@@ -4,6 +4,14 @@
 void RenderMenu();
 float Menu_FadeAlpha();   // botox m_anim_progress, render.cpp fades the menu layer by it
 
+// botox fade_draw_lists popup half: confirm popups (SavePopup) fade on their own, 2x menu speed.
+// Once per built frame: moves lists owned by a fading popup out of `lists` into `out`, plus
+// ghosts of closed ones. Returns the out count.
+struct ImDrawList;
+struct MenuFadedList { ImDrawList* list; float alpha; };
+int  Menu_SplitPopups(ImDrawList** lists, int& count, MenuFadedList* out, int max);
+void Menu_DropPopupGhosts();
+
 // bold label + thin line to the right edge -- the SUB header inside a group box.
 // Shared so the ps point window heads its blocks the same way instead of with
 // TextDisabled + Separator.

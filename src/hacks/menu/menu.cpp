@@ -152,6 +152,7 @@ bool ImGui::Keybind(const char* label, int* key, int* mode, bool has_style)
 
     SameLine(0.f, 0.f);
     const ImVec2 ts = CalcTextSize(disp);
+    const ImVec2 ls = CalcTextSize(kKeyNames[*key]);   // botox label_size: popup anchor, read before input
     window->DC.CursorPos.x = RowLaneX(ts.x);
     const ImRect bb(window->DC.CursorPos, ImVec2(window->DC.CursorPos.x + ts.x, window->DC.CursorPos.y + ts.y));
     ItemSize(ts, 0.f);
@@ -183,7 +184,7 @@ bool ImGui::Keybind(const char* label, int* key, int* mode, bool has_style)
     PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 8.f));
     SetNextWindowSize(ImVec2(61.f, 65.f), ImGuiCond_Always);
     // botox frame_bb.Max = cursor - label size: popup opens up-left of the key text
-    SetNextWindowPos(ImVec2(bb.Min.x - ts.x + 5.f, bb.Min.y - ts.y), ImGuiCond_Always);
+    SetNextWindowPos(ImVec2(bb.Min.x - ls.x + 5.f, bb.Min.y - ls.y), ImGuiCond_Always);
     if (BeginPopup(label, ImGuiWindowFlags_NoMove))
     {
         ImGuiWindow* pw = GetCurrentWindow();
@@ -779,17 +780,32 @@ static void Page_VisualsScreen()
     menu_columns_next();
     if (menu_group_begin("crosshair"))
     {
+        // cog first, then the swatch one slot left of it, both on the feature row (SimpleVisual:
+        // arrow then swatch). The swatch on its own row put slot 0 exactly under the cog, and the
+        // swatch's click-release picker replaced the settings popup the cog opened on press.
         ImGui::Checkbox("enabled##ch", &g_chEnable);
-        if (g_chEnable) ImGui::ColorRow("color##chcol", g_chColor);
         if (g_chEnable)
+        {
             ImGui::OptionPopup("crosshair settings", [&]() {
                 ImGui::Checkbox("antialias", &g_chAntialias);
-                Crosshair_BlendCombo("blend##chblend");
+                if (Crosshair_BlendCombo("blend##chblend"))
+                    MenuTooltip("how the arms + dot mix with the frame under them. additive adds in\n"
+                                "linear light so the colour survives instead of clipping to white;\n"
+                                "the rest are krita's blending modes. alpha is the opacity, the\n"
+                                "outline stays normal");
                 SliderF("thickness##ch", &g_chThickness, 0.f, 10.f, "%.1f");
                 SliderF("length##ch", &g_chLength, 0.f, 30.f, "%.1f");
                 SliderF("arm aspect##ch", &g_chAspect, 0.25f, 4.f, "%.2f");
+                if (ImGui::IsItemHovered())
+                    MenuTooltip("width : height of the arm pair. 1.00 = square, above 1 stretches\n"
+                                "the left/right arms, below 1 the top/bottom -- the short pair\n"
+                                "always keeps the length above, so nothing shrinks");
                 SliderF("gap##ch", &g_chGap, 0.f, 20.f, "%.1f");
                 SliderF("gap aspect##ch", &g_chGapAspect, 0.25f, 4.f, "%.2f");
+                if (ImGui::IsItemHovered())
+                    MenuTooltip("width : height of the gap. above 1 pushes the left/right arms\n"
+                                "out, below 1 the top/bottom -- the close pair keeps the gap\n"
+                                "above, so nothing pulls in");
                 ImGui::Checkbox("dot##ch", &g_chDot);
                 ImGui::Checkbox("dot circle##ch", &g_chDotCircle);
                 ImGui::Checkbox("outline##ch", &g_chOutline);
@@ -799,10 +815,13 @@ static void Page_VisualsScreen()
                     SliderF("outline thickness##ch", &g_chOutlineThick, 0.f, 10.f, "%.1f");
                 }
             }, ImVec2(210.f, -1));
+            ImGui::SameLine();
+            ImGui::ColorRow("##chcol", g_chColor, 0, 1);
+        }
 
         ImGui::Checkbox("csgo crosshair", &g_chCsgoEnable);
-        if (g_chCsgoEnable) ImGui::ColorRow("color##chcsgocol", g_chCsgoColor);
         if (g_chCsgoEnable)
+        {
             ImGui::OptionPopup("csgo crosshair settings", [&]() {
                 // exact cl_crosshairstyle numbering: 0/1 = panorama reticle, 2/3/4 = vgui bars
                 ImGui::Combo("style##chcsgostyle", &g_chCsgoStyle,
@@ -853,6 +872,9 @@ static void Page_VisualsScreen()
                     }
                 }
             }, ImVec2(220.f, -1));
+            ImGui::SameLine();
+            ImGui::ColorRow("##chcsgocol", g_chCsgoColor, 0, 1);
+        }
 
         ImGui::Checkbox("csgo scope", &g_scCsgo);
         if (g_scCsgo)
@@ -891,6 +913,28 @@ static void Tab_VisualsRoot()
     if      (s_visualsSub == 0) Page_VisualsEsp();
     else if (s_visualsSub == 1) Page_VisualsWorld();
     else                        Page_VisualsScreen();
+}
+
+// rs::MoveBit mask as a botox MultiCombo. MultiCombo is bit i = item i, so the drawn rows are the
+// bits in `allowedBits`, in MoveBit order, and only those bits are rewritten. Never all off: a
+// route that may press nothing solves nothing and blames the markers
+static bool RcMoveMaskCombo(const char* id, int& mask, unsigned allowedBits = 0xFFFFFFFFu)
+{
+    const char* names[32]; int bits[32]; int n = 0;
+    for (int b = 0; b < RC_MoveCount() && n < 32; b++)
+        if (allowedBits & (1u << b)) { names[n] = RC_MoveName(b); bits[n++] = b; }
+    int flags = 0;
+    for (int i = 0; i < n; i++) if (mask & (1 << bits[i])) flags |= 1 << i;
+    if (!ImGui::MultiCombo(id, &flags, names, n)) return false;
+    int drawn = 0, built = 0;
+    for (int i = 0; i < n; i++)
+    {
+        drawn |= 1 << bits[i];
+        if (flags & (1 << i)) built |= 1 << bits[i];
+    }
+    if (!built) return false;
+    mask = (mask & ~drawn) | built;
+    return true;
 }
 
 static void Page_MovementMain()
@@ -1087,7 +1131,11 @@ static void Page_MovementMain()
                 ImGui::Label("texture bug keybind");
                 ImGui::Keybind("texture bug key", &g_textureBugKey, &g_textureBugMode);
                 ImGui::Combo("style##tbstyle", &g_tbStyle, "cumidere\0botox\0");
-                if (g_tbStyle == 0) return;   // cumidere has no knobs
+                if (g_tbStyle == 0)
+                {
+                    ImGui::Checkbox("ride assist##tbcalign", &g_tbcAlign);   // cumidere misc_auto_align
+                    return;
+                }
                 SliderF("reach", &g_tbReach, 1.f, 48.f, "%.0f");
                 SliderF("hug range", &g_tbHugRange, 0.05f, 4.f, "%.2f");
                 ImGui::Checkbox("predict ledges", &g_tbPredict);
@@ -1257,6 +1305,83 @@ static void Page_MovementMain()
     }
     menu_group_end();
 
+    // pixel finder / assist / pixel calculator: botox keeps them on the main page ("other"), the
+    // calculator page is the route calculator alone
+    if (menu_group_begin("pixel surf"))
+    {
+        ImGui::Checkbox("ps finder", &g_psFinder);
+        if (g_psFinder)
+            ImGui::OptionPopup("ps finder settings", [&]() {
+                ImGui::Label("ps finder keybind");
+                ImGui::Keybind("ps finder key", &g_psFinderKey, &g_psFinderMode);
+                SliderF("scan margin", &g_psFinderMargin, 0.f, 64.f, "%.0f");
+                SliderF("scan budget", &g_psFinderBudget, 0.25f, 32.f, "%.2f ms");
+                ImGui::Checkbox("strict##pf", &g_psFinderStrict);
+                ImGui::Checkbox("find texturebugs##pf", &g_psFinderTb);
+                ImGui::Checkbox("find headbounces##pf", &g_psFinderHeadbounce);
+                ImGui::Checkbox("find pixeljumps##pf", &g_psFinderPixeljump);
+                ImGui::Checkbox("ignore props##pf", &g_psFinderNoProps);
+                ImGui::Checkbox("surf fix (hold duck into a ride)##pf", &g_psSurfFix);
+
+                // whole-map scan: the same scanner, pointed at every brush edge in the map
+                PsMapScanState ms;
+                PS_MapScanGet(ms);
+                char pmLabel[64];
+                if (ms.busy) snprintf(pmLabel, sizeof(pmLabel), "cancel scan  %d%%", int(ms.progress * 100.f));
+                else         snprintf(pmLabel, sizeof(pmLabel), "search whole map");
+                if (ImGui::Button(pmLabel, ImVec2(-1.f, 0.f)))
+                    PS_MapScanToggle();
+                ImGui::Checkbox("show map lines##pm", &g_psMapLines);
+                if (ms.busy || ms.lines > 0 || ms.tb > 0)
+                {
+                    char pmInfo[96];
+                    snprintf(pmInfo, sizeof(pmInfo), "seam %d / %d   %d surf%s   %d texturebug%s",
+                             ms.done, ms.total, ms.lines, ms.lines == 1 ? "" : "s",
+                             ms.tb, ms.tb == 1 ? "" : "s");
+                    ImGui::TextUnformatted(pmInfo);
+                }
+            }, ImVec2(260.f, -1));
+
+        // the point list is shared by assist and finder
+        ImGui::Checkbox("ps assist", &g_psAssist);
+        if (g_psAssist || g_psFinder)
+            ImGui::OptionPopup("ps assist settings", [&]() {
+                ImGui::Label("ps assist keybind");
+                ImGui::Keybind("ps assist key", &g_psAssistKey, &g_psAssistMode);
+                ImGui::Label("set point");
+                BindKeyNoMode("##pasetbind", &g_psSetPointKey);
+                ImGui::Label("delete point");
+                BindKeyNoMode("##padelbind", &g_psDeletePointKey);
+                SliderF("radius", &g_psAssistRadius, 40.f, 1024.f, "%.0f");
+                SliderI("points at once", &g_psAssistMaxPoints, 1, 8);
+                SliderF("reuse delay", &g_psAssistReuseDelay, 0.f, 8.f, "%.1f s");
+                SliderF("snap distance", &g_psAssistSnap, 4.f, 256.f, "%.0f");
+                ImGui::Checkbox("ground help", &g_psGroundHelp);
+                if (g_psGroundHelp)
+                    SliderF("steer limit", &g_psGroundHelpAngle, 5.f, 90.f, "%.0f deg");
+                SliderF("launch z slack", &g_psLaunchZSlack, 0.f, 32.f, "%.0f");
+                ImGui::Checkbox("show points", &g_psAssistRender);
+                ImGui::Checkbox("jump popup", &g_psAssistJumpBox);
+            }, ImVec2(240.f, -1));
+
+        ImGui::Checkbox("pixel calculator", &g_pixelCalc);
+        if (g_pixelCalc)
+            ImGui::OptionPopup("pixel calculator settings", [&]() {
+                ImGui::Label("place pixel");
+                BindKeyNoMode("##pcplacebind", &g_pcPlaceKey);
+                ImGui::Label("calculate pixel");
+                BindKeyNoMode("##pcsolvebind", &g_pcSolveKey);
+                ImGui::Checkbox("show marker", &g_pcShowMarker);
+                ImGui::Checkbox("show answer panel", &g_pcShowPanel);
+                ImGui::Label("jump types (shared with route calculator)");
+                RcMoveMaskCombo("##pcmoves", g_rcMoveMask);
+            }, ImVec2(260.f, -1));
+
+        // UNIT_MENU_SLOT movement_calculator
+        UnitB_Menu_movement_calculator();
+    }
+    menu_group_end();
+
     menu_columns_end();
 }
 
@@ -1339,212 +1464,148 @@ static void Page_MovementIndicators()
 
 static void Page_MovementCalculator()
 {
-    // One move mask, one solver, shared by the pixel calculator and the route calculator.
-    // bits 0-3 jump / minijump / longjump / jumpbug, 4-5 walk off / crouch walk off (rs::MoveBit).
-    auto MoveBox = [](int b, int& mask)
-    {
-        bool on = (mask >> b) & 1;
-        ImGui::PushID(b);
-        if (ImGui::Checkbox(RC_MoveName(b), &on))
-        {
-            const int next = on ? (mask | (1 << b)) : (mask & ~(1 << b));
-            if (next) mask = next;          // never all off: nothing could be solved
-        }
-        ImGui::PopID();
-    };
-
+    // botox menu_tab_movement.cpp route_calc_page 1:1: "route calculator" + "keys" | "points".
+    // TF2 has no ducked ground jump (tf_gamemovement.cpp:1220 "Cannot jump while ducked"), so the
+    // point list has no "jump (ducked)" row; pixeljump / headbounce point types are not modelled
     menu_columns_begin();
 
-    if (menu_group_begin("pixel surf"))
+    if (menu_group_begin("route calculator"))
     {
-        ImGui::Checkbox("ps finder", &g_psFinder);
-        if (g_psFinder)
-            ImGui::OptionPopup("ps finder settings", [&]() {
-                ImGui::Label("ps finder keybind");
-                ImGui::Keybind("ps finder key", &g_psFinderKey, &g_psFinderMode);
-                SliderF("scan margin", &g_psFinderMargin, 0.f, 64.f, "%.0f");
-                SliderF("scan budget", &g_psFinderBudget, 0.25f, 32.f, "%.2f ms");
-                ImGui::Checkbox("strict##pf", &g_psFinderStrict);
-                ImGui::Checkbox("find texturebugs##pf", &g_psFinderTb);
-                ImGui::Checkbox("find headbounces##pf", &g_psFinderHeadbounce);
-                ImGui::Checkbox("find pixeljumps##pf", &g_psFinderPixeljump);
-                ImGui::Checkbox("ignore props##pf", &g_psFinderNoProps);
-                ImGui::Checkbox("surf fix (hold duck into a ride)##pf", &g_psSurfFix);
+        ImGui::Checkbox("route calculator", &g_routeCalc);
 
-                // whole-map scan: the same scanner, pointed at every brush edge in the map
-                PsMapScanState ms;
-                PS_MapScanGet(ms);
-                char pmLabel[64];
-                if (ms.busy) snprintf(pmLabel, sizeof(pmLabel), "cancel scan  %d%%", int(ms.progress * 100.f));
-                else         snprintf(pmLabel, sizeof(pmLabel), "search whole map");
-                if (ImGui::Button(pmLabel, ImVec2(-1.f, 0.f)))
-                    PS_MapScanToggle();
-                ImGui::Checkbox("show map lines##pm", &g_psMapLines);
-                if (ms.busy || ms.lines > 0 || ms.tb > 0)
-                {
-                    char pmInfo[96];
-                    snprintf(pmInfo, sizeof(pmInfo), "seam %d / %d   %d surf%s   %d texturebug%s",
-                             ms.done, ms.total, ms.lines, ms.lines == 1 ? "" : "s",
-                             ms.tb, ms.tb == 1 ? "" : "s");
-                    ImGui::TextUnformatted(pmInfo);
-                }
-            }, ImVec2(260.f, -1));
+        if (ImGui::Checkbox("use current pos for start jump", &g_rcStartHere))
+            RC_DropAnswer();
+        if (ImGui::Checkbox("allow selecting invalid pixels", &g_rcAllowInvalid))
+            RC_DropAnswer();
 
-        // the point list is shared by assist and finder
-        ImGui::Checkbox("ps assist", &g_psAssist);
-        if (g_psAssist || g_psFinder)
-            ImGui::OptionPopup("ps assist settings", [&]() {
-                ImGui::Label("ps assist keybind");
-                ImGui::Keybind("ps assist key", &g_psAssistKey, &g_psAssistMode);
-                ImGui::Label("set point");
-                BindKeyNoMode("##pasetbind", &g_psSetPointKey);
-                ImGui::Label("delete point");
-                BindKeyNoMode("##padelbind", &g_psDeletePointKey);
-                SliderF("radius", &g_psAssistRadius, 40.f, 1024.f, "%.0f");
-                SliderI("points at once", &g_psAssistMaxPoints, 1, 8);
-                SliderF("reuse delay", &g_psAssistReuseDelay, 0.f, 8.f, "%.1f s");
-                SliderF("snap distance", &g_psAssistSnap, 4.f, 256.f, "%.0f");
-                ImGui::Checkbox("ground help", &g_psGroundHelp);
-                if (g_psGroundHelp)
-                    SliderF("steer limit", &g_psGroundHelpAngle, 5.f, 90.f, "%.0f deg");
-                SliderF("launch z slack", &g_psLaunchZSlack, 0.f, 32.f, "%.0f");
-                ImGui::Checkbox("show points", &g_psAssistRender);
-                ImGui::Checkbox("jump popup", &g_psAssistJumpBox);
-            }, ImVec2(240.f, -1));
+        ImGui::Checkbox("snap points to nearest edge", &g_rcSnapEdge);
+        ImGui::Checkbox("show key list", &g_rcShowKeys);
+        ImGui::Checkbox("show path", &g_rcShowPath);
+        if (g_rcShowPath)
+        {
+            SliderI("path alpha", &g_rcPathAlpha, 0, 255, "%d");
+            SliderF("path thickness", &g_rcPathThick, 1.f, 8.f, "%.1f px");
+        }
+        ImGui::Checkbox("show combos on screen", &g_rcShowPanel);
+        ImGui::Checkbox("advanced readout##route calc", &g_rcAdvanced);
 
-        ImGui::Checkbox("pixel calculator", &g_pixelCalc);
-        if (g_pixelCalc)
-            ImGui::OptionPopup("pixel calculator settings", [&]() {
-                ImGui::Label("place pixel");
-                BindKeyNoMode("##pcplacebind", &g_pcPlaceKey);
-                ImGui::Label("calculate pixel");
-                BindKeyNoMode("##pcsolvebind", &g_pcSolveKey);
-                ImGui::Checkbox("show marker", &g_pcShowMarker);
-                ImGui::Checkbox("show answer panel", &g_pcShowPanel);
-                ImGui::Label("allowed jumps (shared with route calculator)");
-                ImGui::PushID("pcmoves");
-                for (int b = 0; b < 4; b++) MoveBox(b, g_rcMoveMask);
-                ImGui::PopID();
-            }, ImVec2(260.f, -1));
+        SliderI("popup duration", &g_rcPopupTime, 1, 30, "%d sec");
+        SliderI("max displayed combos", &g_rcMaxShown, 1, 64, "%d combos");
 
-        // UNIT_MENU_SLOT movement_calculator
-        UnitB_Menu_movement_calculator();
+        if (SliderI("delay hop ticks", &g_rcDelayTicks, 0, 8, "%d ticks"))
+            RC_DropAnswer();
+
+        ImGui::Label("jump types to calculate");
+        if (RcMoveMaskCombo("##global jump types", g_rcMoveMask))
+            RC_DropAnswer();
+    }
+    menu_group_end();
+
+    if (menu_group_begin("keys"))
+    {
+        ImGui::Label("add point");
+        BindKeyNoMode("##rcaddbind", &g_rcAddKey);
+        ImGui::Label("calculate combos");
+        BindKeyNoMode("##rcsolvebind", &g_rcSolveKey);
+        ImGui::Label("delete point");
+        BindKeyNoMode("##rcdelbind", &g_rcDeleteKey);
+        ImGui::Label("clear all points");
+        BindKeyNoMode("##rcclrbind", &g_rcClearKey);
     }
     menu_group_end();
 
     menu_columns_next();
 
-    // route calculator: a marker editor, not a settings popup -- flat content, same as botox's
-    // own dedicated route calc page (menu_tab_movement.cpp route_calc_page).
-    if (menu_group_begin("route calculator"))
+    if (menu_group_begin("points"))
     {
-        ImGui::Checkbox("route calculator", &g_routeCalc);
-
-        ImGui::Label("place marker");
-        BindKeyNoMode("##rcaddbind", &g_rcAddKey);
-        ImGui::Label("delete marker");
-        BindKeyNoMode("##rcdelbind", &g_rcDeleteKey);
-        ImGui::Label("clear markers");
-        BindKeyNoMode("##rcclrbind", &g_rcClearKey);
-        ImGui::Label("calculate");
-        BindKeyNoMode("##rcsolvebind", &g_rcSolveKey);
-
-        ImGui::Checkbox("start where you are", &g_rcStartHere);
-        SliderI("max displayed combos", &g_rcMaxShown, 1, 50);
-        ImGui::Checkbox("show markers", &g_rcShowMarkers);
-        ImGui::Checkbox("show path", &g_rcShowPath);
-        ImGui::Checkbox("show answer panel", &g_rcShowPanel);
-        SliderI("popup duration", &g_rcPopupTime, 1, 30, "%d sec");
-
-        ImGui::Label("jump types");
-        for (int b = 0; b < 4; b++) MoveBox(b, g_rcMoveMask);
-        ImGui::Label("starting point");
-        for (int b = 4; b < RC_MoveCount(); b++) MoveBox(b, g_rcMoveMask);
-
-        // ---- the markers themselves ----------------------------------------------------
+        // row 0 = the starting jump, row i = marker i (botox route.selected_row)
+        static int s_rcRow = 0;
         const int nPts = RC_PointCount();
-        ImGui::Label(nPts > 0 ? "markers" : "markers (none placed)");
-        static int s_rcOpenRow = -1;
-        // order = rs::PointType, so the combo index IS the type
-        static const char* kTypeItems = "ground\0pixelsurf\0edgebug\0headbang\0texturebug\0";
-        // index = stand | duck << 1 with 0 impossible, so: 1 stand only, 2 ducked only, 3 both
-        static const char* kStanceItems = "stand only\0ducked only\0stand or ducked\0";
-        for (int i = 0; i < nPts; i++)
+        if (ImGui::BeginListBox("##route points", ImVec2(-1.f, 160.f)))
         {
-            RcPointInfo pt;
-            if (!RC_PointGet(i, pt)) break;
-
-            ImGui::PushID(i);
-            char row[96];
-            snprintf(row, sizeof(row), "%d  %s%s  z %.2f%s%s", i + 1, RC_TypeName(pt.type),
-                     pt.player ? " (player head)" : pt.building ? " (building)" : "", pt.pos.z,
-                     // an edgebug's z is its ledge's lip, not where you clicked -- say which
-                     pt.edgeZ ? " (edge)" : "", pt.enabled ? "" : "  (off)");
-            if (ImGui::Selectable(row, s_rcOpenRow == i))
-                s_rcOpenRow = (s_rcOpenRow == i) ? -1 : i;
-            if (s_rcOpenRow == i)
+            if (ImGui::Selectable(g_rcStartHere ? "starting jump (current position)" : "starting jump (point 1)", s_rcRow == 0))
+                s_rcRow = 0;
+            for (int i = 0; i < nPts; i++)
             {
-                RcPointInfo edit = pt;
-                bool changed = false;
-                changed |= ImGui::Combo("##rctype", &edit.type, kTypeItems);
-                // picking pixelsurf / texturebug here on a marker that did not come off
-                // a finder point is refused by RC_PointSet (the combo snaps back next frame)
-                if (!pt.snapped)
-                    ImGui::TextDisabled("pixelsurf / texturebug: place it on a finder point");
-                changed |= ImGui::Checkbox("use this marker", &edit.enabled);
-                if (edit.type != 0)
+                RcPointInfo pt;
+                if (!RC_PointGet(i, pt)) break;
+                char row[96];
+                snprintf(row, sizeof(row), "%d. %s   z %d%s##rcrow%d", i + 1, RC_TypeName(pt.type), (int)pt.pos.z,
+                         pt.enabled ? "" : "   (off)", i);
+                if (ImGui::Selectable(row, s_rcRow == i + 1))
+                    s_rcRow = i + 1;
+            }
+            ImGui::EndListBox();
+        }
+
+        if (ImGui::Button("clear all points", ImVec2(-1.f, 15.f)))
+            RC_PointsClear();
+
+        if (s_rcRow > RC_PointCount())
+            s_rcRow = 0;
+
+        if (s_rcRow == 0)
+        {
+            ImGui::Label("types to calculate");
+            if (RcMoveMaskCombo("##types to calculate", g_rcStartMoves, RC_StartMoves()))
+                RC_DropAnswer();
+        }
+        else
+        {
+            const int row = s_rcRow - 1;
+            RcPointInfo edit;
+            if (RC_PointGet(row, edit))
+            {
+                if (ImGui::Checkbox("point enabled", &edit.enabled))
+                    RC_PointSet(row, edit);
+
+                const int n = RC_PointCount();
+                if (ImGui::Button("move up", ImVec2(-1.f, 15.f)) && row > 0)
                 {
-                    ImGui::Label(edit.type == 2 ? "edgebug stance" : "arrival stance");
-                    int st = (edit.stand ? 1 : 0) | (edit.duck ? 2 : 0);
-                    if (st < 1) st = 3;
-                    int sel = st - 1;
-                    if (ImGui::Combo("##rcstance", &sel, kStanceItems))
-                    {
-                        edit.stand = ((sel + 1) & 1) != 0;
-                        edit.duck  = ((sel + 1) & 2) != 0;
+                    RC_PointMove(row, -1);
+                    s_rcRow -= 1;
+                }
+                else if (ImGui::Button("move down", ImVec2(-1.f, 15.f)) && row + 1 < n)
+                {
+                    RC_PointMove(row, 1);
+                    s_rcRow += 1;
+                }
+                else if (ImGui::Button("delete point", ImVec2(-1.f, 15.f)))
+                {
+                    RC_PointDelete(row);
+                    if (s_rcRow > RC_PointCount()) s_rcRow = RC_PointCount();
+                }
+                else if (RC_PointGet(row, edit))
+                {
+                    bool changed = false;
+                    // order = rs::PointType, so the combo index IS the type. RC_PointSet refuses
+                    // pixelsurf / texturebug on a marker no finder pinned (botox: "a pixelsurf
+                    // point must be placed on a finder dot"), unless invalid pixels are allowed
+                    static const char* kTypeItems = "ground\0pixelsurf\0edgebug\0headbang\0texturebug\0";
+                    const int was = edit.type;
+                    if (ImGui::Combo("point type", &edit.type, kTypeItems) && edit.type != was)
                         changed = true;
-                    }
-                }
-                else
-                {
-                    // ground: land here then press one of these, or jumpbug off it
-                    ImGui::Label("moves at this marker");
-                    int mask = (int)edit.moves;
-                    for (int b = 0; b < 4; b++) MoveBox(b, mask);
-                    if ((unsigned)mask != edit.moves) { edit.moves = (unsigned)mask; changed = true; }
-                }
-                if (changed) RC_PointSet(i, edit);
-                // ORDER IS THE ROUTE (1 -> 2 -> 3), so a marker placed out of turn is fixed here
-                // instead of by clearing the lot and walking it again. The list changed under the
-                // loop, so this frame stops here and the open row follows the marker
-                if (nPts > 1)
-                {
-                    const float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-                    int dir = 0;
-                    ImGui::BeginDisabled(i == 0);
-                    if (ImGui::Button("move up", ImVec2(w, 0.f))) dir = -1;
-                    ImGui::EndDisabled();
-                    ImGui::SameLine();
-                    ImGui::BeginDisabled(i + 1 >= nPts);
-                    if (ImGui::Button("move down", ImVec2(w, 0.f))) dir = 1;
-                    ImGui::EndDisabled();
-                    if (dir != 0)
+                    if (!edit.snapped && !g_rcAllowInvalid)
+                        ImGui::TextDisabled("pixelsurf / texturebug: place it on a finder dot");
+
+                    ImGui::Label("types to calculate");
+                    if (edit.type == 0)
                     {
-                        RC_PointMove(i, dir);
-                        s_rcOpenRow = i + dir;
-                        ImGui::PopID();
-                        break;
+                        int mask = (int)edit.moves;
+                        if (RcMoveMaskCombo("##types to calculate", mask, RC_MarkerMoves()))
+                        {
+                            edit.moves = (unsigned)mask;
+                            changed = true;
+                        }
                     }
-                }
-                if (ImGui::Button("delete marker", ImVec2(-1.f, 0.f)))
-                {
-                    RC_PointDelete(i);
-                    s_rcOpenRow = -1;
-                    ImGui::PopID();
-                    break;
+                    else
+                    {
+                        changed |= ImGui::Checkbox("arrive standing", &edit.stand);
+                        changed |= ImGui::Checkbox("arrive ducked", &edit.duck);
+                    }
+                    if (changed) RC_PointSet(row, edit);
                 }
             }
-            ImGui::PopID();
         }
     }
     menu_group_end();
@@ -1581,6 +1642,20 @@ static void Tab_MovementRoot()
 #include <functional>
 #include <shellapi.h>   // ShellExecuteA -- settings "open folder" (WIN32_LEAN_AND_MEAN drops it)
 
+// botox menu.h popup_fade_t: confirm popups fade on their own. live = drawn this frame,
+// ghost = last live frame's geometry, drawn while it fades out after the popup closed.
+// Stepped once per built frame by Menu_SplitPopups (render.cpp SplitDrawData).
+struct PopupFade { ImGuiID id; float alpha; bool live; ImDrawList* ghost; };
+static ImVector<PopupFade> s_popups;
+
+// botox popup_live
+static void PopupLive(ImGuiID window_id)
+{
+    for (PopupFade& p : s_popups)
+        if (p.id == window_id) { p.live = true; return; }
+    s_popups.push_back({ window_id, 0.f, true, nullptr });
+}
+
 // botox menu.cpp save_popup: opens once per request, a click away drops the request (never
 // reopens at the mouse), body under the same 20px band OptionPopup draws.
 static void SavePopup(const char* str_id, bool& open, const ImVec2& size, const std::function<void()>& fn)
@@ -1591,6 +1666,7 @@ static void SavePopup(const char* str_id, bool& open, const ImVec2& size, const 
     if (!st->GetBool(shown)) { ImGui::OpenPopup(str_id); st->SetBool(shown, true); }
     ImGui::SetNextWindowSize(size);
     if (!ImGui::BeginPopup(str_id)) { open = false; st->SetBool(shown, false); return; }
+    PopupLive(ImGui::GetCurrentWindow()->ID);
     PopupChrome(str_id, nullptr, ImHashStr(str_id));
     fn();
     if (!open) { ImGui::CloseCurrentPopup(); st->SetBool(shown, false); }
@@ -2495,21 +2571,20 @@ static const char* BuildDateText()
 
 // botox menu.cpp save_popup("eject confirmation", ..., ImVec2(220, -1)): fixed 220 wide,
 // 20px #191919 title band with the id centred in verdana bold, accent fade line under it,
-// then yes / no as two 15px buttons sharing the row.
+// then yes / no as two 15px buttons sharing the row. Goes through SavePopup like botox, so it
+// fades with the other confirm popups.
+static bool s_ejectOpen = false;
 static void EjectPopup()
 {
-    const char* id = "eject confirmation";
-    ImGui::SetNextWindowSize(ImVec2(220.f, 0.f));
-    if (!ImGui::BeginPopup(id)) return;
-    PopupChrome(id, nullptr, ImHashStr(id));
-    if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f)))
-    {
-        g_eject = true;
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("no", ImVec2(-1.f, 15.f))) ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
+    SavePopup("eject confirmation", s_ejectOpen, ImVec2(220.f, -1.f), []() {
+        if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f)))
+        {
+            s_ejectOpen = false;
+            g_eject = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) s_ejectOpen = false;
+    });
 }
 
 // botox m_anim_progress: render.cpp composites the menu's draw lists as ONE layer at this
@@ -2517,6 +2592,86 @@ static void EjectPopup()
 // band, title, tab and border, so the chrome popped while the widgets faded.
 static float s_animProgress = 0.f;
 float Menu_FadeAlpha() { return ImSaturate(s_animProgress); }
+
+static bool OwnsWindow(ImGuiWindow* w, ImGuiWindow* root)
+{
+    for (int d = 0; w && d < 32; ++d, w = w->ParentWindow)
+        if (w == root) return true;
+    return false;
+}
+
+static bool WindowDrawn(const ImGuiWindow* w) { return w && w->Active && !w->Hidden && w->DrawList; }
+
+// botox fade_draw_lists, popup half: popups fade at 2x the menu speed. Lists owned by a live
+// popup leave the menu layer for `out` at menu_fade * popup alpha; closed popups add their ghost.
+int Menu_SplitPopups(ImDrawList** lists, int& count, MenuFadedList* out, int max)
+{
+    ImGuiWindow* root = ImGui::FindWindowByName("botox");
+    const float step = (std::min)(ImGui::GetIO().DeltaTime, 1.f / 30.f) / (0.12f * 0.5f);
+    const bool shown = s_animProgress > 0.f && WindowDrawn(root);
+
+    for (int i = 0; i < s_popups.Size;)
+    {
+        PopupFade& p = s_popups[i];
+        ImGuiWindow* w = ImGui::FindWindowByID(p.id);
+        if (shown && p.live && WindowDrawn(w))
+        {
+            p.alpha = (std::min)(p.alpha + step, 1.f);
+            if (!p.ghost) p.ghost = IM_NEW(ImDrawList)(w->DrawList->_Data);
+            p.ghost->CmdBuffer = w->DrawList->CmdBuffer;
+            p.ghost->IdxBuffer = w->DrawList->IdxBuffer;
+            p.ghost->VtxBuffer = w->DrawList->VtxBuffer;
+            p.ghost->Flags     = w->DrawList->Flags;
+        }
+        else if (!shown || !p.live)
+            p.alpha = shown ? p.alpha - step : 0.f;
+
+        // live but hidden = imgui auto-fit frame, hold at 0
+        if (p.alpha <= 0.f && !(shown && p.live))
+        {
+            if (p.ghost) IM_DELETE(p.ghost);
+            s_popups.erase(s_popups.Data + i);
+            continue;
+        }
+        ++i;
+    }
+
+    int n = 0;
+    if (!shown) return 0;   // !shown emptied s_popups above
+    const float menu_fade = ImSaturate(s_animProgress);
+
+    ImGuiContext& g = *GImGui;
+    int keep = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        ImDrawList* dl = lists[i];
+        const PopupFade* owner = nullptr;
+        for (ImGuiWindow* w : g.Windows)
+        {
+            if (w->DrawList != dl) continue;
+            for (const PopupFade& p : s_popups)
+                if (p.live && OwnsWindow(w, ImGui::FindWindowByID(p.id))) owner = &p;
+            break;
+        }
+        if (owner && n < max) out[n++] = { dl, menu_fade * owner->alpha };
+        else lists[keep++] = dl;
+    }
+    count = keep;
+
+    for (PopupFade& p : s_popups)
+    {
+        if (!p.live && p.ghost && n < max) out[n++] = { p.ghost, menu_fade * p.alpha };
+        p.live = false;
+    }
+    return n;
+}
+
+// ghosts hold the font atlas texture id: drop them with it (reset, rebind, atlas rebuild)
+void Menu_DropPopupGhosts()
+{
+    for (PopupFade& p : s_popups)
+        if (p.ghost) { IM_DELETE(p.ghost); p.ghost = nullptr; }
+}
 
 void RenderMenu()
 {
@@ -2647,7 +2802,7 @@ void RenderMenu()
         int ejectNoPage = -1;
         if (SidebarTab_Draw(SidebarTab{ "eject", nullptr, 0 }, TAB_COUNT, false, ejectNoPage,
                             sidebarX, ejectY, io.DeltaTime))
-            ImGui::OpenPopup("eject confirmation");
+            s_ejectOpen = true;
 
         EjectPopup();
     }

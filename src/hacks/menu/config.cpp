@@ -442,6 +442,7 @@ static const CfgEntry kEntries[] = {
     { "textureBugKey",    CfgEntry::INT,    &g_textureBugKey, 0 },
     { "textureBugMode",   CfgEntry::INT,    &g_textureBugMode, 0 },
     { "tbStyle",          CfgEntry::INT,    &g_tbStyle, 0 },
+    { "tbcAlign",         CfgEntry::BOOL,   &g_tbcAlign, 0 },
     { "tbReach",          CfgEntry::FLOAT,  &g_tbReach, 0 },
     { "tbScanStep",       CfgEntry::FLOAT,  &g_tbScanStep, 0 },
     { "tbRampNz",         CfgEntry::FLOAT,  &g_tbRampNz, 0 },
@@ -591,13 +592,21 @@ static const CfgEntry kEntries[] = {
     // (13 bits) would read as the wrong moves. Unmatched old keys are skipped on load.
     // rcBudget removed (dihrc worker thread): the solve runs off the game thread now, nothing
     // left to budget per cmd. An old rcBudget line in a saved cfg is just skipped.
-    { "rcMoveSet",        CfgEntry::INT,    &g_rcMoveMask, 0 },
+    { "rcMoveBits",       CfgEntry::INT,    &g_rcMoveMask, 0 },   // was rcMoveSet (6 bits): renamed so the delay hop bit (7th) starts on
     { "rcMaxShown",       CfgEntry::INT,    &g_rcMaxShown, 0 },
     { "rcStartHere",      CfgEntry::BOOL,   &g_rcStartHere, 0 },
-    { "rcShowMarkers",    CfgEntry::BOOL,   &g_rcShowMarkers, 0 },
+    // rcShowMarkers removed: botox always draws the points (an old line is skipped on load)
     { "rcShowPath",       CfgEntry::BOOL,   &g_rcShowPath, 0 },
     { "rcShowPanel",      CfgEntry::BOOL,   &g_rcShowPanel, 0 },
     { "rcPopupTime",      CfgEntry::INT,    &g_rcPopupTime, 0 },
+    { "rcStartMoves",     CfgEntry::INT,    &g_rcStartMoves, 0 },
+    { "rcDelayTicks",     CfgEntry::INT,    &g_rcDelayTicks, 0 },
+    { "rcShowKeys",       CfgEntry::BOOL,   &g_rcShowKeys, 0 },
+    { "rcPathAlpha",      CfgEntry::INT,    &g_rcPathAlpha, 0 },
+    { "rcPathThick",      CfgEntry::FLOAT,  &g_rcPathThick, 0 },
+    { "rcAllowInvalid",   CfgEntry::BOOL,   &g_rcAllowInvalid, 0 },
+    { "rcSnapEdge",       CfgEntry::BOOL,   &g_rcSnapEdge, 0 },
+    { "rcAdvanced",       CfgEntry::BOOL,   &g_rcAdvanced, 0 },
     { "pixelCalc",        CfgEntry::BOOL,   &g_pixelCalc, 0 },
     { "pcPlaceKey",       CfgEntry::INT,    &g_pcPlaceKey, 0 },
     { "pcSolveKey",       CfgEntry::INT,    &g_pcSolveKey, 0 },
@@ -931,8 +940,8 @@ static const CfgEntry kEntries[] = {
     // ---- unit B: detections ----
     { "detections",         CfgEntry::BOOL,   &g_detections, 0 },
     { "detectionStackEb",   CfgEntry::BOOL,   &g_detectionStackEb, 0 },
-    { "detectionGraceTicks",CfgEntry::INT,    &g_detectionGraceTicks, 0 },
-    { "detectionColor",     CfgEntry::FLOAT4, g_detectionColor, 0 },
+    { "detectionTypes",     CfgEntry::INT,    &g_detectionTypes, 0 },
+    { "detectionLabel",     CfgEntry::STR,    g_detectionLabel, sizeof(g_detectionLabel) },
 
     // ---- unit B: pixelsurf lines ----
     { "psLinesEnable",     CfgEntry::BOOL,   &g_psLinesEnable, 0 },
@@ -1166,6 +1175,7 @@ void LoadConfig(const char* path, bool visuals)
         // hold -- the creep is what keeps a ride alive between pins.
         { &g_tbHugRange,   0.05f, kNoHi,  "tbHugRange",   "the creep hold stops working", nullptr },
         { &g_tbReach,      1.f,   kNoHi,  "tbReach",      nullptr, nullptr },
+        { &g_rcPathThick,  1.f,   8.f,    "rcPathThick",  nullptr, nullptr },
         { &g_tbScanStep,   1.f,   kNoHi,  "tbScanStep",   nullptr, nullptr },
         // the live scan's own max_normal_z is 0.35, so a saved 0.35 makes the hands-off
         // gate reject NOTHING and TB glues itself to every ramp and displacement it can see.
@@ -1275,9 +1285,13 @@ void LoadConfig(const char* path, bool visuals)
           "no point is simmed, so the assist could never fire", nullptr },
         // the mask is what a route is ALLOWED to press -- an empty one solves nothing
         // and blames the markers
-        { &g_rcMoveMask,         1,  0x3F, "rcMoveSet",
+        { &g_rcMoveMask,         1,  0x7F, "rcMoveBits",
           "no move is allowed, so every route is empty", nullptr },
-        { &g_rcMaxShown,         1,  50,  "rcMaxShown",         nullptr, nullptr },
+        { &g_rcMaxShown,         1,  64,  "rcMaxShown",         nullptr, nullptr },
+        { &g_rcStartMoves,       1,  0x7F, "rcStartMoves",
+          "the starting jump may press nothing, so every route is empty", nullptr },
+        { &g_rcDelayTicks,       0,  8,   "rcDelayTicks",       nullptr, nullptr },
+        { &g_rcPathAlpha,        0,  255, "rcPathAlpha",        nullptr, nullptr },
     };
 
     for (const auto& c : kFloatClamps)

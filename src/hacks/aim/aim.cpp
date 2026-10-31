@@ -27,6 +27,13 @@ static bool s_bTried  = false;
 
 bool Aim_Active() { return s_bActive; }
 
+// CBaseHudChat::ChatPrintf (vtable 19). Text goes in as the format: caller strips '%'.
+void Aim_ChatPrint(const char* text)
+{
+	if (I::ClientModeShared && I::ClientModeShared->m_pChatElement)
+		I::ClientModeShared->m_pChatElement->ChatPrintf(0, text);
+}
+
 // The hooks the aim half installs. Every other MAKE_HOOK in hooks.cpp is compiled (so it
 // registers) but never initialised. Rules used to pick this list:
 //   - it feeds the aimbot (entity cache, backtrack records, bone/anim fidelity, prediction), or

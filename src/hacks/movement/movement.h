@@ -275,6 +275,8 @@ struct RcDrawPt
     int  type = 0;         // rs::PointType (routesim.h)
     bool enabled = true;
     bool filtered = false; // its move list or stance flags are narrowed -- drawn with a *
+    bool player = false;   // on a player's head: label " (player)"
+    bool stand = true, duck = true;   // arrival stances: label " (ducked)" / " (stand)" when only one
 };
 
 struct RcDrawData
@@ -317,6 +319,10 @@ bool        RC_PointGet(int i, RcPointInfo& out);
 void        RC_PointSet(int i, const RcPointInfo& in);   // applies + persists (type/moves/enabled/stance)
 void        RC_PointDelete(int i);
 void        RC_PointMove(int i, int dir);   // -1 / +1: swap with the marker before / after it
+void        RC_PointsClear();                // menu "clear all points"
+void        RC_DropAnswer();                 // a setting changed: the shown route answer is stale
+unsigned    RC_MarkerMoves();                // rs::MoveBit bits a ground marker's row may pick
+unsigned    RC_StartMoves();                 // ...and the starting jump's row
 const char* RC_MoveName(int bit);    // rs::MoveBit -> "longjump" etc (menu + panel share it)
 int         RC_MoveCount();
 const char* RC_TypeName(int type);

@@ -340,6 +340,28 @@ static bool RcAimWorld(void* pLocal, const Vec3& vEye, const Vec3& vAngles, Game
     return out.fraction < 1.f && !out.startsolid && !out.allsolid;
 }
 
+// botox rc_clip_top: A CLIP BRUSH YOU CANNOT SEE IS HIT ON ITS SIDE. r_drawclipbrushes only draws
+// them, so aiming at "the ledge" puts the ray on the clip's invisible side face first: a wall, and
+// the marker was refused. Step 1u inside that face and drop from k_rcClipClimb over the hit: a
+// standable player clip top inside that height is the floor you would really land on. 82u = a
+// standing hull: a clip taller than that is not a ledge you get onto, so the caller aims through it
+static constexpr float k_rcClipClimb = 82.f;
+static bool RcClipTop(void* pLocal, const GameTrace_t& tr, Vec3& top)
+{
+    Vec3 n(tr.plane.normal.x, tr.plane.normal.y, 0.f);
+    const float len = sqrtf(n.x * n.x + n.y * n.y);
+    if (len < 0.1f) return false;
+    n = n * (1.f / len);
+    const Vec3 inside = tr.endpos - n;
+    TraceFilterRcMarker filter; filter.Setup(pLocal);
+    GameTrace_t down{};
+    TraceLine(inside + Vec3(0.f, 0.f, k_rcClipClimb), inside, MASK_PLAYERSOLID, &filter, &down);
+    if (down.startsolid || down.fraction >= 1.f || down.plane.normal.z <= 0.7f || !(down.contents & 0x10000))
+        return false;
+    top = down.endpos;   // a line trace stops 1/32 over the plane: already the landing height
+    return true;
+}
+
 // ================================================================================================
 //  THE ENGINE CHECK -- the port and Pred_Simulate side by side, every solve
 // ================================================================================================
@@ -543,6 +565,8 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
     params.pixelSurf   = g_pixelSurf;
     params.jbYieldSurf = g_jbYieldSurf;
     params.psHorizon   = std::clamp(g_pixelSurfPredictTicks, 1, 32);
+    // botox reads its own delay hop ticks for both calculators (pixel_calc.cpp in.delay_ticks)
+    params.delayTicks  = std::clamp(g_rcDelayTicks, 0, 8);
     // no 'hop speed' knob: every bhop in an answer is read as one under 1.2x class max speed
     // (params.cropFrac stays 1), which is where PreventBunnyJumping leaves a standing hop alone
 
@@ -586,8 +610,10 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         if (!bHere)
         {
             start.player = pts[0].player; start.building = pts[0].building; firstPoint = 1;
-            start.moves  = (pts[0].moves & rs::kMovesPress) | rs::kMovesStart;   // its presses, walk offs global
         }
+        // the starting jump is its own row (botox "starting jump" + m_route_calc_start_styles),
+        // wherever it leaves from. The pixel calculator has no start row: every move is its
+        if (!bPixel) start.moves = (unsigned)g_rcStartMoves & (rs::kMovesPress | rs::kMovesStart);
     }
 
     // one Pred_Simulate flight from where you stand. Every hop pass of one pixel solve would
@@ -691,7 +717,7 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
 
     rs::Options opt;
     opt.moves = (unsigned)g_rcMoveMask & rs::kMovesAll;
-    opt.topK = std::max(32, std::clamp(g_rcMaxShown, 1, 50));
+    opt.topK = std::max(32, std::clamp(g_rcMaxShown, 1, 64));
 
     // everything the solve needs is plain data now (route/start/params/opt) -- the snapshot the
     // worker gets. Begin() itself is O(1) (one root node), so it stays here on the game thread
@@ -702,11 +728,11 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
     s_rcJob = job;
     s_rcBusy = true;
 
-    DebugLog("RC: solve (dihrc24) -- %d marker(s), start %s z %.3f vz %.1f%s, moves 0x%X, "
-             "gravity %.0f, tick %.4f, scale %.2f, jump mod %.4f, bhop crop %.4f",
+    DebugLog("RC: solve (dihrc32) -- %d marker(s), start %s z %.3f vz %.1f%s, moves 0x%X start 0x%X, "
+             "delay hop %dt, gravity %.0f, tick %.4f, scale %.2f, jump mod %.4f, bhop crop %.4f",
              (int)route.size(), start.air ? "IN AIR" : (bHere ? "where you stand" : "marker 1"),
-             start.s.z, start.s.vz, start.s.fDuck ? " ducked" : "", opt.moves, params.gravity,
-             params.dt, params.scale, params.jumpMod, params.cropFrac);
+             start.s.z, start.s.vz, start.s.fDuck ? " ducked" : "", opt.moves, start.moves,
+             params.delayTicks, params.gravity, params.dt, params.scale, params.jumpMod, params.cropFrac);
     for (size_t i = 0; i < route.size(); i++)
         DebugLog("RC: marker %d  %-11s z %.4f  moves 0x%X  stand %d duck %d%s", s_rcMarkerNo[i],
                  rs::PointTypeName(route[i].type), route[i].z, route[i].moves, (int)route[i].allowStand,
@@ -772,7 +798,7 @@ static void RcSolveFinish(RcJob& job)
     // printed on the panel. It fires on any low ceiling over the check spot, which is most of the
     // places worth calculating, and it never told you anything the answer itself did not. The
     // check still RUNS and still logs every disagreement -- `RC: engine check` in C:\dih\debug.log
-    const int shown = std::clamp(g_rcMaxShown, 1, 50);
+    const int shown = std::clamp(g_rcMaxShown, 1, 64);
     // a pixel pass past the first gets half the rows: the single jumps are the answer you asked
     // for, the hop chains are what to run when there are none of those
     const int rows = (s_rcPixelSolve && s_pcHops > 0) ? std::max(2, shown / 2) : shown;
@@ -1167,6 +1193,8 @@ static void RcPlacePixel(void* pLocal, UserCmd_t* pCmd)
 // An edgebug is a ground face you slide off, so it is placed as a ground and switched to edgebug
 // in the marker's own row in the menu. A player head and a building top are grounds: they ARE
 // floors, and the one height that means anything on them is the top.
+static bool RcEdgeAt(void* pLocal, const Vec3& at, rce::Edge& out);   // below, with the edgebug snap
+
 static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
 {
     if (g_offViewOffset <= 0) return;
@@ -1188,9 +1216,12 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
             s_rcPoints.push_back(sp);
             s_rcGen++;
             s_rcLines.clear(); s_rcPath.clear();
-            snprintf(b, sizeof(b), "marker %d placed (%s, %s from the pixel finder, z %.3f)",
-                     (int)s_rcPoints.size(), rs::PointTypeName(sp.type),
-                     bTb ? "red seam ring" : "grey pinned pixel", sp.pos.z);
+            if (g_rcAdvanced)
+                snprintf(b, sizeof(b), "marker %d placed (%s, %s from the pixel finder, z %.3f)",
+                         (int)s_rcPoints.size(), rs::PointTypeName(sp.type),
+                         bTb ? "red seam ring" : "grey pinned pixel", sp.pos.z);
+            else   // botox's short readout: "added <type> point at <z>"
+                snprintf(b, sizeof(b), "added %s point at %.2f", rs::PointTypeName(sp.type), sp.pos.z);
             s_rcMessage = b;
         }
         DebugLog("RC: marker placed at %.2f %.2f %.4f -- %s (finder point, %d candidate(s))",
@@ -1219,7 +1250,9 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
     // a pure player clip is invisible, so a marker on one looks like a marker in mid air. It is
     // the surface you actually stand on, which is the one the calculator wants -- say so once
     // rather than let it read as a misplaced marker
-    const bool bClip = bWorld && (trace.contents & 0x10000) != 0 && (trace.contents & 0x1) == 0;
+    bool bClip = bWorld && (trace.contents & 0x10000) != 0 && (trace.contents & 0x1) == 0;
+    bool bClipTop = false;   // the hit was a clip's side: the marker went on the clip's top
+    bool bClipThrough = false;   // ...too tall a clip: aimed through it at what you see
     // a teammate in front is not solid: the world behind him gets the marker, the note says why
     const char* mateNote = bMate ? " - the teammate in front was skipped, teammate heads are not solid" : "";
     bool bNotSolid = false;   // building hit that the engine does not let you stand on
@@ -1245,6 +1278,32 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
         // THE FACE IS THE TYPE: a floor can only be landed on (ground; switch the row to edgebug
         // in the menu if you mean to slide off it), a ceiling can only be hit with your head.
         // 0.7 is the engine's own floor/ceiling cut (CategorizePosition, normal.z > 0.7 = standable)
+        // A player clip's SIDE (botox route_calc add key): its top if a hull could stand there,
+        // else the ray again without CONTENTS_PLAYERCLIP, onto the geometry you can see
+        if (bClip && fabsf(trace.plane.normal.z) <= 0.7f)
+        {
+            Vec3 top;
+            if (RcClipTop(pLocal, trace, top))
+            {
+                trace.endpos = top;
+                trace.plane.normal = Vec3(0.f, 0.f, 1.f);
+                bClipTop = true;
+            }
+            else
+            {
+                TraceFilterRcMarker filter; filter.Setup(pLocal);
+                GameTrace_t through{};
+                TraceLine(vEye, vEye + vForward * 8192.f, MASK_RC_NOCLIP, &filter, &through);
+                if (through.fraction < 1.f && !through.startsolid && !through.allsolid)
+                {
+                    trace = through;
+                    bClip = false;
+                    bClipThrough = true;
+                }
+            }
+            DebugLog("RC: marker on a clip side -- %s, z %.4f", bClipTop ? "took its top" : bClipThrough
+                     ? "aimed through it" : "no top, nothing behind it", trace.endpos.z);
+        }
         pt.pos = trace.endpos;
         pt.type = trace.plane.normal.z > 0.7f ? rs::PT_GROUND : rs::PT_HEADBANG;
         // ---- BUILDINGS: the only height that means anything is the TOP --------------
@@ -1271,7 +1330,11 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
         // hits; a wall face is neither, and the z stored off one is whatever height the crosshair
         // happened to be at -- a marker for a spot that is not the one you meant (the "i want a
         // ground point on a thin ledge" report, where the ray caught the ledge's SIDE). Refuse it
-        // and say so, so the fix is to aim at the top instead of to wonder why the answer is wrong
+        // and say so, so the fix is to aim at the top instead of to wonder why the answer is wrong.
+        // botox "allow selecting invalid pixels": the wall hit is a pixelsurf marker anyway, at the
+        // crosshair's z, unverified (no finder pinned it)
+        else if (fabsf(trace.plane.normal.z) <= 0.7f && g_rcAllowInvalid)
+            pt.type = rs::PT_SURF;
         else if (fabsf(trace.plane.normal.z) <= 0.7f)
         {
             std::lock_guard<std::mutex> l(g_rcLock);
@@ -1292,6 +1355,20 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
             bNotSolid = true;
     }
 
+    // botox "snap points to nearest edge": a ground marker moves onto the lip of the floor it sits
+    // on (xy AND z, botox movement_nearest_edge). An entity marker is pinned to its hull top every
+    // frame, so there is no lip on it to keep
+    float flSnapDist = -1.f;
+    if (g_rcSnapEdge && pt.type == rs::PT_GROUND && !pt.ent)
+    {
+        rce::Edge e{};
+        if (RcEdgeAt(pLocal, pt.pos, e))
+        {
+            flSnapDist = e.dist;
+            pt.pos = Vec3(e.x, e.y, e.z);
+        }
+    }
+
     char buf[128];
     {
         std::lock_guard<std::mutex> l(g_rcLock);
@@ -1300,12 +1377,29 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
         s_rcPoints.push_back(pt);
         s_rcGen++;
         s_rcLines.clear(); s_rcPath.clear();
-        snprintf(buf, sizeof(buf), "marker %d placed (%s%s, z %.3f)", (int)s_rcPoints.size(),
-                 rs::PointTypeName(pt.type),
-                 pt.player ? ", player head" : pt.building ? ", building" : "", pt.pos.z);
-        s_rcMessage = buf;
-        s_rcMessage += mateNote;
-        if (bClip && !bHead) s_rcMessage += " - on a player clip brush (invisible, but it is what you stand on)";
+        if (g_rcAdvanced)
+        {
+            snprintf(buf, sizeof(buf), "marker %d placed (%s%s, z %.3f)", (int)s_rcPoints.size(),
+                     rs::PointTypeName(pt.type),
+                     pt.player ? ", player head" : pt.building ? ", building" : "", pt.pos.z);
+            s_rcMessage = buf;
+            s_rcMessage += mateNote;
+            if (bClipTop && !bHead)   s_rcMessage += " - on top of a player clip (invisible)";
+            else if (bClip && !bHead) s_rcMessage += " - on a player clip brush (invisible, but it is what you stand on)";
+            if (bClipThrough && !bHead) s_rcMessage += " - aimed through a player clip too tall to stand on";
+            if (flSnapDist >= 0.f)
+            {
+                snprintf(buf, sizeof(buf), " - snapped to the edge %.1fu away", flSnapDist);
+                s_rcMessage += buf;
+            }
+            if (pt.type == rs::PT_SURF) s_rcMessage += " - NOT a finder dot, unverified";
+        }
+        else
+        {
+            snprintf(buf, sizeof(buf), "added %s point at %.2f", rs::PointTypeName(pt.type), pt.pos.z);
+            s_rcMessage = buf;
+        }
+        // the one note the short readout keeps: that marker cannot be stood on at all
         if (bNotSolid) s_rcMessage += " - that building is not solid to player movement, you cannot stand on it";
     }
     DebugLog("RC: marker placed at %.2f %.2f %.4f -- %s%s%s", pt.pos.x, pt.pos.y, pt.pos.z,
@@ -1520,7 +1614,8 @@ void RC_GetDrawData(RcDrawData& out)
     out.pts.reserve(s_rcPoints.size());
     for (const RcPoint& p : s_rcPoints)
         out.pts.push_back({ p.pos, p.type, p.enabled,
-                            p.type == rs::PT_GROUND ? p.moves != rs::kMovesMarker : (!p.stand || !p.duck) });
+                            p.type == rs::PT_GROUND ? p.moves != rs::kMovesMarker : (!p.stand || !p.duck),
+                            p.player, p.stand, p.duck });
     out.hasPixel = s_pcHave;
     out.pixel    = s_pcPoint.pos;
     out.pixelSolve = s_rcPixelSolve;   // which of the two features owns the answer on screen
@@ -1565,7 +1660,8 @@ void RC_PointSet(int i, const RcPointInfo& in)
         // the same rule the place key obeys -- a pixelsurf or texturebug marker exists
         // only where the pixel finder pinned one, so the menu combo cannot turn a surface marker
         // into one either. Place it by aiming at the ring instead
-        if (rs::SeamLike(type) && !p.snapped) type = p.type;
+        // (botox: unless "allow selecting invalid pixels" is on)
+        if (rs::SeamLike(type) && !p.snapped && !g_rcAllowInvalid) type = p.type;
         p.type    = type;
         p.moves   = (in.moves & rs::kMovesMarker) ? (in.moves & rs::kMovesMarker) : rs::kMovesMarker;
         p.enabled = in.enabled;
@@ -1599,6 +1695,30 @@ void RC_PointDelete(int i)
         s_rcGen++;
     }
 }
+
+// the menu's "clear all points" button (the clear key does the same from RouteCalc_Tick, where it
+// can also cancel a running solve; a solve flies a copied route, so one left running only answers
+// for markers that are gone, and the next edit drops that answer too)
+void RC_PointsClear()
+{
+    std::lock_guard<std::mutex> l(g_rcLock);
+    s_rcPoints.clear();
+    s_rcLines.clear(); s_rcPath.clear();
+    s_rcMessage.clear();
+    s_rcGen++;
+}
+
+// botox drop_solutions(): a setting the answer was solved under changed, so the answer is stale
+void RC_DropAnswer()
+{
+    std::lock_guard<std::mutex> l(g_rcLock);
+    if (s_rcPixelSolve) return;           // the pixel calculator's answer is not the route's to drop
+    s_rcLines.clear(); s_rcPath.clear();
+    s_rcGen++;
+}
+
+unsigned RC_MarkerMoves() { return rs::kMovesMarker; }
+unsigned RC_StartMoves()  { return (rs::kMovesPress & ~(1u << rs::MB_DELAY)) | rs::kMovesStart; }   // no landing to delay off
 
 const char* RC_MoveName(int bit) { return rs::MoveName(bit); }
 int         RC_MoveCount()       { return rs::MB_COUNT; }

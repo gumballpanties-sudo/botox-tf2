@@ -63,12 +63,14 @@ void UnitB_Menu_movement_indicators()
 
 void UnitB_Menu_movement_calculator()
 {
+    // botox menu_tab_movement "detections": label list order must match DetType
     ImGui::Checkbox("detections", &g_detections);
-    ImGui::Checkbox("stack edgebugs##det", &g_detectionStackEb);
-    if (g_detections || g_detectionStackEb)
-        ImGui::OptionPopup("detection text settings", [&]() {
-            if (g_detectionStackEb) ImGui::SliderInt("grace ticks##det", &g_detectionGraceTicks, 1, 66);
-            ImGui::ColorRow("text color##det", g_detectionColor);
+    if (g_detections)
+        ImGui::OptionPopup("detection settings", [&]() {
+            static const char* const kTypes[DET_MAX] = { "edgebug", "texturebug", "airstuck", "pixelsurf", "wallclimb" };
+            ImGui::MultiCombo("detections", &g_detectionTypes, kTypes, DET_MAX);
+            ImGui::Checkbox("stack edgebugs##detstack", &g_detectionStackEb);
+            ImGui::InputText("chat label##detlabel", g_detectionLabel, sizeof(g_detectionLabel));
         }, ImVec2(220.f, -1));
 
     ImGui::Checkbox("pixelsurf lines", &g_psLinesEnable);

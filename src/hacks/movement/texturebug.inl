@@ -970,6 +970,148 @@ static float TBC_Gap(void* pLocal, const GameTrace_t& wall)
     return tr.fraction * 32.f - TB_WallSupportDistance(pLocal, Vec3(n.x, n.y, 0.f));
 }
 
+// ---- cumidere misc_auto_align = the RIDE half of its texture bug ---------------------------
+// cumidere's createmove (FUN_1801f9b10) runs FUN_1801d0170 (auto align) a few features before
+// FUN_1801cbee0 (tb), both on the pre-prediction state. TB finds a pin, align is what keeps one:
+// into-wall press with the least force that pins, and while pinned (base vz = -halfgrav) one held
+// WASD key steers along the wall at up to 450 and a 450 press tilted atan(15..25/speed) off the
+// wall normal gains speed (air accel caps the wish at 30, so vel.wish ~= 15..25 leaves 5..15 u/s
+// of accel the wall does not eat). Every move is re-proven pinned by a 1-tick sim.
+
+// FUN_1801d1a80: origin x or y sits 0.0075..0.03125u off a whole unit
+static bool TBC_NearPixel(const Vec3& o)
+{
+    const auto near_px = [](float v)
+    {
+        const float f = v - floorf(v), g = 1.f - f;
+        return (g >= 0.0075f && g <= 0.03125f) || (f >= 0.0075f && f <= 0.03125f);
+    };
+    return near_px(o.x) || near_px(o.y);
+}
+
+// FUN_1801cfca0: 16 hull traces 2u out, the first that hits a dead-vertical face wins. Zero-xy
+// normal refused (start solid), cumidere would steer toward yaw 0 on it
+static bool TBC_AlignWall(void* pLocal, const Vec3& org, const Vec3& mins, const Vec3& maxs, Vec3& n)
+{
+    TraceFilterWorldProps fil; fil.Setup(pLocal);
+    for (int i = 0; i < 16; ++i)
+    {
+        const float a = float(i) * 0.3926991f;
+        GameTrace_t tr{};
+        TraceHull(org, Vec3(org.x + cosf(a) * 2.f, org.y + sinf(a) * 2.f, org.z), mins, maxs,
+                  MASK_PLAYERSOLID, &fil, &tr);
+        if (tr.fraction != 1.f && tr.plane.normal.z == 0.f
+            && (tr.plane.normal.x != 0.f || tr.plane.normal.y != 0.f))
+            { n = tr.plane.normal; return true; }
+    }
+    return false;
+}
+
+// TBC_Align result bits, for the TBC: log
+enum { TBCA_WALL = 1, TBCA_PRESS = 2, TBCA_PINNED = 4, TBCA_STEER = 8, TBCA_GAIN = 16 };
+
+// FUN_1801d0170. Entity must sit on the restore base; it is left there
+static int TBC_Align(void* pLocal, UserCmd_t* pCmd, int nBase)
+{
+    const auto Restore = [&]() { RestoreToFrame(nBase - 1); };
+    const Vec3 org  = EntV3(pLocal, g_offOrigin);
+    const Vec3 mins = EntV3(pLocal, g_offMins);
+    const Vec3 maxs = EntV3(pLocal, g_offMaxs);
+    Vec3 n{};
+    if (!TBC_AlignWall(pLocal, org, mins, maxs, n)) return 0;
+    int res = TBCA_WALL;
+
+    const Vec3  vel    = EntV3(pLocal, g_offVelocity);
+    const float speed  = vel.Length2D();
+    const float half   = TargetPredictZVel();   // cumidere hardcodes -6
+    // cumidere: 0.01. Valve Oct 2026 ClipVelocity subtracts DIST_EPSILON, so a top-plane pin now
+    // ends at -6 + 0.03125 and 0.01 never fires on Valve servers (sv_wallbug 0)
+    const auto  pin    = [&](float vz) { return fabsf(vz - half) < 0.05f; };
+    const bool  pinned = pin(vel.z);
+    const float user_fwd = pCmd->forwardmove, user_side = pCmd->sidemove;
+    const float view_yaw = pCmd->viewangles.y;
+    const int   b        = pCmd->buttons;
+
+    const float into_yaw = VectorAngles(Vec3(-n.x, -n.y, 0.f)).y;
+    const float rel = DEG2RADF(NormalizeAngle(into_yaw - view_yaw));
+    const float c = cosf(rel), s = sinf(rel);
+
+    // one tick of pCmd with (f, sd); out of budget = a miss (no pin, no speed)
+    const auto sim = [&](float f, float sd) -> Vec3
+    {
+        if (SimsLeft() <= 0) return Vec3(0.f, 0.f, 1e30f);
+        UserCmd_t fake = *pCmd;
+        fake.forwardmove = f; fake.sidemove = sd;
+        Restore();
+        Pred_Simulate(pLocal, &fake);
+        const Vec3 v = EntV3(pLocal, g_offVelocity);
+        Restore();
+        return v;
+    };
+
+    // press straight in, 0..100: least force that pins, else 10
+    float best_f = c * 10.f, best_s = -s * 10.f;
+    for (float m = 0.f; m <= 100.f; m += 10.f)
+        if (pin(sim(c * m, -s * m).z)) { best_f = c * m; best_s = -s * m; res |= TBCA_PRESS; break; }
+    pCmd->forwardmove = best_f;
+    pCmd->sidemove    = best_s;
+    // off a pixel offset, not riding and steering: the player's own move
+    if (!TBC_NearPixel(org) && !pinned && (b & (IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT)))
+        { pCmd->forwardmove = user_fwd; pCmd->sidemove = user_side; }
+    if (!pinned) return res;
+    res |= TBCA_PINNED;
+
+    // riding: exactly one WASD key held
+    float kyaw = 0.f;
+    bool  key  = false;
+    if ((b & IN_FORWARD)   && !(b & (IN_BACK | IN_MOVELEFT | IN_MOVERIGHT)))    { kyaw = view_yaw;         key = true; }
+    if ((b & IN_BACK)      && !(b & (IN_FORWARD | IN_MOVELEFT | IN_MOVERIGHT))) { kyaw = view_yaw + 180.f; key = true; }
+    if ((b & IN_MOVELEFT)  && !(b & (IN_FORWARD | IN_BACK | IN_MOVERIGHT)))     { kyaw = view_yaw + 90.f;  key = true; }
+    if ((b & IN_MOVERIGHT) && !(b & (IN_FORWARD | IN_BACK | IN_MOVELEFT)))      { kyaw = view_yaw - 90.f;  key = true; }
+    if (!key) return res;
+
+    TraceFilterWorldProps fil; fil.Setup(pLocal);
+    GameTrace_t tr{};
+    const float kr = DEG2RADF(kyaw);
+    TraceLine(org, Vec3(org.x + cosf(kr) * 128.f, org.y + sinf(kr) * 128.f, org.z), MASK_PLAYERSOLID, &fil, &tr);
+    if (tr.fraction < 1.f)
+    {
+        // the held key's axis 0..450, the other axis keeps the press; the LAST pinned step wins
+        float kf = best_f, ks = best_s;
+        for (int k = 0; k < 451; k += 45)
+        {
+            const float f  = (b & IN_FORWARD)  ? float(k)  : (b & IN_BACK)      ? -float(k) : kf;
+            const float sd = (b & IN_MOVELEFT) ? -float(k) : (b & IN_MOVERIGHT) ? float(k)  : ks;
+            if (pin(sim(f, sd).z)) { kf = f; ks = sd; res |= TBCA_STEER; }
+        }
+        pCmd->forwardmove = kf;
+        pCmd->sidemove    = ks;
+
+        // fast and not gaining: 450 tilted a hair off the wall normal toward the drift
+        const float speed2 = sim(kf, ks).Length2D();
+        if (speed > 250.f && fabsf(speed - speed2) < 5.f)
+        {
+            float gain = 0.f, gf = kf, gs = ks;
+            const float drift = NormalizeAngle(VectorAngles(Vec3(vel.x, vel.y, 0.f)).y - into_yaw);
+            for (float a = 15.f; a < 30.f; a += 5.f)
+            {
+                const float ang = RAD2DEGF(atanf(a / speed));
+                const float r   = DEG2RADF(NormalizeAngle(into_yaw + (drift < 0.f ? -ang : ang) - view_yaw));
+                const float f = cosf(r) * 450.f, sd = -sinf(r) * 450.f;
+                const Vec3  v = sim(f, sd);
+                if (pin(v.z) && v.Length2D() - speed > gain) { gain = v.Length2D() - speed; gf = f; gs = sd; }
+            }
+            if (gain > 0.f) { pCmd->forwardmove = gf; pCmd->sidemove = gs; res |= TBCA_GAIN; }
+        }
+    }
+    // never push against the held key
+    if (pCmd->forwardmove < 0.f && (b & IN_FORWARD))   pCmd->forwardmove = 450.f;
+    if (pCmd->forwardmove > 0.f && (b & IN_BACK))      pCmd->forwardmove = -450.f;
+    if (pCmd->sidemove    < 0.f && (b & IN_MOVERIGHT)) pCmd->sidemove    = 450.f;
+    if (pCmd->sidemove    > 0.f && (b & IN_MOVELEFT))  pCmd->sidemove    = -450.f;
+    return res;
+}
+
 // FUN_1801cbee0
 static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
 {
@@ -985,6 +1127,8 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
 
     if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK)
         { s_tbPhase = TBP_OFF; s_tbRideLen = s_tbcRun = 0; return; }
+
+    const int al = g_tbcAlign ? TBC_Align(pLocal, pCmd, nBase) : 0;
 
     const Vec3 org  = EntV3(pLocal, g_offOrigin);
     const Vec3 mins = EntV3(pLocal, g_offMins);
@@ -1011,6 +1155,20 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
     float out_fwd = pCmd->forwardmove, out_side = pCmd->sidemove, out_off = 0.f;
     int   sims = 0;
     float last_vz = 0.f;
+
+    // NOT cumidere: a cmd that already pins (align's steer / speed move, or the player's own)
+    // is kept. cumidere's grid overwrites it with fwd=1 at 86 deg, and its hug with a variant
+    // that does not pin at all -- the steer and the speed gain never reached the server
+    bool natural = false;
+    if (SimsLeft() > 0)
+    {
+        UserCmd_t fake = *pCmd;
+        Restore();
+        Pred_Simulate(pLocal, &fake);
+        ++sims;
+        last_vz = EntV3(pLocal, g_offVelocity).z;
+        natural = found = fabsf(last_vz - half) < 0.1f || fabsf(last_vz + half) < 0.1f;
+    }
 
     for (int i = 0; i < 10 && !found; ++i)
     {
@@ -1060,10 +1218,12 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
     s_tbPhase       = found ? (s_tbRideLen >= 2 ? TBP_RIDE : TBP_PIN) : hug ? TBP_HUG : TBP_SCAN;
 
     if (g_debugLogEnable && DiagOk(s_tbcDiagTick, found || hug))
-        DebugLog("TBC: pin=%d hug=%d gap=%.3f off=%.3f fwd=%.3f side=%.3f vz=%.1f lvz=%.2f sims=%d "
-                 "ang=%.2f n=%.2f %.2f %.2f sign=%.0f ride=%d", (int)found, (int)hug, best_gap,
-                 out_off, out_fwd, out_side, vel.z, last_vz, sims, ang, wall.plane.normal.x,
-                 wall.plane.normal.y, wall.plane.normal.z, sign, s_tbRideLen);
+        // al = TBC_Align bits: 1 wall, 2 press pinned, 4 riding, 8 key steer pinned, 16 speed gain
+        DebugLog("TBC: pin=%d nat=%d al=%d hug=%d gap=%.3f off=%.3f fwd=%.3f side=%.3f vz=%.1f lvz=%.2f "
+                 "sims=%d xy=%.0f ang=%.2f n=%.2f %.2f %.2f sign=%.0f ride=%d", (int)found, (int)natural,
+                 al, (int)hug, best_gap, out_off, out_fwd, out_side, vel.z, last_vz, sims,
+                 vel.Length2D(), ang, wall.plane.normal.x, wall.plane.normal.y, wall.plane.normal.z,
+                 sign, s_tbRideLen);
 }
 
 // ============================================================================

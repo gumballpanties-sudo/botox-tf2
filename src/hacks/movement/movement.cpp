@@ -12,6 +12,7 @@
 #include "movement_ex_pure.h" // Unit A port: pure decisions (hsw/delay hop/lj adaptive cancel), gate-tested
 #include "movement_tricks2_pure.h" // Unit A3 port: pure decisions (bounce tangent/tung band/eb style), gate-tested
 #include "movement_edge_pure.h" // Unit A2 port: pure decisions (edge skip duck gate, blockbot wish/sign), gate-tested
+#include "detections.h"   // botox chat detections, fed the cmd start state at the publish point
 #include <mutex>
 #include <atomic>
 #include <thread>
@@ -2638,6 +2639,19 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s.mouseDx  = pCmd->mousedx;
         s.mouseDy  = pCmd->mousedy;
         s_mvInd    = s;
+
+        // botox run_detections: cmd START state (pre-pred), hit flags final here
+        DetTick d;
+        d.onGround    = (s_prePredFlags & FL_ONGROUND) != 0;
+        d.walk        = iLocalMove == MOVETYPE_WALK;
+        d.jumpPressed = (pCmd->buttons & IN_JUMP) != 0;
+        d.vz          = s_prePredVel.z;
+        d.speed       = s_prePredVel.Length2D();
+        d.gravity     = CvarFloat("sv_gravity", 800.f);
+        d.interval    = TickInterval();
+        d.tick        = s_prePredTick;
+        d.tb = s_textureBugHit; d.as = s_airStuckHit; d.ps = s.psHit; d.wc = s_wallClimbHit;
+        Detections_Tick(d);
     }
 }
 

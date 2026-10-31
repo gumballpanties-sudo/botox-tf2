@@ -21,6 +21,10 @@ bool Aim_Init();
 // Movement_Run itself.
 bool Aim_Active();
 
+// Print a line to the game chat (\x07RRGGBB color codes). No-op until interfaces resolve.
+// Game thread only. `text` is the ChatPrintf format, so it must not contain '%'.
+void Aim_ChatPrint(const char* text);
+
 // Disables the whitelisted hooks. Called from dih's eject path before MH_Uninitialize.
 void Aim_Unload();
 

@@ -424,7 +424,7 @@ add_executable(demostreak_test tests/demostreak_test.cpp)
 # Build + run: cmake --build build --config Release --target recorder_test && build\Release\recorder_test.exe
 add_executable(recorder_test tests/recorder_test.cpp)
 
-# Gate test for the stack-edgebug detection counter (src/hacks/movement/detections_core.h).
+# Gate test for the detection core (src/hacks/movement/detections_core.h): physical edgebug + fresh gate.
 # Build + run: cmake --build build --config Release --target detections_test && build\Release\detections_test.exe
 add_executable(detections_test tests/detections_test.cpp)
 # Gate test for Unit C's ESP pure math (src/hacks/esp/esp_math.h): oof-arrow edge placement

@@ -372,20 +372,21 @@ bool g_steamHistory     = false;   // right-click a player -> "Steam History" (s
 
 // -- Crosshair ----------------------------------------------------------------------------------------
 bool  g_chEnable        = false;
-bool  g_chAntialias     = false;
+// defaults = SimpleVisual's C:\dih\default.cfg -- at 0 thickness/length enabling drew nothing
+bool  g_chAntialias     = true;
 bool  g_chAdditive      = false;   // arms + dot blend ONE instead of INVSRCALPHA
 int   g_chBlendMode     = 0;       // kChBlend id (ch_blend_modes.h); 0 falls back to g_chAdditive
-float g_chColor[4]      = { 0.f, 1.f, 0.f, 1.f };
-float g_chThickness     = 0.f;
-float g_chLength        = 0.f;
-float g_chGap           = 0.f;
+float g_chColor[4]      = { 1.f, 1.f, 1.f, 1.f };
+float g_chThickness     = 1.1f;
+float g_chLength        = 3.f;
+float g_chGap           = 1.6f;
 float g_chAspect        = 1.f;     // arm length w:h. 1 = square, >1 wider, <1 taller
 float g_chGapAspect     = 1.f;     // gap w:h, same rule
 bool  g_chDot           = false;
 bool  g_chDotCircle     = false;
-bool  g_chOutline       = false;
+bool  g_chOutline       = true;
 float g_chOutlineColor[4] = { 0.f, 0.f, 0.f, 1.f };
-float g_chOutlineThick  = 0.f;
+float g_chOutlineThick  = 0.5f;
 bool  g_staticAmbyCrosshair = false;
 
 // CS:GO sniper scope (scope_csgo.inl) -- csgo defaults
@@ -577,6 +578,7 @@ bool g_autoAlign = false;   // plain on/off, no bind
 // is SIM-DECIDED now (a duck pass runs only when the standing hull missed everywhere)
 bool g_textureBug = false;  int g_textureBugKey = 0;  int g_textureBugMode = 1;
 int g_tbStyle = 0;             // 0 cumidere (TF2 dll port) / 1 botox (the big search)
+bool g_tbcAlign = true;        // cumidere style: run cumidere misc_auto_align (ride steer) before the tb
 float g_tbReach = 2.f;         // how far out of the hull the wall scan looks
 float g_tbScanStep = 1.f;      // z resolution of the scan's line grid
 float g_tbRampNz = 0.05f;      // coldtires ramp_nz_band() default -- 2.9 deg off vertical = a surf
@@ -688,10 +690,17 @@ int  g_rcAddKey = 0;
 int  g_rcDeleteKey = 0;
 int  g_rcClearKey = 0;
 int  g_rcSolveKey = 0;
-int  g_rcMoveMask = 0x3F;     // rs::MoveBit: jump mini long jumpbug + walk off / crouch walk off (start)
+int  g_rcMoveMask = 0x7F;     // rs::MoveBit: jump mini long jumpbug walk off / crouch walk off (start) delay hop
+int  g_rcStartMoves = 0x37;   // botox m_route_calc_start_styles: jump mini long + walk off / crouch walk off
+int  g_rcDelayTicks = 2;      // botox m_route_calc_delay_ticks (0-8)
+bool g_rcShowKeys = true;     // botox m_route_calc_show_keys
+int  g_rcPathAlpha = 255;     // botox m_route_calc_path_alpha
+float g_rcPathThick = 2.f;    // botox m_route_calc_path_thickness (1-8 px)
+bool g_rcAllowInvalid = false; // botox m_route_calc_allow_invalid
+bool g_rcSnapEdge = false;    // botox m_route_calc_snap_edge
+bool g_rcAdvanced = false;    // botox m_route_calc_advanced_readout
 int  g_rcMaxShown = 8;
 bool g_rcStartHere = true;
-bool g_rcShowMarkers = true;
 bool g_rcShowPath = true;
 bool g_rcShowPanel = true;
 int  g_rcPopupTime = 6;       // botox m_route_calc_popup_time

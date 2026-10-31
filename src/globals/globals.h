@@ -614,6 +614,7 @@ extern int  g_pixelSurfPredictTicks; // seam look-ahead horizon, ticks (def 8, 1
 extern bool g_autoAlign;   // plain on/off, no bind
 extern bool g_textureBug;  extern int g_textureBugKey;  extern int g_textureBugMode;
 extern int g_tbStyle;              // 0 cumidere (texturebug.inl TextureBugCumidere) / 1 botox
+extern bool g_tbcAlign;            // cumidere style: cumidere auto align first (texturebug.inl TBC_Align)
 extern float g_tbReach;            // wall scan reach on top of the 1-tick lookahead (def 2 = base, 1-48)
 extern float g_tbScanStep;         // wall scan z step (def 1 = base, 1-8) -- perf lever, >1 misses thin seams
 extern float g_tbRampNz;           // |plane.normal.z| past this = a RAMP: TB hands the cmd back (def 0.05)
@@ -745,10 +746,17 @@ extern int  g_rcAddKey;            // place a marker where you aim (edge press)
 extern int  g_rcDeleteKey;         // delete the marker you aim at, else the newest
 extern int  g_rcClearKey;          // drop every marker on this map
 extern int  g_rcSolveKey;          // calculate (press again while solving = cancel)
-extern int   g_rcMoveMask;         // moves a route may use (rs::MoveBit bits, def all 6)
+extern int   g_rcMoveMask;         // moves a route may use (rs::MoveBit bits, def all 7)
+extern int   g_rcStartMoves;       // the starting jump's own moves (rs::MoveBit bits, botox start styles)
+extern int   g_rcDelayTicks;       // grounded cmds a delay hop waits (botox delay hop ticks, 0-8)
+extern bool  g_rcShowKeys;         // route calc key list box (botox show key list)
+extern int   g_rcPathAlpha;        // path line alpha 0-255
+extern float g_rcPathThick;        // path line thickness 1-8 px
+extern bool  g_rcAllowInvalid;     // a wall hit with no finder ring is a pixelsurf marker anyway
+extern bool  g_rcSnapEdge;         // ground markers move onto their nearest ledge lip
+extern bool  g_rcAdvanced;         // long placement readout (botox advanced readout)
 extern int   g_rcMaxShown;         // combos printed on the panel (def 8, 1-50)
 extern bool  g_rcStartHere;        // start where you stand / in the air (off = marker 1 is the start)
-extern bool  g_rcShowMarkers;      // draw the markers in the world
 extern bool  g_rcShowPath;         // draw the line between them (the solved arc once there is one)
 extern bool  g_rcShowPanel;        // draw the answer panel
 extern int   g_rcPopupTime;        // seconds the route/pixel popup stays up (botox def 6, 1-30)

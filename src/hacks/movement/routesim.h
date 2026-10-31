@@ -63,6 +63,9 @@ struct Params
     bool  pixelSurf   = true;   // PixelSurf on: its duck pass, its hold, its latch
     bool  jbYieldSurf = true;   // g_jbYieldSurf: AutoJumpbug idles while a ride is latched
     int   psHorizon   = 8;      // g_pixelSurfPredictTicks: the hunt's look-ahead
+    // botox m_route_calc_delay_ticks: grounded cmds a delay hop waits before its press. 0 = no
+    // delay hop is flown (it would be the bhop's own arc under another name)
+    int   delayTicks  = 0;
 };
 
 struct State
@@ -347,20 +350,31 @@ inline void Tick(State& s, Cmd c, const World& w, const Params& p, TickInfo* pti
 //                     let go of duck + jump. Replaces the landing on a ground marker
 //    walk off         start only: one grounded tick past the edge, then free fall
 //    crouch walk off  start only: duck on the floor until FL_DUCKING, walk off holding it
+//    delay hop        DelayHop (movement_ex.inl): off a STANDING landing, Params::delayTicks
+//                     grounded cmds with jump stripped, then the press. The wait is StayOnGround's
+//                     snap from the 2u hover to the floor, so it launches up to 2u under the bhop
+//                     (botox route_engine: "delay hop = plain jump only, off a standing landing")
 // ================================================================================================
-enum Script { SC_JUMP = 0, SC_MINI, SC_LONG, SC_WALKOFF, SC_WALKOFFDUCK, SC_FALL, SC_COUNT };
+enum Script { SC_JUMP = 0, SC_MINI, SC_LONG, SC_WALKOFF, SC_WALKOFFDUCK, SC_DELAY, SC_FALL, SC_COUNT };
 
-enum MoveBit { MB_JUMP = 0, MB_MINI, MB_LONG, MB_JUMPBUG, MB_WALKOFF, MB_CROUCHWALKOFF, MB_COUNT };
+// MB_DELAY is last on purpose: bits 0-5 keep the meaning every older build gave them
+enum MoveBit { MB_JUMP = 0, MB_MINI, MB_LONG, MB_JUMPBUG, MB_WALKOFF, MB_CROUCHWALKOFF, MB_DELAY, MB_COUNT };
 constexpr unsigned kMovesAll    = (1u << MB_COUNT) - 1u;
-constexpr unsigned kMovesPress  = (1u << MB_JUMP) | (1u << MB_MINI) | (1u << MB_LONG);   // off a floor
+constexpr unsigned kMovesPress  = (1u << MB_JUMP) | (1u << MB_MINI) | (1u << MB_LONG) | (1u << MB_DELAY);   // off a floor
 constexpr unsigned kMovesMarker = kMovesPress | (1u << MB_JUMPBUG);                       // per marker
 constexpr unsigned kMovesStart  = (1u << MB_WALKOFF) | (1u << MB_CROUCHWALKOFF);          // start only
 
 inline const char* MoveName(int b)
 {
-    static const char* k[MB_COUNT] = { "jump", "minijump", "longjump", "jumpbug", "walk off", "crouch walk off" };
+    static const char* k[MB_COUNT] = { "jump", "minijump", "longjump", "jumpbug", "walk off", "crouch walk off",
+                                       "delay hop" };
     return (b >= 0 && b < MB_COUNT) ? k[b] : "";
 }
+// a delay hop's printed step names its wait, botox's "delay hop 2t": a wait you cannot see is a
+// wait you cannot perform
+inline std::string DelayName(int ticks) { return "delay hop " + std::to_string(ticks) + "t"; }
+// the press itself: jump, minijump, longjump or a delay hop's late jump
+inline bool PressScript(int sc) { return sc == SC_JUMP || sc == SC_MINI || sc == SC_LONG || sc == SC_DELAY; }
 
 inline int ScriptBit(int sc)
 {
@@ -371,6 +385,7 @@ inline int ScriptBit(int sc)
     case SC_LONG:        return MB_LONG;
     case SC_WALKOFF:     return MB_WALKOFF;
     case SC_WALKOFFDUCK: return MB_CROUCHWALKOFF;
+    case SC_DELAY:       return MB_DELAY;
     default:             return -1;
     }
 }
@@ -403,7 +418,8 @@ inline Cmd ScriptCmd(int sc, int i, const State& s, ScriptMem& m, const World& w
     Cmd c;
     switch (sc)
     {
-    case SC_JUMP: c.jump = i == 0; break;
+    case SC_JUMP:
+    case SC_DELAY: c.jump = i == 0; break;                         // RunLeg already waited
     case SC_LONG: c.jump = i == 0; c.duck = i <= 1; break;          // LongJump: 2 duck ticks
     case SC_MINI:
         if (i == 0) { c.jump = true; c.duck = true; m.mjHold = true; break; }
@@ -746,7 +762,9 @@ private:
     struct Node { State s; std::vector<Best> best; double count = 0.0; };
     // sc/jb/ride are the PLAN that flew this edge, kept so the winning route can be flown again
     // tick by tick for the drawn arc (TraceBest). Three bytes, not a second search.
-    struct Edge { int from; int dep; int arr; int cost; float margin; int8_t sc; int8_t ride; bool jb; };
+    // duckApex too: a forced-duck landing replayed without its duck flies the standing arc, misses
+    // the arrival it was built from, and the drawn line for that answer was silently dropped
+    struct Edge { int from; int dep; int arr; int cost; float margin; int8_t sc; int8_t ride; bool jb; bool duckApex; };
     struct Key
     {
         uint32_t z, vz, bits, duckTime; int since, aduck;
@@ -792,11 +810,12 @@ private:
         int  tbSeen = 0;        // texturebug: straddling ticks this leg has already offered
     };
     // edges out of a just-caught pixelsurf, gathered over every ride length before they are added
-    struct Pending { State s; std::string dep, arr; int cost; float margin; int ride; int sc; bool jb; };
+    struct Pending { State s; std::string dep, arr; int cost; float margin; int ride; int sc; bool jb; bool duckApex; };
     std::vector<Pending>* m_collect = nullptr;
     int m_ride = 0;
     int  m_curSc = SC_FALL;      // the plan the leg being flown right now is running
     bool m_curJb = false;
+    bool m_curDuckApex = false;
     // ---- replay recorder (TraceBest): the arc of ONE known-good edge, not a search ----
     std::vector<float>* m_rec = nullptr;   // z after every tick of the leg being replayed
     std::vector<ArcTick>* m_recArc = nullptr;  // what the drawn line needs on top of z
@@ -860,7 +879,7 @@ private:
     {
         if (arrived.edgy) return;
         if (m_rec) { RecArrive(arrived); return; }     // a replay never touches the DAG
-        if (m_collect) { m_collect->push_back({ arrived, dep, arr, cost, margin, m_ride, m_curSc, m_curJb }); return; }
+        if (m_collect) { m_collect->push_back({ arrived, dep, arr, cost, margin, m_ride, m_curSc, m_curJb, m_curDuckApex }); return; }
         const int into = L.layer + 1;
         const int di = Label(dep), ai = Label(arr);
         std::vector<Node>& layer = m_layers[into];
@@ -883,7 +902,7 @@ private:
         // cap: many arrivals merging into one popular state is exactly the unbounded growth path
         std::vector<Edge>& edges = m_edges[into];
         if (edges.size() >= m_o.maxEdges) { m_res.capped = true; return; }
-        edges.push_back({ L.from, di, ai, cost, margin, (int8_t)m_curSc, (int8_t)m_ride, m_curJb });
+        edges.push_back({ L.from, di, ai, cost, margin, (int8_t)m_curSc, (int8_t)m_ride, m_curJb, m_curDuckApex });
         const int ei = (int)edges.size() - 1;
         const Node& u = m_layers[L.layer][L.from];
         Node& n = layer[v];
@@ -907,14 +926,14 @@ private:
     }
 
     // ---- names and costs ---------------------------------------------------------------------------
-    static std::string DepName(const Leg& L, const Plan& pl)
+    std::string DepName(const Leg& L, const Plan& pl) const
     {
         if (!L.srcGround) return std::string();
-        return WithOn(MoveName(ScriptBit(pl.sc)), L.depOn);
+        return WithOn(pl.sc == SC_DELAY ? DelayName(m_p.delayTicks) : std::string(MoveName(ScriptBit(pl.sc))), L.depOn);
     }
     static int PlanCost(const Plan& pl, bool srcGround)
     {
-        static const int k[SC_COUNT] = { 1, 2, 2, 0, 1, 0 };
+        static const int k[SC_COUNT] = { 1, 2, 2, 0, 1, 1, 0 };
         return srcGround ? k[pl.sc] : 0;
     }
     static std::string Stance(bool ducked) { return ducked ? " (ducked)" : " (stand)"; }
@@ -980,10 +999,9 @@ private:
                     const int into = layer + 1;
                     const size_t before = into < (int)m_edges.size() ? m_edges[into].size() : 0;
                     RunLeg(L, s, { sc, useJb });
-                    // jump / minijump / longjump only -- a walk off that never fell was rejected on
-                    // purpose (9b), and forcing a duck on it is not what this fallback is for
-                    const bool pressScript = sc == SC_JUMP || sc == SC_MINI || sc == SC_LONG;
-                    if (!useJb && tryDuckApex && pressScript)
+                    // presses only -- a walk off that never fell was rejected on purpose (9b), and
+                    // forcing a duck on it is not what this fallback is for
+                    if (!useJb && tryDuckApex && PressScript(sc))
                     {
                         const size_t after = into < (int)m_edges.size() ? m_edges[into].size() : 0;
                         if (after == before) RunLeg(L, s, { sc, false, true });
@@ -1039,7 +1057,7 @@ private:
                 }
                 // the edge carries the SHORTEST ride of the run and the plan that flew it: that is
                 // the one TraceBest re-flies, and the one the printed run starts at
-                m_ride = lo; m_curSc = e->sc; m_curJb = e->jb;
+                m_ride = lo; m_curSc = e->sc; m_curJb = e->jb; m_curDuckApex = e->duckApex;
                 AddEdge(L, e->s, dep, e->arr, e->cost, e->margin);
                 lo = hi;
             }
@@ -1096,8 +1114,24 @@ private:
 
     void RunLeg(const Leg& L, State s, const Plan& pl)
     {
-        m_curSc = pl.sc; m_curJb = pl.jb;
+        m_curSc = pl.sc; m_curJb = pl.jb; m_curDuckApex = pl.duckApex;
         World g; g.floor = L.depFloor; g.floorEff = L.depFloorEff;
+        if (pl.sc == SC_DELAY)
+        {
+            // off a LANDING only, standing only (botox: "delay hop = style_jump off a STANDING
+            // landing"). Off the start you are already settled, so the wait is the jump's own arc;
+            // ducked, DelayHop's stripped cmds are the Bunnyhop stand-up below, a different bind
+            if (L.layer == 0 || m_p.delayTicks <= 0 || !s.ground || s.fDuck || s.ducking) return;
+            // DelayHop strips IN_JUMP off every grounded cmd until tick > lastAir + N: N cmds
+            // standing still, then the press. Ground cmds: PixelSurf and MiniJump let go, the ride
+            // detect reads vz 0 (Fly's own grounded-tick bookkeeping, done by hand here)
+            for (int k = 0; k < m_p.delayTicks; k++)
+            {
+                Tick(s, Cmd(), g, m_p); m_res.ticks++; Rec(s);
+                if (!s.ground || s.edgy) return;
+                s.hold &= ~6; s.psAge = 17; s.psRiding = false; s.psPrevSurf = false;
+            }
+        }
         const bool press = pl.sc == SC_JUMP || pl.sc == SC_MINI || pl.sc == SC_LONG;
         if (press && s.ground && (s.fDuck || s.ducking))
         {
@@ -1148,8 +1182,7 @@ private:
     static bool TickOk(const Leg& L, const Plan& pl, int i, bool planDuck, const TickInfo& ti, const State& s)
     {
         if (s.edgy) return false;
-        const bool jumpScript = pl.sc == SC_JUMP || pl.sc == SC_MINI || pl.sc == SC_LONG;
-        if (i == 0 && L.srcGround && jumpScript && !ti.jumped) return false;
+        if (i == 0 && L.srcGround && PressScript(pl.sc) && !ti.jumped) return false;
         if (planDuck && ti.duckStripped) return false;
         return true;
     }
@@ -1512,7 +1545,7 @@ public:
         const int N = (int)m_pts.size();
         if ((int)m_layers.size() <= N) return false;
 
-        struct Hop { int layer, from, to, sc, ride; bool jb; };
+        struct Hop { int layer, from, to, sc, ride; bool jb, duckApex; };
         std::vector<Hop> hops;
         int layer = N, node = m_bestNode, rank = m_bestRank;
         while (layer > 0)
@@ -1523,7 +1556,7 @@ public:
             const Best& b = bs[rank];
             if (b.edge < 0 || b.edge >= (int)m_edges[layer].size()) return false;
             const Edge& e = m_edges[layer][b.edge];
-            hops.push_back({ layer - 1, e.from, node, e.sc, e.ride, e.jb });
+            hops.push_back({ layer - 1, e.from, node, e.sc, e.ride, e.jb, e.duckApex });
             node = e.from; rank = b.rank; layer--;
         }
         std::reverse(hops.begin(), hops.end());
@@ -1546,7 +1579,7 @@ public:
             const Leg L = MakeLeg(h.layer, h.from);
             m_rec = &z; m_recArc = arc ? &a : nullptr;
             m_recTo = &m_layers[h.layer + 1][h.to].s; m_recHit = false; m_recLen = 0;
-            RunLeg(L, s, { h.sc, h.jb });
+            RunLeg(L, s, { h.sc, h.jb, h.duckApex });
             const bool hit = m_recHit;
             const size_t len = m_recLen;
             m_rec = nullptr; m_recArc = nullptr; m_recTo = nullptr;

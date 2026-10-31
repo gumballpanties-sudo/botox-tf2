@@ -544,6 +544,85 @@ static void RenderEdgeBugOverlay()
 // Same contract as the ps overlay above: the movement thread owns the markers and the solve, this
 // draws a per-frame copy. Monochrome like everything else -- a marker is a ring with its number
 // in it, the path between them is a 1px line, and the answer is botox's timed popup (draw_popup).
+// botox route_calc.cpp key_label: the short name the key list prints, "none" when unbound
+static std::string RcKeyLabel(int k)
+{
+    if (k <= 0) return "none";
+    switch (k)
+    {
+    case VK_LBUTTON: return "m1";   case VK_RBUTTON: return "m2";   case VK_MBUTTON: return "m3";
+    case VK_XBUTTON1: return "m4";  case VK_XBUTTON2: return "m5";  case VK_SPACE: return "spa";
+    case VK_SHIFT: return "shi";    case VK_CONTROL: return "ctl";  case VK_MENU: return "alt";
+    case VK_TAB: return "tab";      case VK_RETURN: return "ret";   case VK_BACK: return "bac";
+    case VK_INSERT: return "ins";   case VK_DELETE: return "del";   case VK_END: return "end";
+    case VK_HOME: return "hom";     case VK_PRIOR: return "pgu";    case VK_NEXT: return "pgd";
+    case VK_CAPITAL: return "cap";  case VK_OEM_4: return "[";      case VK_OEM_6: return "]";
+    case VK_OEM_1: return ";";      case VK_OEM_7: return "'";      case VK_OEM_COMMA: return ",";
+    case VK_OEM_PERIOD: return ".";
+    default: break;
+    }
+    if (k >= '0' && k <= '9') return std::string(1, (char)k);
+    if (k >= 'A' && k <= 'Z') return std::string(1, (char)(k + 32));
+    if (k >= VK_NUMPAD0 && k <= VK_NUMPAD9) return "num" + std::to_string(k - VK_NUMPAD0);
+    if (k >= VK_F1 && k <= VK_F24) return "f" + std::to_string(k - VK_F1 + 1);
+    return "key";
+}
+
+// botox route_calc_ui "show key list": an ImGui window (draggable while the menu is open) in the
+// route calculator box chrome -- 25px band, centred bold title, faded accent line, 1px inner outline
+static void RenderRouteKeys()
+{
+    ImFont* font = g_menuReg ? g_menuReg : ImGui::GetFont();   // botox verdana 11
+    ImFont* bold = g_menuBold ? g_menuBold : font;              // botox verdana bold 11
+    constexpr float k_band = 25.f, k_pad = 8.f, k_gap = 22.f;
+    struct Hint { const char* label; std::string key; };
+    const Hint hints[] = {
+        { "add point",        RcKeyLabel(g_rcAddKey) },
+        { "calculate combos", RcKeyLabel(g_rcSolveKey) },
+        { "delete point",     RcKeyLabel(g_rcDeleteKey) },
+        { "clear all points", RcKeyLabel(g_rcClearKey) },
+    };
+    auto TextW = [](ImFont* f, const char* s) { return f->CalcTextSizeA(f->FontSize, FLT_MAX, 0.f, s).x; };
+    const float row_h = font->FontSize + 2.f;
+    float body_w = 0.f;
+    for (const Hint& h : hints) body_w = std::max(body_w, TextW(font, h.label) + k_gap + TextW(font, h.key.c_str()));
+
+    int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse;
+    if (!g_showMenu) flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs;
+    ImGui::SetNextWindowSize(ImVec2(body_w + k_pad * 2.f, k_band + k_pad + row_h * (float)IM_ARRAYSIZE(hints)), ImGuiCond_Always);
+    ImGui::Begin("botox-route-calc-keys", nullptr, flags);
+    {
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        ImDrawList* wdl = w->DrawList;
+        const ImVec2 pos = w->Pos, size = w->Size;
+        const float rounding = ImGui::GetStyle().WindowRounding;
+        const char* title = "route calculator";
+
+        ImGui::PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + k_band), false);
+        wdl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + k_band), IM_COL32(25, 25, 25, 255), rounding, ImDrawFlags_RoundCornersTop);
+        ImGui::PopClipRect();
+        RenderFadedGradientLine(wdl, ImVec2(pos.x, pos.y + k_band - 1.f), ImVec2(size.x, 1.f),
+                                ImColor(ImGui::GetColorU32(ImGuiCol_Accent)));
+        const ImVec2 ts = bold->CalcTextSizeA(bold->FontSize, FLT_MAX, 0.f, title);
+        wdl->AddText(bold, bold->FontSize, ImVec2(pos.x + (size.x - ts.x) * 0.5f, pos.y + (k_band - ts.y) * 0.5f),
+                     IM_COL32(255, 255, 255, 255), title);
+        ImGui::PushClipRect(ImVec2(pos.x + 1.f, pos.y + 1.f), ImVec2(pos.x + size.x - 1.f, pos.y + size.y - 1.f), false);
+        wdl->AddRect(ImVec2(pos.x + 1.f, pos.y + 1.f), ImVec2(pos.x + size.x - 1.f, pos.y + size.y - 1.f),
+                     IM_COL32(50, 50, 50, 255), rounding);
+        ImGui::PopClipRect();
+
+        float y = pos.y + k_band + 2.f;
+        for (const Hint& h : hints)
+        {
+            wdl->AddText(font, font->FontSize, ImVec2(pos.x + k_pad, y), ImColor(0.63f, 0.63f, 0.63f, 1.f), h.label);
+            wdl->AddText(font, font->FontSize, ImVec2(pos.x + size.x - k_pad - TextW(font, h.key.c_str()), y),
+                         IM_COL32(255, 255, 255, 255), h.key.c_str());
+            y += row_h;
+        }
+    }
+    ImGui::End();
+}
+
 static void RenderRouteOverlay()
 {
     if (!g_routeCalc && !g_pixelCalc) return;
@@ -557,7 +636,7 @@ static void RenderRouteOverlay()
     const float W = io.DisplaySize.x, H = io.DisplaySize.y;
 
     // two features, two sets of points. Neither one draws while its own feature is off
-    const bool bRoutePts = g_routeCalc && g_rcShowMarkers && !d.pts.empty();
+    const bool bRoutePts = g_routeCalc && !d.pts.empty();   // botox: points always drawn
     const bool bPixelPt  = g_pixelCalc && g_pcShowMarker && d.hasPixel;
 
     // ---- world markers + the path ---------------------------------------------------------
@@ -587,17 +666,24 @@ static void RenderRouteOverlay()
             // link, because this one is a solved route and not just an ordering.
             // No answer yet (markers just placed, or nothing completes them) -> the plain line.
             // the arc belongs to the feature that solved it, and follows that feature's own switch
+            // botox route_calc_render 1:1: accent path (path alpha / thickness), grey point-order
+            // line before a solve, markers = black disc + accent ring + accent number, white label
+            const ImU32 accent = ImGui::ColorConvertFloat4ToU32(ImVec4(g_accentColor[0], g_accentColor[1], g_accentColor[2], 1.f));
+            ImFont* mf = g_menuReg ? g_menuReg : ImGui::GetFont();   // botox verdana 11
+            const int   pathA = std::clamp(g_rcPathAlpha, 0, 255);
+            const float thick = std::clamp(g_rcPathThick, 1.f, 8.f);
             const bool bPath = g_rcShowPath;
             const bool bArc  = bPath && !d.path.empty() && (d.pixelSolve ? bPixelPt : bRoutePts);
             ImVec2 prev; bool bHavePrev = false;
             if (bArc)
             {
+                const ImU32 col = (accent & ~IM_COL32_A_MASK) | ((ImU32)pathA << IM_COL32_A_SHIFT);
                 for (size_t i = 0; i < d.path.size(); i++)
                 {
                     ImVec2 s;
                     if (!W2S(d.path[i], s)) { bHavePrev = false; continue; }
                     if (bHavePrev)
-                        dl->AddLine(prev, s, IM_COL32(170, 170, 170, 200), 1.f);
+                        dl->AddLine(prev, s, col, thick);
                     prev = s; bHavePrev = true;
                 }
             }
@@ -606,54 +692,44 @@ static void RenderRouteOverlay()
                 ImVec2 s;
                 if (!W2S(d.pts[i].pos, s)) { bHavePrev = false; continue; }
                 if (bHavePrev)
-                    dl->AddLine(prev, s, IM_COL32(110, 110, 110, 160), 1.f);
+                    dl->AddLine(prev, s, IM_COL32(110, 110, 110, pathA * 160 / 255), thick);
                 prev = s; bHavePrev = true;
             }
+
+            auto TextW = [&](const char* t) { return mf->CalcTextSizeA(mf->FontSize, FLT_MAX, 0.f, t).x; };
+            auto Ring = [&](const ImVec2& s, const char* inner, const char* label)
+            {
+                const float r = 11.f;
+                dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, 255), kSegments);
+                dl->AddCircle(s, r, accent, kSegments, 1.f);
+                dl->AddText(mf, mf->FontSize, ImVec2(s.x - TextW(inner) * 0.5f, s.y - mf->FontSize * 0.5f - 1.f), accent, inner);
+                dl->AddText(mf, mf->FontSize, ImVec2(s.x - TextW(label) * 0.5f, s.y - r - mf->FontSize - 3.f),
+                            IM_COL32(255, 255, 255, 255), label);
+            };
 
             for (size_t i = 0; bRoutePts && i < d.pts.size(); i++)
             {
                 ImVec2 s;
                 if (!W2S(d.pts[i].pos, s)) continue;
-
                 const RcDrawPt& p = d.pts[i];
-                const float r = 10.f;
-                const int   a = p.enabled ? 255 : 110;
-
-                dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, p.enabled ? 130 : 70), kSegments);
-                dl->AddCircle(s, r, IM_COL32(235, 235, 235, a), kSegments, 1.f);
-
-                char num[8];
-                snprintf(num, sizeof(num), "%d", (int)i + 1);
-                const ImVec2 ns = ImGui::CalcTextSize(num);
-                dl->AddText(ImVec2(s.x - ns.x * 0.5f, s.y - ns.y * 0.5f), IM_COL32(235, 235, 235, a), num);
-
                 // the label is what the marker IS (what an arc has to ARRIVE at it as); a *
-                // means its own departure list is filtered, so which markers are pinned to one
-                // press is readable without opening the menu
-                char lbl[48];
-                snprintf(lbl, sizeof(lbl), "%s%s%s", RC_TypeName(p.type), p.filtered ? " *" : "",
-                         p.enabled ? "" : " (off)");
-                const ImVec2 ls = ImGui::CalcTextSize(lbl);
-                dl->AddText(ImVec2(s.x - ls.x * 0.5f + 1.f, s.y - r - ls.y - 2.f), IM_COL32(0, 0, 0, a / 3), lbl);
-                dl->AddText(ImVec2(s.x - ls.x * 0.5f, s.y - r - ls.y - 3.f), IM_COL32(160, 160, 160, a), lbl);
+                // means its own departure list is filtered (botox: styles narrowed)
+                char num[8], lbl[64];
+                snprintf(num, sizeof(num), "%d", (int)i + 1);
+                snprintf(lbl, sizeof(lbl), "%s%s%s%s%s", RC_TypeName(p.type), p.filtered ? " *" : "",
+                         p.enabled ? "" : " (off)", p.player ? " (player)" : "",
+                         !p.stand ? " (ducked)" : !p.duck ? " (stand)" : "");
+                Ring(s, num, lbl);
             }
 
-            // pixel calculator marker: the same ring a route marker draws, with a "p" in it
-            // instead of a number (it is not part of the numbered route)
+            // pixel calculator marker: the same ring, a "p" in it instead of a number (it is not
+            // part of the numbered route)
             ImVec2 s;
-            if (bPixelPt && W2S(d.pixel, s))
-            {
-                const float r = 10.f;
-                dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, 130), kSegments);
-                dl->AddCircle(s, r, IM_COL32(235, 235, 235, 255), kSegments, 1.f);
-                const ImVec2 ns = ImGui::CalcTextSize("p");
-                dl->AddText(ImVec2(s.x - ns.x * 0.5f, s.y - ns.y * 0.5f), IM_COL32(235, 235, 235, 255), "p");
-                const ImVec2 ls = ImGui::CalcTextSize("pixel");
-                dl->AddText(ImVec2(s.x - ls.x * 0.5f + 1.f, s.y - r - ls.y - 2.f), IM_COL32(0, 0, 0, 85), "pixel");
-                dl->AddText(ImVec2(s.x - ls.x * 0.5f, s.y - r - ls.y - 3.f), IM_COL32(160, 160, 160, 255), "pixel");
-            }
+            if (bPixelPt && W2S(d.pixel, s)) Ring(s, "p", "pixel");
         }
     }
+
+    if (g_routeCalc && g_rcShowKeys) RenderRouteKeys();
 
     // ---- the answer popup: botox route_calc.cpp n_route::draw_popup 1:1 ----------------------
     // the answer belongs to whichever of the two features produced it, and so does its toggle
@@ -915,6 +991,7 @@ SetCursorPos_t o_SetCursorPos = nullptr;
 static ImDrawList* s_gameLists[64]; static int s_gameCount = 0;
 static ImDrawList* s_menuLists[64]; static int s_menuCount = 0;
 static ImDrawList* s_fadeLists[64]; static int s_fadeCount = 0;   // botox menu window + its popups: one faded layer
+static MenuFadedList s_popLists[16]; static int s_popCount = 0;    // confirm popups + ghosts, each at its own alpha, over the menu
 
 // Per-frame state, all reset at the end of h_Present.
 static bool s_frameBuilt  = false;   // imgui frame for THIS frame exists
@@ -928,7 +1005,7 @@ static bool s_menuScene   = false;
 
 static void SplitDrawData()
 {
-    s_gameCount = s_menuCount = s_fadeCount = 0;
+    s_gameCount = s_menuCount = s_fadeCount = s_popCount = 0;
     ImDrawData* dd = ImGui::GetDrawData();
     if (!dd || !dd->Valid) return;
 
@@ -962,6 +1039,7 @@ static void SplitDrawData()
         else if (menu) { if (s_menuCount < IM_ARRAYSIZE(s_menuLists)) s_menuLists[s_menuCount++] = dl; }
         else      { if (s_gameCount < IM_ARRAYSIZE(s_gameLists)) s_gameLists[s_gameCount++] = dl; }
     }
+    s_popCount = Menu_SplitPopups(s_fadeLists, s_fadeCount, s_popLists, IM_ARRAYSIZE(s_popLists));
 }
 
 // Render one subset through a copy of the frame's ImDrawData. CmdLists is a plain array
@@ -1402,6 +1480,8 @@ static void BuildImGuiFrame()
     {
         BuildFontAtlas();
         ImGui_ImplDX9_InvalidateDeviceObjects();   // NewFrame re-uploads the atlas texture
+        s_popCount = 0;
+        Menu_DropPopupGhosts();                    // ghosts point at the old atlas texture
     }
 
     ImGui_ImplDX9_NewFrame();
@@ -1420,7 +1500,6 @@ static void BuildImGuiFrame()
     RenderMoveIndicators();
     RenderVelocityGraph();       // unit B
     RenderKeystrokeIndicator();  // unit B
-    RenderDetections();          // unit B
     Recorder_RenderStatus();     // unit B
     RenderCrosshair();
     RenderSpectatorList();       // unit E: misc HUD
@@ -1674,7 +1753,8 @@ static void Render_RebindDevice(IDirect3DDevice9* dev)
     ImGui_ImplDX9_Init(dev);
     s_imguiDev = dev;
 
-    s_gameCount = s_menuCount = s_fadeCount = 0;   // lists reference the dropped font texture
+    s_gameCount = s_menuCount = s_fadeCount = s_popCount = 0;   // lists reference the dropped font texture
+    Menu_DropPopupGhosts();
     s_frameBuilt = false;
     s_vguiDrew   = false;
     s_menuScene  = false;
@@ -1822,10 +1902,12 @@ chain:
         // what puts it on top of the crosshair (every EndScene pass has already run) and
         // what keeps it out of the recording -- a capture hook that owns the Present entry
         // has copied the backbuffer before this line runs.
-        if ((s_menuCount > 0 || s_fadeCount > 0) && SUCCEEDED(dev->BeginScene()))
+        if ((s_menuCount > 0 || s_fadeCount > 0 || s_popCount > 0) && SUCCEEDED(dev->BeginScene()))
         {
             s_menuScene = true;
             RenderSubset(s_fadeLists, s_fadeCount, Menu_FadeAlpha());
+            for (int i = 0; i < s_popCount; ++i)   // botox: popups on top of the menu, each at its own alpha
+                RenderSubset(&s_popLists[i].list, 1, s_popLists[i].alpha);
             RenderSubset(s_menuLists, s_menuCount);
             dev->EndScene();          // re-enters h_EndScene -- s_menuScene stands it down
             s_menuScene = false;
@@ -1868,7 +1950,8 @@ HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     if (g_imguiInit) ImGui_ImplDX9_InvalidateDeviceObjects();
     // The split arrays point at draw lists from the frame being dropped -- a Present that
     // renders them after a Reset would submit freed geometry.
-    s_gameCount = s_menuCount = 0;
+    s_gameCount = s_menuCount = s_fadeCount = s_popCount = 0;
+    Menu_DropPopupGhosts();
     s_frameBuilt = false;
     s_vguiDrew   = false;
     s_menuScene  = false;

@@ -856,11 +856,12 @@ static constexpr int k_pfSeamTraceCap = 1800;
 
 // two marks are the same seam when they are at the same height on the same stretch of wall. The
 // band is swept per offset, so without this a boundary that really does run the width of the
-// column comes back as nine rings in a row
-static bool PfSeamKnown(const std::vector<Vec3>& v, const Vec3& p)
+// column comes back as nine rings in a row. Radius = whole band width: a fixed 8u let every
+// other 4u offset through, so one seam rang 5 times
+static bool PfSeamKnown(const std::vector<Vec3>& v, const Vec3& p, float flRadius)
 {
     for (const Vec3& q : v)
-        if (std::fabs(q.z - p.z) < 0.5f && (q - p).Length2D() < 8.f) return true;
+        if (std::fabs(q.z - p.z) < 0.5f && (q - p).Length2D() < flRadius) return true;
     return false;
 }
 
@@ -942,7 +943,7 @@ static void PfScanSeams(void* pLocal)
                 // ...and the ride has to be somewhere a player can be. The thin box above is a
                 // sweep that started where it ended, so it says nothing about a spot sealed
                 // inside a brush or sitting off the edge of the map
-                if (!fit.startsolid && !fit.allsolid && !PfSeamKnown(vOut, vMark)
+                if (!fit.startsolid && !fit.allsolid && !PfSeamKnown(vOut, vMark, flBandHalf * 2.f + 1.f)
                     && !MV_PointUnusable(vAt))
                     vOut.push_back(vMark);
             }

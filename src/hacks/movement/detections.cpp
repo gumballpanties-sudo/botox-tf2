@@ -1,76 +1,60 @@
 #include "detections.h"
-#include "movement.h"
 #include "detections_core.h"
-#include <vector>
-#include <string>
-#include <algorithm>
+#include "../aim/aim.h"
 #include <cstdio>
 
-struct Toast { std::string text; unsigned long long bornMs; };
-static std::vector<Toast> s_toasts;
-static constexpr unsigned long long kToastLifeMs = 1400;
-
-static void Announce(const char* text)
+// botox push_notice detection_html: accent label, " | event" in #bebebe
+static void Print(DetType type, const char* event)
 {
-    if (s_toasts.size() > 24) s_toasts.erase(s_toasts.begin());   // runaway guard
-    s_toasts.push_back({ text, GetTickCount64() });
+    if (!g_detections || !(g_detectionTypes & (1 << type))) return;
+    char label[64]; int n = 0;
+    for (const char* p = g_detectionLabel; *p && n < 63; ++p) if (*p != '%') label[n++] = *p;   // ChatPrintf formats
+    label[n] = 0;
+    char line[160];
+    snprintf(line, sizeof(line), "\x07%02X%02X%02X%s\x07" "BEBEBE | %s",
+             (int)(g_accentColor[0] * 255), (int)(g_accentColor[1] * 255), (int)(g_accentColor[2] * 255),
+             n ? label : "botox", event);
+    Aim_ChatPrint(line);
+    DebugLog("DET: %s", event);
 }
 
-void RenderDetections()
+static void PrintEb(int chain)
 {
-    if (!g_detections && !g_detectionStackEb) { s_toasts.clear(); return; }
+    char ev[32];
+    if (chain > 1) snprintf(ev, sizeof(ev), "edgebugged x%d", chain);
+    else           snprintf(ev, sizeof(ev), "edgebugged");
+    Print(DET_EB, ev);
+}
 
-    MvInd_t s{};
-    MV_GetIndicators(s);
-    static int s_lastTick = -1;
-    const bool freshTick = s.ms != 0 && GetTickCount64() - s.ms <= 250 && s.tick != s_lastTick;
-    if (freshTick)
+void Detections_Tick(const DetTick& t)
+{
+    static DetEb eb;
+    static int chain = 0, groundTicks = 0;
+    static int tbOff = 1 << 30, asOff = 1 << 30, psOff = 1 << 30, wcOff = 1 << 30;
+
+    // chain ends on 2 ground ticks or a jump (botox). Stack mode: TF2 chat cannot rewrite a line
+    // the way botox's panorama restack does, so the streak prints once, when it ends.
+    // ponytail: stack = print-on-end; live in-place update needs a CHudChat history patch
+    groundTicks = t.onGround ? groundTicks + 1 : 0;
+    if (chain && (groundTicks >= 2 || (t.onGround && t.jumpPressed)))
     {
-        s_lastTick = s.tick;
-
-        if (g_detections)
-        {
-            if (s.tbHit) Announce("texture bug");
-            if (s.asHit) Announce("air stuck");
-            if (s.wcHit) Announce("wall climb");
-            if (s.psHit) Announce("pixel surf");
-            if (s.astHit) Announce("ps assist");
-            if (s.mjHit) Announce("mini jump");
-            if (s.jbHit) Announce("jump bug");
-            // edgebug has its own streak counter below when stack detection is on; plain
-            // single-hit announce only when the streak feature is off
-            if (!g_detectionStackEb && s.ebHit) Announce("edge bug");
-        }
-
-        if (g_detectionStackEb)
-        {
-            static DetStack st;
-            const int broke = DetStackUpdate(st, s.ebHit, g_detectionGraceTicks);
-            if (broke > 1) { char buf[32]; snprintf(buf, sizeof(buf), "edge bug x%d", broke); Announce(buf); }
-            else if (broke == 1 && g_detections) Announce("edge bug");
-        }
+        if (g_detectionStackEb) PrintEb(chain);
+        chain = 0;
     }
 
-    if (s_toasts.empty()) return;
-    const unsigned long long now = GetTickCount64();
-    s_toasts.erase(std::remove_if(s_toasts.begin(), s_toasts.end(),
-                   [&](const Toast& t) { return now - t.bornMs > kToastLifeMs; }), s_toasts.end());
-    if (s_toasts.empty()) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    ImFont* font = g_fontMi ? g_fontMi : (g_fontBold ? g_fontBold : ImGui::GetFont());
-    const float fs = font->FontSize;
-    float y = io.DisplaySize.y * 0.3f;
-    for (const Toast& t : s_toasts)
+    DetStart st;
+    st.air        = !t.onGround && t.walk;
+    st.landedWalk = t.onGround && t.walk;
+    st.vz = t.vz; st.speed = t.speed; st.tick = t.tick;
+    const float g = t.gravity * 0.5f * t.interval;
+    if (DetEbStep(eb, st, g, t.tb, t.ps))
     {
-        const float age = (now - t.bornMs) / (float)kToastLifeMs;
-        const float a = age > 0.7f ? (1.f - age) / 0.3f : 1.f;
-        const ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, t.text.c_str());
-        const ImVec2 p(roundf(io.DisplaySize.x * 0.5f - sz.x * 0.5f), roundf(y));
-        const ImU32 col = IM_COL32((int)(g_detectionColor[0]*255),(int)(g_detectionColor[1]*255),(int)(g_detectionColor[2]*255),(int)(g_detectionColor[3]*a*255));
-        dl->AddText(font, fs, ImVec2(p.x+1.f,p.y+1.f), IM_COL32(0,0,0,(int)(a*255)), t.text.c_str());
-        dl->AddText(font, fs, p, col, t.text.c_str());
-        y += sz.y + 2.f;
+        ++chain;
+        if (!g_detectionStackEb) PrintEb(chain);
     }
+
+    if (DetFresh(t.tb, tbOff)) Print(DET_TB, "texturebugged");
+    if (DetFresh(t.as, asOff)) Print(DET_AS, "airstucked");
+    if (DetFresh(t.ps && !t.as && !t.tb, psOff)) Print(DET_PS, "pixelsurfed");
+    if (DetFresh(t.wc, wcOff)) Print(DET_WC, "wallclimbed");
 }
