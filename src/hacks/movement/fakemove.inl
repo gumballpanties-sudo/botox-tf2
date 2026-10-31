@@ -336,7 +336,7 @@ static void FM_JumpFx(short surf)
 
 static bool FM_Local(void* player, CMoveData* mv, bool server)
 {
-    if (g_eject || !s_fmBits || !player || !mv) return false;
+    if (g_eject || !player || !mv) return false;
     const int idx = GetLocalPlayerIndex();
     if (idx <= 0) return false;
     if (server)
@@ -345,10 +345,12 @@ static bool FM_Local(void* player, CMoveData* mv, bool server)
         // that player's ref ehandle). Exact entry index (ENT_ENTRY_MASK 0xFFFF, const.h) -- a
         // narrower mask would alias index 4096+ onto ours. Anyone else: untouched vanilla move.
         if ((mv->m_nPlayerHandle & 0xFFFF) != (unsigned long)idx) return false;
+        // stamp BEFORE the bits check: "we host" must hold with no bind held, or the
+        // wallbug fix (not a bind) never sees the gate open
         s_fmServerSeenMs = GetTickCount64();
-        return true;
+        return s_fmBits != 0;
     }
-    return player == GetClientEntity(idx) && GetTickCount64() - s_fmServerSeenMs < 1000;
+    return s_fmBits && player == GetClientEntity(idx) && GetTickCount64() - s_fmServerSeenMs < 1000;
 }
 
 static void FM_Pre(void* player, CMoveData* mv, FmCtx& c)
@@ -742,39 +744,57 @@ static bool FakeMove_WallJumpReady(void* pLocal)
                    g_fmWallJumpSeam ? &FM_JumpSeam : nullptr);
 }
 
-// ---- wallbug fix: sv_wallbug 1 while we host (same local gate as every FM bit: the server
-// hook saw our cmd in the last second). Real IConVar SetValue so the engine's replicate
-// callback runs; client.dll's copy is a child of the same parent anyway, so prediction and
-// server read one value. Old value handed back on toggle off, disconnect, eject.
-static void FM_WallbugCvar(bool want)
+// ---- wallbug fix: sv_wallbug 1 while we host (gate: the server hook saw our cmd in the last
+// second). Sent as a real console command (ClientCmd_Unrestricted, slot 106 -- same call as
+// FM_StepSound), so the host's console runs it exactly like typing it: replicate callback,
+// prediction copy, all of it. ConVar* only to read the old value handed back on toggle off,
+// disconnect, eject.
+static bool s_wbApplied = false;
+static int  s_wbSaved = 0;
+
+static ConVar* FM_WallbugVar()
 {
     static ConVar* cv = nullptr;
     static unsigned long long nextFindMs = 0;
-    static bool applied = false, missingLogged = false;
-    static int saved = 0;
-    if (!cv)
-    {
-        if (!want || !g_cvar) return;
-        const unsigned long long now = GetTickCount64();
-        if (now < nextFindMs) return;
-        nextFindMs = now + 2000;   // server.dll registers it when the listen server comes up
-        cv = g_cvar->FindVarWalk("sv_wallbug");
-        if (!cv)
-        {
-            if (!missingLogged) { missingLogged = true; DebugLog("fakemove: sv_wallbug not found (game older than Oct 5 2026?)"); }
-            return;
-        }
-    }
-    if (want == applied) return;
-    if (want) saved = static_cast<int>(cv->GetFloat());
-    const int to = want ? 1 : saved;
-    const bool ok = cv->SetValueInt("sv_wallbug", to);
-    if (!ok) cv->ForceInt(to);   // layout miss: raw write still lands on the shared parent
-    applied = want;
-    DebugLog("fakemove: sv_wallbug -> %d%s", to, ok ? "" : " (raw write)");
+    if (cv || !g_cvar) return cv;
+    const unsigned long long now = GetTickCount64();
+    if (now < nextFindMs) return nullptr;
+    nextFindMs = now + 2000;   // server.dll registers it when the listen server comes up
+    cv = g_cvar->FindVarWalk("sv_wallbug");
+    return cv;
 }
 
-void FakeMove_Restore() { FM_WallbugCvar(false); }
+static void FM_WallbugCvar(bool want)
+{
+    if (want == s_wbApplied || !g_engine) return;
+    if (want)
+    {
+        ConVar* cv = FM_WallbugVar();
+        s_wbSaved = cv ? static_cast<int>(cv->GetFloat()) : 0;
+    }
+    const int to = want ? 1 : s_wbSaved;
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "sv_wallbug %d", to);
+    __try {
+        void** vt = *reinterpret_cast<void***>(g_engine);
+        ((void(__fastcall*)(void*, const char*))vt[106])(g_engine, cmd);   // ClientCmd_Unrestricted
+    } __except (EXCEPTION_EXECUTE_HANDLER) { DebugLog("fakemove: sv_wallbug cmd faulted"); return; }
+    s_wbApplied = want;
+    DebugLog("fakemove: exec \"%s\"", cmd);
+}
+
+// eject runs on the poll thread: the command buffer is game-thread only, so write the cvar
+// directly there (and only if we changed it)
+void FakeMove_Restore()
+{
+    if (!s_wbApplied) return;
+    s_wbApplied = false;
+    if (ConVar* cv = FM_WallbugVar())
+    {
+        if (!cv->SetValueInt("sv_wallbug", s_wbSaved)) cv->ForceInt(s_wbSaved);
+        DebugLog("fakemove: sv_wallbug -> %d (eject)", s_wbSaved);
+    }
+}
 
 // per cmd, after the bind snapshot + netvars: lazy hook install + resolve binds.
 // Lazy because server.dll only matters once a listen server is up; installing from the game
