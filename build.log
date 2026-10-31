@@ -1,0 +1,222 @@
+﻿Wersja programu MSBuild 17.13.19+0d9f5a35a dla .NET Framework
+
+  Checking File Globs
+  1>Checking Build System
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  aimfov_test.cpp
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  buildplace_test.cpp
+  crashlog_test.cpp
+  backstab_test.cpp
+  demostreak_test.cpp
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  fmseam_test.cpp
+  flipworld_test.cpp
+  bloom_test.cpp
+  ebstance_test.cpp
+  airlean_test.cpp
+  fbmath_test.cpp
+  fmslide_test.cpp
+  dllmain.cpp
+  netvars.cpp
+  visuals.cpp
+  lagres.cpp
+  render.cpp
+  colorcorrect.cpp
+  bloom.cpp
+  screenfx.cpp
+  ssao.cpp
+  dof.cpp
+  frameblend.cpp
+  killfeed.cpp
+  jbpredict_test.cpp
+  crashlog.cpp
+  crosshair.cpp
+  watermark.cpp
+  mediaplayer.cpp
+  movind.cpp
+  menu.cpp
+  ebstance_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\ebstance_test.exe
+  config.cpp
+  thread.cpp
+  netregion.cpp
+  airlean_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\airlean_test.exe
+  equipregion.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  demostreak_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\demostreak_test.exe
+  Generowanie kodu...
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  fmseam_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\fmseam_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  buildplace_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\buildplace_test.exe
+  mmfix.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  scoreboard.cpp
+  crashlog.cpp
+  fbmath_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\fbmath_test.exe
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  fmslide_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\fmslide_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  skins.cpp
+  bloom_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\bloom_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  flipworld.cpp
+  imgui.cpp
+  imgui_draw.cpp
+  imgui_tables.cpp
+  imgui_widgets.cpp
+  imgui_impl_dx9.cpp
+  imgui_impl_win32.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  flipworld_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\flipworld_test.exe
+  imgui_freetype.cpp
+  mediaplayer_test.cpp
+cl : wiersz polecenia  warning D9025: przesłanianie "/DNDEBUG" przez " /UNDEBUG" [C:\Users\huber\Desktop\botox-tf2\build\menuchrome_test.vcxproj]
+  menuchrome_test.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  menuflow_test.cpp
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  imgui.cpp
+  backstab_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\backstab_test.exe
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  crashlog_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\crashlog_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  jbpredict_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\jbpredict_test.exe
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  menuflow_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\menuflow_test.exe
+  migoo_test.cpp
+  miwarp_test.cpp
+  netcvar_test.cpp
+  mvscan_test.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  metaball_test.cpp
+  imgui_draw.cpp
+  aimfov_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\aimfov_test.exe
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  miwarp_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\miwarp_test.exe
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  imgui_tables.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  imgui.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  netcvar_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\netcvar_test.exe
+  metaball_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\metaball_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  psmap_test.cpp
+  pssurf_test.cpp
+  mvscan_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\mvscan_test.exe
+  imgui_widgets.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  mediaplayer_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\mediaplayer_test.exe
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt
+  rcedge_test.cpp
+  routesim_test.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  scopecsgo_test.cpp
+  imgui_draw.cpp
+  vmcsgo_test.cpp
+  imgui_tables.cpp
+  pssurf_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\pssurf_test.exe
+  rcedge_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\rcedge_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  psmap_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\psmap_test.exe
+  imgui_widgets.cpp
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  imgui_freetype.cpp
+  vmcsgo_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\vmcsgo_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  Generowanie kodu...
+  scopecsgo_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\scopecsgo_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  imgui_freetype.cpp
+  Generowanie kodu...
+  prediction.cpp
+  movement.cpp
+  menuchrome_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\menuchrome_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  hde64.c
+  buffer.c
+  hook.c
+  trampoline.c
+  migoo_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\migoo_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  aim.cpp
+  aim_global.cpp
+  aim_hitscan.cpp
+  aim_melee.cpp
+  aim_projectile.cpp
+  aimbot.cpp
+  autoairblast.cpp
+  autodetonate.cpp
+  crithack.cpp
+  defs.cpp
+  engineprediction.cpp
+  events.cpp
+  helpers.cpp
+  hooks.cpp
+  movesim.cpp
+  nospread.cpp
+  nospread_hitscan.cpp
+  nospread_projectile.cpp
+  projsim.cpp
+  sdk.cpp
+  ticks.cpp
+  utils.cpp
+  routesim_test.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\routesim_test.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  Trwa generowanie kodu
+  Zakończono generowanie kodu
+  dih.vcxproj -> C:\Users\huber\Desktop\botox-tf2\build\Release\dih.dll
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
+  Building Custom Rule C:/Users/huber/Desktop/botox-tf2/CMakeLists.txt

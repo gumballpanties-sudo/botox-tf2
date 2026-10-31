@@ -1,0 +1,387 @@
+#include "screenfx_passes.h"
+#include "shaders/fx_simplefx.h"   // k_fxSimpleFxBytes  -- compiled from fx_simplefx.hlsl by fxc
+#include "shaders/fx_depthview.h"  // k_fxDepthViewBytes -- compiled from fx_depthview.hlsl by fxc
+#include "screenfx.h"      // shared quad -- emphasize/show depth draw through its vs_3_0
+#include <cmath>           // fmodf (grain phase)
+
+// The simple passes read the FINISHED frame -- no depth, no new hook. Same "copy the
+// backbuffer, sample the copy" shape as bloom.cpp, for the same reason: a render target
+// cannot be bound as its own sampler input.
+//
+// Emphasize and show depth are NOT in that pass: both are depth based (botox depth_view.cpp)
+// and draw from screenfx.cpp's post slot through ScreenFxPasses_DepthView below. They used to
+// run here, at the vgui point / EndScene, where nothing had resolved the depth for them
+// (ScreenFx_Frame only resolved for ao/dof/fb) and the depth there reads far everywhere.
+
+static IDirect3DPixelShader9* s_psSimple = nullptr;
+static IDirect3DPixelShader9* s_psDepthView = nullptr;   // fx_depthview.hlsl, ps_3_0
+static IDirect3DTexture9*     s_dvFrameTex  = nullptr;   // depth view's own frame copy
+static IDirect3DSurface9*     s_dvFrameSurf = nullptr;
+static int  s_dvW = 0, s_dvH = 0;
+static bool s_dvFailed = false;
+static IDirect3DTexture9*     s_sceneTex  = nullptr;
+static IDirect3DSurface9*     s_sceneSurf = nullptr;
+static int  s_w = 0, s_h = 0;
+static bool s_failed = false;
+static bool s_done   = false;
+static float s_noisePhase = 0.f;
+
+void ScreenFxPasses_NewFrame() { s_done = false; }
+
+void ScreenFxPasses_Destroy()
+{
+    if (s_sceneSurf)   { s_sceneSurf->Release();   s_sceneSurf   = nullptr; }
+    if (s_sceneTex)    { s_sceneTex->Release();    s_sceneTex    = nullptr; }
+    if (s_psSimple)    { s_psSimple->Release();    s_psSimple    = nullptr; }
+    if (s_psDepthView) { s_psDepthView->Release(); s_psDepthView = nullptr; }
+    if (s_dvFrameSurf) { s_dvFrameSurf->Release(); s_dvFrameSurf = nullptr; }
+    if (s_dvFrameTex)  { s_dvFrameTex->Release();  s_dvFrameTex  = nullptr; }
+    s_w = s_h = 0;
+    s_dvW = s_dvH = 0;
+}
+
+static bool WantAny()
+{
+    return g_sharpenEnable || g_filmGrainEnable || g_vignetteEnable || g_invertFilterEnable ||
+           g_posterizeEnable || g_debandEnable || g_channelShiftEnable;
+}
+
+static bool Ensure(IDirect3DDevice9* dev, IDirect3DSurface9* bb)
+{
+    D3DSURFACE_DESC desc{};
+    if (FAILED(bb->GetDesc(&desc))) return false;
+
+    if (s_psSimple && s_sceneTex && s_w == (int)desc.Width && s_h == (int)desc.Height)
+        return true;
+
+    if (s_sceneSurf) { s_sceneSurf->Release(); s_sceneSurf = nullptr; }
+    if (s_sceneTex)  { s_sceneTex->Release();  s_sceneTex  = nullptr; }
+    if (s_psSimple)  { s_psSimple->Release();  s_psSimple  = nullptr; }
+    s_w = s_h = 0;
+
+    {
+        std::vector<DWORD> code((sizeof(k_fxSimpleFxBytes) + 3) / 4);
+        memcpy(code.data(), k_fxSimpleFxBytes, sizeof(k_fxSimpleFxBytes));
+        if (FAILED(dev->CreatePixelShader(code.data(), &s_psSimple)) || !s_psSimple) {
+            s_failed = true;
+            DebugLog("screenfx_passes: the card refused the simplefx shader -- sharpen/grain/"
+                     "vignette/invert/posterize/deband/channel-shift are off");
+            ScreenFxPasses_Destroy();
+            return false;
+        }
+    }
+
+    // Backbuffer-format copy, same reasoning as bloom.cpp's s_sceneTex.
+    HRESULT hr = dev->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET,
+                                    desc.Format, D3DPOOL_DEFAULT, &s_sceneTex, nullptr);
+    if (FAILED(hr))
+        hr = dev->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET,
+                                D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &s_sceneTex, nullptr);
+    if (FAILED(hr) || FAILED(s_sceneTex->GetSurfaceLevel(0, &s_sceneSurf))) {
+        DebugLog("screenfx_passes: frame copy target failed 0x%08lx", (unsigned long)hr);
+        ScreenFxPasses_Destroy();
+        return false;
+    }
+
+    s_w = (int)desc.Width; s_h = (int)desc.Height;
+    DebugLog("screenfx_passes: built %dx%d", s_w, s_h);
+    return true;
+}
+
+struct SfxSaved
+{
+    IDirect3DPixelShader9*       ps;
+    IDirect3DVertexShader9*      vs;
+    IDirect3DVertexDeclaration9* decl;
+    IDirect3DBaseTexture9*       tex0;
+    IDirect3DVertexBuffer9*      stream;
+    IDirect3DIndexBuffer9*       indices;
+    UINT   streamOffset, streamStride;
+    DWORD  fvf;
+    D3DVIEWPORT9 vp;
+    DWORD  rs[8];
+    DWORD  samp[6];
+    float  psc[4][4];   // the shaderapi caches ps constants -- ours must not leak into the hud
+};
+static const D3DRENDERSTATETYPE k_sfxRS[8] = {
+    D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE,
+    D3DRS_CULLMODE, D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_COLORWRITEENABLE,
+};
+static const D3DSAMPLERSTATETYPE k_sfxSamp[6] = {
+    D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_MAGFILTER,
+    D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE,
+};
+
+static void SfxSave(IDirect3DDevice9* dev, SfxSaved& s)
+{
+    dev->GetPixelShader(&s.ps);
+    dev->GetVertexShader(&s.vs);
+    dev->GetVertexDeclaration(&s.decl);
+    dev->GetTexture(0, &s.tex0);
+    dev->GetStreamSource(0, &s.stream, &s.streamOffset, &s.streamStride);
+    dev->GetIndices(&s.indices);
+    dev->GetFVF(&s.fvf);
+    dev->GetViewport(&s.vp);
+    for (int i = 0; i < 8; ++i) dev->GetRenderState(k_sfxRS[i], &s.rs[i]);
+    for (int i = 0; i < 6; ++i) dev->GetSamplerState(0, k_sfxSamp[i], &s.samp[i]);
+    dev->GetPixelShaderConstantF(0, s.psc[0], 4);
+}
+static void SfxRestore(IDirect3DDevice9* dev, SfxSaved& s)
+{
+    for (int i = 0; i < 8; ++i) dev->SetRenderState(k_sfxRS[i], s.rs[i]);
+    for (int i = 0; i < 6; ++i) dev->SetSamplerState(0, k_sfxSamp[i], s.samp[i]);
+    dev->SetPixelShaderConstantF(0, s.psc[0], 4);
+    dev->SetViewport(&s.vp);
+    dev->SetTexture(0, s.tex0);
+    dev->SetPixelShader(s.ps);
+    dev->SetVertexShader(s.vs);
+    if (s.decl) dev->SetVertexDeclaration(s.decl); else dev->SetFVF(s.fvf);
+    dev->SetStreamSource(0, s.stream, s.streamOffset, s.streamStride);
+    dev->SetIndices(s.indices);
+    if (s.tex0)    s.tex0->Release();
+    if (s.ps)      s.ps->Release();
+    if (s.vs)      s.vs->Release();
+    if (s.decl)    s.decl->Release();
+    if (s.stream)  s.stream->Release();
+    if (s.indices) s.indices->Release();
+}
+
+struct SfxVert { float x, y, z, rhw, u, v; };
+static void SfxQuad(SfxVert (&q)[4], int w, int h)
+{
+    const float W = (float)w, H = (float)h;
+    q[0] = { -0.5f,    -0.5f,     0.f, 1.f, 0.f, 0.f };
+    q[1] = { W - 0.5f, -0.5f,     0.f, 1.f, 1.f, 0.f };
+    q[2] = { -0.5f,     H - 0.5f, 0.f, 1.f, 0.f, 1.f };
+    q[3] = { W - 0.5f,  H - 0.5f, 0.f, 1.f, 1.f, 1.f };
+}
+
+static void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* bb)
+{
+    SfxVert quad[4];
+    SfxQuad(quad, s_w, s_h);
+    const D3DVIEWPORT9 vp{ 0, 0, (DWORD)s_w, (DWORD)s_h, 0.f, 1.f };
+
+    SfxSaved st{};
+    SfxSave(dev, st);
+
+    for (int i = 0; i < 8; ++i) dev->SetRenderState(k_sfxRS[i], FALSE);
+    dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0f);
+    dev->SetVertexShader(nullptr);
+    dev->SetVertexDeclaration(nullptr);
+    dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    dev->SetSamplerState(0, D3DSAMP_ADDRESSU,    D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(0, D3DSAMP_ADDRESSV,    D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(0, D3DSAMP_MAGFILTER,   D3DTEXF_LINEAR);
+    dev->SetSamplerState(0, D3DSAMP_MINFILTER,   D3DTEXF_LINEAR);
+    dev->SetSamplerState(0, D3DSAMP_MIPFILTER,   D3DTEXF_NONE);
+    dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, 0);
+    dev->SetViewport(&vp);
+    dev->SetRenderTarget(0, bb);
+
+    if (FAILED(dev->StretchRect(bb, nullptr, s_sceneSurf, nullptr, D3DTEXF_NONE)))
+    {
+        static bool logged = false;
+        if (!logged) { logged = true; DebugLog("screenfx_passes: frame copy blit failed -- nothing drawn"); }
+    }
+    else
+    {
+        // whole-ish pixel jump per frame so the grain re-rolls every frame instead of creeping
+        s_noisePhase = fmodf(s_noisePhase + 61.37f, 997.f);
+
+        // Posterize off = CPU sends 1024 "levels", a quantization step fine enough to be
+        // invisible -- see fx_simplefx.hlsl's note on why that beats a branch under ps_2_0.
+        const float levels = g_posterizeEnable ? (g_posterizeLevels < 2.f ? 2.f : g_posterizeLevels) : 1024.f;
+
+        const float c0[4] = { 1.f / (float)s_w, 1.f / (float)s_h,
+                               g_sharpenEnable   ? g_sharpenAmount   : 0.f,
+                               g_filmGrainEnable ? g_filmGrainAmount : 0.f };
+        const float c1[4] = { g_vignetteEnable ? g_vignetteAmount : 0.f,
+                               g_vignetteInvert ? 1.f : 0.f,
+                               levels,
+                               g_debandEnable ? g_debandAmount : 0.f };
+        const float c2[4] = { g_channelShiftEnable ? g_channelShiftAmount : 0.f, 0.f, 0.f,
+                               g_invertFilterEnable ? 1.f : 0.f };
+        const float c3[4] = { s_noisePhase, (float)s_w, (float)s_h, 0.f };
+
+        dev->SetPixelShaderConstantF(0, c0, 1);
+        dev->SetPixelShaderConstantF(1, c1, 1);
+        dev->SetPixelShaderConstantF(2, c2, 1);
+        dev->SetPixelShaderConstantF(3, c3, 1);
+        dev->SetTexture(0, s_sceneTex);
+        dev->SetPixelShader(s_psSimple);
+        dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(SfxVert));
+    }
+
+    SfxRestore(dev, st);
+}
+
+bool ScreenFxPasses_Frame(IDirect3DDevice9* dev, bool forceBackbuffer)
+{
+    if (s_done || !dev || s_failed || !WantAny()) return false;
+    if (!IsInGame()) return false;
+
+    IDirect3DSurface9* rt = nullptr;
+    IDirect3DSurface9* bb = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(dev->GetRenderTarget(0, &rt)) && rt &&
+        SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb)
+        ok = forceBackbuffer || (rt == bb);
+
+    bool drew = false;
+    if (ok && Ensure(dev, bb)) {
+        Draw(dev, bb);
+        s_done = true;
+        drew   = true;
+    }
+
+    if (rt) rt->Release();
+    if (bb) bb->Release();
+    return drew;
+}
+
+// ==== emphasize + show depth (botox depth_view.cpp) ======================================
+// Render thread, from ScreenFx_Frame at the game's post slot, right after the depth resolve --
+// botox runs it first in its DoPostScreenSpaceEffects, ahead of reflections/ao/dof.
+void ScreenFxPasses_DepthView(IDirect3DDevice9* dev, IDirect3DSurface9* target,
+                              const D3DSURFACE_DESC& desc, IDirect3DTexture9* depth)
+{
+    if (!dev || !target || !depth || s_dvFailed || (!g_emphasizeEnable && !g_showDepthEnable)) return;
+    if (!ScreenFx_QuadReady(dev)) return;   // ps_3_0: the shared passthrough vs, not FF
+
+    // must be frame sized, else it is not the scene's depth
+    D3DSURFACE_DESC dd{};
+    if (FAILED(depth->GetLevelDesc(0, &dd)) || dd.Width != desc.Width || dd.Height != desc.Height) return;
+
+    if (!s_psDepthView) {
+        std::vector<DWORD> code((sizeof(k_fxDepthViewBytes) + 3) / 4);
+        memcpy(code.data(), k_fxDepthViewBytes, sizeof(k_fxDepthViewBytes));
+        if (FAILED(dev->CreatePixelShader(code.data(), &s_psDepthView)) || !s_psDepthView) {
+            s_psDepthView = nullptr;
+            s_dvFailed = true;
+            DebugLog("screenfx_passes: the card refused the depth view shader -- emphasize/show depth are off");
+            return;
+        }
+        DebugLog("screenfx_passes: depth view shader built");
+    }
+    if (!s_dvFrameTex || s_dvW != (int)desc.Width || s_dvH != (int)desc.Height) {
+        if (s_dvFrameSurf) { s_dvFrameSurf->Release(); s_dvFrameSurf = nullptr; }
+        if (s_dvFrameTex)  { s_dvFrameTex->Release();  s_dvFrameTex  = nullptr; }
+        HRESULT hr = dev->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET, desc.Format,
+                                        D3DPOOL_DEFAULT, &s_dvFrameTex, nullptr);
+        if (FAILED(hr))
+            hr = dev->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8,
+                                    D3DPOOL_DEFAULT, &s_dvFrameTex, nullptr);
+        if (FAILED(hr) || FAILED(s_dvFrameTex->GetSurfaceLevel(0, &s_dvFrameSurf))) {
+            static bool logged = false;
+            if (!logged) { logged = true; DebugLog("screenfx_passes: depth view frame copy failed 0x%08lx", (unsigned long)hr); }
+            if (s_dvFrameTex) { s_dvFrameTex->Release(); s_dvFrameTex = nullptr; }
+            return;
+        }
+        s_dvW = (int)desc.Width; s_dvH = (int)desc.Height;
+    }
+
+    if (FAILED(dev->StretchRect(target, nullptr, s_dvFrameSurf, nullptr, D3DTEXF_NONE))) return;
+
+    // ---- save (botox's list). The shaderapi caches all of it, ps constants included.
+    static const D3DRENDERSTATETYPE k_rs[] = {
+        D3DRS_STENCILENABLE, D3DRS_COLORWRITEENABLE, D3DRS_CLIPPLANEENABLE, D3DRS_FILLMODE, D3DRS_ZENABLE,
+        D3DRS_ZWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE, D3DRS_CULLMODE,
+        D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE,
+    };
+    const DWORD k_rsVal[] = {
+        FALSE, D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE, 0, D3DFILL_SOLID,
+        FALSE, FALSE, FALSE, FALSE, D3DCULL_NONE, FALSE, FALSE,
+    };
+    constexpr int kRs = (int)(sizeof(k_rs) / sizeof(k_rs[0]));
+    static_assert(sizeof(k_rsVal) / sizeof(k_rsVal[0]) == sizeof(k_rs) / sizeof(k_rs[0]), "state list");
+
+    DWORD oldRs[kRs]{}, oldSamp[2][6]{}, oldFvf = 0;
+    float oldC[8][4]{};
+    IDirect3DSurface9* oldDs = nullptr;
+    IDirect3DPixelShader9* oldPs = nullptr;
+    IDirect3DVertexShader9* oldVs = nullptr;
+    IDirect3DVertexDeclaration9* oldDecl = nullptr;
+    IDirect3DBaseTexture9* oldTex[2]{};
+    IDirect3DVertexBuffer9* oldStream = nullptr;
+    IDirect3DIndexBuffer9* oldIdx = nullptr;
+    UINT oldOff = 0, oldStride = 0;
+    D3DVIEWPORT9 oldVp{};
+
+    if (FAILED(dev->GetDepthStencilSurface(&oldDs))) oldDs = nullptr;
+    for (int i = 0; i < kRs; ++i) dev->GetRenderState(k_rs[i], &oldRs[i]);
+    for (int u = 0; u < 2; ++u) {
+        dev->GetTexture(u, &oldTex[u]);
+        for (int i = 0; i < 6; ++i) dev->GetSamplerState(u, k_sfxSamp[i], &oldSamp[u][i]);
+    }
+    dev->GetPixelShader(&oldPs);
+    dev->GetVertexShader(&oldVs);
+    dev->GetVertexDeclaration(&oldDecl);
+    dev->GetFVF(&oldFvf);
+    dev->GetStreamSource(0, &oldStream, &oldOff, &oldStride);
+    dev->GetIndices(&oldIdx);
+    dev->GetViewport(&oldVp);
+    dev->GetPixelShaderConstantF(0, oldC[0], 8);
+
+    // ---- draw, constants laid out exactly as botox's
+    const float W = (float)desc.Width, H = (float)desc.Height;
+    const float sx = g_showDepthScaleX > 0.001f ? g_showDepthScaleX : 0.001f;
+    const float sy = g_showDepthScaleY > 0.001f ? g_showDepthScaleY : 0.001f;
+    const float c[8][4] = {
+        { g_emphasizeEnable ? 1.f : 0.f, g_showDepthEnable ? 1.f : 0.f, 1.f / W, 1.f / H },
+        { g_emphasizeFocusDepth, g_emphasizeFocusRange, g_emphasizeFocusEdge, g_emphasizeSpherical ? 1.f : 0.f },
+        { (float)g_emphasizeSphereFov, g_emphasizeSphereX, g_emphasizeSphereY, g_emphasizeAmount },
+        { g_emphasizeBlendColor[0], g_emphasizeBlendColor[1], g_emphasizeBlendColor[2], g_emphasizeBlendFactor },
+        { (float)g_showDepthType, g_showDepthBlend ? 1.f : 0.f, g_showDepthLive ? 1.f : 0.f, 0.f },
+        { g_showDepthUpsideDown ? 1.f : 0.f, g_showDepthReversed ? 1.f : 0.f, g_showDepthLog ? 1.f : 0.f, g_showDepthFarPlane },
+        { sx, sy, (float)g_showDepthOffsetX, (float)g_showDepthOffsetY },
+        { g_showDepthMultiplier, W, H, 0.f },
+    };
+
+    dev->SetDepthStencilSurface(nullptr);
+    for (int i = 0; i < kRs; ++i) dev->SetRenderState(k_rs[i], k_rsVal[i]);
+    for (int u = 0; u < 2; ++u) {
+        dev->SetSamplerState(u, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        dev->SetSamplerState(u, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        dev->SetSamplerState(u, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        dev->SetSamplerState(u, D3DSAMP_SRGBTEXTURE, 0);
+        dev->SetSamplerState(u, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        dev->SetSamplerState(u, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    }
+    dev->SetPixelShaderConstantF(0, c[0], 8);
+    dev->SetTexture(0, depth);
+    dev->SetTexture(1, s_dvFrameTex);
+    dev->SetRenderTarget(0, target);
+    const D3DVIEWPORT9 vp{ 0, 0, desc.Width, desc.Height, 0.f, 1.f };
+    dev->SetViewport(&vp);
+    dev->SetPixelShader(s_psDepthView);
+    ScreenFx_BindQuad(dev);
+    ScreenFx_DrawQuad(dev, (int)desc.Width, (int)desc.Height);
+
+    // ---- restore
+    dev->SetPixelShaderConstantF(0, oldC[0], 8);
+    dev->SetPixelShader(oldPs);
+    dev->SetVertexShader(oldVs);
+    if (oldDecl) dev->SetVertexDeclaration(oldDecl); else dev->SetFVF(oldFvf);
+    dev->SetStreamSource(0, oldStream, oldOff, oldStride);
+    dev->SetIndices(oldIdx);
+    for (int u = 0; u < 2; ++u) {
+        dev->SetTexture(u, oldTex[u]);
+        for (int i = 0; i < 6; ++i) dev->SetSamplerState(u, k_sfxSamp[i], oldSamp[u][i]);
+    }
+    for (int i = 0; i < kRs; ++i) dev->SetRenderState(k_rs[i], oldRs[i]);
+    dev->SetViewport(&oldVp);
+    dev->SetDepthStencilSurface(oldDs);
+
+    for (IUnknown* held : { (IUnknown*)oldDs, (IUnknown*)oldPs, (IUnknown*)oldVs, (IUnknown*)oldDecl,
+                            (IUnknown*)oldTex[0], (IUnknown*)oldTex[1], (IUnknown*)oldStream, (IUnknown*)oldIdx })
+        if (held) held->Release();
+
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        DebugLog("screenfx_passes: depth view drew %ux%u (emphasize=%d show depth=%d) at the post slot",
+                 (unsigned)desc.Width, (unsigned)desc.Height, (int)g_emphasizeEnable, (int)g_showDepthEnable);
+    }
+}

@@ -1,0 +1,31 @@
+
+======== botox session 2026-10-31 09:18:45  pid 12188  botox.dll 00007FF6184B0000..00007FF6184BF000 ========
+
+[09:18:45] ACCESS_VIOLATION (0xC0000005) reading 0x18  at crashlog_test.exe+0x15A0  thread 22208   *** botox on stack ***
+   rax=0000000000000000 rbx=00007FF6184B6840 rcx=0000000000000000 rdx=0000000000000000
+   rsi=0000000000000000 rdi=000001C9C55160A0 rbp=0000002AB1CFFED0 rsp=0000002AB1CFFE78
+   r8 =0000002AB1CFE518 r9 =00000000000000FF r10=0000002AB1CFE538 r11=0000002AB1CFE640
+   marks: test/mark-one > test/mark-two
+   stack:
+     00  crashlog_test.exe+0x15A0   <<< botox
+     01  crashlog_test.exe+0x1E0E   <<< botox
+     02  crashlog_test.exe+0x2C15   <<< botox
+     03  crashlog_test.exe+0x471C   <<< botox
+     04  KERNEL32.DLL+0x2DDA7
+     05  ntdll.dll+0x7EE4C
+
+[09:18:45] INT_DIVIDE_BY_ZERO (0xC0000094)  at crashlog_test.exe+0x1592  thread 22208   *** botox on stack ***
+   rax=0000000000000007 rbx=00007FF6184B6840 rcx=0000000000000000 rdx=0000000000000000
+   rsi=0000000000000000 rdi=000001C9C55160A0 rbp=0000002AB1CFFED0 rsp=0000002AB1CFFE78
+   r8 =0000000000000028 r9 =000001C9C54F007C r10=000001C9C54F0000 r11=0000002AB1CFEC70
+   marks: test/mark-one > test/mark-two
+   stack:
+     00  crashlog_test.exe+0x1592   <<< botox
+     01  crashlog_test.exe+0x1E18   <<< botox
+     02  crashlog_test.exe+0x2C15   <<< botox
+     03  crashlog_test.exe+0x471C   <<< botox
+     04  KERNEL32.DLL+0x2DDA7
+     05  ntdll.dll+0x7EE4C
+
+[09:18:45] HITCH 215 ms on the main thread (vgui frame gap)
+   marks: test/mark-one > test/mark-two > test/hitch-mark

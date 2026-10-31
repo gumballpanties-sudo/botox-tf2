@@ -1,0 +1,1195 @@
+// ============================================================================
+//  edgebug.inl -- EDGE BUG. 1:1 port of botox hacks/movement/edgebug.cpp (n_edgebug::impl_t)
+//  onto TF2's sims. Included from movement.cpp, same translation unit: uses its Pred_Simulate /
+//  RestoreEntityToPredicted, TraceHull, TraceFilterWorldProps, CorrectMovement and the s_*Hit
+//  yield flags.
+//
+//  Entry points (Movement_RunImpl):
+//    EdgeBugPre   before prediction -- snapshots velocity/flags/user move (PrePredictionEdgeBug)
+//    EdgeBugPost  after Pred_End    -- search, plan pick, replay (EdgeBugPostPredict / donor_post)
+//  EB_GetDrawData publishes the latched plan to the render thread.
+//  EdgeBug_MouseInput is IClientMode::OverrideMouseInput: mouse steer input + mouse lock.
+//
+//  TF2 differences from botox (CS:GO), each forced by tf_gamemovement / gamemovement:
+//   - air duck moves the origin 20u (82 vs 62 hull, scaled by model), not 9: EbDuckShiftZ.
+//   - a ducked player cannot ground-jump (tf_gamemovement.cpp:1221), so the post-replay duck
+//     hold botox does (m_ducked) is gone, the confirm tick flies with the crouch let go, and a
+//     ducked find that lands still ducked is only a fallback (stance, eb_stance.h).
+//   - IN_JUMP is stripped from the search's base buttons (scout air jump), same as the replay.
+//   - 66.67 tick: botox's 64-tick counts go through EbTicks, per-tick tolerances through EbScale.
+//   - no ladders.
+// ============================================================================
+
+static constexpr int k_ebMaxTicks = 256;   // botox k_predicted_cmd_max (2 s at 128)
+static constexpr int k_ebPlanMax  = 4;
+static constexpr float k_ebStandable = 0.7f;   // CategorizePosition's walkable cut (route calc reads it)
+
+struct EbCmd_t { Vec3 view; float fwd; float side; int buttons; Vec3 origin; };
+struct EbPlan_t
+{
+    EbCmd_t cmds[k_ebMaxTicks];
+    int ticks = 0, variant = 0, bend = 0;
+    Vec3 end{};
+    bool ducked = false, blocked = false;
+};
+
+// ---- live state (botox impl_t members) ----
+static bool  s_ebDetected = false;        // m_found
+static int   s_ebCurrentTick = 0;         // m_replay_hits
+static int   s_ebLockTicks = 0;           // m_prediction_ticks
+static int   s_ebFoundTick = 0;           // m_found_tick
+static Vec3  s_ebVelBackup{};             // m_backup_velocity
+static int   s_ebFlags = 0;               // m_backup_flags
+static int   s_ebMoveType = 0;            // m_backup_move_type
+static float s_ebUserFwd = 0.f, s_ebUserSide = 0.f;
+static int   s_ebUserButtons = 0;
+static EbCmd_t  s_ebCmds[k_ebMaxTicks] = {};   // m_predicted_cmds
+static EbCmd_t  s_ebRun[k_ebMaxTicks]  = {};   // m_run_cmds
+static EbPlan_t s_ebPlans[k_ebPlanMax];
+static int   s_ebPlanCount = 0;
+static Vec3  s_ebFollowEnd{};
+static bool  s_ebFollowBlocked = false;   // flying a jump-eating ducked plan (fallback)
+static float s_ebMouseX = 0.f;            // OverrideMouseInput x, drained each EdgeBugPost
+static float s_ebSteerSince = 0.f;
+static int   s_ebLastSearchTick = -1, s_ebLastContactTick = -1;
+static float s_ebStrafeSide = 1.f, s_ebStrafeLastYaw = 0.f;
+static Vec3  s_ebEdgeTarget{};
+static bool  s_ebEdgeTargetValid = false;
+static float s_ebCourseYaw = 0.f;
+static bool  s_ebCourseValid = false;
+static int   s_ebLastVariant = 0, s_ebLastBend = 0;
+static bool  s_esActive = false;   // edge skip plan flying (movement_edge.inl owns it)
+
+// ---- tick rules (botox tick_scale.h) ----
+static float EbScale() { return std::clamp(64.f * TickInterval(), 0.25f, 4.f); }
+static int   EbTicks(int ticksAt64) { return EsTicksPure(ticksAt64, 1.f / TickInterval()); }
+static float EbHalfGravTick(float grav) { return grav * 0.5f * TickInterval(); }
+
+// ---- the clock budget (shared with edge skip) ----
+struct EbBudget_t
+{
+    long long qpcStart = 0, qpcFreq = 0, capUs = 0;
+    void Start(float flSeconds)
+    {
+        static const long long s_freq = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+        LARGE_INTEGER c; QueryPerformanceCounter(&c);
+        qpcFreq = s_freq; qpcStart = c.QuadPart;
+        capUs = static_cast<long long>(flSeconds * 1000000.f);
+    }
+    long long UsedUs() const
+    {
+        if (qpcFreq <= 0) return 0;
+        LARGE_INTEGER c; QueryPerformanceCounter(&c);
+        return ((c.QuadPart - qpcStart) * 1000000ll) / qpcFreq;
+    }
+    bool Expired() const { return UsedUs() >= capUs; }
+    bool CannotFit(long long worstUs) const { return UsedUs() + worstUs >= capUs; }
+};
+
+// ---- tick-time window for sims after Pred_End (shared with edge skip) ----
+// Pred_End hands the engine its real frametime back, and ProcessMovement integrates against
+// gpGlobals->frametime: a sim run without this moves by a FRAME, not a tick.
+struct EbTimeGuard
+{
+    int t; float c, f;
+    explicit EbTimeGuard(int iTickBase)
+    {
+        t = g_globalVars->tickcount; c = g_globalVars->curtime; f = g_globalVars->frametime;
+        g_globalVars->tickcount = iTickBase;
+        g_globalVars->curtime = TickInterval() * iTickBase;
+        g_globalVars->frametime =
+            reinterpret_cast<unsigned char*>(g_prediction)[kPredOff_EnginePaused] ? 0.f : TickInterval();
+    }
+    ~EbTimeGuard() { g_globalVars->tickcount = t; g_globalVars->curtime = c; g_globalVars->frametime = f; }
+};
+
+// air duck teleport: FinishDuck adds hullNormal - hullCrouch (gamemovement.cpp:4240), 82 - 62 = 20
+// in TF2 (tf_gamerules.cpp:1310), scaled with the player's model scale -> read off the live hull
+static float EbDuckShiftZ(void* pLocal)
+{
+    const float flHeight = EntV3(pLocal, g_offMaxs).z - EntV3(pLocal, g_offMins).z;
+    if (flHeight < 1.f) return 20.f;
+    const float flNominal = (EntI(pLocal, g_offFlags) & FL_DUCKING) ? 62.f : 82.f;
+    return 20.f * (flHeight / flNominal);
+}
+
+static Vec3 EbClampAng(Vec3 a)
+{
+    a.x = std::clamp(NormalizeAngle(a.x), -89.f, 89.f);
+    a.y = NormalizeAngle(a.y);
+    a.z = 0.f;
+    return a;
+}
+
+// ---- the latched plan, for the world overlay (movement thread -> render thread) ----
+static std::mutex s_ebVizLock;
+static std::vector<Vec3> s_ebVizPath;
+static int  s_ebVizFlown = 0;
+static bool s_ebVizActive = false;
+
+static void EbVizSet(const Vec3* pts, int n)
+{
+    if (!g_edgeBugViz) return;
+    std::lock_guard<std::mutex> l(s_ebVizLock);
+    s_ebVizPath.assign(pts, pts + std::max(0, n));
+    s_ebVizFlown = 0;
+}
+
+static void EbVizPublish(bool bActive, int iFlown)
+{
+    std::lock_guard<std::mutex> l(s_ebVizLock);
+    s_ebVizActive = bActive && g_edgeBugViz;
+    s_ebVizFlown = iFlown;
+    if (!s_ebVizActive && !s_ebVizPath.empty()) s_ebVizPath.clear();
+}
+
+void EB_GetDrawData(EbDrawData& out)
+{
+    std::lock_guard<std::mutex> l(s_ebVizLock);
+    out.path.clear();
+    out.active = s_ebVizActive && (int)s_ebVizPath.size() >= 2;
+    if (!out.active) return;
+    const int iFrom = std::clamp(s_ebVizFlown, 0, (int)s_ebVizPath.size() - 2);
+    out.path.assign(s_ebVizPath.begin() + iFrom, s_ebVizPath.end());
+    out.at = s_ebVizPath.back();
+}
+
+// ---- reach sweep (botox eb_make_hull / eb_first_reach_tick) ----
+// NOTHING IN REACH = NO SEARCH: one conservative hull sweep along the window's ballistic arc
+// (3 chords, grown 32u in xy for strafe variants) can never hide an edgebug. Ducked hull grows
+// the air-unduck drop down for the release family.
+struct EbHull_t { Vec3 mins{}, maxs{}; float grav = 800.f; bool valid = false; };
+
+static EbHull_t EbMakeHull(void* pLocal, float flGrav, float grow = 32.f)
+{
+    EbHull_t h;
+    h.mins = EntV3(pLocal, g_offMins);
+    h.maxs = EntV3(pLocal, g_offMaxs);
+    h.mins.x -= grow; h.mins.y -= grow;
+    h.maxs.x += grow; h.maxs.y += grow;
+    h.mins.z -= 1.f;
+    if (EntI(pLocal, g_offFlags) & FL_DUCKING) h.mins.z -= EbDuckShiftZ(pLocal);
+    h.grav = flGrav;
+    h.valid = true;
+    return h;
+}
+
+static int EbFirstReachTick(void* pLocal, const EbHull_t& hull, const Vec3& origin, const Vec3& vel,
+                            int windowTicks, int segs = 3)
+{
+    if (!hull.valid || windowTicks <= 0) return 0;
+    const float ipt = TickInterval();
+    const float window = windowTicks * ipt;
+    const float segT = window / (float)segs;
+    Vec3 maxs = hull.maxs;
+    maxs.z += hull.grav * segT * segT * 0.125f;   // arc sag under a chord
+    TraceFilterWorldProps filter; filter.Setup(pLocal);
+    Vec3 prev = origin;
+    for (int seg = 1; seg <= segs; seg++)
+    {
+        const float t0 = segT * (seg - 1), t = segT * seg;
+        Vec3 p = origin + vel * t;
+        p.z = origin.z + vel.z * t - 0.5f * hull.grav * t * t;
+        GameTrace_t tr{};
+        TraceHull(prev, p, hull.mins, maxs, MASK_PLAYERSOLID, &filter, &tr);
+        if (tr.DidHit())
+            return std::clamp((int)((t0 + (t - t0) * tr.fraction) / ipt), 0, windowTicks - 1);
+        prev = p;
+    }
+    return -1;
+}
+
+// heading error of start -> end vs aim yaw; 90 = path too short to have a heading
+static float EbAimErr(const Vec3& a, const Vec3& b, float aimYaw)
+{
+    const float dx = b.x - a.x, dy = b.y - a.y;
+    if (dx * dx + dy * dy < 4.f) return 90.f;
+    return fabsf(NormalizeAngle(RAD2DEGF(atan2f(dy, dx)) - aimYaw));
+}
+
+// ebanat ring: 16 vertical rays 32u out; a face under 0.6 nz = a ramp clipped the fall, not a lip
+static bool EbSteepRing(void* pLocal)
+{
+    const Vec3 o = EntV3(pLocal, g_offOrigin);
+    TraceFilterWorldProps filter; filter.Setup(pLocal);
+    for (float a = 0.f; a < 6.2831855f; a += 0.3926991f)
+    {
+        const float x = o.x + cosf(a) * 32.f, y = o.y + sinf(a) * 32.f;
+        GameTrace_t tr{};
+        TraceLine(Vec3(x, y, o.z + 200.f), Vec3(x, y, o.z - 100.f), MASK_PLAYERSOLID, &filter, &tr);
+        if (tr.fraction < 1.f && tr.plane.normal.z < 0.6f) return true;
+    }
+    return false;
+}
+
+// lookahead is a DISTANCE (2-3 ticks of travel at 64): stepped in 64-tick units at any rate
+static bool EbIsNearEdge(void* pLocal)
+{
+    const Vec3 origin = EntV3(pLocal, g_offOrigin);
+    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+    const float speed = vel.Length2D();
+    if (speed < 1.f) return false;
+    const Vec3 dir(vel.x / speed, vel.y / speed, 0.f);
+    const int steps = speed < 120.f ? 2 : 3;
+    TraceFilterWorldProps filter; filter.Setup(pLocal);
+    for (int s = 1; s <= steps; s++)
+    {
+        const Vec3 p = origin + dir * (speed * (1.f / 64.f) * s);
+        GameTrace_t tr{};
+        TraceLine(Vec3(p.x, p.y, origin.z + 2.f), Vec3(p.x, p.y, origin.z - 64.f), MASK_PLAYERSOLID, &filter, &tr);
+        if (tr.fraction > 0.8f) return true;
+    }
+    return false;
+}
+
+static bool EbCheck(void* pLocal, float vz0, float vz, float g, bool onGround, int mode)
+{
+    const float s = EbScale();
+    return MV_EbCheck(mode, vz0, vz, g, s, vz0 < -6.f * s, onGround,
+                      [&] { return EbIsNearEdge(pLocal); }, [&] { return EbSteepRing(pLocal); });
+}
+
+// botox CorrectMovement + its button fixup (move keys follow the folded wish)
+static void EbCorrect(void* pLocal, UserCmd_t* c, const Vec3& wish, const Vec3& frame)
+{
+    if (!(EntI(pLocal, g_offFlags) & FL_ONGROUND) && frame.z != 0.f) c->sidemove = 0.f;
+    CorrectMovement(c, wish, frame);
+    c->buttons &= ~(IN_MOVERIGHT | IN_MOVELEFT | IN_BACK | IN_FORWARD);
+    if (c->sidemove > 0.f) c->buttons |= IN_MOVERIGHT; else if (c->sidemove < 0.f) c->buttons |= IN_MOVELEFT;
+    if (c->forwardmove > 0.f) c->buttons |= IN_FORWARD; else if (c->forwardmove < 0.f) c->buttons |= IN_BACK;
+}
+
+// silent fold (botox start/end_movement_fix): move read in `from`'s frame, sent in `to`'s
+static void EbFold(UserCmd_t* c, const Vec3& from, const Vec3& to)
+{
+    CorrectMovement(c, from, to);
+    c->viewangles = to;
+}
+
+// BEND CONE: max path bend caps how far the FLIGHT PATH bends off s_ebCourseYaw, never the push.
+// At the cone edge an outward push is MIRRORED across the velocity. 180 = no cone.
+static void EbCommitStrafe(void* pLocal, UserCmd_t* c, Vec3 wish)
+{
+    const float cap = std::clamp(g_edgeBugStrafeAngleMax, 0.f, 180.f);
+    if (cap < 180.f && s_ebCourseValid)
+    {
+        const Vec3 vel = EntV3(pLocal, g_offVelocity);
+        if (vel.Length2D() > 1.f)
+        {
+            const float velYaw = RAD2DEGF(atan2f(vel.y, vel.x));
+            const float dev = NormalizeAngle(velYaw - s_ebCourseYaw);
+            const float moveOff = RAD2DEGF(atan2f(-c->sidemove, c->forwardmove));
+            const float rel = NormalizeAngle(wish.y + moveOff - velYaw);
+            if (fabsf(dev) >= cap && ((dev > 0.f) == (rel > 0.f)))
+                wish.y = velYaw - rel - moveOff;
+        }
+    }
+    EbCorrect(pLocal, c, wish, c->viewangles);
+}
+
+static void EbApplyAutoStrafe(void* pLocal, UserCmd_t* c, bool duck, float sideSpeed)
+{
+    if (duck) c->buttons |= IN_DUCK; else c->buttons &= ~IN_DUCK;
+    s_ebStrafeSide = -s_ebStrafeSide;
+    const float side = s_ebStrafeSide;
+    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+    Vec3 wish = c->viewangles;
+    const float speed = vel.Length2D();
+    const float ideal = std::clamp(RAD2DEGF(atanf(15.f / speed)), 0.f, 90.f);
+    c->forwardmove = 0.f;
+    const float yawDelta = NormalizeAngle(wish.y - s_ebStrafeLastYaw);
+    const float absDelta = fabsf(yawDelta);
+    s_ebStrafeLastYaw = wish.y;
+    if (absDelta <= ideal || absDelta >= 30.f)
+    {
+        const float velYaw = VectorAngles(vel).y;
+        const float velDelta = NormalizeAngle(wish.y - velYaw);
+        const float retrack = std::clamp(RAD2DEGF(atanf(30.f / speed)), 0.f, 90.f) * 2.f;
+        if (velDelta <= retrack || speed <= 15.f)
+        {
+            if (-retrack <= velDelta || speed <= 15.f) { wish.y += side * ideal; c->sidemove = sideSpeed * side; }
+            else { wish.y = velYaw - retrack; c->sidemove = sideSpeed; }
+        }
+        else { wish.y = velYaw + retrack; c->sidemove = -sideSpeed; }
+        EbCommitStrafe(pLocal, c, wish);
+    }
+    else
+    {
+        c->sidemove = yawDelta > 0.f ? -sideSpeed : sideSpeed;
+        EbCommitStrafe(pLocal, c, c->viewangles);
+    }
+}
+
+// lip target, once per real tick (geometry is static during the sim): at the ballistic point near
+// first contact lay 9 lanes across the path (+-64u), floor-trace each, take the boundary nearest
+// the path (solid/void or a drop taller than a step), inside the cone and the lateral reach
+static bool EbFindEdgeTarget(void* pLocal, int reachTick, int windowTicks, float grav)
+{
+    s_ebEdgeTargetValid = false;
+    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+    const float speed = vel.Length2D();
+    if (speed < 30.f) return false;
+    const float ipt = TickInterval();
+    const Vec3 origin = EntV3(pLocal, g_offOrigin);
+    const int probe = std::clamp(reachTick >= 0 ? reachTick + 1 : windowTicks / 3, 1, std::max(1, windowTicks));
+    const float t = probe * ipt;
+    Vec3 p = origin + vel * t;
+    p.z = origin.z + vel.z * t - 0.5f * grav * t * t;
+    const Vec3 right(vel.y / speed, -vel.x / speed, 0.f);
+    constexpr int k_lanes = 9;
+    constexpr float k_lane = 16.f, k_stepUp = 18.f;
+    float laneZ[k_lanes]; bool laneSolid[k_lanes];
+    TraceFilterWorldProps filter; filter.Setup(pLocal);
+    for (int i = 0; i < k_lanes; i++)
+    {
+        const Vec3 c = p + right * ((i - k_lanes / 2) * k_lane);
+        GameTrace_t tr{};
+        TraceLine(Vec3(c.x, c.y, c.z + 16.f), Vec3(c.x, c.y, c.z - 128.f), MASK_PLAYERSOLID, &filter, &tr);
+        laneSolid[i] = tr.DidHit();
+        laneZ[i] = laneSolid[i] ? tr.endpos.z : -99999.f;
+    }
+    const float cap = std::clamp(g_edgeBugStrafeAngleMax, 0.f, 180.f);
+    const float n = (float)(probe + 1);
+    const float maxLat = 30.f * ipt * n * (n + 1.f) * 0.5f + 16.f;
+    float bestOff = 0.f, bestDist = 99999.f;
+    for (int i = 0; i < k_lanes - 1; i++)
+    {
+        const bool a = laneSolid[i], b = laneSolid[i + 1];
+        if (a == b && (!a || fabsf(laneZ[i] - laneZ[i + 1]) < k_stepUp)) continue;
+        const float mid = (i - k_lanes / 2) * k_lane + k_lane * 0.5f;
+        const float airSign = a == b ? (laneZ[i] < laneZ[i + 1] ? -1.f : 1.f) : (a ? 1.f : -1.f);
+        const float off = mid + airSign * 8.f;   // half a hull onto the drop side
+        if (fabsf(off) > maxLat) continue;
+        if (cap < 180.f && s_ebCourseValid)
+        {
+            const Vec3 q = p + right * off;
+            if (fabsf(NormalizeAngle(RAD2DEGF(atan2f(q.y - origin.y, q.x - origin.x)) - s_ebCourseYaw)) > cap) continue;
+        }
+        if (fabsf(off) < bestDist) { bestDist = fabsf(off); bestOff = off; }
+    }
+    if (bestDist > 90.f) return false;
+    s_ebEdgeTarget = p + right * bestOff;
+    s_ebEdgeTargetValid = true;
+    return true;
+}
+
+static void EbApplyToEdge(void* pLocal, UserCmd_t* c, bool duck, float sideSpeed)
+{
+    if (!s_ebEdgeTargetValid) { EbApplyAutoStrafe(pLocal, c, duck, sideSpeed); return; }
+    if (duck) c->buttons |= IN_DUCK; else c->buttons &= ~IN_DUCK;
+    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+    const float speed = vel.Length2D();
+    if (speed < 1.f) { c->forwardmove = 0.f; c->sidemove = 0.f; return; }
+    const Vec3 origin = EntV3(pLocal, g_offOrigin);
+    const Vec3 dir(vel.x / speed, vel.y / speed, 0.f);
+    const Vec3 to(s_ebEdgeTarget.x - origin.x, s_ebEdgeTarget.y - origin.y, 0.f);
+    // only the part ACROSS the path can be bought (addspeed = 30 - dot(vel, wishdir))
+    const float along = to.x * dir.x + to.y * dir.y;
+    const Vec3 lat(to.x - dir.x * along, to.y - dir.y * along, 0.f);
+    const float latLen = lat.Length2D();
+    if (latLen < 1.f) { EbApplyAutoStrafe(pLocal, c, duck, sideSpeed); return; }
+    const Vec3 target(0.f, RAD2DEGF(atan2f(lat.y / latLen, lat.x / latLen)), 0.f);
+    c->forwardmove = 450.f;
+    c->sidemove = 0.f;
+    EbCommitStrafe(pLocal, c, target);
+}
+
+// ---- DOES THIS DUCKED BUG EAT THE NEXT JUMP (TF2) ----
+// fly on past the find with crouch + jump let go (= the player's own cmd once the replay ends)
+// until the hull unducks or lands ducked. Unduck goes in on the first tick the 20u below is
+// clear, so this is 1-3 sims on a normal fall; 16 unresolved = not proven blocked.
+static bool EbJumpBlocked(void* pLocal, UserCmd_t c, int& iSims)
+{
+    c.buttons &= ~(IN_DUCK | IN_JUMP);
+    for (int i = 0; ; i++)
+    {
+        const int fl = EntI(pLocal, g_offFlags);
+        const MvEbJump v = MV_EbJumpTick((fl & FL_DUCKING) != 0, (fl & FL_ONGROUND) != 0);
+        if (v != kEbJumpPending) return v == kEbJumpBlocked;
+        if (i >= 16 || !EntAlive(pLocal)) return false;
+        Pred_Simulate(pLocal, &c);
+        iSims++;
+    }
+}
+
+static void EbDropPlan(const char* why)
+{
+    if (s_ebDetected) DebugLog("EB: drop why=%s at %d/%d", why, s_ebCurrentTick, s_ebLockTicks);
+    s_ebDetected = false;
+    s_ebCurrentTick = 0;
+    s_ebSteerSince = 0.f;
+    s_ebFollowBlocked = false;
+}
+
+// ============================================================================
+//  donor styles (botox donor_*): 1 = delusional, 2 = dna
+// ============================================================================
+struct EbDonor_t
+{
+    int ticksLeft = 0, ebLength = 0, detectTick = 0, edgebugTick = 0;
+    bool crouched = false, strafing = false;
+    float fwd = 0.f, side = 0.f, yawDelta = 0.f, startYaw = 0.f;
+    short mousedx = 0;
+};
+static EbDonor_t s_ebDonor;
+
+static void EbDonorReset()
+{
+    s_ebDonor = {};
+    s_ebDetected = false;
+    s_ebCurrentTick = 0;
+}
+
+// TF2 mousedx is AFTER sensitivity (in_mouse.cpp:602 is written from the scaled mouse_x), and
+// ApplyMouse turns the view by -m_yaw * x: so the hand's yaw is -m_yaw * mousedx
+static float EbDonorMouseYaw(const UserCmd_t* c)
+{
+    return std::clamp(-(float)c->mousedx * CvarFloat("m_yaw", 0.022f), -30.f, 30.f);
+}
+
+static void EbDonorFixMove(void* pLocal, UserCmd_t* c, const Vec3& angle)
+{
+    if (!(EntI(pLocal, g_offFlags) & FL_ONGROUND) && c->viewangles.z != 0.f && (c->buttons & IN_ATTACK))
+        c->sidemove = 0.f;
+    const float len = sqrtf(c->forwardmove * c->forwardmove + c->sidemove * c->sidemove);
+    if (len == 0.f) return;
+    const float yaw = DEG2RADF(RAD2DEGF(atan2f(c->sidemove, c->forwardmove)) + c->viewangles.y - angle.y);
+    float fwd = cosf(yaw) * len;
+    if (c->viewangles.x < -90.f || c->viewangles.x > 90.f) fwd = -fwd;
+    c->forwardmove = std::clamp(fwd, -450.f, 450.f);
+    c->sidemove = std::clamp(sinf(yaw) * len, -450.f, 450.f);
+    c->upmove = std::clamp(c->upmove, -320.f, 320.f);
+    c->buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVERIGHT | IN_MOVELEFT);
+}
+
+// vel = this sim tick, start = the cmd's pre-prediction state (botox g_prediction.backup_data)
+static bool EbDonorCheck(void* pLocal, UserCmd_t* c, bool& brk, float grav, float shift)
+{
+    if (EntMoveType(pLocal) == MOVETYPE_NOCLIP) { brk = true; return false; }
+    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+    const float ipt = TickInterval();
+    const float gravVelo = -(grav * 0.5f) * ipt;
+    const int fl = EntI(pLocal, g_offFlags);
+    if (roundf(vel.z) >= 0.f || (fl & FL_ONGROUND) || roundf(vel.Length2D()) == 0.f) { brk = true; return false; }
+    if (s_prePredVel.z < 0.f && vel.z > s_prePredVel.z && vel.z < 0.f)
+    {
+        // the origin compare reads an air duck's 20u teleport as a rise: take it out (TF2)
+        float rise = EntV3(pLocal, g_offOrigin).z - s_prePredOrigin.z;
+        const bool dNow = (fl & FL_DUCKING) != 0, dStart = (s_prePredFlags & FL_DUCKING) != 0;
+        if (dNow != dStart) rise += dNow ? -shift : shift;
+        if (rise > 0.f) return false;
+        const int zVel = (int)vel.z;
+        Pred_Simulate(pLocal, c);
+        const float rounded = roundf(-grav * ipt) + (float)zVel;
+        const float nextVz = roundf(EntV3(pLocal, g_offVelocity).z);
+        if (rounded == nextVz || (nextVz == 0.f && (EntI(pLocal, g_offFlags) & FL_ONGROUND))) return true;
+        brk = true;
+        return false;
+    }
+    return s_prePredVel.z < gravVelo && roundf(vel.z) == roundf(gravVelo);
+}
+
+static void EbDonorPre(UserCmd_t* pCmd)
+{
+    if (s_ebDetected && s_ebDonor.crouched && s_ebDonor.ticksLeft) pCmd->buttons |= IN_DUCK;
+    if (s_ebDetected && s_ebDonor.ticksLeft && s_ebDonor.strafing)
+    {
+        pCmd->forwardmove = s_ebDonor.fwd;
+        pCmd->sidemove = s_ebDonor.side;
+    }
+}
+
+static void EbDonorPost(void* pLocal, UserCmd_t* pCmd, int style)
+{
+    const bool del = style == 1;
+    const int mt = EntMoveType(pLocal);
+    const bool key = On(g_edgeBug, g_edgeBugKey, g_edgeBugMode);
+    if (del)
+    {
+        if ((s_prePredFlags & FL_ONGROUND) || mt == MOVETYPE_NOCLIP || mt == MOVETYPE_OBSERVER) { EbDonorReset(); return; }
+        if (!key && (!s_ebDonor.ticksLeft || s_ebDonor.ticksLeft > 2)) { EbDonorReset(); return; }
+    }
+    else if (!key || (s_prePredFlags & FL_ONGROUND) || mt != MOVETYPE_WALK) { EbDonorReset(); return; }
+
+    const Vec3 viewBackup = pCmd->viewangles;
+    const float grav = CvarFloat("sv_gravity", 800.f);
+    const float shift = EbDuckShiftZ(pLocal);
+    if (!s_ebDonor.ticksLeft)
+    {
+        const float yawdelta = EbDonorMouseYaw(pCmd);
+        const float ipt = TickInterval();
+        const int ticklimit = std::clamp(del ? g_edgeBugDelTicks : (int)(0.5f + g_edgeBugDnaScan / ipt), 0, k_ebMaxTicks - 1);
+        const bool advanced = del ? g_edgeBugDelAdvanced : g_edgeBugDnaAdvanced;
+        const int predRounds = (advanced && yawdelta != 0.f) ? 4 : 2;
+        const int search = del ? g_edgeBugDelSearch : std::max(g_edgeBugDnaRange, 1);
+        const int divisor = del || advanced ? search : 2;
+        const float delLimit = g_edgeBugDelAngleLimit;
+        const bool dnaCustom = g_edgeBugDnaCustomAngle;
+        const float dnaLimit = g_edgeBugDnaAngleLimit;
+        const UserCmd_t base = *pCmd;
+        const Vec3 orig = base.viewangles;
+        RestoreEntityToPredicted();
+        const Vec3 endVel = EntV3(pLocal, g_offVelocity);
+        s_ebDonor.startYaw = orig.y;
+        const int tickCount = g_globalVars->tickcount;
+        static Vec3 path[k_ebMaxTicks + 1];
+        int sims = 0;
+        const bool dnaRising = !del && (endVel.z > 0.f || s_prePredVel.z > 0.f);
+        const bool strafeRuns = !dnaRising && divisor != 0 && (del ? delLimit != 0.f : dnaLimit == 0.f);
+        bool stillRuns = !dnaRising && ticklimit > 0;
+        int reach = -1;
+        if (stillRuns)
+        {
+            const int window = ticklimit + 1;
+            reach = EbFirstReachTick(pLocal, EbMakeHull(pLocal, grav), EntV3(pLocal, g_offOrigin), endVel, window,
+                                     std::clamp((int)std::ceil(window * ipt / 0.1f), 3, 16));
+            stillRuns = reach >= 0;
+        }
+        // contact far (or none): search every 2nd tick, a far bug found 1 tick later is the same bug
+        static int s_lastSearch = -1;
+        const bool farSkip = !dnaRising && ticklimit > 0 && (reach < 0 || reach > EbTicks(16)) && s_lastSearch >= 0
+                          && tickCount > s_lastSearch && tickCount - s_lastSearch < EbTicks(2);
+        if (farSkip) stillRuns = false; else s_lastSearch = tickCount;
+        float fan[2][64]; int fanN[2] = {};
+        if (strafeRuns && predRounds > 2 && !farSkip)
+        {
+            float yd = yawdelta;
+            for (int r = 0; r < 2; ++r)
+            {
+                const float maxDelta = yd;
+                for (yd = maxDelta / divisor; fabsf(yd) <= fabsf(maxDelta) && fanN[r] < 64; yd += maxDelta / divisor)
+                    fan[r][fanN[r]++] = yd;
+            }
+        }
+        EbBudget_t clock; clock.Start(ipt * 0.2f);
+        // TF2 stance: a crouched find that eats the jump is held back while a standing round runs
+        EbDonor_t fallback{}; Vec3 fbPath[k_ebMaxTicks + 1]; int fbN = 0;
+        auto run = [&](int round, float yd)
+        {
+            const bool crouched = round == 0 || round == 2, strafing = round > 1;
+            UserCmd_t c = base;
+            if (crouched) c.buttons |= IN_DUCK; else c.buttons &= ~IN_DUCK;
+            if (!strafing) { c.forwardmove = 0.f; c.sidemove = 0.f; if (!del) c.upmove = 0.f; }
+            else if (!del) c.sidemove = (round == 2 && orig.y <= 0.f) ? base.sidemove * -450.f : base.sidemove * 450.f;
+            RestoreEntityToPredicted();
+            int pathN = 0;
+            path[pathN++] = EntV3(pLocal, g_offOrigin);
+            for (int t = 1; t <= ticklimit; ++t)
+            {
+                if (strafing)
+                {
+                    c.viewangles.y = NormalizeAngle(orig.y + yd * (float)t);
+                    const float turned = fabsf(c.viewangles.y - s_ebDonor.startYaw);
+                    if (del) { if (delLimit == 0.f || turned > delLimit) break; }
+                    else if (((turned > (dnaCustom ? 1.f : 0.f)) ? dnaLimit : 1.f) != 0.f) break;
+                }
+                Pred_Simulate(pLocal, &c);
+                sims++;
+                const Vec3 vel = EntV3(pLocal, g_offVelocity);
+                if (del ? (vel.z > 0.f || vel.Length2D() == 0.f) : (endVel.z > 0.f || s_prePredVel.z > 0.f)) break;
+                if (pathN <= k_ebMaxTicks) path[pathN++] = EntV3(pLocal, g_offOrigin);
+                bool br = false;
+                const bool duckedNow = (EntI(pLocal, g_offFlags) & FL_DUCKING) != 0;
+                if (EbDonorCheck(pLocal, &c, br, grav, shift))
+                {
+                    if (!MV_EbStanceOk(g_edgeBugStance, duckedNow)) break;
+                    bool blocked = false;
+                    if (MV_EbJumpCheck(g_edgeBugStance, duckedNow)) blocked = EbJumpBlocked(pLocal, c, sims);
+                    EbDonor_t& d = blocked ? fallback : s_ebDonor;
+                    if (blocked && fallback.ticksLeft) break;   // keep the first fallback
+                    d.ticksLeft = t; d.ebLength = t; d.edgebugTick = tickCount + t; d.detectTick = tickCount;
+                    d.fwd = c.forwardmove; d.side = c.sidemove; d.yawDelta = yd;
+                    d.crouched = crouched; d.strafing = strafing; d.mousedx = base.mousedx;
+                    d.startYaw = s_ebDonor.startYaw;
+                    if (blocked) { memcpy(fbPath, path, sizeof(Vec3) * pathN); fbN = pathN; }
+                    else EbVizSet(path, pathN);
+                    break;
+                }
+                if (br) break;
+            }
+        };
+        int foundRound = -1;
+        for (int round = 0; round < 2 && stillRuns && foundRound < 0; ++round)
+        {
+            run(round, yawdelta);
+            if (s_ebDonor.ticksLeft) foundRound = round;
+        }
+        // strafe fan over 0.2 tick of clock (rounds 0/1 never cut): a cut fan resumes next search
+        static int s_fanResume = 0;
+        const int fanTotal = fanN[0] + fanN[1];
+        bool fanCut = false;
+        if (foundRound < 0 && fanTotal > 0)
+        {
+            const int first = s_fanResume % fanTotal;
+            int i = 0;
+            for (; i < fanTotal; ++i)
+            {
+                if (clock.Expired()) break;
+                const int k = (first + i) % fanTotal, r = k < fanN[0] ? 0 : 1;
+                run(2 + r, fan[r][r ? k - fanN[0] : k]);
+                if (s_ebDonor.ticksLeft) { foundRound = 2 + r; break; }
+            }
+            fanCut = foundRound < 0 && i < fanTotal;
+            s_fanResume = fanCut ? (first + i) % fanTotal : 0;
+        }
+        const bool usedFallback = !s_ebDonor.ticksLeft && fallback.ticksLeft;
+        if (usedFallback) { s_ebDonor = fallback; EbVizSet(fbPath, fbN); }
+        RestoreEntityToPredicted();
+        if (s_ebDonor.ticksLeft)
+            DebugLog("EB: style=%d find round=%d t=%d duck=%d strafe=%d yd=%.2f fwd=%.0f side=%.0f sims=%d lim=%d vz=%.2f fb=%d cut=%d",
+                     style, foundRound, s_ebDonor.ebLength, s_ebDonor.crouched ? 1 : 0, s_ebDonor.strafing ? 1 : 0,
+                     s_ebDonor.yawDelta, s_ebDonor.fwd, s_ebDonor.side, sims, ticklimit, s_prePredVel.z,
+                     usedFallback ? 1 : 0, fanCut ? 1 : 0);
+    }
+
+    if (!s_ebDonor.ticksLeft) { s_ebDetected = false; return; }
+    s_ebDetected = true;
+    s_ebFoundTick = s_ebDonor.edgebugTick;
+    s_ebLockTicks = s_ebDonor.ebLength;
+    const float yaw = NormalizeAngle(s_ebDonor.startYaw + s_ebDonor.yawDelta * (float)(s_ebDonor.ebLength - (s_ebDonor.ticksLeft - 1)));
+    if (s_ebDonor.crouched) pCmd->buttons |= IN_DUCK; else pCmd->buttons &= ~IN_DUCK;
+    if (s_ebDonor.strafing)
+    {
+        pCmd->forwardmove = s_ebDonor.fwd;
+        pCmd->sidemove = s_ebDonor.side;
+        if (del)
+        {
+            const Vec3 newView(pCmd->viewangles.x, yaw, pCmd->viewangles.z);
+            pCmd->viewangles.y = yaw;
+            if (g_edgeBugDelSilent) { pCmd->viewangles = viewBackup; EbDonorFixMove(pLocal, pCmd, newView); }
+            else { Vec3 v = newView; EngineSetViewAngles(v); }   // botox donor_frame_start, per tick
+        }
+        else
+        {
+            pCmd->mousedx = s_ebDonor.mousedx;
+            const Vec3 ang(viewBackup.x + 18.f, yaw, 0.f);
+            pCmd->viewangles.y = yaw;
+            EbDonorFixMove(pLocal, pCmd, ang);
+            Vec3 v(viewBackup.x, yaw, 0.f); EngineSetViewAngles(v);
+        }
+    }
+    else { pCmd->forwardmove = 0.f; pCmd->sidemove = 0.f; }
+    s_ebDonor.ticksLeft--;
+    s_ebCurrentTick = s_ebDonor.ebLength - s_ebDonor.ticksLeft;
+}
+
+// delusional mouse fix: mousedx/dy agree with the view the cmd really sends
+static void EbDonorMouseFix(UserCmd_t* pCmd)
+{
+    if (!g_edgeBug || g_edgeBugStyle != 1 || !g_edgeBugDelMouseFix) return;
+    static Vec3 last{};
+    Vec3 d = pCmd->viewangles - last;
+    d.y = NormalizeAngle(d.y);
+    last = pCmd->viewangles;
+    auto counts = [](float v) { const int i = (int)std::clamp(v, -32768.f, 32767.f); return (short)(i == 0 ? 1 : i); };
+    if (d.x != 0.f) pCmd->mousedy = counts(d.x / CvarFloat("m_pitch", 0.022f));
+    if (d.y != 0.f) pCmd->mousedx = counts(-d.y / CvarFloat("m_yaw", 0.022f));
+}
+
+// ============================================================================
+//  pre / post
+// ============================================================================
+static void EdgeBugPre(void* pLocal, UserCmd_t* pCmd)
+{
+    if (!EntAlive(pLocal)) return;
+    if (g_offVelocity > 0) s_ebVelBackup = EntV3(pLocal, g_offVelocity);
+    if (g_offFlags > 0)    s_ebFlags = EntI(pLocal, g_offFlags);
+    s_ebMoveType   = EntMoveType(pLocal);
+    s_ebUserFwd    = pCmd->forwardmove;
+    s_ebUserSide   = pCmd->sidemove;
+    s_ebUserButtons = pCmd->buttons;
+    if (g_edgeBugStyle == 2) EbDonorPre(pCmd);   // botox: dna only
+}
+
+static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
+{
+    // raw mouse, not view delta: mouse lock holds the view still while the hand still turns
+    const float mouseYaw = -CvarFloat("m_yaw", 0.022f) * s_ebMouseX;
+    s_ebMouseX = 0.f;
+
+    if (!g_frameReady || g_offVelocity <= 0 || g_offFlags <= 0 || g_offOrigin <= 0
+        || g_offMins <= 0 || g_offMaxs <= 0 || g_offTickBase <= 0 || !EntAlive(pLocal))
+    {
+        EbDropPlan("off");
+        EbDonorReset();
+        return;
+    }
+    const EbTimeGuard timeGuard(EntI(pLocal, g_offTickBase));
+
+    // a wall feature owns this cmd: EB runs LAST and a replay would stomp it
+    // (botox: air stuck / wall climb / pixel surf / binds)
+    const bool bTaken = s_textureBugHit || s_tbOwnsCmd || s_headSurfHit || s_headBounceHit
+                     || s_airStuckHit || s_wallClimbHit || s_esActive;
+
+    if (const int style = g_edgeBugStyle; style != 0)
+    {
+        if (bTaken) { EbDonorReset(); return; }
+        EbDonorPost(pLocal, pCmd, style);
+        EbDonorMouseFix(pCmd);
+        return;
+    }
+    if (s_ebDonor.ebLength) EbDonorReset();
+
+    if (!On(g_edgeBug, g_edgeBugKey, g_edgeBugMode)) { EbDropPlan("key"); return; }
+    const int mt = EntMoveType(pLocal);
+    if (mt == MOVETYPE_NOCLIP || mt == MOVETYPE_OBSERVER || s_ebMoveType == MOVETYPE_NOCLIP) { EbDropPlan("move"); return; }
+    if (bTaken) { EbDropPlan("taken"); return; }
+    if (s_ebFlags & FL_ONGROUND)
+    {
+        EbDropPlan("landed");   // a real bug never grounds
+        s_ebLastSearchTick = -1;
+        s_ebLastContactTick = -1;
+        return;
+    }
+
+    const int mode = std::clamp(g_edgeBugDetectMode, 0, 2);
+    const int stance = std::clamp(g_edgeBugStance, 0, 2);
+    const bool steer = g_edgeBugMouseSteer;
+    static Vec3 s_prevAngle{};
+    Vec3 delta = pCmd->viewangles - s_prevAngle;
+    s_prevAngle = pCmd->viewangles;
+    delta.y = NormalizeAngle(delta.y);
+    if (steer && mouseYaw != 0.f) delta.y = std::clamp(mouseYaw, -30.f, 30.f);
+    auto isLargeDelta = [](float y1, float y2) { float d = fabsf(y1 - y2); if (d > 180.f) d = 360.f - d; return d >= 179.f; };
+
+    const bool toEdge = g_edgeBugToEdge;
+    const bool autostrafe = toEdge;   // to-edge IS the autostrafe switch
+    int searchCount = mode == 1 ? 4 : 6;
+    if (toEdge && searchCount < 8) searchCount = 8;
+    if (!autostrafe && searchCount > 4) searchCount = 4;
+    const float predictTime = std::clamp(g_edgeBugPredictTime, 0.02f, 2.f);
+    const int maxTicks = std::clamp((int)std::round(predictTime / TickInterval()), 1, k_ebMaxTicks - 1);
+
+    const Vec3 origView = pCmd->viewangles;
+    const float userFwd = s_ebUserFwd, userSide = s_ebUserSide;
+    const int userButtons = s_ebUserButtons & ~IN_JUMP;   // TF2: replay strips jump in air, so do the sims
+    const float sideSpeed = CvarFloat("cl_sidespeed", 450.f);
+    const float grav = CvarFloat("sv_gravity", 800.f);
+    bool bSimmed = false;
+
+    if (s_ebDetected && steer) s_ebSteerSince += delta.y;
+    // re-plan: mouse turned >= 1 deg since the latch, OR (TF2) flying a jump-eating fallback --
+    // a standing bug that shows up later still wins. Never swap a bug 2 ticks out
+    const bool farFromBug = s_ebLockTicks - s_ebCurrentTick >= EbTicks(2);
+    const bool replan = s_ebDetected && farFromBug
+                     && ((steer && fabsf(s_ebSteerSince) >= 1.f) || s_ebFollowBlocked);
+    if (!s_ebDetected || replan) do
+    {
+        static int nVz = 0, nGap = 0, nAir = 0, nRun = 0, nHit = 0;
+        if (static unsigned long long next = 0ull; GetTickCount64() >= next)
+        {
+            next = GetTickCount64() + 1000ull;
+            if (nVz || nGap || nAir || nRun)
+                DebugLog("EB: gates vz=%d gap=%d air=%d run=%d hit=%d", nVz, nGap, nAir, nRun, nHit);
+            nVz = nGap = nAir = nRun = nHit = 0;
+        }
+        if (s_ebVelBackup.z >= (mode >= 1 ? -4.f : -10.f)) { nVz++; break; }
+
+        RestoreEntityToPredicted();
+        bSimmed = true;
+        const Vec3 liveOrigin = EntV3(pLocal, g_offOrigin);
+        const Vec3 liveVel = EntV3(pLocal, g_offVelocity);
+        const EbHull_t hull = EbMakeHull(pLocal, grav);
+        const int reachTick = EbFirstReachTick(pLocal, hull, liveOrigin, liveVel, maxTicks);
+        if (reachTick < 0) { s_ebLastContactTick = -1; nAir++; break; }
+
+        // CADENCE: near = every tick. Far (contact > 12 ticks out, last pass saw no ground within
+        // 8) = every 2nd tick: a far plan is re-made many times before it matters (botox does this
+        // at 128 tick only; TF2's 66 gets it from distance instead)
+        const int nowTick = g_globalVars->tickcount;
+        const bool everyTick = s_ebLastContactTick >= 0 && s_ebLastContactTick <= EbTicks(8);
+        const bool nearGeometry = everyTick || reachTick <= EbTicks(12);
+        if (!nearGeometry && s_ebLastSearchTick >= 0 && nowTick > s_ebLastSearchTick
+            && nowTick - s_ebLastSearchTick < EbTicks(2) && !replan)
+        { nGap++; break; }
+        s_ebLastSearchTick = nowTick;
+
+        s_ebSteerSince = 0.f;
+        s_ebPlanCount = 0;
+        const int wantPaths = steer ? std::clamp(g_edgeBugPaths, 1, k_ebPlanMax) : 1;
+        auto goodPlans = [&] { int n = 0; for (int p = 0; p < s_ebPlanCount; p++) n += !s_ebPlans[p].blocked; return n; };
+        auto enough = [&] { return goodPlans() >= wantPaths; };
+        if (liveVel.Length2D() > 30.f) { s_ebCourseYaw = RAD2DEGF(atan2f(liveVel.y, liveVel.x)); s_ebCourseValid = true; }
+        else s_ebCourseValid = false;
+        if (toEdge) EbFindEdgeTarget(pLocal, reachTick, maxTicks, grav);
+        else s_ebEdgeTargetValid = false;
+        nRun++;
+
+        const int runTicks = std::min(maxTicks, reachTick + 1 + EbTicks(10));
+        int totalPredictions = 0;
+        // per-tick clock share (botox: 0.30 / 0.45 of a 64-tick tick, capped 0.60 / 0.75 of this
+        // one), halved while geometry is far
+        const float wantS = (mode >= 1 ? 0.45f : 0.30f) * (1.f / 64.f) * (nearGeometry ? 1.f : 0.5f);
+        const float share = std::min(mode >= 1 ? 0.75f : 0.60f, wantS / TickInterval());
+        const int maxPredictions = std::clamp(std::max((int)(TickInterval() * 1000000.f * share / 8.f),
+                                                       runTicks * (mode >= 1 ? 6 : 4)), 16, 2048);
+        EbBudget_t budget; budget.Start(TickInterval() * share);
+        long long worstRunUs = 0;
+        // duck press window: TF2's 20u press vs a ~12u fall step, so 3 ticks of retry cover it
+        const int duckRetry = std::clamp(EbTicks(3), 2, 8);
+        int contactTick = -1;
+        const float g = EbHalfGravTick(grav);
+        const int probeEvery = std::clamp(EbTicks(2), 1, 8);
+        int tailCut = 0, nJumpChecks = 0, nBlocked = 0, nStance = 0;
+        constexpr float k_ebTurn = 4.f;
+        const float ebCap = std::clamp(g_edgeBugStrafeAngleMax, 15.f, 180.f);
+        const bool userMoveDead = fabsf(userFwd) < 0.1f && fabsf(userSide) < 0.1f
+                               && fabsf(delta.y) < 0.01f && fabsf(delta.x) < 0.01f;
+
+        // one pass. duckAt = press held from this tick (-1 = variant's own rule); undoAt = released
+        // and left released (-1 = never); bend = first |bend| ticks pushed across the velocity
+        auto runVariant = [&](int v, int duckAt, int undoAt = -1, int bend = 0)
+        {
+            const long long runStarted = budget.UsedUs();
+            RestoreEntityToPredicted();
+            s_ebStrafeSide = 1.f;
+            s_ebStrafeLastYaw = origView.y;
+            Vec3 searchVelBackup = EntV3(pLocal, g_offVelocity);
+            UserCmd_t c = *pCmd;
+            c.viewangles = origView; c.forwardmove = userFwd; c.sidemove = userSide; c.buttons = userButtons;
+            Vec3 cur = origView;
+            contactTick = -1;
+            auto replayUserMove = [&](bool duck)
+            {
+                if (duck) c.buttons |= IN_DUCK; else c.buttons &= ~IN_DUCK;
+                c.forwardmove = userFwd; c.sidemove = userSide;
+                if (!isLargeDelta(cur.y, origView.y)) cur = EbClampAng(cur + delta);
+                EbFold(&c, cur, origView);
+            };
+            auto strafe = [&](bool duck)
+            {
+                if (steer && !isLargeDelta(cur.y, origView.y)) { cur = EbClampAng(cur + delta); c.viewangles = cur; }
+                EbApplyAutoStrafe(pLocal, &c, duck, sideSpeed);
+            };
+            auto turnMove = [&](float step, bool duck)
+            {
+                cur.y = NormalizeAngle(cur.y + step);
+                if (duck) c.buttons |= IN_DUCK; else c.buttons &= ~IN_DUCK;
+                c.forwardmove = userMoveDead ? 450.f : userFwd;
+                c.sidemove = userSide;
+                EbFold(&c, cur, origView);
+            };
+            auto sideWish = [&](float off, bool duck)
+            {
+                if (duck) c.buttons |= IN_DUCK; else c.buttons &= ~IN_DUCK;
+                const Vec3 wish(0.f, NormalizeAngle(origView.y + off), 0.f);
+                c.forwardmove = 0.f;
+                c.sidemove = off > 0.f ? -450.f : 450.f;
+                EbCommitStrafe(pLocal, &c, wish);
+            };
+            // an edgebug KEEPS FALLING: hold a candidate one tick and sim the next one
+            int pending = -1;
+            Vec3 pendingPos{};
+            float pendingVz = 0.f;
+            bool pendingDucked = false;
+            bool runFound = false;
+            auto latch = [&](int tickIndex, const Vec3& endPos, bool ducked)
+            {
+                runFound = true;
+                if (!MV_EbStanceOk(stance, ducked)) { nStance++; return; }
+                // same variant landing within 4u of a kept plan = same path, not an alternative
+                for (int p = 0; p < s_ebPlanCount; p++)
+                    if (s_ebPlans[p].variant == v && s_ebPlans[p].end.DistTo(endPos) < 4.f) return;
+                bool blocked = false;
+                if (MV_EbJumpCheck(stance, ducked))
+                {
+                    nJumpChecks++;
+                    blocked = EbJumpBlocked(pLocal, c, totalPredictions);
+                    nBlocked += blocked;
+                }
+                int slot = s_ebPlanCount;
+                if (slot >= k_ebPlanMax)
+                {
+                    // full: a standing plan evicts a jump-eating one
+                    slot = -1;
+                    if (!blocked)
+                        for (int p = 0; p < s_ebPlanCount; p++) if (s_ebPlans[p].blocked) { slot = p; break; }
+                    if (slot < 0) return;
+                }
+                else s_ebPlanCount++;
+                EbPlan_t& pl = s_ebPlans[slot];
+                memcpy(pl.cmds, s_ebRun, sizeof(EbCmd_t) * (tickIndex + 1));
+                pl.ticks = tickIndex; pl.variant = v; pl.bend = bend; pl.end = endPos;
+                pl.ducked = ducked; pl.blocked = blocked;
+            };
+            for (int i = 0; i < runTicks || (pending >= 0 && i < maxTicks); i++)
+            {
+                {
+                    const bool grounded = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
+                    if (grounded || EntV3(pLocal, g_offVelocity).z > 0.f)
+                    {
+                        if (grounded) contactTick = i;
+                        pending = -1;
+                        break;
+                    }
+                }
+                switch (v)
+                {
+                case 0: c.buttons &= ~IN_DUCK; c.forwardmove = 0.f; c.sidemove = 0.f; break;
+                case 1: c.buttons |= IN_DUCK;  c.forwardmove = 0.f; c.sidemove = 0.f; break;
+                case 2: case 3: if (autostrafe) strafe(v == 3); else replayUserMove(v == 3); break;
+                case 4: case 5: if (autostrafe) replayUserMove(v == 5); else strafe(v == 5); break;
+                case 6: if (toEdge) EbApplyToEdge(pLocal, &c, false, sideSpeed); else strafe(false); break;
+                case 7: if (toEdge) EbApplyToEdge(pLocal, &c, true, sideSpeed); else strafe(true); break;
+                case 8:  turnMove(k_ebTurn, false); break;
+                case 9:  turnMove(-k_ebTurn, true); break;
+                case 10: turnMove(-k_ebTurn, false); break;
+                case 11: turnMove(k_ebTurn, true); break;
+                case 12: sideWish(ebCap, false); break;
+                case 13: sideWish(-ebCap, true); break;
+                case 14: sideWish(sinf((i + 1) * 0.85f) * ebCap * 0.65f, true); break;
+                case 15: strafe((i & 1) != 0); break;
+                }
+                // square to velocity: +30 u/s lateral a tick, speed kept, cone capped
+                if (i < abs(bend))
+                {
+                    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+                    if (vel.Length2D() > 1.f)
+                    {
+                        const Vec3 wish(0.f, RAD2DEGF(atan2f(vel.y, vel.x)) + (bend > 0 ? -90.f : 90.f), 0.f);
+                        c.forwardmove = 450.f; c.sidemove = 0.f;
+                        EbCommitStrafe(pLocal, &c, wish);
+                    }
+                }
+                if (duckAt >= 0) { if (i < duckAt) c.buttons &= ~IN_DUCK; else c.buttons |= IN_DUCK; }
+                // release = the -20u knob: air unduck is instant (CTFGameMovement::OnUnDuck in air)
+                if (undoAt >= 0 && i >= undoAt) c.buttons &= ~IN_DUCK;
+                // confirm tick is past the replay: the player's own crouch (TF2: no duck hold)
+                if (pending >= 0) { if (userButtons & IN_DUCK) c.buttons |= IN_DUCK; else c.buttons &= ~IN_DUCK; }
+                s_ebRun[i] = { c.viewangles, c.forwardmove, c.sidemove, c.buttons, EntV3(pLocal, g_offOrigin) };
+                if (totalPredictions >= maxPredictions || budget.Expired()) break;
+                Pred_Simulate(pLocal, &c);
+                totalPredictions++;
+                if (const int smt = EntMoveType(pLocal); smt == MOVETYPE_NOCLIP || smt == MOVETYPE_OBSERVER)
+                { pending = -1; break; }
+                if (pending >= 0)
+                {
+                    if (EntI(pLocal, g_offFlags) & FL_ONGROUND) contactTick = i + 1;
+                    else if (const float vzNow = EntV3(pLocal, g_offVelocity).z;
+                             vzNow <= 0.f && (mode != 2 || roundf(vzNow) == roundf(pendingVz - 2.f * g)))
+                        latch(pending, pendingPos, pendingDucked);
+                    pending = -1;
+                    break;
+                }
+                const Vec3 velNow = EntV3(pLocal, g_offVelocity);
+                const int flNow = EntI(pLocal, g_offFlags);
+                if (EbCheck(pLocal, searchVelBackup.z, velNow.z, g, (flNow & FL_ONGROUND) != 0, mode))
+                {
+                    if (i + 1 >= maxTicks) { latch(i, EntV3(pLocal, g_offOrigin), (flNow & FL_DUCKING) != 0); break; }
+                    pending = i;
+                    pendingPos = EntV3(pLocal, g_offOrigin);
+                    pendingVz = velNow.z;
+                    pendingDucked = (flNow & FL_DUCKING) != 0;
+                }
+                searchVelBackup = velNow;
+                // tail probe: past reach tick, nothing pending, ticks left worth saving
+                if (pending < 0 && i > reachTick && i + probeEvery < runTicks && ((i - reachTick) % probeEvery) == 0
+                    && EbFirstReachTick(pLocal, hull, EntV3(pLocal, g_offOrigin), searchVelBackup, runTicks - i - 1) < 0)
+                { tailCut += runTicks - i - 1; break; }
+            }
+            if (!runFound && pending >= 0) latch(pending, pendingPos, pendingDucked);
+            if (const long long spent = budget.UsedUs() - runStarted; spent > worstRunUs) worstRunUs = spent;
+        };
+
+        int bestContact = -1;
+        const int replayVariant = autostrafe ? 4 : 2;
+        // BREADTH FIRST: every variant once, THEN the duck sweeps
+        int sweepCenter[8]; for (int& x : sweepCenter) x = -1;
+        bool sweepApprox[8]{}, baseRan[8]{};
+        int baseRuns = 0, sweepRuns = 0, releaseRuns = 0, bendRuns = 0, ebRuns = 0;
+        const int firstVariant = (s_ebLastVariant > 0 && s_ebLastVariant < searchCount) ? s_ebLastVariant : 0;
+        auto variantAt = [&](int idx) { return idx == 0 ? firstVariant : (idx == firstVariant ? 0 : idx); };
+        auto outOfBudget = [&] { return totalPredictions > 0 && (totalPredictions >= maxPredictions || budget.CannotFit(worstRunUs)); };
+        // pass 0: every variant once
+        for (int idx = 0; idx < searchCount && !enough(); idx++)
+        {
+            const int v = variantAt(idx);
+            if (userMoveDead && (v == replayVariant || v == replayVariant + 1)) continue;
+            if ((!toEdge || !s_ebEdgeTargetValid) && (v == 6 || v == 7)) continue;
+            if (stance == 2 && (v & 1) && v < 8) continue;   // standing only: ducked twins land ducked
+            if (outOfBudget()) break;
+            runVariant(v, -1);
+            baseRuns++;
+            baseRan[v] = true;
+            if (contactTick > bestContact) bestContact = contactTick;
+            sweepCenter[v] = contactTick > 0 ? contactTick : (reachTick >= 0 ? reachTick + 1 : -1);
+            sweepApprox[v] = contactTick <= 0;
+        }
+        // PASS 1: DUCK TIMING, even variants, round robin on the offset (latest press first)
+        int sweepFirst[8]{}, sweepLast[8]{};
+        int maxOff = -1;
+        const int approxSlack = std::max(2, EbTicks(2));
+        if (!enough())
+        {
+            for (int v = 0; v < 8; v += 2)
+            {
+                const MvEbPress w = MV_EbSweepWindow(sweepCenter[v], sweepApprox[v], runTicks, baseRan[v + 1], duckRetry, approxSlack);
+                sweepFirst[v] = w.first; sweepLast[v] = w.last;
+                if (w.last >= 0 && w.last - w.first > maxOff) maxOff = w.last - w.first;
+            }
+            for (int off = 0; off <= maxOff && !enough(); off++)
+            {
+                for (int idx = 0; idx < searchCount && !enough(); idx++)
+                {
+                    const int v = variantAt(idx);
+                    if (v & 1) continue;
+                    const int k = sweepLast[v] - off;
+                    if (sweepLast[v] < 0 || k < sweepFirst[v]) continue;
+                    if (outOfBudget()) { off = maxOff; break; }
+                    // a press lands ducked: standing only skips it, the release twin is the point
+                    if (stance != 2) { runVariant(v, k); sweepRuns++; }
+                    // release at k (-20u family): ducked from 0, released at k, never re-pressed
+                    if (stance != 1 && !enough() && k >= 1 && !outOfBudget()) { runVariant(v, 0, k); releaseRuns++; }
+                }
+            }
+        }
+        // PASS 2: BEND, smallest first, near geometry + no usable plan yet
+        if (autostrafe && nearGeometry && goodPlans() == 0)
+        {
+            constexpr int k_bend[] = { 1, 2, 3, 4, 6, 8, 12 };
+            for (int b = 0; b < 2 * (int)std::size(k_bend) && !enough() && !outOfBudget(); b++)
+            {
+                const int bend = (b & 1) ? -k_bend[b / 2] : k_bend[b / 2];
+                if (abs(bend) >= runTicks) break;
+                for (int idx = 0; idx < searchCount && !enough() && !outOfBudget(); idx++)
+                {
+                    const int v = variantAt(idx);
+                    if (!baseRan[v]) continue;
+                    runVariant(v, -1, -1, bend);
+                    bendRuns++;
+                }
+            }
+        }
+        // PASS 3: EBANAT SHAPES, zero usable plans only
+        if (autostrafe && nearGeometry && goodPlans() == 0)
+            for (int v = 8; v < 16 && !enough() && !outOfBudget(); v++)
+            {
+                if (stance == 2 && (v == 9 || v == 11 || v == 13 || v == 14)) continue;
+                runVariant(v, -1);
+                ebRuns++;
+            }
+        s_ebLastContactTick = bestContact >= 0 ? bestContact : reachTick;
+
+        // pick: heading closest to where the mouse turns; a jump-eating plan only if nothing else
+        auto aimAt = [&](int ticks) { return origView.y + std::clamp(delta.y * (ticks + 1) * 0.5f, -90.f, 90.f); };
+        MvEbRank rank[k_ebPlanMax];
+        for (int p = 0; p < s_ebPlanCount; p++)
+            rank[p] = { EbAimErr(s_ebPlans[p].cmds[0].origin, s_ebPlans[p].end, aimAt(s_ebPlans[p].ticks)), s_ebPlans[p].blocked };
+        int sel = MV_EbPickPlan(rank, s_ebPlanCount);
+        if (replan && sel >= 0)
+        {
+            const float curErr = EbAimErr(s_ebCmds[std::min(s_ebCurrentTick, s_ebLockTicks)].origin, s_ebFollowEnd,
+                                          aimAt(s_ebLockTicks - s_ebCurrentTick));
+            const bool keep = MV_EbKeepPlan(s_ebFollowBlocked, curErr, rank[sel].blocked, rank[sel].err);
+            DebugLog("EB: replan %s at %d/%d best=%.1f cur=%.1f of %d steer=%.2f blk=%d/%d",
+                     keep ? "keep" : "swap", s_ebCurrentTick, s_ebLockTicks, rank[sel].err, curErr,
+                     s_ebPlanCount, delta.y, s_ebFollowBlocked ? 1 : 0, rank[sel].blocked ? 1 : 0);
+            if (keep) sel = -1;
+        }
+        if (sel >= 0)
+        {
+            const EbPlan_t& pl = s_ebPlans[sel];
+            memcpy(s_ebCmds, pl.cmds, sizeof(EbCmd_t) * (pl.ticks + 1));
+            s_ebDetected = true;
+            s_ebLockTicks = pl.ticks;
+            s_ebFoundTick = nowTick + pl.ticks + 1;
+            s_ebCurrentTick = 0;
+            s_ebFollowEnd = pl.end;
+            s_ebFollowBlocked = pl.blocked;
+            s_ebLastVariant = pl.variant;
+            s_ebLastBend = pl.bend;
+            if (g_edgeBugViz)
+            {
+                static Vec3 pts[k_ebMaxTicks + 1];
+                int n = 0;
+                for (int p = 0; p <= pl.ticks; p++) pts[n++] = pl.cmds[p].origin;
+                pts[n++] = pl.end;
+                EbVizSet(pts, n);
+            }
+            nHit++;
+        }
+        // win = slider window, run = trimmed window, reach = first hull contact, edge = lip found,
+        // base/sw/rel/bnd/ebv = runs per pass, sims = spent/ceiling, us = spent/share, con = closest
+        // floor, jc/blk/stc = jump checks / jump-eating finds / stance refusals, duck = latched hull
+        DebugLog("EB: mode=%d win=%d run=%d reach=%d edge=%d vars=%d base=%d sw=%d rel=%d bnd=%d ebv=%d sims=%d/%d cut=%d "
+                 "us=%lld/%lld con=%d vz=%.2f found=%d var=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d duck=%d fb=%d",
+                 mode, maxTicks, runTicks, reachTick, s_ebEdgeTargetValid ? 1 : 0, searchCount, baseRuns, sweepRuns,
+                 releaseRuns, bendRuns, ebRuns, totalPredictions, maxPredictions, tailCut, budget.UsedUs(), budget.capUs,
+                 bestContact, s_ebVelBackup.z, s_ebDetected ? 1 : 0, s_ebLastVariant, s_ebDetected ? s_ebLockTicks : -1,
+                 s_ebPlanCount, wantPaths, nJumpChecks, nBlocked, nStance,
+                 sel >= 0 ? (s_ebPlans[sel].ducked ? 1 : 0) : -1, s_ebFollowBlocked ? 1 : 0);
+    } while (false);
+
+    if (s_ebDetected)
+    {
+        RestoreEntityToPredicted();
+        const bool spent = s_ebCurrentTick > s_ebLockTicks;
+        const float dist = spent ? 0.f : EntV3(pLocal, g_offOrigin).DistTo(s_ebCmds[s_ebCurrentTick].origin);
+        if (spent || dist > 1.f)
+        {
+            // dist = plan vs world disagree: the REPLAY diverged (another cmd writer or a correction)
+            if (spent) DebugLog("EB: drop why=spent at %d/%d", s_ebCurrentTick, s_ebLockTicks);
+            else DebugLog("EB: replay drop at %d/%d dist=%.3f", s_ebCurrentTick, s_ebLockTicks, dist);
+            s_ebDetected = false;
+            s_ebCurrentTick = 0;
+            s_ebFollowBlocked = false;
+            return;
+        }
+        const EbCmd_t& e = s_ebCmds[s_ebCurrentTick];
+        pCmd->buttons = (pCmd->buttons & ~(IN_DUCK | IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT))
+                      | (e.buttons & (IN_DUCK | IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT));
+        pCmd->buttons &= ~IN_JUMP;   // airborne (landed returned above)
+        pCmd->forwardmove = e.fwd;
+        pCmd->sidemove = e.side;
+        // always silent: the replay's angle folded into fwd/side, the real view handed back
+        EbFold(pCmd, e.view, origView);
+        s_ebCurrentTick++;
+    }
+    else if (bSimmed)
+        RestoreEntityToPredicted();   // never leave a sim tick live
+}
+
+// ============================================================================
+//  IClientMode::OverrideMouseInput (slot 20: SDK iclientmode.h, between the confirmed
+//  OverrideView 16 and CreateMove 21). botox override_mouse_input.cpp: feed the mouse steer and
+//  scale the turn while a plan flies.
+// ============================================================================
+void EdgeBug_MouseInput(float* x, float* y)
+{
+    if (!g_edgeBug || !x) return;
+    s_ebMouseX = std::clamp(s_ebMouseX + *x, -100000.f, 100000.f);
+    const int style = g_edgeBugStyle;
+    const bool live = style == 1 ? s_ebDonor.ticksLeft != 0 : s_ebDetected;
+    if (!live || !g_edgeBugMouseLock) return;
+    const float strength = std::clamp(g_edgeBugLockStrength, 0.f, 100.f) / 100.f;
+    const int type = g_edgeBugLockType;
+    if (style != 0)
+    {
+        const float keep = type == 1 ? 0.f : 1.f - strength;
+        *x *= keep;
+        if (style == 2 && type == 0 && y) *y *= keep;
+    }
+    else
+    {
+        const float progress = s_ebLockTicks > 0
+            ? std::clamp((float)(s_ebCurrentTick + 1) / (float)(s_ebLockTicks + 1), 0.f, 1.f) : 1.f;
+        *x *= 1.f - strength * (type == 0 ? progress : 1.f);
+    }
+}
+
+using OverrideMouseInput_t = void(__fastcall*)(void*, float*, float*);
+static OverrideMouseInput_t o_OverrideMouseInput = nullptr;
+static void __fastcall h_OverrideMouseInput(void* self, float* x, float* y)
+{
+    o_OverrideMouseInput(self, x, y);
+    __try { EdgeBug_MouseInput(x, y); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void* ScreenFx_FindClientMode();
+void EdgeBug_InstallMouseHook()
+{
+    if (o_OverrideMouseInput) return;
+    if (void* mode = ScreenFx_FindClientMode())
+        InstallVTableHook(mode, 20, "edgebug: OverrideMouseInput",
+                          (void*)h_OverrideMouseInput, (void**)&o_OverrideMouseInput);
+}

@@ -1,0 +1,332 @@
+#pragma once
+#include "../../globals/common.h"
+#include <string>   // RcDrawData carries the route lines the panel prints
+
+// Aletherium movement core port: bhop, jumpbug, autostrafe, strafe optimizer,
+// edge jump (engine prediction), fast stop/accelerate, duck speed, movement lock,
+// break jump. Binds = delusional style: mode 0 always on, 1 on hotkey, 2 toggle.
+
+// ==== Vec3 (the vector subset the movement code needs) ====
+struct Vec3
+{
+    float x = 0.f, y = 0.f, z = 0.f;
+
+    Vec3() {}
+    Vec3(float X, float Y, float Z) : x(X), y(Y), z(Z) {}
+
+    Vec3 operator+(const Vec3& v) const { return { x + v.x, y + v.y, z + v.z }; }
+    Vec3 operator-(const Vec3& v) const { return { x - v.x, y - v.y, z - v.z }; }
+    Vec3 operator*(float f)       const { return { x * f, y * f, z * f }; }
+    Vec3& operator+=(const Vec3& v) { x += v.x; y += v.y; z += v.z; return *this; }
+    Vec3& operator-=(const Vec3& v) { x -= v.x; y -= v.y; z -= v.z; return *this; }
+    Vec3& operator*=(float f) { x *= f; y *= f; z *= f; return *this; }
+    float& operator[](int i)       { return (&x)[i]; }
+    float  operator[](int i) const { return (&x)[i]; }
+
+    float Length2D()  const { return sqrtf(x * x + y * y); }
+    float LengthSqr() const { return x * x + y * y + z * z; }
+    float Length()    const { return sqrtf(LengthSqr()); }
+    bool  IsZero()    const { return x == 0.f && y == 0.f && z == 0.f; }
+    void  Set(float X = 0.f, float Y = 0.f, float Z = 0.f) { x = X; y = Y; z = Z; }
+    float Dot(const Vec3& v) const { return x * v.x + y * v.y + z * v.z; }
+    float DistTo(const Vec3& v) const { return (*this - v).Length(); }
+    void  Normalize() { float l = Length(); if (l > 0.f) { x /= l; y /= l; z /= l; } }
+};
+
+// 16-aligned Vec3 + w -- Ray_t needs it (engine SIMD reads)
+struct __declspec(align(16)) VectorAligned : Vec3
+{
+    VectorAligned() {}
+    VectorAligned& operator=(const Vec3& o) { Set(o.x, o.y, o.z); return *this; }
+    float w = 0.f;
+};
+
+// ==== math ====
+#define MV_PI 3.14159265358979323846f
+#define DEG2RADF(d) ((d) * (MV_PI / 180.f))
+#define RAD2DEGF(r) ((r) * (180.f / MV_PI))
+
+// surface extension (PAPER table 1, "eps"): every brush side is virtually pushed out by
+// this much, and it is the numerator offset in the trace fraction f = (s - eps)/(s1 - s2).
+// Every flush-brush bug (pixelwalk/pixelsurf/texturebug) lives inside this band
+#define MV_SURF_EPS 0.03125f
+
+inline float NormalizeAngle(float a) { return isfinite(a) ? remainderf(a, 360.f) : 0.f; }
+
+inline void VectorAngles(const Vec3& f, Vec3& out)
+{
+    float yaw, pitch;
+    if (f.y == 0.f && f.x == 0.f) { yaw = 0.f; pitch = f.z > 0.f ? 270.f : 90.f; }
+    else {
+        yaw = RAD2DEGF(atan2f(f.y, f.x));   if (yaw < 0.f) yaw += 360.f;
+        pitch = RAD2DEGF(atan2f(-f.z, f.Length2D())); if (pitch < 0.f) pitch += 360.f;
+    }
+    out = { pitch, yaw, 0.f };
+}
+inline Vec3 VectorAngles(const Vec3& f) { Vec3 r; VectorAngles(f, r); return r; }
+
+inline void AngleVectors(const Vec3& ang, Vec3* fwd, Vec3* right = nullptr, Vec3* up = nullptr)
+{
+    float sp = sinf(DEG2RADF(ang.x)), cp = cosf(DEG2RADF(ang.x));
+    float sy = sinf(DEG2RADF(ang.y)), cy = cosf(DEG2RADF(ang.y));
+    float sr = sinf(DEG2RADF(ang.z)), cr = cosf(DEG2RADF(ang.z));
+    if (fwd)   { fwd->x = cp * cy; fwd->y = cp * sy; fwd->z = -sp; }
+    if (right) { right->x = -1.f * sr * sp * cy + -1.f * cr * -sy; right->y = -1.f * sr * sp * sy + -1.f * cr * cy; right->z = -1.f * sr * cp; }
+    if (up)    { up->x = cr * sp * cy + -sr * -sy; up->y = cr * sp * sy + -sr * cy; up->z = cr * cp; }
+}
+
+// ==== trace structs (engine CGameTrace / Ray_t) ====
+// Here rather than in movement.cpp because backstab.cpp traces too, and two copies of
+// a 16-field engine struct is a layout drift waiting to happen.
+struct cplane_mv { Vec3 normal; float dist; unsigned char type, signbits, pad[2]; };
+struct csurface_mv { const char* name; short surfaceProps; unsigned short flags; };
+
+struct GameTrace_t
+{
+    Vec3 startpos;
+    Vec3 endpos;
+    cplane_mv plane;
+    float fraction = 1.f;
+    int contents = 0;
+    unsigned short dispFlags = 0;
+    bool allsolid = false;
+    bool startsolid = false;
+    // CGameTrace extras
+    float fractionleftsolid = 0.f;
+    csurface_mv surface{};
+    int hitgroup = 0;
+    short physicsbone = 0;
+    void* m_pEnt = nullptr;
+    int hitbox = 0;
+
+    bool DidHit() const { return fraction < 1.f || allsolid || startsolid; }
+};
+
+struct Ray_mv
+{
+    VectorAligned m_Start, m_Delta, m_StartOffset, m_Extents;
+    bool m_IsRay = true, m_IsSwept = true;
+
+    void Init(const Vec3& start, const Vec3& end)
+    {
+        m_Delta = end - start;
+        m_IsSwept = m_Delta.LengthSqr() != 0.f;
+        m_Extents.Set(); m_IsRay = true; m_StartOffset.Set();
+        m_Start = start;
+    }
+    void Init(const Vec3& start, const Vec3& end, const Vec3& mins, const Vec3& maxs)
+    {
+        m_Delta = end - start;
+        m_IsSwept = m_Delta.LengthSqr() != 0.f;
+        m_Extents = (maxs - mins) * 0.5f;
+        m_IsRay = m_Extents.LengthSqr() == 0.f;
+        Vec3 off = (mins + maxs) * 0.5f;
+        m_Start = start + off;
+        m_StartOffset = off * -1.f;
+    }
+};
+
+// IEngineTrace::TraceRay -- confirmed x64 slot, shared by movement + backstab
+inline constexpr int kTrace_TraceRay = 4;
+
+// ==== CUserCmd (TF2 x64, sizeof 72 -- same layout as bhop.cpp CUserCmd_t) ====
+struct UserCmd_t
+{
+    void*         vfptr;            // 0
+    int           command_number;   // 8
+    int           tick_count;       // 12
+    Vec3          viewangles;       // 16
+    float         forwardmove;      // 28
+    float         sidemove;         // 32
+    float         upmove;           // 36
+    int           buttons;          // 40
+    unsigned char impulse;          // 44
+    int           weaponselect;     // 48
+    int           weaponsubtype;    // 52
+    int           random_seed;      // 56
+    short         mousedx;          // 60
+    short         mousedy;          // 62
+    bool          hasbeenpredicted; // 64
+};
+
+// ==== bind runtime (delusional checkkey) ====
+// mode: 0 = always on, 1 = on hotkey (hold), 2 = toggle
+bool MovementKeyOK(int key, int mode);
+
+void Movement_Install();                 // resolve interfaces/sigs -- PollThread, after client.dll up
+void Movement_Run(UserCmd_t* pCmd);      // full per-cmd pipeline -- call from h_CreateMove after o_CreateMove
+// Same pipeline under dih's eject drain guard. Called by the aim half's CreateMove hook,
+// which owns that slot when that half loads (see src/hacks/aim/aim.h).
+void Movement_RunGuarded(UserCmd_t* pCmd);
+// botox air_stuck_final_stamp + air_stuck_shot_proof: call AFTER every other writer of the cmd
+// (the aim hook calls it after its aimbot / prediction end). No-op unless air stuck sent a pin.
+void Movement_AirStuckLastWriter(UserCmd_t* pCmd);
+
+// Re-express forwardmove/sidemove/upmove: they are read as a wish in vWishAngle's frame
+// and written back in vOldAngles' frame. Silent movement passes the fake angle as the
+// wish and keeps the real view; silent AIM passes the real view as the wish and the
+// fake angle as the frame the command will be sent in (backstab.cpp).
+void CorrectMovement(UserCmd_t* pCmd, Vec3 vWishAngle, Vec3 vOldAngles);
+
+// ==== CHLClient::CreateMove hook (VClient vtable slot 21) + CInput input plumbing ====
+// (was bhop.cpp -- folded in; pCmd read from CInput::m_pCommands[seq % MULTIPLAYER_BACKUP])
+using CreateMove_t = void(__fastcall*)(void* rcx, int seq, float frametime, bool active);
+extern CreateMove_t o_CreateMove;
+void __fastcall h_CreateMove(void* rcx, int seq, float frametime, bool active);
+
+extern void* g_input;   // CInput* (resolved via signature)
+bool ResolveInput();    // sig-scan client.dll -> g_input, true if found
+
+// ==== C_TFPlayer::AvoidPlayers -- "no push" ====
+// Client-side only: it rewrites forward/sidemove to steer you off nearby teammates
+// (tf_avoidteammates_pushaway, replicated so the client cannot just turn it off).
+// Skip the call = teammates stop shoving you. Nothing else in movement touched.
+using AvoidPlayers_t = void(__fastcall*)(void* rcx, UserCmd_t* pCmd);
+extern AvoidPlayers_t o_AvoidPlayers;
+void __fastcall h_AvoidPlayers(void* rcx, UserCmd_t* pCmd);
+
+// ==== movement indicator snapshot (movement thread -> render thread) ====
+// Published once per cmd at the end of the pipeline. Plain scalars, no lock: the render
+// thread only draws it, so the worst a torn read can do is show one stale digit.
+struct MvInd_t
+{
+    unsigned long long ms = 0;   // GetTickCount64 at publish; stale = not in a live cmd
+    bool  tbOn = false, tbHit = false, tbOwn = false;
+    int   tbPhase = 0, tbRide = 0, tbSeams = 0;
+    float tbD = 0.f, tbVin = 0.f, tbAim = 0.f;
+    bool  asOn = false, asHit = false;
+    bool  wcOn = false, wcHit = false;
+    bool  psOn = false, psHit = false;
+    // ps assist ("ast"): on = the assist bind is live, hit = it owns the arc right now
+    bool  astOn = false, astHit = false;
+    bool  ebOn = false, ebHit = false;
+    bool  strafeOn = false, ejOn = false, ljOn = false, mjOn = false;
+    bool  mjHit = false;                 // mini jump: hit = the takeoff duck went out this tick
+    bool  jbOn = false, jbHit = false;   // jumpbug: hit = the unduck+jump fired this tick
+    bool  onGround = false;
+    float speed = 0.f;
+    int   tick = 0;        // globals tickcount / curtime after Pred_End (real, not a sim's)
+    float curtime = 0.f;
+    int   wjSeq = 0;       // fake wall jump count: a change = takeoff at wjSpeed
+    float wjSpeed = 0.f;
+    // raw input, for the keystroke indicator (unit B). Same publish point, same safety:
+    // a torn read is one stale frame of a display-only overlay.
+    int   buttons = 0;
+    short mouseDx = 0, mouseDy = 0;
+};
+void MV_GetIndicators(MvInd_t& out);
+
+// ==== edge bug plan snapshot (movement thread -> render thread) ====
+// The winning variant's own simulated flight path -- not a re-sim and not a guess. `path` is
+// what is LEFT of it (the replay eats a point per tick, so the leftover line is the countdown)
+// and `at` is the tick the bug lands on. Empty / active = false whenever nothing is latched.
+struct EbDrawData
+{
+    std::vector<Vec3> path;
+    Vec3 at;
+    bool active = false;
+};
+void EB_GetDrawData(EbDrawData& out);
+
+// ==== PS finder/assist draw snapshot (movement thread -> render thread) ====
+// Render copies under the movement-side mutex; stale when aliveMs is old
+// (dead / not in game / movement pipeline idle).
+struct PsDrawData
+{
+    std::vector<Vec3> finderPts;   // finder-found surf spots (current map)
+    std::vector<Vec3> tbPts;       // finder-found texturebug seams (drawn with a red ring)
+    std::vector<Vec3> assistPts;   // saved assist targets (current map)
+    // whole-map scan (psmap.inl): confirmed surf segments, A then B, one pair per line
+    std::vector<Vec3> mapLines;
+    // ...and the texturebug seams that scan found. Its own list because it follows the map
+    // scan's switch, not the finder's: a scan is minutes of work and its marks outlive the aim
+    std::vector<Vec3> mapTbPts;
+    int  assistActive = -1;        // assistPts index the assist works toward (-1 = none)
+    bool lineActive = false;       // finder scan column being stretched
+    Vec3 lineA, lineB;
+    Vec3 localOrigin;              // for the distance fade
+    char boxText[64] = {};         // "minijump to <z>" popup text
+    unsigned long long boxMs = 0;  // GetTickCount64 at fire (0 = none)
+    unsigned long long aliveMs = 0;
+};
+void PS_GetDrawData(PsDrawData& out);
+void PS_GetBox(PsDrawData& out);   // boxText/boxMs only -- no vector copies
+
+// ==== whole-map pixel surf scan (psmap.inl) ====
+// The menu button toggles it; the scan itself lives on the movement thread, a slice per
+// command, and publishes its lines into PsDrawData::mapLines as it goes.
+struct PsMapScanState
+{
+    bool  busy = false;
+    int   done = 0, total = 0;   // seams verified / seams found on this map
+    int   lines = 0;             // surfs marked so far
+    int   tb = 0;                // ...and texturebug seams (red rings), found by trace on the way
+    float progress = 0.f;
+};
+void PS_MapScanToggle();              // start, or cancel a scan already running
+void PS_MapScanGet(PsMapScanState& out);
+
+// ==== route calculator snapshot (movement thread -> render thread) ====
+// Same contract as PsDrawData: the movement thread owns the markers and the solve, the render
+// thread only draws a copy. `gen` bumps on every edit so a menu row cannot act on a stale index.
+struct RcDrawPt
+{
+    Vec3 pos;
+    int  type = 0;         // rs::PointType (routesim.h)
+    bool enabled = true;
+    bool filtered = false; // its move list or stance flags are narrowed -- drawn with a *
+};
+
+struct RcDrawData
+{
+    std::vector<RcDrawPt>    pts;
+    bool        hasPixel = false;      // pixel calculator marker
+    Vec3        pixel;
+    bool        pixelSolve = false;    // the answer below came from the pixel calculator, not the route
+    // the first printed combination flown again tick by tick : the arc the overlay draws
+    // between the markers instead of a straight line. Empty until a solve lands
+    std::vector<Vec3> path;
+    // the answer, composed on the movement thread: combos best first, "(and +N more)", or why not
+    std::vector<std::string> lines;
+    std::string message;               // placement / binding / cancel note (empty = none)
+    bool        solving = false;
+    float       progress = 0.f;
+    unsigned    gen = 0;
+};
+void RC_GetDrawData(RcDrawData& out);
+void RC_RefreshLive();   // MAIN thread: player/building markers follow their entity
+
+// one marker, for the menu list
+struct RcPointInfo
+{
+    Vec3     pos;
+    int      type = 0;        // rs::PointType
+    unsigned moves = 0;       // rs::MoveBit mask: what may be pressed off it
+    bool     enabled = true;
+    bool     stand = true, duck = true;   // arrival stances allowed
+    bool     player = false;  // on a player's head
+    bool     building = false; // on a sentry / dispenser / teleporter
+    bool     snapped = false; // pixel finder z
+    bool     edgeZ = false;   // edgebug: z came off the nearest edge, not off where you clicked
+};
+
+// marker access for the menu list (all lock internally)
+unsigned    RC_PointsGen();
+int         RC_PointCount();
+bool        RC_PointGet(int i, RcPointInfo& out);
+void        RC_PointSet(int i, const RcPointInfo& in);   // applies + persists (type/moves/enabled/stance)
+void        RC_PointDelete(int i);
+void        RC_PointMove(int i, int dir);   // -1 / +1: swap with the marker before / after it
+const char* RC_MoveName(int bit);    // rs::MoveBit -> "longjump" etc (menu + panel share it)
+int         RC_MoveCount();
+const char* RC_TypeName(int type);
+int         RC_TypeCount();
+
+// assist point access for the render-thread ENTER window (all lock internally).
+// mask bits, readout order: 0 mini, 1 regular, 2 mini+duck, 3 crouch, 4 long,
+// 5 long+duck, 6 double jump. Gen bumps on load/add/erase -- open window closes.
+unsigned PS_PointsGen();
+bool PS_PointGet(int i, Vec3& pos, int& mask, float& radius); // false = index stale
+void PS_PointSetMask(int i, int mask);          // applies + persists instantly
+void PS_PointSetRadius(int i, float radius);    // 0 = follow the global radius slider
+void PS_PointDelete(int i);                     // erase + persist

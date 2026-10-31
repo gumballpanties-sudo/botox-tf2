@@ -1,0 +1,2595 @@
+#include "menu.h"
+#include "../aim/aim.h"
+#include "config.h"
+#include "../network/mmfix.h"
+#include "../hud/movind.h"
+#include "../network/netregion.h"
+#include "../hud/scoreboard.h"
+#include "../screen/colorcorrect.h"
+#include "../hud/crosshair.h"   // Crosshair_BlendCombo
+#include "../visuals/lagres.h"
+#include "../movement/movement.h"   // RC_* marker access for the route calculator's marker list
+#include "../visuals/skins.h"      // skinchanger tab: weapon/warpaint/reskin tables + particle list
+#include "../../dependencies/data/skindata.h"
+#include "../../dependencies/imgui/imgui_internal.h"
+#include "menu_chrome.h"  // the panels, the group box flow and every metric they use
+
+#include <cmath>   // isfinite -- SliderF refuses a NaN/inf value as a range bound
+#include <cctype>  // tolower -- the searchable warpaint/particle combos
+#include <algorithm>
+#include <ctime>     // BuildDateText: localtime_s off the PE timestamp
+#include <cstdint>
+#include <string>
+#include "unitA_menu.h"
+#include "unitB_menu.h"
+#include "unitC_menu.h"
+#include "unitD_menu.h"
+#include "unitD3_menu.h"
+#include "unitE_menu.h"
+#include "unitF_menu.h"
+
+// ==== tooltips: OFF ==============================================================
+// Every menu tooltip goes through here instead of ImGui::SetTooltip. Body is empty, so
+// nothing draws and no tooltip window is ever created -- which also keeps the tooltip
+// out of the draw-data split in render.cpp (a tooltip is its own root window and would
+// otherwise have to be classified). Text is kept at every call site: to bring tooltips
+// back, uncomment the one line below.
+static void MenuTooltip(const char* fmt, ...)
+{
+    (void)fmt;
+    // va_list a; va_start(a, fmt); ImGui::SetTooltipV(fmt, a); va_end(a);
+}
+
+// ==== botox imgui fork widgets (dependencies/imgui/imgui_widgets.cpp), ported 1:1 =========
+// Declared in menu.h so unit menus and aim.cpp port botox tab code verbatim. Fonts:
+// BoldFont() = font_name_verdana_bd_11, g_fontIcon13 = font_name_icon_13.
+
+// botox key_names, 256 entries, one per vk
+static const char* const kKeyNames[256] = {
+    "[-]",   "[m1]",  "[m2]",  "[cn]",  "[m3]",  "[m4]",  "[m5]",  "[-]",   "[bac]", "[tab]", "[-]",   "[-]",   "[clr]", "[ret]", "[-]",   "[-]",
+    "[shi]", "[ctl]", "[men]", "[pau]", "[cap]", "[kan]", "[-]",   "[jun]", "[fin]", "[kan]", "[-]",   "[esc]", "[con]", "[nco]", "[acc]", "[mad]",
+    "[spa]", "[pgu]", "[pgd]", "[end]", "[hom]", "[lef]", "[up]",  "[rig]", "[dow]", "[sel]", "[pri]", "[exe]", "[pri]", "[ins]", "[del]", "[hel]",
+    "[0]",   "[1]",   "[2]",   "[3]",   "[4]",   "[5]",   "[6]",   "[7]",   "[8]",   "[9]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",
+    "[-]",   "[a]",   "[b]",   "[c]",   "[d]",   "[e]",   "[f]",   "[g]",   "[h]",   "[i]",   "[j]",   "[k]",   "[l]",   "[m]",   "[n]",   "[o]",
+    "[p]",   "[q]",   "[r]",   "[s]",   "[t]",   "[u]",   "[v]",   "[w]",   "[x]",   "[y]",   "[z]",   "[win]", "[win]", "[app]", "[-]",   "[sle]",
+    "[num]", "[num]", "[num]", "[num]", "[num]", "[num]", "[num]", "[num]", "[num]", "[num]", "[mul]", "[add]", "[sep]", "[min]", "[dec]", "[div]",
+    "[f1]",  "[f2]",  "[f3]",  "[f4]",  "[f5]",  "[f6]",  "[f7]",  "[f8]",  "[f9]",  "[f10]", "[f11]", "[f12]", "[f13]", "[f14]", "[f15]", "[f16]",
+    "[f17]", "[f18]", "[f19]", "[f20]", "[f21]", "[f22]", "[f23]", "[f24]", "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",
+    "[num]", "[scr]", "[equ]", "[mas]", "[toy]", "[oya]", "[oya]", "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",
+    "[shi]", "[shi]", "[ctr]", "[ctr]", "[alt]", "[alt]", "[bbk]", "[bfw]", "[brf]", "[bst]", "[bse]", "[bfa]", "[bho]", "[mut]", "[vo-]", "[vo+]",
+    "[nxt]", "[prv]", "[stp]", "[ply]", "[mai]", "[sel]", "[ap1]", "[ap2]", "[-]",   "[-]",   "[;]",   "[=]",   "[,]",   "[dsh]", "[.]",   "[/]",
+    "[`]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",
+    "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[-]",   "[[]",   "[\\]",  "[]]",   "[']",   "[oe8]",
+    "[-]",   "[oem]", "[<>]",  "[oem]", "[oem]", "[ime]", "[oem]", "[pkt]", "[-]",   "[oem]", "[oem]", "[oem]", "[oem]", "[oem]", "[oem]", "[oem]",
+    "[oem]", "[oem]", "[oem]", "[oem]", "[oem]", "[oem]", "[att]", "[crs]", "[exs]", "[eof]", "[ply]", "[zoo]", "[-]",   "[pa1]", "[clr]", "[-]"
+};
+
+static ImU32 BlendU32(const ImVec4& a, const ImVec4& b, float t)
+{
+    return ImGui::GetColorU32(ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t));
+}
+
+// botox popup chrome (OptionPopup / save_popup): 20px band, centred bold title, outline, accent line
+static void PopupChrome(const char* title, const char* title_end, ImGuiID anim_id)
+{
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+    const float rnd = ImGui::GetStyle().WindowRounding - 2.f;
+    ImGui::PushClipRect(p, ImVec2(p.x + sz.x, p.y + 20.f), false);
+    dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + 20.f), kBandBg, rnd, ImDrawFlags_RoundCornersTop);
+    ImGui::PopClipRect();
+    ImGui::PushClipRect(p, ImVec2(p.x + sz.x, p.y + sz.y), false);
+    dl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y), kTabBorder, rnd);
+    auto anim = ImAnimationHelper(anim_id, ImGui::GetIO().DeltaTime);
+    anim.Update(ImGui::IsMouseHoveringRect(p, ImVec2(p.x + sz.x, p.y + sz.y)) ? 3.f : -2.f, 1.f, 0.5f, 1.f);
+    ImGui::PopClipRect();
+    ImFont* f = BoldFont();
+    const ImVec2 ts = f->CalcTextSizeA(f->FontSize, FLT_MAX, 0.f, title, title_end);
+    dl->AddText(f, f->FontSize, ImVec2(p.x + (sz.x - ts.x) * 0.5f, p.y + (20.f - ts.y) * 0.5f),
+                ImGui::GetColorU32(ImGuiCol_Text, anim.AnimationData->second), title, title_end);
+    RenderFadedGradientLine(dl, ImVec2(p.x, p.y + 20.f), ImVec2(sz.x, 1.f), ImColor(Accent()));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 20.f);
+}
+
+// Right-edge lane of the row just drawn: a cog and a keybind on one row stack leftward
+// (first caller gets the right edge) instead of drawing on top of each other.
+static float RowLaneX(float w)
+{
+    static ImGuiID s_win = 0;
+    static float s_y = -1.f, s_used = 0.f;
+    static int s_frame = -1;
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    const float y = win->DC.CursorPosPrevLine.y;
+    if (s_win != win->ID || s_y != y || s_frame != ImGui::GetFrameCount())
+    {
+        s_win = win->ID; s_y = y; s_used = 0.f; s_frame = ImGui::GetFrameCount();
+    }
+    const float x = ImGui::GetRowFrameRight() - s_used - w;
+    s_used += w + 6.f;
+    return x;
+}
+
+void ImGui::OptionPopup(const char* str_id, const std::function<void()>& function, const ImVec2& window_size)
+{
+    ImGuiWindow* window = GetCurrentWindow();
+    const char* title_end = FindRenderedTextEnd(str_id);
+    {
+        ImFont* icon = g_fontIcon13 ? g_fontIcon13 : GetFont();
+        const char* cog = "\xef\x80\x93";   // U+F013
+        const ImVec2 cs = icon->CalcTextSizeA(icon->FontSize, FLT_MAX, 0.f, cog);
+        // pinned to the row's right edge, on the row just drawn (cursor is already one row below)
+        const float cog_x = RowLaneX(15.f);
+        const float cog_y = GetWindowPos().y + GetCursorPosY() - window->Scroll.y - 20.f;
+        const bool hovered = IsMouseHoveringRect(ImVec2(cog_x, cog_y), ImVec2(cog_x + 15.f, cog_y - 1.f + cs.y), false);
+        window->DrawList->AddText(icon, icon->FontSize, ImVec2(cog_x, cog_y),
+                                  hovered ? IM_COL32_WHITE : IM_COL32(190, 190, 190, 255), cog);
+        if (hovered && (IsMouseClicked(ImGuiMouseButton_Right) || IsMouseClicked(ImGuiMouseButton_Left)))
+            OpenPopup(str_id);
+    }
+    SetNextWindowSize(window_size);
+    if (BeginPopup(str_id))
+    {
+        PopupChrome(str_id, title_end, ImHashStr(str_id));
+        function();
+        EndPopup();
+    }
+}
+
+// botox Keybind: "[key]" on the row above, right edge, 50% text -> accent while listening.
+// Left click = listen (esc clears, click away cancels), right click = style popup.
+// mode: 0 always on, 1 hold, 2 toggle (same order as botox EKeyStyles).
+bool ImGui::Keybind(const char* label, int* key, int* mode, bool has_style)
+{
+    ImGuiWindow* window = GetCurrentWindow();
+    if (window->SkipItems) return false;
+    static ImGuiID s_listening = 0;
+    static bool s_clean = false;   // every key seen up since listening began
+
+    const ImGuiID id = window->GetID(label);
+    if (*key < 0 || *key > 255) *key = 0;
+    const bool listening = (s_listening == id);
+    const char* disp = listening ? "[...]" : (*key ? kKeyNames[*key] : "[none]");
+
+    SameLine(0.f, 0.f);
+    const ImVec2 ts = CalcTextSize(disp);
+    window->DC.CursorPos.x = RowLaneX(ts.x);
+    const ImRect bb(window->DC.CursorPos, ImVec2(window->DC.CursorPos.x + ts.x, window->DC.CursorPos.y + ts.y));
+    ItemSize(ts, 0.f);
+    if (!ItemAdd(bb, id)) return false;
+
+    bool changed = false;
+    const bool hovered = ItemHoverable(bb, id);
+    if (hovered && IsMouseClicked(0)) { if (!listening) { s_listening = id; s_clean = false; *key = 0; } }
+    else if (IsMouseClicked(0)) { if (listening) s_listening = 0; }
+    else if (hovered && IsMouseClicked(1) && has_style) OpenPopup(label);
+
+    if (s_listening == id)
+    {
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { *key = 0; s_listening = 0; }
+        else
+        {
+            bool anyDown = false;
+            int pressed = 0;
+            for (int vk = 0x01; vk <= 0xFE && !pressed; ++vk)
+            {
+                if (vk == VK_ESCAPE || vk == 0x07 || vk == 0x0A || vk == 0x0B || vk == 0xE5 || vk == 0xE7) continue;
+                if (GetAsyncKeyState(vk) & 0x8000) { anyDown = true; if (s_clean) pressed = vk; }
+            }
+            if (!anyDown) s_clean = true;   // the click that started listening must be released first
+            if (pressed) { *key = pressed; s_listening = 0; changed = true; }
+        }
+    }
+
+    PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 8.f));
+    SetNextWindowSize(ImVec2(61.f, 65.f), ImGuiCond_Always);
+    // botox frame_bb.Max = cursor - label size: popup opens up-left of the key text
+    SetNextWindowPos(ImVec2(bb.Min.x - ts.x + 5.f, bb.Min.y - ts.y), ImGuiCond_Always);
+    if (BeginPopup(label, ImGuiWindowFlags_NoMove))
+    {
+        ImGuiWindow* pw = GetCurrentWindow();
+        pw->DrawList->AddRect(pw->Pos, ImVec2(pw->Pos.x + pw->Size.x, pw->Pos.y + pw->Size.y), kTabBorder, GetStyle().WindowRounding);
+        if (Selectable("always on", *mode == 0, ImGuiSelectableFlags_DontClosePopups)) *mode = 0;
+        if (Selectable("hold",      *mode == 1, ImGuiSelectableFlags_DontClosePopups)) *mode = 1;
+        if (Selectable("toggle",    *mode == 2, ImGuiSelectableFlags_DontClosePopups)) *mode = 2;
+        EndPopup();
+    }
+    PopStyleVar();
+
+    auto anim = ImAnimationHelper(id + ImHashStr("text-animation"), GetIO().DeltaTime);
+    anim.Update(2.f, (s_listening == id) ? 2.f : -2.f);
+    ImVec4 tc = GetStyleColorVec4(ImGuiCol_Text); tc.w *= 0.5f;
+    ImVec4 ac = GetStyleColorVec4(ImGuiCol_Accent); ac.w = 1.f;
+    window->DrawList->AddText(bb.Min, BlendU32(tc, ac, anim.AnimationData->second), disp);
+    return changed;
+}
+
+// botox MultiCombo on a bitmask (bit i = item i): preview = picked items joined ", ", word-wrapped
+// to the frame with "...", "none" when empty; rows toggle without closing.
+bool ImGui::MultiCombo(const char* label, int* mask, const char* const items[], int count)
+{
+    if (GetCurrentWindow()->SkipItems) return false;
+    std::string buf;
+    for (int i = 0; i < count; ++i)
+        if (*mask & (1 << i)) { if (!buf.empty()) buf += ", "; buf += items[i]; }
+    if (buf.empty()) buf = "none";
+    else
+    {
+        ImGuiContext& g = *GImGui;
+        const float w = GetRowFrameWidth();
+        const char* wrap = g.Font->CalcWordWrapPositionA(GetCurrentWindow()->FontWindowScale, buf.data(), buf.data() + buf.size(),
+                                                        w - g.Style.FramePadding.x * 2.f);
+        const size_t n = (size_t)(wrap - buf.data());
+        if (n > 0 && n < buf.size()) { buf.resize(n); buf += "..."; }
+    }
+    bool changed = false;
+    if (BeginCombo(label, buf.c_str(), 0))
+    {
+        for (int i = 0; i < count; ++i)
+            if (Selectable(items[i], (*mask & (1 << i)) != 0, ImGuiSelectableFlags_DontClosePopups)) { *mask ^= (1 << i); changed = true; }
+        EndCombo();
+    }
+    return changed;
+}
+
+// botox ColorEdit4(label, col, flags, swatch_slot): ONE row -- label at the row's left edge,
+// swatch pinned to the row's right edge (slot N = N swatches further left), click = botox picker
+// popup. The body is the imgui fork's ColorEdit4 (botox port); this name stays for the call sites.
+bool ImGui::ColorRow(const char* label, float col[4], ImGuiColorEditFlags flags, int swatch_slot)
+{
+    return ColorEdit4(label, col, flags, swatch_slot);
+}
+
+void MenuSectionHeader(const char* label) { SectionHeader(label); }
+
+void MenuBindKey(const char* id, int* key, int* mode) { ImGui::Keybind(id, key, mode, true); }
+
+// key capture only, no style popup (edge-press actions: set/delete point)
+static void BindKeyNoMode(const char* id, int* key)
+{
+    int unused = 1;
+    ImGui::Keybind(id, key, &unused, false);
+}
+
+// ==== sliders =======================================================================
+// A slider's min/max bound the DRAG only, never the value. Ctrl+click (or right-click)
+// any slider to type a value -- negative fog start, a fog end past 10000 -- imgui keeps
+// it as typed (no ImGuiSliderFlags_AlwaysClamp anywhere in the menu) and config.cpp
+// round-trips it through a plain %.4f / atof, so it saves and reloads unchanged.
+//
+// What was missing is the DRAW: a value outside [lo,hi] pinned the thumb at an end, and
+// the very next drag snapped it back into range with no way to get out again. These two
+// widen the drawn range to hold the current value, so an out-of-range value shows where
+// it actually sits and stays draggable. The normal range is untouched while the value is
+// inside it -- widening happens only for a value that is ALREADY out, so no drag can
+// reach a region the slider didn't already offer.
+//
+// Non-finite is refused (NaN/inf would make the range itself garbage) -- the value is
+// still whatever was typed, only the bar falls back to its declared range.
+static bool SliderF(const char* label, float* v, float lo, float hi, const char* fmt = "%.3f")
+{
+    float dlo = lo, dhi = hi;
+    if (isfinite(*v))
+    {
+        if (*v < dlo) dlo = *v;
+        if (*v > dhi) dhi = *v;
+    }
+    return ImGui::SliderFloat(label, v, dlo, dhi, fmt);
+}
+
+static bool SliderI(const char* label, int* v, int lo, int hi, const char* fmt = "%d")
+{
+    const int dlo = *v < lo ? *v : lo;
+    const int dhi = *v > hi ? *v : hi;
+    return ImGui::SliderInt(label, v, dlo, dhi, fmt);
+}
+
+static void CcCurveEditor()
+{
+    static int s_chan = 0;      // 0 = master (rgb), 1/2/3 = R/G/B
+    static int s_drag = -1;
+
+    static const char* k_names[4]  = { "rgb", "r", "g", "b" };
+    static const ImU32 k_bright[4] = { IM_COL32(235,235,235,240), IM_COL32(235, 95, 95,240),
+                                       IM_COL32( 95,215,110,240), IM_COL32(100,150,255,240) };
+    static const ImU32 k_dim[4]    = { IM_COL32(235,235,235, 60), IM_COL32(235, 95, 95, 60),
+                                       IM_COL32( 95,215,110, 60), IM_COL32(100,150,255, 60) };
+
+    {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        const float gap   = ImGui::GetStyle().ItemSpacing.x;
+        const float bw    = (avail - gap * 3.f) / 4.f;
+        for (int ch = 0; ch < 4; ++ch)
+        {
+            if (ch) ImGui::SameLine(0.f, gap);
+            const bool on = (s_chan == ch);
+            ImGui::PushID(ch);
+            if (on)
+            {
+                const ImVec4 c = ImGui::ColorConvertU32ToFloat4(k_bright[ch]);
+                ImGui::PushStyleColor(ImGuiCol_Button,        c);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, c);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  c);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.10f, 0.10f, 0.10f, 1.f));
+            }
+            if (ImGui::Button(k_names[ch], ImVec2(bw, 0.f))) { s_chan = ch; s_drag = -1; }
+            if (on) ImGui::PopStyleColor(4);
+            ImGui::PopID();
+        }
+    }
+
+    CcCurve& cv = g_ccCurve[s_chan];
+
+    const float  w  = ImGui::GetContentRegionAvail().x;
+    const float  h  = (w < 220.f) ? w : 220.f;      // square until it would eat the tab
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p1(p0.x + w, p0.y + h);
+
+    ImGui::InvisibleButton("##ccgraph", ImVec2(w, h));
+    const bool hov = ImGui::IsItemHovered();
+    const bool act = ImGui::IsItemActive();
+
+    auto ToScreen = [&](float x, float y) { return ImVec2(p0.x + x * w, p0.y + (1.f - y) * h); };
+
+    const ImVec2 mp = ImGui::GetIO().MousePos;
+    const float  mx = (mp.x - p0.x) / w;
+    const float  my = 1.f - (mp.y - p0.y) / h;
+
+    // Nearest control point to the cursor, in pixels. One hit test drives grab, add and
+    // remove, so they can never disagree about which point is under the mouse.
+    int   hit  = -1;
+    float hitD = 1e9f;
+    for (int i = 0; i < cv.n; ++i)
+    {
+        const ImVec2 s = ToScreen(cv.x[i], cv.y[i]);
+        const float  d = hypotf(mp.x - s.x, mp.y - s.y);
+        if (d < hitD) { hitD = d; hit = i; }
+    }
+    const bool onPoint = (hov && hitD <= 11.f);
+
+    if (act && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        s_drag = onPoint ? hit : CcAddPoint(cv, mx, my);
+    if (s_drag >= 0 && s_drag < cv.n && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        CcMovePoint(cv, s_drag, mx, my);
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_drag = -1;
+    if (onPoint && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+    {
+        CcRemovePoint(cv, hit);
+        s_drag = -1;
+        hit    = -1;
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, IM_COL32(18, 18, 18, 235), 3.f);
+    for (int i = 1; i < 4; ++i)
+    {
+        const float gx = p0.x + w * i * 0.25f;
+        const float gy = p0.y + h * i * 0.25f;
+        dl->AddLine(ImVec2(gx, p0.y), ImVec2(gx, p1.y), IM_COL32(255, 255, 255, 16));
+        dl->AddLine(ImVec2(p0.x, gy), ImVec2(p1.x, gy), IM_COL32(255, 255, 255, 16));
+    }
+    dl->AddLine(ImVec2(p0.x, p1.y), ImVec2(p1.x, p0.y), IM_COL32(255, 255, 255, 30));
+    dl->AddRect(p0, p1, ImGui::GetColorU32(ImGuiCol_Border), 3.f);
+
+    // Inactive channels first so the one being edited is never drawn under another. A
+    // channel still on the diagonal is skipped: three identity lines lying on the
+    // reference diagonal is noise, not information.
+    const int kSeg = 96;
+    ImVec2 pts[kSeg + 1];
+    for (int pass = 0; pass < 2; ++pass)
+        for (int ch = 0; ch < 4; ++ch)
+        {
+            const bool on = (ch == s_chan);
+            if (on != (pass == 1)) continue;
+            if (!on && CcCurveIsIdentity(g_ccCurve[ch])) continue;
+            for (int i = 0; i <= kSeg; ++i)
+            {
+                const float x = (float)i / (float)kSeg;
+                pts[i] = ToScreen(x, CcEval(g_ccCurve[ch], x));
+            }
+            dl->AddPolyline(pts, kSeg + 1, on ? k_bright[ch] : k_dim[ch],
+                            ImDrawFlags_None, on ? 1.8f : 1.f);
+        }
+
+    for (int i = 0; i < cv.n; ++i)
+    {
+        const ImVec2 s   = ToScreen(cv.x[i], cv.y[i]);
+        const bool   lit = (s_drag == i) || (onPoint && hit == i);
+        const float  r   = lit ? 5.0f : 3.8f;
+        dl->AddCircleFilled(s, r, lit ? IM_COL32(255, 255, 255, 255) : k_bright[s_chan]);
+        dl->AddCircle(s, r, IM_COL32(15, 15, 15, 210), 0, 1.2f);
+    }
+
+    // Readout in 8-bit codes, because that is the unit the curve actually lands in.
+    if (s_drag >= 0 && s_drag < cv.n)
+        ImGui::Text("%s   in %3d   out %3d", k_names[s_chan],
+                    (int)(cv.x[s_drag] * 255.f + 0.5f), (int)(cv.y[s_drag] * 255.f + 0.5f));
+    else if (hov)
+        ImGui::TextDisabled("left add / drag, right remove");
+    else
+        ImGui::TextDisabled("%s   %d points", k_names[s_chan], cv.n);
+
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float bw2 = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+    if (ImGui::Button("reset curve", ImVec2(bw2, 0.f))) CcResetCurve(cv);
+    ImGui::SameLine(0.f, gap);
+    if (ImGui::Button("reset all curves", ImVec2(bw2, 0.f)))
+        for (int i = 0; i < 4; ++i) CcResetCurve(g_ccCurve[i]);
+}
+
+// ==== tab bodies ====================================================================
+// Was three side-by-side columns in one window. Same widgets, same order inside a
+// section -- they just live in a Tab_* function now and only one runs per frame.
+// PushItemWidth(-1) is done ONCE around the switch in RenderMenu, so nothing here
+// pushes or pops it.
+
+static void Page_VisualsEsp()
+{
+    menu_columns_begin();
+    if (menu_group_begin("players"))
+    {
+        // UNIT_MENU_SLOT visuals_esp
+        UnitC_Menu_visuals_esp();
+    }
+    menu_group_end();
+
+    menu_columns_next();
+    if (menu_group_begin("chams"))
+        UnitC_Menu_visuals_chams();
+    menu_group_end();
+    menu_columns_end();
+}
+
+// Skybox name combo, shared by the botox-named "sky" row below. Builtins first, then
+// whatever the user last typed (custom), so the combo never loses the live value.
+static void SkyboxCombo()
+{
+    static const char* kSkyList[] = {
+        "sky_tf2_04", "sky_upward", "sky_dustbowl_01", "sky_goldrush_01",
+        "sky_granary_01", "sky_well_01", "sky_gravel_01", "sky_badlands_01",
+        "sky_hydro_01", "sky_night_01", "sky_nightfall_01", "sky_trainyard_01",
+        "sky_stormfront_01", "sky_morningsnow_01", "sky_alpinestorm_01",
+        "sky_harvest_01", "sky_harvest_night_01", "sky_halloween",
+        "sky_halloween_night_01", "sky_halloween_night2014_01",
+        "sky_island_01", "sky_jungle_01", "sky_invasion2fort_01",
+        "sky_coastal_01", "sky_outpost_01", "sky_rainbow_01",
+    };
+    constexpr int kSkyCount = (int)(sizeof(kSkyList) / sizeof(kSkyList[0]));
+
+    // -1 = custom; -2 = unsynced (match g_skyName once)
+    static int s_skySel = -2;
+    if (s_skySel == -2)
+    {
+        s_skySel = -1;
+        for (int i = 0; i < kSkyCount; ++i)
+            if (strcmp(kSkyList[i], g_skyName) == 0) { s_skySel = i; break; }
+    }
+
+    const char* preview = (s_skySel >= 0) ? kSkyList[s_skySel] : "custom";
+    if (ImGui::BeginCombo("skybox", preview))
+    {
+        for (int i = 0; i < kSkyCount; ++i)
+            if (ImGui::Selectable(kSkyList[i], s_skySel == i))
+            {
+                s_skySel = i;
+                strncpy(g_skyName, kSkyList[i], sizeof(g_skyName) - 1);
+                g_skyName[sizeof(g_skyName) - 1] = '\0';
+            }
+        if (ImGui::Selectable("custom", s_skySel == -1))
+            s_skySel = -1;
+        ImGui::EndCombo();
+    }
+    if (s_skySel == -1)
+        ImGui::InputText("##skyname", g_skyName, sizeof(g_skyName));
+}
+
+static void Page_VisualsWorld()
+{
+    menu_columns_begin();
+    if (menu_group_begin("world"))
+    {
+        ImGui::Checkbox("precipitation", &g_weatherEnable);
+        if (g_weatherEnable)
+            ImGui::OptionPopup("precipitation settings", [&]() {
+                // combo index 0/1 = g_weatherMode 1/2 (0 is "off"). Binding the combo straight to
+                // g_weatherMode made "rain" write 0 (off) and "snow" write 1 (rain).
+                int type = (g_weatherMode == 2) ? 1 : 0;
+                if (ImGui::Combo("type##precipitation", &type, "rain\0" "snow\0"))
+                    g_weatherMode = type + 1;
+                if (g_weatherMode != 2)
+                {
+                    // Floors are NOT taste: speed 0 divides by zero in ComputeEmissionArea,
+                    // length 0 collapses the tracer quad, radius 0 is an empty emission box.
+                    SliderF("alpha##rain", &g_rainAlpha, 0.05f, 1.f, "%.2f");
+                    SliderF("speed##rain", &g_rainSpeed, 50.f, 2000.f, "%.0f");
+                    SliderF("width##rain", &g_rainWidth, 0.05f, 5.f, "%.2f");
+                    SliderF("length##rain", &g_rainLength, 0.01f, 1.f, "%.2f");
+                    SliderF("radius##rain", &g_rainRadius, 256.f, 5000.f, "%.0f");
+                    SliderF("side vel##rain", &g_rainSideVel, 0.f, 500.f, "%.0f");
+                }
+                else
+                {
+                    SliderF("alpha##snow", &g_snowAlpha, 0.05f, 1.f, "%.2f");
+                    SliderF("speed##snow", &g_snowSpeed, 20.f, 500.f, "%.0f");
+                    SliderF("size##snow", &g_snowWidth, 0.05f, 10.f, "%.1f");
+                    // A flake is still a tracer quad -- r_rainlength 0 draws literally nothing.
+                    SliderF("trail##snow", &g_snowLength, 0.01f, 1.f, "%.2f");
+                    SliderF("radius##snow", &g_snowRadius, 256.f, 5000.f, "%.0f");
+                    SliderF("drift##snow", &g_snowSideVel, 0.f, 100.f, "%.0f");
+                    SliderF("density##snow", &g_snowDensity, 0.05f, 1.f, "%.2f");
+                }
+            }, ImVec2(220.f, -1));
+
+        SkyboxCombo();
+
+        ImGui::Checkbox("fog", &g_fogEnable);
+        if (g_fogEnable)
+            ImGui::OptionPopup("fog settings", [&]() {
+                ImGui::ColorEdit4("color##fog", g_fogColor);
+                SliderF("start##fog", &g_fogStart, 0.f, 5000.f, "%.0f");
+                SliderF("end##fog", &g_fogEnd, 0.f, 10000.f, "%.0f");
+                SliderF("density##fog", &g_fogDensity, 0.f, 1.f, "%.2f");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("flip world", &g_flipWorld);
+
+        // UNIT_MENU_SLOT visuals_world (world fov, fullbright, dlight, sun angle, world/prop
+        // texture colour, weather particle colour, minecraft sky)
+        UnitD_Menu_visuals_world();
+    }
+    menu_group_end();
+
+    if (menu_group_begin("edicts"))
+        UnitC_Menu_visuals_world();
+    menu_group_end();
+
+    menu_columns_next();
+    if (menu_group_begin("removals"))
+    {
+        ImGui::Checkbox("no hats", &g_noHats);
+        ImGui::Checkbox("no unusual effects", &g_noUnusual);
+        ImGui::Checkbox("remove ragdolls", &g_removeRagdolls);
+        ImGui::Checkbox("remove prop fade", &g_removePropFade);
+        ImGui::Checkbox("fps boost", &g_fpsBoost);
+        ImGui::Checkbox("remove screen effects", &g_removeScreenEffects);
+        ImGui::Checkbox("disable interp", &g_disableInterpEnable);
+        ImGui::Checkbox("remove visual recoil", &g_removeVisualRecoilEnable);
+    }
+    menu_group_end();
+
+    if (menu_group_begin("viewmodel"))
+    {
+        ImGui::Checkbox("sway", &g_vmSwayEnable);
+        if (g_vmSwayEnable)
+            ImGui::OptionPopup("sway settings", [&]() {
+                SliderF("sway scale", &g_vmSwayScale, 0.f, 10.f, "%.1f");
+                SliderF("sway interp", &g_vmSwayInterp, 0.f, 1.f, "%.2f");
+                if (ImGui::Button("csgo sway##vs", ImVec2(-1.f, 0.f)))
+                {
+                    g_vmSwayScale = 1.6f;    // cl_wpn_sway_scale  (CS:GO default)
+                    g_vmSwayInterp = 0.1f;   // cl_wpn_sway_interp (CS:GO default)
+                }
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("offset", &g_vmOffsetEnable);
+        if (g_vmOffsetEnable)
+            ImGui::OptionPopup("offset settings", [&]() {
+                SliderF("x##vmoffset", &g_vmOffsetX, -20.f, 20.f, "%.1f");
+                SliderF("y##vmoffset", &g_vmOffsetY, -20.f, 20.f, "%.1f");
+                SliderF("z##vmoffset", &g_vmOffsetZ, -20.f, 20.f, "%.1f");
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("remove bob", &g_vmRemoveBob);
+
+        ImGui::BeginDisabled(g_vmRemoveBob);
+        ImGui::Checkbox("csgo bob", &g_vmCsBob);
+        if (g_vmCsBob)
+            ImGui::OptionPopup("csgo bob settings", [&]() {
+                SliderF("lower amount##vcb", &g_vmCsBobLower, 5.f, 30.f, "%.1f");
+                SliderF("bob up/down##vcb", &g_vmCsBobVert, 0.1f, 2.f, "%.2f");
+                SliderF("bob side##vcb", &g_vmCsBobLat, 0.1f, 2.f, "%.2f");
+                SliderF("bob cycle##vcb", &g_vmCsBobCycle, 0.1f, 2.f, "%.2f");
+                SliderF("bob up time##vcb", &g_vmCsBobUp, 0.05f, 0.95f, "%.2f");
+                if (ImGui::Button("csgo defaults##vcb", ImVec2(-1.f, 0.f)))
+                {
+                    g_vmCsBobLower = 21.f; g_vmCsBobVert = 0.25f; g_vmCsBobLat = 0.4f;
+                    g_vmCsBobCycle = 0.98f; g_vmCsBobUp = 0.5f;
+                }
+            }, ImVec2(200.f, -1));
+        ImGui::EndDisabled();
+
+        ImGui::Checkbox("csgo jump lower", &g_vmCsGunLower);
+        if (g_vmCsGunLower)
+            ImGui::OptionPopup("csgo jump lower settings", [&]() {
+                SliderF("angle##vcgl", &g_vmCsGunLowerAngle, 0.f, 20.f, "%.1f");
+                SliderF("speed##vcgl", &g_vmCsGunLowerSpeed, 0.01f, 2.f, "%.2f");
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("csgo landing dip", &g_vmCsLandDip);
+        if (g_vmCsLandDip)
+            ImGui::OptionPopup("csgo landing dip settings", [&]() {
+                SliderF("dip##vcld", &g_vmCsLandDipAmt, 0.f, 20.f, "%.0f");
+                SliderF("dip time##vcld", &g_vmCsLandDipTime, 0.03f, 0.5f, "%.2fs");
+            }, ImVec2(200.f, -1));
+
+        // The cfg has been found sitting on vmAlpha=1.0000 -- the value the feature itself
+        // treats as off (h_DrawModelExecute gates on < 0.999f). Ticking the box there does
+        // nothing and reads as a broken feature, so an enable at the opaque end lands on a
+        // visible value instead.
+        const bool wasVmAlpha = g_vmAlphaEnable;
+        ImGui::Checkbox("transparent", &g_vmAlphaEnable);
+        if (g_vmAlphaEnable && !wasVmAlpha && g_vmAlpha >= 0.999f)
+            g_vmAlpha = 0.5f;
+        if (g_vmAlphaEnable)
+            ImGui::OptionPopup("transparent settings", [&]() {
+                SliderF("alpha##vm", &g_vmAlpha, 0.f, 1.f, "%.2f");
+                ImGui::Checkbox("flat alpha##vm", &g_vmFlatAlpha);
+            }, ImVec2(200.f, -1));
+    }
+    menu_group_end();
+    menu_columns_end();
+}
+
+static void Page_VisualsScreen()
+{
+    menu_columns_begin();
+    if (menu_group_begin("screen"))
+    {
+        // UNIT_MENU_SLOT visuals_screen (third person, aspect ratio, sharpen, film grain,
+        // vignette, invert filter, posterize, deband, channel shift, emphasize, show depth)
+        UnitD_Menu_visuals_screen();
+
+        ImGui::Checkbox("color correction", &g_ccEnable);
+        if (g_ccEnable)
+            ImGui::OptionPopup("color correction settings", [&]() {
+                CcCurveEditor();
+
+                ImGui::Spacing();
+                SliderF("exposure",    &g_ccExposure, -3.f,  3.f,  "%+.2f EV");
+                SliderF("contrast",    &g_ccContrast,  0.5f, 1.5f, "%.3f");
+                SliderF("saturation",  &g_ccSat,       0.f,  3.f,  "%.2f");
+                SliderF("temperature", &g_ccTemp,     -1.f,  1.f,  "%+.2f");
+                SliderF("hue",         &g_ccHue,    -180.f, 180.f, "%.1f deg");
+                SliderF("highlights",  &g_ccHighlights, -1.f, 1.f, "%+.2f");
+                SliderF("shadows",     &g_ccShadows,    -1.f, 1.f, "%+.2f");
+
+                ImGui::Spacing();
+                ImGui::Label("levels");
+                SliderF("in black",  &g_ccLevInBlack,  0.f, 0.99f, "%.3f");
+                SliderF("in white",  &g_ccLevInWhite,  0.01f, 1.f, "%.3f");
+                SliderF("gamma",     &g_ccGamma,       0.1f, 4.f,  "%.2f");
+                SliderF("out black", &g_ccLevOutBlack, 0.f, 1.f,   "%.3f");
+                SliderF("out white", &g_ccLevOutWhite, 0.f, 1.f,   "%.3f");
+                // An input white at or under the input black leaves two colours on screen.
+                if (g_ccLevInWhite < g_ccLevInBlack + 0.01f)
+                    g_ccLevInWhite = g_ccLevInBlack + 0.01f;
+
+                ImGui::Spacing();
+                ImGui::Label("gain");
+                SliderF("red",   &g_ccGainR, 0.f, 2.f, "%.2f");
+                SliderF("green", &g_ccGainG, 0.f, 2.f, "%.2f");
+                SliderF("blue",  &g_ccGainB, 0.f, 2.f, "%.2f");
+
+                ImGui::Spacing();
+                if (ImGui::Button("reset all##cc", ImVec2(-1.f, 0.f))) CcResetAll();
+            }, ImVec2(260.f, -1));
+
+        // UNIT_MENU_SLOT visuals_screen (reflections, minecraft sky moved to world)
+        UnitD3_Menu_visuals_screen();
+
+        ImGui::Checkbox("ambient occlusion", &g_aoEnable);
+        if (g_aoEnable)
+            ImGui::OptionPopup("ambient occlusion settings", [&]() {
+                SliderF("intensity##ao",  &g_aoIntensity, 0.f, 4.f,    "%.2f");
+                SliderF("radius##ao",     &g_aoRadius,    4.f, 200.f,  "%.0f u");
+                SliderI("samples##ao",    &g_aoSamples,   4,   64);
+                SliderF("bias##ao",       &g_aoBias,      0.f, 0.8f,   "%.2f");
+                SliderF("blur##ao",       &g_aoBlur,      0.f, 4.f,    "%.2f");
+                SliderF("render size##ao", &g_aoScale,    0.25f, 1.f,  "%.2f");
+
+                ImGui::Label("range");
+                SliderF("fade start##ao", &g_aoFadeStart, 0.f, 4000.f, "%.0f u");
+                SliderF("fade end##ao",   &g_aoFadeEnd,   0.f, 8000.f, "%.0f u");
+                if (g_aoFadeEnd < g_aoFadeStart + 1.f) g_aoFadeEnd = g_aoFadeStart + 1.f;
+
+                ImGui::Checkbox("skip viewmodel##ao", &g_aoViewmodel);
+                ImGui::Checkbox("fade under fog##ao", &g_aoFogFade);
+
+                ImGui::Label("debug");
+                ImGui::Checkbox("show occlusion##ao", &g_aoDebug);
+            }, ImVec2(240.f, -1));
+
+        ImGui::Checkbox("depth of field", &g_dofEnable);
+        if (g_dofEnable)
+            ImGui::OptionPopup("depth of field settings", [&]() {
+                ImGui::Label("focus");
+                ImGui::Checkbox("auto focus##dof", &g_dofAutoFocus);
+                if (g_dofAutoFocus)
+                {
+                    SliderF("focus speed##dof", &g_dofFocusSpeed, 0.1f, 40.f,   "%.1f /s");
+                    SliderF("focus limit##dof", &g_dofFocusLimit, 64.f, 8192.f, "%.0f u");
+                }
+                else
+                    SliderF("focal distance##dof", &g_dofDistance, 16.f, 8192.f, "%.0f u");
+
+                ImGui::Label("range");
+                SliderF("sharp band##dof", &g_dofRange,   0.f, 2000.f, "%.0f u");
+                SliderF("blur ramp##dof",  &g_dofRamp,    1.f, 4000.f, "%.0f u");
+
+                ImGui::Label("blur");
+                SliderF("max blur##dof",     &g_dofMaxBlur, 0.f, 60.f,   "%.1f px");
+                SliderF("tap density##dof",  &g_dofTapDensity, 0.5f, 2.5f, "%.2f /px");
+                SliderF("highlights##dof",   &g_dofBokehBoost,     0.f, 16.f, "%.1f");
+                SliderF("highlight cutoff##dof", &g_dofBokehThreshold, 0.f, 1.f,  "%.2f");
+                ImGui::Checkbox("near blur##dof", &g_dofNearBlur);
+                ImGui::Checkbox("viewmodel stays sharp##dof", &g_dofViewmodelSharp);
+                SliderF("particle guard##dof", &g_fxParticleGuard, 0.f, 1.f, "%.2f");
+                ImGui::Checkbox("smoothing pass##dof", &g_dofSmooth);
+            }, ImVec2(240.f, -1));
+
+        ImGui::Checkbox("motion blur", &g_fbEnable);
+        if (g_fbEnable)
+            ImGui::OptionPopup("motion blur settings", [&]() {
+                SliderF("shutter##fb", &g_fbShutter, 0.f, 60.f, "%.1f ms");
+                SliderF("world amount##fb", &g_fbAmount, 0.f, 4.f, "%.2f");
+                SliderI("samples##fb", &g_fbSamples, 4, 64);
+                SliderF("max streak##fb", &g_fbMaxStreak, 0.01f, 0.2f, "%.3f h");
+
+                ImGui::Checkbox("blur other players##fb", &g_fbPlayers);
+                ImGui::Checkbox("blur the viewmodel##fb", &g_fbViewmodel);
+                if (g_fbViewmodel)
+                    SliderF("viewmodel amount##fb", &g_fbVmAmount, 0.f, 16.f, "%.2f");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("bloom", &g_bloomEnable);
+        if (g_bloomEnable)
+            ImGui::OptionPopup("bloom settings", [&]() {
+                SliderF("intensity##bloom", &g_bloomIntensity, 0.f, 3.f, "%.2f");
+                SliderF("threshold##bloom", &g_bloomThreshold, 0.f, 1.f, "%.2f");
+                SliderF("radius##bloom",    &g_bloomRadius,    0.f, 1.f, "%.2f");
+                SliderF("saturation##bloom", &g_bloomSat,      0.f, 3.f, "%.2f");
+            }, ImVec2(210.f, -1));
+
+        // botox menu_tab_visuals.cpp:1688, same spot (screen group, after bloom)
+        ImGui::Checkbox("low fps viewmodel", &g_vmLowFps);
+        if (g_vmLowFps)
+            ImGui::OptionPopup("low fps viewmodel settings", [&]() {
+                SliderF("fps##low fps viewmodel", &g_vmLowFpsRate, 15.f, 60.f, "%.0f fps");
+            }, ImVec2(210.f, -1));
+
+        ImGui::Checkbox("lag resolver", &g_lagResolver);
+        if (g_lagResolver)
+            ImGui::OptionPopup("lag resolver settings", [&]() {
+                SliderF("smoothing##lr", &g_lrSmoothMs, 15.f, 200.f, "%.0f ms");
+                SliderF("carry##lr", &g_lrExtrapMs, 40.f, 400.f, "%.0f ms");
+                SliderF("snap past##lr", &g_lrMaxErr, 8.f, 128.f, "%.0f u");
+                ImGui::Checkbox("smooth turning##lr", &g_lrYaw);
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("queue passes onto the render thread", &g_fxUseCallQueue);
+        ImGui::Checkbox("force mat_queue_mode 0", &g_fxForceQueueMode);
+        ImGui::Checkbox("depth probe", &g_fxDepthProbe);
+    }
+    menu_group_end();
+
+    menu_columns_next();
+    if (menu_group_begin("crosshair"))
+    {
+        ImGui::Checkbox("enabled##ch", &g_chEnable);
+        if (g_chEnable) ImGui::ColorRow("color##chcol", g_chColor);
+        if (g_chEnable)
+            ImGui::OptionPopup("crosshair settings", [&]() {
+                ImGui::Checkbox("antialias", &g_chAntialias);
+                Crosshair_BlendCombo("blend##chblend");
+                SliderF("thickness##ch", &g_chThickness, 0.f, 10.f, "%.1f");
+                SliderF("length##ch", &g_chLength, 0.f, 30.f, "%.1f");
+                SliderF("arm aspect##ch", &g_chAspect, 0.25f, 4.f, "%.2f");
+                SliderF("gap##ch", &g_chGap, 0.f, 20.f, "%.1f");
+                SliderF("gap aspect##ch", &g_chGapAspect, 0.25f, 4.f, "%.2f");
+                ImGui::Checkbox("dot##ch", &g_chDot);
+                ImGui::Checkbox("dot circle##ch", &g_chDotCircle);
+                ImGui::Checkbox("outline##ch", &g_chOutline);
+                if (g_chOutline)
+                {
+                    ImGui::ColorRow("outline color##choutcol", g_chOutlineColor);
+                    SliderF("outline thickness##ch", &g_chOutlineThick, 0.f, 10.f, "%.1f");
+                }
+            }, ImVec2(210.f, -1));
+
+        ImGui::Checkbox("csgo crosshair", &g_chCsgoEnable);
+        if (g_chCsgoEnable) ImGui::ColorRow("color##chcsgocol", g_chCsgoColor);
+        if (g_chCsgoEnable)
+            ImGui::OptionPopup("csgo crosshair settings", [&]() {
+                // exact cl_crosshairstyle numbering: 0/1 = panorama reticle, 2/3/4 = vgui bars
+                ImGui::Combo("style##chcsgostyle", &g_chCsgoStyle,
+                    "default\0" "default static\0" "classic standard\0" "classic dynamic\0" "classic static\0");
+
+                if (g_chCsgoStyle <= 1)
+                {
+                    SliderF("gap offset##csgo", &g_chCsgoGap, -20.f, 20.f, "%.1f");
+                    SliderF("gap aspect##csgo", &g_chCsgoGapAspect, 0.25f, 4.f, "%.2f");
+                    SliderF("scale##csgo", &g_chCsgoScale, 0.5f, 8.f, "%.2f");
+                    ImGui::Checkbox("crisp##csgo", &g_chCsgoCrisp);
+                    ImGui::Checkbox("linear##csgo", &g_chCsgoLinear);
+                    ImGui::Checkbox("additive##csgo", &g_chCsgoAdditive);
+                    SliderF("black##csgo", &g_chCsgoBlack, 0.f, 1.f, "%.2f");
+                    SliderF("velocity sens##csgo",  &g_chCsgoVelSens, 0.f, 2.f, "%.2f");
+                    SliderF("velocity smooth##csgo", &g_chCsgoSmooth, 0.f, 0.5f, "%.2f s");
+                    SliderF("arm aspect##csgo", &g_chCsgoAspect, 0.25f, 4.f, "%.2f");
+                    if (g_chCsgoStyle == 0)
+                        ImGui::Checkbox("spread lines##csgo", &g_chCsgoArcs);
+                    ImGui::Checkbox("arms##csgo", &g_chCsgoPips);
+                }
+                else
+                {
+                    SliderF("size##csx",      &g_csXSize,  0.f, 20.f, "%.1f");
+                    SliderF("arm aspect##csx", &g_chCsgoAspect, 0.25f, 4.f, "%.2f");
+                    SliderF("thickness##csx", &g_csXThick, 0.f, 6.f,  "%.1f");
+                    SliderF("gap##csx",       &g_csXGap,  -5.f, 20.f, "%.1f");
+                    SliderF("gap aspect##csx", &g_chCsgoGapAspect, 0.25f, 4.f, "%.2f");
+                    SliderI("alpha##csx",       &g_csXAlpha, 0, 255);
+                    ImGui::Checkbox("dot##csx",     &g_csXDot);
+                    ImGui::Checkbox("outline##csx", &g_csXOutline);
+                    if (g_csXOutline)
+                        // whole pixels: csgo's outline is an int vgui rect
+                        SliderF("outline thickness##csx", &g_csXOutlineTh, 1.f, 3.f, "%.0f");
+                    ImGui::Checkbox("t style##csx",   &g_csXT);
+                    ImGui::Checkbox("use alpha##csx", &g_csXUseAlpha);
+                    if (g_chCsgoStyle <= 3)   // 2/3 are the dynamic ones; 4 never moves
+                    {
+                        SliderF("velocity sens##csx",   &g_chCsgoVelSens, 0.f, 2.f, "%.2f");
+                        SliderF("velocity smooth##csx", &g_chCsgoSmooth,  0.f, 0.5f, "%.2f s");
+                    }
+                    if (g_chCsgoStyle == 2)
+                    {
+                        SliderF("split dist##csx",  &g_csXSplitDist,  0.f, 25.f, "%.1f");
+                        SliderF("split ratio##csx", &g_csXSplitRatio, 0.f, 1.f,  "%.2f");
+                        SliderF("split alpha in##csx",  &g_csXInnerMod, 0.f, 1.f, "%.2f");
+                        SliderF("split alpha out##csx", &g_csXOuterMod, 0.f, 1.f, "%.2f");
+                    }
+                }
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("csgo scope", &g_scCsgo);
+        if (g_scCsgo)
+            ImGui::OptionPopup("csgo scope settings", [&]() {
+                ImGui::Combo("weapon##scweapon", &g_scCsgoWeapon, "awp\0" "ssg 08\0" "scar-20 / g3sg1\0");
+                ImGui::Combo("zoom##sczoom", &g_scCsgoZoom, "zoom level 1\0" "zoom level 2\0");
+                SliderI("line width##sc", &g_scCsgoWidth, 1, 10);
+                ImGui::Checkbox("show normal inaccuracy##sc", &g_scCsgoNormalInacc);
+                SliderF("opacity##sc", &g_scCsgoOpacity, 0.f, 1.f, "%.2f");
+                SliderF("scale##sc", &g_scCsgoScale, 0.25f, 2.f, "%.2f");
+                ImGui::Checkbox("dust lens##sc", &g_scCsgoLens);
+                ImGui::Checkbox("hide your dot##sc", &g_scCsgoNoDot);
+                SliderF("move blur##sc", &g_scCsgoMoveSens, 0.f, 2.f, "%.2f");
+                SliderF("air blur##sc", &g_scCsgoAirSens, 0.f, 2.f, "%.2f");
+                ImGui::Checkbox("scope-in blur##sc", &g_scCsgoScopeIn);
+                ImGui::Checkbox("sway##sc", &g_scCsgoBob);
+                if (g_scCsgoBob)
+                {
+                    SliderF("sway scale##sc", &g_scCsgoBobScale, 0.f, 10.f, "%.2f");
+                    SliderF("sway sideways##sc", &g_scCsgoBobLat, 0.f, 5.f, "%.2f");
+                    SliderF("sway up/down##sc", &g_scCsgoBobVert, 0.f, 5.f, "%.2f");
+                }
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("hide scope charge meter", &g_scChargeHide);
+        ImGui::Checkbox("static amby crosshair", &g_staticAmbyCrosshair);
+    }
+    menu_group_end();
+    menu_columns_end();
+}
+
+static const char* kVisualsSub[3] = { "esp", "world", "screen" };
+static int s_visualsSub = 0;
+static void Tab_VisualsRoot()
+{
+    if      (s_visualsSub == 0) Page_VisualsEsp();
+    else if (s_visualsSub == 1) Page_VisualsWorld();
+    else                        Page_VisualsScreen();
+}
+
+static void Page_MovementMain()
+{
+    menu_columns_begin();
+
+    if (menu_group_begin("movement"))
+    {
+        ImGui::Checkbox("bunnyhop", &g_bhop);
+
+        ImGui::Checkbox("edge jump", &g_edgeJump);
+        if (g_edgeJump)
+            ImGui::OptionPopup("edge jump settings", [&]() {
+                ImGui::Label("edge jump keybind");
+                ImGui::Keybind("edge jump key", &g_edgeJumpKey, &g_edgeJumpMode);
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("long jump", &g_longJump);
+        if (g_longJump)
+            ImGui::OptionPopup("long jump settings", [&]() {
+                ImGui::Label("long jump keybind");
+                ImGui::Keybind("long jump key", &g_longJumpKey, &g_longJumpMode);
+                ImGui::Checkbox("edgejump on lj", &g_longJumpEdge);
+                ImGui::Checkbox("adaptive key cancelling", &g_longJumpAdaptive);
+                if (g_longJumpAdaptive)
+                {
+                    ImGui::Checkbox("stop: let go##ljadlg", &g_longJumpAdaptiveLetGo);
+                    ImGui::Checkbox("stop: landed##ljadld", &g_longJumpAdaptiveLanded);
+                    ImGui::Checkbox("stop: time passes##ljadtm", &g_longJumpAdaptiveTimed);
+                    if (g_longJumpAdaptiveTimed)
+                        ImGui::SliderFloat("time after jump##ljadtime", &g_longJumpAdaptiveTime, 0.02f, 1.f, "%.2f s");
+                }
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("mini jump", &g_miniJump);
+        if (g_miniJump)
+            ImGui::OptionPopup("mini jump settings", [&]() {
+                ImGui::Label("mini jump keybind");
+                ImGui::Keybind("mini jump key", &g_miniJumpKey, &g_miniJumpMode);
+                ImGui::Checkbox("hold duck", &g_miniJumpHoldDuck);
+                ImGui::Checkbox("edgejump on mj", &g_miniJumpEdge);
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("jumpbug", &g_jumpbug);
+        if (g_jumpbug)
+            ImGui::OptionPopup("jumpbug settings", [&]() {
+                ImGui::Label("jumpbug keybind");
+                ImGui::Keybind("jumpbug key", &g_jumpbugKey, &g_jumpbugMode);
+                ImGui::Checkbox("predict the hit##jb", &g_jbPredict);
+                ImGui::Checkbox("yield to pixel surf##jb", &g_jbYieldSurf);
+                ImGui::Checkbox("kangaroo", &g_jumpbugKangaroo);
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("edge bug", &g_edgeBug);
+        if (g_edgeBug)
+            ImGui::OptionPopup("edgebug advanced settings", [&]() {
+                ImGui::Label("edgebug keybind");
+                ImGui::Keybind("edge bug key", &g_edgeBugKey, &g_edgeBugMode);
+                ImGui::Combo("style##ebstyle", &g_edgeBugStyle, "botox\0delusional\0dna\0");
+                const int style = g_edgeBugStyle;
+                if (style == 1)
+                {
+                    ImGui::Checkbox("mouse fix##ebdelmousefix", &g_edgeBugDelMouseFix);
+                    SliderI("ticks to predict##ebdelticks", &g_edgeBugDelTicks, 0, 128);
+                    ImGui::Checkbox("advanced detection##ebdeladv", &g_edgeBugDelAdvanced);
+                    if (g_edgeBugDelAdvanced)
+                    {
+                        SliderF("angle limit##ebdelangle", &g_edgeBugDelAngleLimit, 0.f, 180.f, "%.2f");
+                        if (g_edgeBugDelAngleLimit > 0.f)
+                        {
+                            SliderI("search amount##ebdelsearch", &g_edgeBugDelSearch, 1, 15);
+                            ImGui::Checkbox("silent edgebug##ebdelsilent", &g_edgeBugDelSilent);
+                        }
+                    }
+                }
+                else if (style == 2)
+                {
+                    SliderF("scan time##ebdnascan", &g_edgeBugDnaScan, 0.f, 1.f, "%.2f s");
+                    ImGui::Checkbox("advanced mode##ebdnaadv", &g_edgeBugDnaAdvanced);
+                    if (g_edgeBugDnaAdvanced)
+                    {
+                        SliderI("advanced range##ebdnarange", &g_edgeBugDnaRange, 1, 10);
+                        ImGui::Checkbox("strafe custom angle##ebdnacustom", &g_edgeBugDnaCustomAngle);
+                        SliderF("angle limit##ebdnaangle", &g_edgeBugDnaAngleLimit, 0.f, 45.f, "%.1f");
+                    }
+                }
+                if (style == 0)
+                {
+                    SliderF("edge bug predict time", &g_edgeBugPredictTime, 0.02f, 2.f, "%.2f s");
+                    ImGui::Checkbox("autostrafe to edge", &g_edgeBugToEdge);
+                    if (g_edgeBugToEdge)
+                        SliderF("max path bend##ebstrafemax", &g_edgeBugStrafeAngleMax, 0.f, 180.f, "%.0f deg");
+                    ImGui::Checkbox("mouse steer##ebsteer", &g_edgeBugMouseSteer);
+                    if (g_edgeBugMouseSteer)
+                        SliderI("paths##ebpaths", &g_edgeBugPaths, 1, 4);
+                    // TF2: a ducked bug that lands still ducked eats the next jump
+                    ImGui::Combo("stance##ebstance", &g_edgeBugStance,
+                                 "prefer standing\0" "ducked only\0" "standing only\0");
+                }
+                ImGui::Checkbox("lock mouse on find", &g_edgeBugMouseLock);
+                if (g_edgeBugMouseLock)
+                {
+                    ImGui::Combo("lock type##eblocktype", &g_edgeBugLockType,
+                                 style == 0 ? "smooth\0full\0" : "static\0full\0");
+                    SliderF("lock strength##eblockstr", &g_edgeBugLockStrength, 0.f, 100.f, "%.0f%%");
+                }
+                ImGui::Checkbox("sound on hit##ebsound", &g_edgeBugSound);
+                if (g_edgeBugSound)
+                    ImGui::Combo("sound##ebsoundid", &g_edgeBugSoundId, "crit hit\0mini crit\0double donk\0achievement\0upgrade\0");
+                if (style == 0)
+                    ImGui::Combo("detection mode##ebdetectmode", &g_edgeBugDetectMode, "normal\0enhanced\0ebanat\0");
+                ImGui::Checkbox("visualize##ebviz", &g_edgeBugViz);
+                if (g_edgeBugViz)
+                    SliderF("pad size##ebvizsize", &g_edgeBugVizSize, 2.f, 64.f, "%.0f");
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("edge skip", &g_edgeSkip);
+        if (g_edgeSkip)
+            ImGui::OptionPopup("edge skip settings", [&]() {
+                ImGui::Label("edge skip keybind");
+                ImGui::Keybind("edge skip key", &g_edgeSkipKey, &g_edgeSkipMode);
+                SliderI("search window (ticks)", &g_edgeSkipTicks, 2, 132);
+                SliderI("search depth", &g_edgeSkipDepth, 1, 4);
+                SliderF("max bend", &g_edgeSkipMaxBend, 0.f, 180.f, "%.0f deg (180 = off)");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("auto strafe", &g_autoStrafe);
+        if (g_autoStrafe)
+            ImGui::OptionPopup("auto strafe settings", [&]() {
+                ImGui::Label("auto strafe keybind");
+                ImGui::Keybind("auto strafe key", &g_autoStrafeKey, &g_autoStrafeMode);
+                ImGui::Checkbox("avoid wall collisions", &g_autoStrafeAvoidWalls);
+                if (g_autoStrafeAvoidWalls)
+                    SliderF("avoid distance", &g_autoStrafeAvoidDist, 0.f, 200.f, "%.0f units");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("strafe optimizer", &g_strafeOpt);
+        if (g_strafeOpt)
+            ImGui::OptionPopup("strafe optimizer settings", [&]() {
+                SliderF("gain", &g_strafeOptGain, 0.f, 100.f, "%.0f%%");
+                SliderF("min speed", &g_strafeOptMinSpeed, 0.f, 320.f, "%.0f");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("auto align", &g_autoAlign);
+
+        ImGui::Checkbox("pixel surf", &g_pixelSurf);
+        if (g_pixelSurf)
+            ImGui::OptionPopup("pixel surf settings", [&]() {
+                ImGui::Label("pixel surf keybind");
+                ImGui::Keybind("pixel surf key", &g_pixelSurfKey, &g_pixelSurfMode);
+                // route calc's pixel surf horizon only -- the surf itself is botox pixel_surf, no knobs
+                SliderI("route predict ticks", &g_pixelSurfPredictTicks, 1, 32);
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("tung surf", &g_tungSurf);
+        if (g_tungSurf)
+            ImGui::OptionPopup("tung surf settings", [&]() {
+                ImGui::Label("tung surf keybind");
+                ImGui::Keybind("tung surf key", &g_tungSurfKey, &g_tungSurfMode);
+                SliderF("max surface tilt", &g_tungMaxNz, 0.05f, 0.5f, "%.2f nz");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("auto bounce", &g_autoBounce);
+        if (g_autoBounce)
+            ImGui::OptionPopup("auto bounce settings", [&]() {
+                ImGui::Label("auto bounce keybind");
+                ImGui::Keybind("auto bounce key", &g_autoBounceKey, &g_autoBounceMode);
+                SliderF("bounce reach", &g_bounceReach, 8.f, 128.f, "%.0f units");
+                SliderF("bounce min speed", &g_bounceMinSpeed, 0.f, 600.f, "%.0f u/s");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("bounce assist", &g_bounceAssist);
+        if (g_bounceAssist)
+            ImGui::OptionPopup("bounce assist settings", [&]() {
+                ImGui::Label("bounce assist keybind");
+                ImGui::Keybind("bounce assist key", &g_bounceAssistKey, &g_bounceAssistMode);
+                SliderF("bounce reach##ba", &g_bounceReach, 8.f, 128.f, "%.0f units");
+                SliderF("bounce min speed##ba", &g_bounceMinSpeed, 0.f, 600.f, "%.0f u/s");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("air stuck", &g_airStuck);
+        if (g_airStuck)
+            ImGui::OptionPopup("air stuck settings", [&]() {
+                ImGui::Label("air stuck keybind");
+                ImGui::Keybind("air stuck key", &g_airStuckKey, &g_airStuckMode);
+                SliderF("extra reach##as", &g_asExtraReach, 0.f, 32.f, "%.0f");
+                SliderF("search budget##as", &g_asBudget, 10.f, 90.f, "%.0f%% tick");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("texture bug", &g_textureBug);
+        if (g_textureBug)
+            // also drives head surf + head bounce, which have no toggle of their own
+            ImGui::OptionPopup("texture bug settings", [&]() {
+                ImGui::Label("texture bug keybind");
+                ImGui::Keybind("texture bug key", &g_textureBugKey, &g_textureBugMode);
+                ImGui::Combo("style##tbstyle", &g_tbStyle, "cumidere\0botox\0");
+                if (g_tbStyle == 0) return;   // cumidere has no knobs
+                SliderF("reach", &g_tbReach, 1.f, 48.f, "%.0f");
+                SliderF("hug range", &g_tbHugRange, 0.05f, 4.f, "%.2f");
+                ImGui::Checkbox("predict ledges", &g_tbPredict);
+                if (g_tbPredict)
+                {
+                    SliderI("predict ticks", &g_tbPredictTicks, 8, 128);
+                    SliderF("predict reach", &g_tbPredictReach, 1.f, 96.f, "%.0f");
+                }
+                SliderF("scan step", &g_tbScanStep, 1.f, 8.f, "%.0f");
+                SliderF("ramp nz (hands off)", &g_tbRampNz, 0.02f, 0.25f, "%.2f");
+                ImGui::Checkbox("exact solve pass", &g_tbSolveForward);
+                ImGui::Checkbox("no off-grid stick", &g_tbNoOffgridStick);
+                ImGui::Checkbox("park at end of surf##tb", &g_tbParkAtEnd);
+                if (g_tbParkAtEnd)
+                {
+                    SliderI("park ticks (0 = forever)", &g_tbParkTicks, 0, 256);
+                    SliderF("park speed cap", &g_tbParkSpeed, 5.f, 250.f, "%.0f");
+                }
+                ImGui::Checkbox("brake into the park", &g_tbParkBrake);
+                if (g_tbParkBrake)
+                    SliderF("brake lead", &g_tbParkLead, 0.f, 128.f, "%.0f");
+            }, ImVec2(260.f, -1));
+
+        ImGui::Checkbox("wall climb", &g_wallClimb);
+        if (g_wallClimb)
+            ImGui::OptionPopup("wall climb settings", [&]() {
+                ImGui::Label("wall climb keybind");
+                ImGui::Keybind("wall climb key", &g_wallClimbKey, &g_wallClimbMode);
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("blockbot", &g_blockBot);
+        if (g_blockBot)
+            ImGui::OptionPopup("blockbot settings", [&]() {
+                ImGui::Label("blockbot keybind");
+                ImGui::Keybind("blockbot key", &g_blockBotKey, &g_blockBotMode);
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("fast stop", &g_fastStop);
+        ImGui::Checkbox("fast accelerate", &g_fastAccel);
+        ImGui::Checkbox("no push", &g_noPush);
+
+        // UNIT_MENU_SLOT movement_main
+        UnitA_Menu_movement_main();
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("fake movement"))
+    {
+        ImGui::Checkbox("enabled", &g_fmEnabled);
+        ImGui::BeginDisabled(!g_fmEnabled);
+
+        ImGui::Checkbox("surf on any wall", &g_fmWallSurf);
+        if (g_fmWallSurf)
+            ImGui::OptionPopup("surf on any wall settings", [&]() {
+                ImGui::Label("surf on any wall keybind");
+                ImGui::Keybind("fake wall surf key", &g_fmWallSurfKey, &g_fmWallSurfMode);
+                SliderF("wall reach##fmws", &g_fmWallReach, 1.f, 32.f, "%.0f");
+                ImGui::Checkbox("seams only##fmws", &g_fmWallSurfSeam);
+                if (g_fmWallSurfSeam)
+                    SliderF("seam slack##fmws", &g_fmSeamSlack, 0.f, 16.f, "%.0f");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("jump off walls", &g_fmWallJump);
+        if (g_fmWallJump)
+            ImGui::OptionPopup("jump off walls settings", [&]() {
+                ImGui::Label("jump off walls keybind");
+                ImGui::Keybind("fake wall jump key", &g_fmWallJumpKey, &g_fmWallJumpMode);
+                SliderF("wall reach##fmwj", &g_fmWallReach, 1.f, 32.f, "%.0f");
+                SliderF("push##fmwj", &g_fmWallJumpPush, 0.f, 1000.f, "%.0f");
+                ImGui::Checkbox("jump while held##fmwj", &g_fmWallJumpHold);
+                ImGui::Checkbox("seams only##fmwj", &g_fmWallJumpSeam);
+                if (g_fmWallJumpSeam)
+                    SliderF("seam slack##fmwj", &g_fmSeamSlack, 0.f, 16.f, "%.0f");
+            }, ImVec2(220.f, -1));
+
+        ImGui::Checkbox("higher jumps", &g_fmHighJump);
+        if (g_fmHighJump)
+            ImGui::OptionPopup("higher jumps settings", [&]() {
+                ImGui::Label("higher jumps keybind");
+                ImGui::Keybind("fake high jump key", &g_fmHighJumpKey, &g_fmHighJumpMode);
+                SliderF("multiplier##fmhj", &g_fmHighJumpMult, 1.f, 4.f, "%.2fx");
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("air stuck##fm", &g_fmAirStuck);
+        if (g_fmAirStuck)
+            ImGui::OptionPopup("fake air stuck settings", [&]() {
+                ImGui::Label("air stuck keybind");
+                ImGui::Keybind("fake air stuck key", &g_fmAirStuckKey, &g_fmAirStuckMode);
+                ImGui::Checkbox("keep momentum##fmas", &g_fmAirStuckKeepVel);
+                ImGui::Checkbox("only near brushes/props##fmas", &g_fmAirStuckNearOnly);
+                if (g_fmAirStuckNearOnly)
+                    SliderF("distance##fmas", &g_fmAirStuckNearDist, 0.f, 64.f, "%.0f");
+            }, ImVec2(240.f, -1));
+
+        ImGui::Checkbox("no fall damage", &g_fmNoFall);
+        if (g_fmNoFall)
+            ImGui::OptionPopup("no fall damage settings", [&]() {
+                ImGui::Label("no fall damage keybind");
+                ImGui::Keybind("fake no fall key", &g_fmNoFallKey, &g_fmNoFallMode);
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("crouch jump", &g_fmCrouchJump);
+        if (g_fmCrouchJump)
+            ImGui::OptionPopup("crouch jump settings", [&]() {
+                ImGui::Label("crouch jump keybind");
+                ImGui::Keybind("fake crouch jump key", &g_fmCrouchJumpKey, &g_fmCrouchJumpMode);
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("ramp boost", &g_fmRampBoost);
+        if (g_fmRampBoost)
+            ImGui::OptionPopup("ramp boost settings", [&]() {
+                ImGui::Label("ramp boost keybind");
+                ImGui::Keybind("fake ramp boost key", &g_fmRampBoostKey, &g_fmRampBoostMode);
+                SliderF("multiplier##fmrb", &g_fmRampBoostMult, 1.f, 4.f, "%.2fx");
+            }, ImVec2(200.f, -1));
+
+        ImGui::Checkbox("head surf", &g_fmHeadSurf);
+        if (g_fmHeadSurf)
+            ImGui::OptionPopup("head surf settings", [&]() {
+                ImGui::Label("head surf keybind");
+                ImGui::Keybind("fake head surf key", &g_fmHeadSurfKey, &g_fmHeadSurfMode);
+                SliderF("snap up##fmhs", &g_fmHeadSurfSnap, 0.f, 64.f, "%.0f");
+                ImGui::Checkbox("ledges only##fmhs", &g_fmHeadSurfLedgeOnly);
+                ImGui::Checkbox("brush bottoms##fmhs", &g_fmHeadSurfBottoms);
+                if (g_fmHeadSurfBottoms)
+                    SliderF("wall reach##fmhs", &g_fmWallReach, 1.f, 32.f, "%.0f");
+            }, ImVec2(240.f, -1));
+
+        ImGui::EndDisabled();
+    }
+    menu_group_end();
+
+    if (menu_group_begin("practice"))
+    {
+        ImGui::Checkbox("infinite ammo", &g_prInfAmmo);
+        ImGui::Checkbox("infinite health", &g_prInfHealth);
+        ImGui::Checkbox("infinite map time", &g_prInfTime);
+
+        ImGui::Label("noclip");
+        BindKeyNoMode("##prnoclip", &g_prNoclipKey);
+        ImGui::Label("save position");
+        BindKeyNoMode("##prsave", &g_prSaveKey);
+        ImGui::Label("teleport to saved");
+        BindKeyNoMode("##prtp", &g_prTpKey);
+    }
+    menu_group_end();
+
+    if (menu_group_begin("build at crosshair"))
+    {
+        ImGui::Combo("class", &g_prBotClass,
+                     "scout\0" "sniper\0" "soldier\0" "demoman\0" "medic\0"
+                     "heavy\0" "pyro\0" "spy\0" "engineer\0");
+        ImGui::Label("enemy player");
+        BindKeyNoMode("##prbotenemy", &g_prBotEnemyKey);
+        ImGui::Label("friendly player");
+        BindKeyNoMode("##prbotmate", &g_prBotMateKey);
+        ImGui::Label("sentry");
+        BindKeyNoMode("##prsentry", &g_prSentryKey);
+        ImGui::Label("dispenser");
+        BindKeyNoMode("##prdisp", &g_prDispenserKey);
+        ImGui::Label("teleporter");
+        BindKeyNoMode("##prtele", &g_prTeleporterKey);
+    }
+    menu_group_end();
+
+    menu_columns_end();
+}
+
+static void Page_MovementIndicators()
+{
+    menu_columns_begin();
+
+    if (menu_group_begin("movement indicator"))
+    {
+        ImGui::Checkbox("enabled##mi", &g_miEnable);
+        if (g_miEnable)
+            ImGui::OptionPopup("movement indicator settings", [&]() {
+                ImGui::Checkbox("horizontal##mi", &g_miHorizontal);
+                ImGui::Checkbox("mitosis##mi", &g_miMitosis);
+
+                // displayed binds: preview lists the tags that are on, rows toggle without closing
+                int cnt = 0, only = -1;
+                for (int i = 0; i < MI_COUNT; ++i)
+                    if (g_miShowMask & (1 << i)) { ++cnt; only = i; }
+
+                char preview[48];
+                if (cnt == 0)             strcpy(preview, "none");
+                else if (cnt == MI_COUNT) strcpy(preview, "all binds");
+                else if (cnt == 1)        _snprintf(preview, sizeof(preview), "%s", kMiNames[only]);
+                else                      _snprintf(preview, sizeof(preview), "%d binds", cnt);
+
+                if (ImGui::BeginCombo("displayed binds##mishow", preview))
+                {
+                    for (int i = 0; i < MI_COUNT; ++i)
+                    {
+                        char row[40];
+                        _snprintf(row, sizeof(row), "%s (%s)", kMiNames[i], kMiTags[i]);
+                        const bool on = (g_miShowMask & (1 << i)) != 0;
+                        if (ImGui::Selectable(row, on, ImGuiSelectableFlags_DontClosePopups))
+                            g_miShowMask ^= (1 << i);
+                    }
+                    ImGui::EndCombo();
+                }
+
+                SliderF("height##mi", &g_miOffsetY, 0.f, 600.f, "%.0f");
+                SliderF("scale##mi", &g_miScale, 0.5f, 2.5f, "%.2f");
+                ImGui::ColorRow("idle##miidle", g_miIdleColor);
+                ImGui::ColorRow("active##miact", g_miActiveColor);
+            }, ImVec2(240.f, -1));
+
+        // UNIT_MENU_SLOT movement_indicators
+        UnitB_Menu_movement_indicators();
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("velocity indicator"))
+    {
+        ImGui::Checkbox("enabled##vi", &g_viEnable);
+        if (g_viEnable)
+            ImGui::OptionPopup("velocity indicator settings", [&]() {
+                ImGui::Checkbox("custom color##vi", &g_viCustomColor);
+                // swatch order reads left to right: slot 0 is rightmost
+                if (g_viCustomColor)
+                {
+                    ImGui::ColorRow("velocity color 1##vic1", g_viColor1, 0, 1);
+                    ImGui::ColorRow("velocity color 2##vic2", g_viColor2, 0, 0);
+                }
+                else
+                {
+                    ImGui::ColorRow("losing speed##vic3", g_viColor3, 0, 2);
+                    ImGui::ColorRow("same speed##vic4", g_viColor4, 0, 1);
+                    ImGui::ColorRow("gaining speed##vic5", g_viColor5, 0, 0);
+                }
+                ImGui::Checkbox("show pre speed##vi", &g_viPreSpeed);
+                ImGui::Checkbox("fade alpha##vi", &g_viFadeAlpha);
+                SliderF("position##vi", &g_viOffsetY, 30.f, ImGui::GetIO().DisplaySize.y, "%.0f");
+            }, ImVec2(240.f, -1));
+    }
+    menu_group_end();
+
+    menu_columns_end();
+}
+
+static void Page_MovementCalculator()
+{
+    // One move mask, one solver, shared by the pixel calculator and the route calculator.
+    // bits 0-3 jump / minijump / longjump / jumpbug, 4-5 walk off / crouch walk off (rs::MoveBit).
+    auto MoveBox = [](int b, int& mask)
+    {
+        bool on = (mask >> b) & 1;
+        ImGui::PushID(b);
+        if (ImGui::Checkbox(RC_MoveName(b), &on))
+        {
+            const int next = on ? (mask | (1 << b)) : (mask & ~(1 << b));
+            if (next) mask = next;          // never all off: nothing could be solved
+        }
+        ImGui::PopID();
+    };
+
+    menu_columns_begin();
+
+    if (menu_group_begin("pixel surf"))
+    {
+        ImGui::Checkbox("ps finder", &g_psFinder);
+        if (g_psFinder)
+            ImGui::OptionPopup("ps finder settings", [&]() {
+                ImGui::Label("ps finder keybind");
+                ImGui::Keybind("ps finder key", &g_psFinderKey, &g_psFinderMode);
+                SliderF("scan margin", &g_psFinderMargin, 0.f, 64.f, "%.0f");
+                SliderF("scan budget", &g_psFinderBudget, 0.25f, 32.f, "%.2f ms");
+                ImGui::Checkbox("strict##pf", &g_psFinderStrict);
+                ImGui::Checkbox("find texturebugs##pf", &g_psFinderTb);
+                ImGui::Checkbox("find headbounces##pf", &g_psFinderHeadbounce);
+                ImGui::Checkbox("find pixeljumps##pf", &g_psFinderPixeljump);
+                ImGui::Checkbox("ignore props##pf", &g_psFinderNoProps);
+                ImGui::Checkbox("surf fix (hold duck into a ride)##pf", &g_psSurfFix);
+
+                // whole-map scan: the same scanner, pointed at every brush edge in the map
+                PsMapScanState ms;
+                PS_MapScanGet(ms);
+                char pmLabel[64];
+                if (ms.busy) snprintf(pmLabel, sizeof(pmLabel), "cancel scan  %d%%", int(ms.progress * 100.f));
+                else         snprintf(pmLabel, sizeof(pmLabel), "search whole map");
+                if (ImGui::Button(pmLabel, ImVec2(-1.f, 0.f)))
+                    PS_MapScanToggle();
+                ImGui::Checkbox("show map lines##pm", &g_psMapLines);
+                if (ms.busy || ms.lines > 0 || ms.tb > 0)
+                {
+                    char pmInfo[96];
+                    snprintf(pmInfo, sizeof(pmInfo), "seam %d / %d   %d surf%s   %d texturebug%s",
+                             ms.done, ms.total, ms.lines, ms.lines == 1 ? "" : "s",
+                             ms.tb, ms.tb == 1 ? "" : "s");
+                    ImGui::TextUnformatted(pmInfo);
+                }
+            }, ImVec2(260.f, -1));
+
+        // the point list is shared by assist and finder
+        ImGui::Checkbox("ps assist", &g_psAssist);
+        if (g_psAssist || g_psFinder)
+            ImGui::OptionPopup("ps assist settings", [&]() {
+                ImGui::Label("ps assist keybind");
+                ImGui::Keybind("ps assist key", &g_psAssistKey, &g_psAssistMode);
+                ImGui::Label("set point");
+                BindKeyNoMode("##pasetbind", &g_psSetPointKey);
+                ImGui::Label("delete point");
+                BindKeyNoMode("##padelbind", &g_psDeletePointKey);
+                SliderF("radius", &g_psAssistRadius, 40.f, 1024.f, "%.0f");
+                SliderI("points at once", &g_psAssistMaxPoints, 1, 8);
+                SliderF("reuse delay", &g_psAssistReuseDelay, 0.f, 8.f, "%.1f s");
+                SliderF("snap distance", &g_psAssistSnap, 4.f, 256.f, "%.0f");
+                ImGui::Checkbox("ground help", &g_psGroundHelp);
+                if (g_psGroundHelp)
+                    SliderF("steer limit", &g_psGroundHelpAngle, 5.f, 90.f, "%.0f deg");
+                SliderF("launch z slack", &g_psLaunchZSlack, 0.f, 32.f, "%.0f");
+                ImGui::Checkbox("show points", &g_psAssistRender);
+                ImGui::Checkbox("jump popup", &g_psAssistJumpBox);
+            }, ImVec2(240.f, -1));
+
+        ImGui::Checkbox("pixel calculator", &g_pixelCalc);
+        if (g_pixelCalc)
+            ImGui::OptionPopup("pixel calculator settings", [&]() {
+                ImGui::Label("place pixel");
+                BindKeyNoMode("##pcplacebind", &g_pcPlaceKey);
+                ImGui::Label("calculate pixel");
+                BindKeyNoMode("##pcsolvebind", &g_pcSolveKey);
+                ImGui::Checkbox("show marker", &g_pcShowMarker);
+                ImGui::Checkbox("show answer panel", &g_pcShowPanel);
+                ImGui::Label("allowed jumps (shared with route calculator)");
+                ImGui::PushID("pcmoves");
+                for (int b = 0; b < 4; b++) MoveBox(b, g_rcMoveMask);
+                ImGui::PopID();
+            }, ImVec2(260.f, -1));
+
+        // UNIT_MENU_SLOT movement_calculator
+        UnitB_Menu_movement_calculator();
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    // route calculator: a marker editor, not a settings popup -- flat content, same as botox's
+    // own dedicated route calc page (menu_tab_movement.cpp route_calc_page).
+    if (menu_group_begin("route calculator"))
+    {
+        ImGui::Checkbox("route calculator", &g_routeCalc);
+
+        ImGui::Label("place marker");
+        BindKeyNoMode("##rcaddbind", &g_rcAddKey);
+        ImGui::Label("delete marker");
+        BindKeyNoMode("##rcdelbind", &g_rcDeleteKey);
+        ImGui::Label("clear markers");
+        BindKeyNoMode("##rcclrbind", &g_rcClearKey);
+        ImGui::Label("calculate");
+        BindKeyNoMode("##rcsolvebind", &g_rcSolveKey);
+
+        ImGui::Checkbox("start where you are", &g_rcStartHere);
+        SliderI("max displayed combos", &g_rcMaxShown, 1, 50);
+        ImGui::Checkbox("show markers", &g_rcShowMarkers);
+        ImGui::Checkbox("show path", &g_rcShowPath);
+        ImGui::Checkbox("show answer panel", &g_rcShowPanel);
+        SliderI("popup duration", &g_rcPopupTime, 1, 30, "%d sec");
+
+        ImGui::Label("jump types");
+        for (int b = 0; b < 4; b++) MoveBox(b, g_rcMoveMask);
+        ImGui::Label("starting point");
+        for (int b = 4; b < RC_MoveCount(); b++) MoveBox(b, g_rcMoveMask);
+
+        // ---- the markers themselves ----------------------------------------------------
+        const int nPts = RC_PointCount();
+        ImGui::Label(nPts > 0 ? "markers" : "markers (none placed)");
+        static int s_rcOpenRow = -1;
+        // order = rs::PointType, so the combo index IS the type
+        static const char* kTypeItems = "ground\0pixelsurf\0edgebug\0headbang\0texturebug\0";
+        // index = stand | duck << 1 with 0 impossible, so: 1 stand only, 2 ducked only, 3 both
+        static const char* kStanceItems = "stand only\0ducked only\0stand or ducked\0";
+        for (int i = 0; i < nPts; i++)
+        {
+            RcPointInfo pt;
+            if (!RC_PointGet(i, pt)) break;
+
+            ImGui::PushID(i);
+            char row[96];
+            snprintf(row, sizeof(row), "%d  %s%s  z %.2f%s%s", i + 1, RC_TypeName(pt.type),
+                     pt.player ? " (player head)" : pt.building ? " (building)" : "", pt.pos.z,
+                     // an edgebug's z is its ledge's lip, not where you clicked -- say which
+                     pt.edgeZ ? " (edge)" : "", pt.enabled ? "" : "  (off)");
+            if (ImGui::Selectable(row, s_rcOpenRow == i))
+                s_rcOpenRow = (s_rcOpenRow == i) ? -1 : i;
+            if (s_rcOpenRow == i)
+            {
+                RcPointInfo edit = pt;
+                bool changed = false;
+                changed |= ImGui::Combo("##rctype", &edit.type, kTypeItems);
+                // picking pixelsurf / texturebug here on a marker that did not come off
+                // a finder point is refused by RC_PointSet (the combo snaps back next frame)
+                if (!pt.snapped)
+                    ImGui::TextDisabled("pixelsurf / texturebug: place it on a finder point");
+                changed |= ImGui::Checkbox("use this marker", &edit.enabled);
+                if (edit.type != 0)
+                {
+                    ImGui::Label(edit.type == 2 ? "edgebug stance" : "arrival stance");
+                    int st = (edit.stand ? 1 : 0) | (edit.duck ? 2 : 0);
+                    if (st < 1) st = 3;
+                    int sel = st - 1;
+                    if (ImGui::Combo("##rcstance", &sel, kStanceItems))
+                    {
+                        edit.stand = ((sel + 1) & 1) != 0;
+                        edit.duck  = ((sel + 1) & 2) != 0;
+                        changed = true;
+                    }
+                }
+                else
+                {
+                    // ground: land here then press one of these, or jumpbug off it
+                    ImGui::Label("moves at this marker");
+                    int mask = (int)edit.moves;
+                    for (int b = 0; b < 4; b++) MoveBox(b, mask);
+                    if ((unsigned)mask != edit.moves) { edit.moves = (unsigned)mask; changed = true; }
+                }
+                if (changed) RC_PointSet(i, edit);
+                // ORDER IS THE ROUTE (1 -> 2 -> 3), so a marker placed out of turn is fixed here
+                // instead of by clearing the lot and walking it again. The list changed under the
+                // loop, so this frame stops here and the open row follows the marker
+                if (nPts > 1)
+                {
+                    const float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                    int dir = 0;
+                    ImGui::BeginDisabled(i == 0);
+                    if (ImGui::Button("move up", ImVec2(w, 0.f))) dir = -1;
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(i + 1 >= nPts);
+                    if (ImGui::Button("move down", ImVec2(w, 0.f))) dir = 1;
+                    ImGui::EndDisabled();
+                    if (dir != 0)
+                    {
+                        RC_PointMove(i, dir);
+                        s_rcOpenRow = i + dir;
+                        ImGui::PopID();
+                        break;
+                    }
+                }
+                if (ImGui::Button("delete marker", ImVec2(-1.f, 0.f)))
+                {
+                    RC_PointDelete(i);
+                    s_rcOpenRow = -1;
+                    ImGui::PopID();
+                    break;
+                }
+            }
+            ImGui::PopID();
+        }
+    }
+    menu_group_end();
+
+    menu_columns_end();
+}
+
+static void Page_MovementRecorder()
+{
+    menu_columns_begin();
+    if (menu_group_begin("movement recorder"))
+    {
+        // entire movement recorder feature set (unit B) -- not wired into the menu yet,
+        // see gap.md "movement/recorder".
+        // UNIT_MENU_SLOT movement_recorder
+        UnitB_Menu_movement_recorder();
+    }
+    menu_group_end();
+    menu_columns_end();
+}
+
+static const char* kMoveSub[4] = { "main", "indicators", "calculator", "recorder" };
+static int s_moveSub = 0;
+static void Tab_MovementRoot()
+{
+    if      (s_moveSub == 0) Page_MovementMain();
+    else if (s_moveSub == 1) Page_MovementIndicators();
+    else if (s_moveSub == 2) Page_MovementCalculator();
+    else                     Page_MovementRecorder();
+}
+
+// ==== misc / fonts / settings helpers ===============================================
+#include "fonts.h"
+#include <functional>
+#include <shellapi.h>   // ShellExecuteA -- settings "open folder" (WIN32_LEAN_AND_MEAN drops it)
+
+// botox menu.cpp save_popup: opens once per request, a click away drops the request (never
+// reopens at the mouse), body under the same 20px band OptionPopup draws.
+static void SavePopup(const char* str_id, bool& open, const ImVec2& size, const std::function<void()>& fn)
+{
+    if (!open) return;
+    const ImGuiID shown = ImGui::GetID(str_id);
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    if (!st->GetBool(shown)) { ImGui::OpenPopup(str_id); st->SetBool(shown, true); }
+    ImGui::SetNextWindowSize(size);
+    if (!ImGui::BeginPopup(str_id)) { open = false; st->SetBool(shown, false); return; }
+    PopupChrome(str_id, nullptr, ImHashStr(str_id));
+    fn();
+    if (!open) { ImGui::CloseCurrentPopup(); st->SetBool(shown, false); }
+    ImGui::EndPopup();
+}
+
+// IVEngineClient::ClientCmd_Unrestricted, slot 106 -- the call skins.cpp / practice.inl /
+// screenfx.cpp already make. botox's convenience buttons call client_cmd_unrestricted the
+// same way, straight from the click.
+static void MenuClientCmd(const char* cmd)
+{
+    DebugLog("menu: convenience button '%s'", cmd);
+    if (!g_engine) return;
+    __try {
+        void** vt = *reinterpret_cast<void***>(g_engine);
+        if (reinterpret_cast<uintptr_t>(vt[106]) > 0x10000)
+            ((void(__fastcall*)(void*, const char*))vt[106])(g_engine, cmd);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { DebugLog("menu: ClientCmd_Unrestricted faulted"); }
+}
+
+// botox tab_misc "convenience": one button per saved title/command, an "x" to drop it, then
+// "add button" opening a "new button" popup. Slots instead of botox's one tab/newline string
+// (config.cpp is one key=value per line).
+static void ConvenienceButtons()
+{
+    static char s_title[32] = "", s_command[160] = "";
+    static bool s_openAdd = false;
+    int remove = -1;
+    const ImVec2 xs = ImGui::CalcTextSize("x");
+    for (int i = 0; i < kConvButtons; ++i)
+    {
+        if (!g_convTitle[i][0] || !g_convCmd[i][0]) continue;
+        ImGui::PushID(i);
+        if (ImGui::Button(g_convTitle[i], ImVec2(ImGui::GetContentRegionAvail().x - 7.f - xs.x, 15.f)))
+            MenuClientCmd(g_convCmd[i]);
+        ImGui::SameLine(0.f, 7.f);
+        if (ImGui::InvisibleButton("##delete", ImVec2(xs.x, 15.f))) remove = i;
+        const ImVec2 xm = ImGui::GetItemRectMin();
+        ImGui::GetWindowDrawList()->AddText(ImVec2(xm.x, ImFloor(xm.y + (15.f - xs.y) * 0.5f)),
+            ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled), "x");
+        ImGui::PopID();
+    }
+    if (remove >= 0) { g_convTitle[remove][0] = '\0'; g_convCmd[remove][0] = '\0'; }
+
+    if (ImGui::Button("add button", ImVec2(-1.f, 15.f))) s_openAdd = true;
+    SavePopup("new button", s_openAdd, ImVec2(220.f, -1.f), []() {
+        ImGui::InputText("title", s_title, sizeof(s_title));
+        ImGui::InputText("command", s_command, sizeof(s_command));
+        auto blank = [](const char* t) { while (*t == ' ') ++t; return *t == '\0'; };
+        int slot = -1;
+        for (int i = 0; i < kConvButtons && slot < 0; ++i)
+            if (!g_convTitle[i][0] || !g_convCmd[i][0]) slot = i;
+        ImGui::BeginDisabled(blank(s_title) || blank(s_command) || slot < 0);
+        if (ImGui::Button("add button", ImVec2(-1.f, 15.f)))
+        {
+            strncpy_s(g_convTitle[slot], s_title, _TRUNCATE);
+            strncpy_s(g_convCmd[slot], s_command, _TRUNCATE);
+            s_title[0] = s_command[0] = '\0';
+            s_openAdd = false;
+        }
+        ImGui::EndDisabled();
+        if (slot < 0) ImGui::TextDisabled("all %d slots used", kConvButtons);
+    });
+}
+
+// botox menu_tab_settings.cpp tab_misc, main page. Same three groups, same order, same
+// popup titles/widths. Rows botox has that this DLL has no feature for are left out (list
+// in the commit / report); TF2-only rows sit in the group they fit.
+static void Page_MiscMain()
+{
+    menu_columns_begin();
+
+    if (menu_group_begin("overlays"))
+    {
+        ImGui::Checkbox("watermark", &g_wmEnable);
+        if (g_wmEnable)
+            ImGui::OptionPopup("watermark configuration", []() {
+                ImGui::Combo("style##watermark style", &g_wmStyle,
+                    "default\0kamibebra\0clarity\0clarity v2\0delusional\0interwebz\0havoc\0onetap\0airflow\0"
+                    "ev0lve\0legendware\0interium\0skebob\0cumidere\0illusory\0lumi\0billware\0dna\0"
+                    "dna clarity\0cucumber\0howeweware\0gamesense\0");
+                ImGui::InputText("name##watermark text", g_wmLabel, sizeof(g_wmLabel));
+                ImGui::Checkbox("title##watermark title", &g_wmShowLabel);
+                ImGui::Checkbox("fps", &g_wmShowFPS);
+                ImGui::Checkbox("ping", &g_wmShowPing);
+                ImGui::Checkbox("loss", &g_wmShowLoss);
+                ImGui::Checkbox("time", &g_wmShowTime);
+                ImGui::Combo("position##watermark pos", &g_wmPos,
+                    "top left\0top center\0top right\0bottom left\0bottom center\0bottom right\0");
+                ImGui::ColorRow("text color##watermark text color", g_wmTextColor);
+            }, ImVec2(220.f, -1.f));
+
+        ImGui::Checkbox("spectator list", &g_specEnable);
+        if (g_specEnable)
+            ImGui::OptionPopup("spectators configuration", []() {
+                ImGui::ColorRow("spectating local color##spectator list text color one", g_specColorOne);
+                ImGui::ColorRow("spectating other color##spectator list text color two", g_specColorTwo);
+                // botox's own index order (spectator_list.h) -- indices this DLL does not
+                // implement yet fall back to the default body, same as index 0.
+                ImGui::Combo("style##spectatorlist style", &g_specStyle,
+                    "default\0delusional\0interwebz\0windows xp\0clarity\0chillware\0lobotomy\0kamibebra\0"
+                    "eyes\0cumhacck\0clarity v2\0airplane\0bhop cheat\0millionware\0aimware\0havoc\0onetap\0"
+                    "airflow\0ev0lve\0legendware\0interium\0chillware v2\0skebob\0cumidere\0illusory\0lumi\0"
+                    "billware\0inkabanium\0dna\0cucumber\0howeweware\0gamesense\0");
+                ImGui::Checkbox("show targets##spectatorlist targets", &g_specShowTarget);
+                ImGui::Checkbox("always show##spectatorlist always show", &g_specAlwaysShow);
+                if (g_specStyle == 1)
+                    ImGui::Checkbox("left side##spectatorlist delusional left", &g_specDelusionalLeft);
+                if (g_specStyle == 2)
+                    ImGui::SliderInt("width##spectatorlist width", &g_specListWidth, 80, 300);
+                ImGui::Combo("position##spectatorlist pos", &g_specPos,
+                    "top left\0top center\0top right\0bottom left\0bottom center\0bottom right\0");
+            }, ImVec2(200.f, -1.f));
+
+        ImGui::Checkbox("media player", &g_mpEnable);
+        if (g_mpEnable)
+            ImGui::OptionPopup("media player configuration", []() {
+                // botox menu_tab_settings.cpp media player popup (minus waveform / lyrics /
+                // keybinds: no visualizer thread, no lyrics fetch, no keybind widget here).
+                // Look + fonts follow the watermark style; prev/pause/next buttons show in
+                // the panel while the menu is open, same as the donor.
+                ImGui::Combo("position##media player position", &g_mpPos,
+                    "top left\0top center\0top right\0bottom left\0bottom center\0bottom right\0");
+                ImGui::Checkbox("simple", &g_mpSimple);
+                if (!g_mpSimple) {
+                    ImGui::Checkbox("cover art", &g_mpCoverArt);
+                    ImGui::Checkbox("background", &g_mpBackground);
+                    ImGui::Checkbox("progress bar", &g_mpProgressBar);
+                }
+                ImGui::Checkbox("precise time", &g_mpTime);
+            }, ImVec2(200.f, -1.f));
+
+        ImGui::Checkbox("points", &g_ptsEnable);
+
+        ImGui::Checkbox("hit marker", &g_hmEnable);
+        if (g_hmEnable)
+            ImGui::OptionPopup("hit marker configuration", []() {
+                ImGui::SliderFloat("size##hitmarkersize", &g_hmSize, 4.f, 30.f, "%.0f");
+                ImGui::ColorRow("color##hitmarkercolor", g_hmColor);
+            }, ImVec2(220.f, -1.f));
+
+        ImGui::Checkbox("death particles", &g_dpEnable);
+        if (g_dpEnable)
+            ImGui::OptionPopup("death particles settings", []() {
+                const char* styles[] = { "blood", "sparks (->blood)", "confetti", "smoke",
+                                          "explosion", "soul", "balls", "melt (->blood)", "minecraft" };
+                ImGui::Combo("effect##deathparticles", &g_dpStyle, styles, 9);
+                if (g_dpStyle == 8)
+                {
+                    const char* mc[] = { "crits only", "crits + xp", "xp only" };
+                    ImGui::Combo("drops##deathparticles", &g_dpMcMode, mc, 3);
+                }
+                if (g_dpStyle == 5)
+                {
+                    const char* soul[] = { "fountain", "rise", "burst", "converge" };
+                    ImGui::Combo("soul##deathparticles", &g_dpSoulStyle, soul, 4);
+                }
+                ImGui::Checkbox("multicolor##deathparticles", &g_dpMulticolor);
+                if (!g_dpMulticolor)
+                    ImGui::ColorRow("color##deathparticles", g_dpColor);
+                ImGui::SliderInt("amount##deathparticles", &g_dpAmount, 1, 100);
+                ImGui::SliderFloat("size##deathparticles", &g_dpSize, 0.25f, 4.f, "%.1fx");
+                ImGui::SliderFloat("lifetime##deathparticles", &g_dpLifetime, 0.5f, 10.f, "%.1f s");
+                if (g_dpStyle == 8 && g_dpMcMode != 0)
+                    ImGui::SliderFloat("xp stays##deathparticles", &g_dpMcXpTime, 1.f, 60.f, "%.0f s");
+            }, ImVec2(220.f, -1.f));
+
+        // botox "console color" tints the console window (DrawSetColor hook); this DLL's knob
+        // colours its own console prints -- same slot in the group.
+        ImGui::ColorRow("console color", g_consoleColor);
+
+        // TF2: killfeed filter (botox "displayed logs" slot -- what the feed shows)
+        ImGui::Checkbox("only your killfeed", &g_selfKillfeedOnly);
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("game"))
+    {
+        // TF2 rows first (botox's clantag / chat / bot names / revive / deagle rows are CS:GO
+        // only), then botox's sv_pure bypass, performance, discord rpc, debugger menu.
+        ImGui::Checkbox("f2p chat bypass", &g_f2pChatBypass);
+        ImGui::Checkbox("reveal scoreboard", &g_revealScoreboard);
+        ImGui::Checkbox("steam history menu item", &g_steamHistory);
+
+        ImGui::Checkbox("region selector", &g_regionEnable);
+        if (g_regionEnable)
+            ImGui::OptionPopup("region selector settings", []() {
+                ImGui::MultiCombo("regions##regions", &g_regionMask, kRegionNames, 29);
+            }, ImVec2(220.f, -1.f));
+
+        ImGui::Checkbox("net settings", &g_netSettingsEnable);
+        if (g_netSettingsEnable)
+            ImGui::OptionPopup("net settings configuration", []() {
+                ImGui::Combo("preset##netcfg", &g_netSettingsSel,
+                    "klown\0" "murmur\0" "boobsy\0" "xcd\0" "0lerp\0" "15lerp\0" "30lerp\0" "spy\0"
+                    "koymu\0" "lenny\0" "snappy\0");
+                ImGui::Checkbox("also set rate / cmdrate / updaterate##nsrates", &g_netSettingsRates);
+                char ns[128];
+                NetSettings_Status(ns, sizeof(ns));
+                if (ns[0]) ImGui::TextDisabled("%s", ns);
+            }, ImVec2(240.f, -1.f));
+
+        ImGui::Checkbox("net graph color", &g_ngColorEnable);
+        if (g_ngColorEnable)
+            ImGui::OptionPopup("net graph color settings", []() {
+                ImGui::ColorRow("text##ngtext", g_ngTextColor);
+                ImGui::ColorRow("warn orange##ngorange", g_ngOrangeColor);
+                ImGui::ColorRow("warn red##ngred", g_ngRedColor);
+                ImGui::ColorRow("warn yellow##ngyellow", g_ngYellowColor);
+            }, ImVec2(200.f, -1.f));
+
+        ImGui::Checkbox("net graph position", &g_ngPosEnable);
+        if (g_ngPosEnable)
+            ImGui::OptionPopup("net graph position settings", []() {
+                // DragInt min==max = unbounded, so no slider end can pin the graph off screen.
+                ImGui::DragInt("x##ngposx", &g_ngPosX, 1.f, 0, 0, "x  %d px");
+                ImGui::DragInt("y##ngposy", &g_ngPosY, 1.f, 0, 0, "y  %d px");
+                if (ImGui::Button("reset offsets", ImVec2(-1.f, 0.f))) { g_ngPosX = 0; g_ngPosY = 0; }
+            }, ImVec2(200.f, -1.f));
+
+        ImGui::Checkbox("equip region unlock", &g_equipRegionUnlock);
+
+        ImGui::Checkbox("sv_pure bypass", &g_pureBypass);
+        ImGui::Checkbox("sv_cheats bypass", &g_cheatsBypass);
+
+        ImGui::Checkbox("performance", &g_perfEnable);
+        if (g_perfEnable)
+            ImGui::OptionPopup("performance configuration", []() {
+                ImGui::Checkbox("1ms timer", &g_hiTimerRes);
+            }, ImVec2(220.f, -1.f));
+
+        ImGui::Checkbox("discord rpc", &g_discordEnable);
+        if (g_discordEnable)
+            ImGui::OptionPopup("discord rpc configuration", []() {
+                ImGui::InputText("application id##discord rpc", g_discordAppId, sizeof(g_discordAppId));
+                ImGui::InputText("state##discord rpc", g_discordState, sizeof(g_discordState));
+                ImGui::InputText("details##discord rpc", g_discordDetails, sizeof(g_discordDetails));
+                ImGui::InputText("large image key##discord rpc", g_discordImageKey, sizeof(g_discordImageKey));
+            }, ImVec2(200.f, -1.f));
+
+        ImGui::Checkbox("debugger menu", &g_debugMenuEnable);
+    }
+    menu_group_end();
+
+    if (menu_group_begin("convenience"))
+    {
+        // TF2: the matchmaker fixes are fixed convenience buttons, above the user's own.
+        const float gap  = ImGui::GetStyle().ItemSpacing.x;
+        const float half = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+        if (ImGui::Button("fix stuck matchmaker", ImVec2(half, 15.f)))
+            MMFix_Run();
+        ImGui::SameLine(0.f, gap);
+        if (ImGui::Button("abandon match (GC)", ImVec2(-1.f, 15.f)))
+            MMFix_Abandon();
+        ImGui::TextDisabled("%s", g_mmFixReady ? g_mmFixStatus : "sigs not resolved");
+
+        ConvenienceButtons();
+    }
+    menu_group_end();
+
+    menu_columns_end();
+
+    // UNIT_MENU_SLOT misc_main
+    UnitE_Menu_misc_main();
+}
+
+static int s_miscSub = 0;
+static void Tab_MiscRoot()
+{
+    Page_MiscMain();
+}
+
+// ==== skins =========================================================================
+// botox menu_tab_settings.cpp tab_inventory, "weapons" page, mapped onto TF2: the left
+// "weapons" box is botox's own (enable, weapon, paint kit list, wear, pattern, stattrak ->
+// stat clock, update, reset skins); the right column holds what TF2 has in place of the
+// knife box -- killstreak, unusual effect, item variant/reskin, spells. CS:GO-only rows
+// (name tag, sticker slots, paint colors, team split) have no TF2 counterpart and are not
+// drawn. Rows that cannot apply to the picked weapon are hidden, never greyed.
+//
+// Every widget edits one SkinCfg in g_skinCfgs, keyed by the weapon's REDIRECT index; an
+// edit marks that entry enabled. Anything that changes which item the weapon reports
+// (warpaint def, australium, festive, reskin) sets g_skinNeedsUpdate: skins.cpp turns a
+// burst of those into ONE cl_fullupdate.
+
+// The four ways a weapon can report a different item are exclusive: ResolveWeaponTarget
+// wears exactly one def (festive > reskin > warpaint def > upgradeable twin), so a second
+// pick would be silently ignored. Picking one clears the others.
+enum SkinItemPick { SKP_PAINT, SKP_AUSTRALIUM, SKP_FESTIVE, SKP_RESKIN };
+static void SkinPickItem(SkinCfg& c, SkinItemPick keep)
+{
+    if (keep != SKP_PAINT)      { c.paintKitId = 0; c.weaponSkinDef = 0; }
+    if (keep != SKP_AUSTRALIUM) c.australium = false;
+    if (keep != SKP_FESTIVE)    c.festive = false;
+    if (keep != SKP_RESKIN)     { c.reskinDef = 0; c.reskinStyle = 0; }
+}
+
+// Paint kit id the weapon wears right now, in k_warpaints terms (weapon-specific skins are
+// stored as their 15xxx def). 0 = default.
+static int SkinCurrentPaintKit(const SkinCfg& cfg)
+{
+    if (cfg.weaponSkinDef > 0) {
+        for (int j = 0; j < k_skinDefCount; j++)
+            if (k_skinDefs[j].skinDef == cfg.weaponSkinDef) return k_skinDefs[j].pkId;
+        return 0;
+    }
+    return cfg.paintKitId;
+}
+
+static const char* SkinPaintKitName(int pk)
+{
+    for (int i = 1; i < k_warpaintCount; i++)
+        if (k_warpaints[i].defindex == pk) return k_warpaints[i].name;
+    return "default";
+}
+
+// TF2's five wear bands (econ_item_constants.cpp EconWear_ToIntCategory: <=0.2 .. >0.8).
+static const char* SkinWearFmt(float w)
+{
+    return w <= 0.2f ? "factory new %.4f" : w <= 0.4f ? "minimal wear %.4f" :
+           w <= 0.6f ? "field-tested %.4f" : w <= 0.8f ? "well-worn %.4f" : "battle scarred %.4f";
+}
+
+static void Tab_Inventory()
+{
+    static int s_wpnSel = 0;
+
+    // alphabetical display order, built once
+    static int  s_wpnOrder[k_wpnCount];
+    static bool s_wpnOrderInit = false;
+    if (!s_wpnOrderInit) {
+        for (int i = 0; i < k_wpnCount; i++) s_wpnOrder[i] = i;
+        std::sort(s_wpnOrder, s_wpnOrder + k_wpnCount, [](int a, int b) {
+            return _stricmp(k_wpnList[a].name, k_wpnList[b].name) < 0;
+        });
+        s_wpnOrderInit = true;
+    }
+
+    // botox update_button: one full update for everything picked so far.
+    const auto update_button = []() {
+        if (ImGui::Button("update", ImVec2(-1.f, 15.f))) g_skinNeedsUpdate = true;
+    };
+
+    bool edited = false;    // any change to the selected weapon's entry -> it is enabled
+    bool swapped = false;   // a change to the item the weapon reports -> full update
+
+    menu_columns_begin();
+
+    // One box, opened once; the selection is bound between its two halves because a pick in
+    // the weapon combo changes s_wpnSel this frame and every row below has to see it.
+    const bool weaponsOpen = menu_group_begin("weapons");
+    if (weaponsOpen)
+    {
+        ImGui::Checkbox("enable weapon skins", &g_enableSkins);
+
+        if (ImGui::BeginCombo("weapon", k_wpnList[s_wpnSel].name))
+        {
+            for (int oi = 0; oi < k_wpnCount; oi++) {
+                const int i = s_wpnOrder[oi];
+                const bool sel = (s_wpnSel == i);
+                if (ImGui::Selectable(k_wpnList[i].name, sel)) s_wpnSel = i;
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+    const WpnEntry& we = k_wpnList[s_wpnSel];
+    const int selRedir = we.redir;
+    SkinCfg& cfg = g_skinCfgs[selRedir];
+    // redir != stock means the stock def cannot take a paint kit and the upgradeable
+    // twin has to be worn instead; canPaint means the stock def already accepts one.
+    const bool hasPaint = we.canPaint || (we.stock != we.redir);
+
+    if (weaponsOpen)
+    {
+        // botox skin_selector: "paint kit: <name>", a search box, a 90px list. Weapon-specific
+        // skins (paint kit 1-86) are listed only when THIS weapon has a 15xxx def for them;
+        // generic war paints (87+) only when it can be painted at all.
+        int listed = 0;
+        for (int i = 1; i < k_warpaintCount; i++) {
+            const int pk = k_warpaints[i].defindex;
+            if (pk <= 86 ? Skin_FindSpecificDef(selRedir, pk) != 0 : hasPaint) ++listed;
+        }
+        const int curPk = SkinCurrentPaintKit(cfg);
+        if (listed > 0)
+        {
+            ImGui::Label("paint kit: %s", SkinPaintKitName(curPk));
+            ImGui::PushID("paint kit");
+            static ImGuiTextFilter s_kitFilter;
+            s_kitFilter.Draw("search##skin filter");
+            if (ImGui::BeginListBox("##skin list", ImVec2(0.f, 90.f)))
+            {
+                if (s_kitFilter.PassFilter("default") && ImGui::Selectable("default", curPk == 0)) {
+                    cfg.paintKitId = 0; cfg.weaponSkinDef = 0; edited = swapped = true;
+                }
+                for (int i = 1; i < k_warpaintCount; i++) {
+                    const int pk = k_warpaints[i].defindex;
+                    const int specific = (pk <= 86) ? Skin_FindSpecificDef(selRedir, pk) : 0;
+                    if (pk <= 86 ? specific == 0 : !hasPaint) continue;
+                    if (!s_kitFilter.PassFilter(k_warpaints[i].name)) continue;
+                    ImGui::PushID(pk);
+                    if (ImGui::Selectable(k_warpaints[i].name, pk == curPk)) {
+                        SkinPickItem(cfg, SKP_PAINT);
+                        if (specific) { cfg.paintKitId = 0;  cfg.weaponSkinDef = specific; }
+                        else          { cfg.paintKitId = pk; cfg.weaponSkinDef = 0; }
+                        edited = swapped = true;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndListBox();
+            }
+            ImGui::PopID();
+
+            // wear and pattern only mean something on a painted weapon
+            if (curPk > 0) {
+                edited |= SliderF("wear", &cfg.wear, 0.0001f, 1.f, SkinWearFmt(cfg.wear));
+                // attrs 866/867 carry a 64-bit seed; the bar covers botox's 0..1023 and a
+                // ctrl+click types any real item's seed.
+                const uint64_t lo = 0, hi = cfg.pattern > 1023 ? cfg.pattern : 1023;
+                edited |= ImGui::SliderScalar("pattern", ImGuiDataType_U64, &cfg.pattern, &lo, &hi, "%llu");
+            }
+        }
+
+        // botox "stattrak" + "kills". The clock model only exists on an item that carries a
+        // warpaint def's weapon_uses_stattrak_module string, so with no skin picked skins.cpp
+        // puts the weapon in a warpaint def whose paint is cancelled (k_noPaintKit).
+        if (ImGui::Checkbox("stat clock", &cfg.statClock)) edited = swapped = true;
+        if (cfg.statClock) {
+            if (SliderI("kills", &cfg.statKills, 0, 99999)) edited = true;
+            if (cfg.statKills < 0) cfg.statKills = 0;
+        }
+
+        update_button();
+
+        if (ImGui::Button("reset skins", ImVec2(-1.f, 15.f))) ImGui::OpenPopup("reset all weapon skins");
+        // botox save_popup( "reset all weapon skins", ..., ImVec2( 220, -1 ) )
+        ImGui::SetNextWindowSize(ImVec2(220.f, 0.f));
+        if (ImGui::BeginPopup("reset all weapon skins"))
+        {
+            PopupChrome("reset all weapon skins", nullptr, ImHashStr("reset all weapon skins"));
+            if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f))) {
+                // values only: the key set is sealed at install (skins.cpp Skins_Install)
+                for (auto& [key, c] : g_skinCfgs) c = SkinCfg{};
+                g_skinNeedsUpdate = true;
+                DebugLog("skins: reset all weapon skins");
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("no", ImVec2(-1.f, 15.f))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("killstreak"))
+    {
+        static const char* const kTier[]  = { "none","basic","specialized","professional" };
+        static const char* const kSheen[] = { "none","team shine","deadly daffodil","manndarin",
+                                              "mean green","agonizing emerald","villainous violet","hot rod" };
+        static const char* const kEff[]   = { "none","fire horns","cerebral discharge","tornado",
+                                              "flames","singularity","incinerator","hypno-beam" };
+        edited |= ImGui::Combo("tier", &cfg.ksTier, kTier, 4);
+        if (cfg.ksTier >= 2) {
+            edited |= ImGui::Combo("sheen", &cfg.ksSheen, kSheen, 8);
+            if (ImGui::Checkbox("custom color", &cfg.ksCustomColor)) edited = swapped = true;
+            if (cfg.ksCustomColor)
+                edited |= ImGui::ColorEdit3("##skkscol", cfg.ksColor,
+                                            ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+        }
+        if (cfg.ksTier == 3)
+            edited |= ImGui::Combo("kill effect", &cfg.ksEffect, kEff, 8);
+    }
+    menu_group_end();
+
+    // attrs 134 + 370. botox name_selector shape: "label: current", search, 90px list. Every id
+    // the game's schema defines is offered (data/particledata.h), grouped as TF2 groups them.
+    if (menu_group_begin("unusual"))
+    {
+        ImGui::Label("effect: %s", cfg.unusual < 0 ? "none" : Particle_Name(cfg.unusual));
+        ImGui::PushID("unusual");
+        static ImGuiTextFilter s_partFilter;
+        s_partFilter.Draw("search##name filter");
+        if (ImGui::BeginListBox("##name list", ImVec2(0.f, 90.f)))
+        {
+            for (int g = 0; g < k_particleGroupCount; ++g)
+            {
+                const ParticleGroup& pg = k_particleGroups[g];
+                bool headerDrawn = false;
+                for (int i = 0; i < pg.count; ++i)
+                {
+                    const ParticleEntry& pe = pg.items[i];
+                    if (!s_partFilter.PassFilter(pe.name)) continue;
+                    if (!headerDrawn) { ImGui::TextDisabled("%s", pg.name); headerDrawn = true; }
+                    ImGui::PushID(g * 10000 + i);
+                    if (ImGui::Selectable(pe.name, cfg.unusual == pe.id)) { cfg.unusual = pe.id; edited = true; }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndListBox();
+        }
+        ImGui::PopID();
+    }
+    menu_group_end();
+
+    const ReskinGroup* rg = Skin_FindReskinGroup(selRedir);
+    const bool hasFestive = we.festiveIdx > 0;
+    if ((we.canAustralia || hasFestive || we.canFestivize || rg) && menu_group_begin("variant"))
+    {
+        if (we.canAustralia && ImGui::Checkbox("australium", &cfg.australium)) {
+            if (cfg.australium) SkinPickItem(cfg, SKP_AUSTRALIUM);
+            edited = swapped = true;
+        }
+        if (hasFestive && ImGui::Checkbox("festive", &cfg.festive)) {
+            if (cfg.festive) { SkinPickItem(cfg, SKP_FESTIVE); cfg.festivized = false; }
+            edited = swapped = true;
+        }
+        // a Festive weapon already has its lights
+        if (we.canFestivize && !cfg.festive && ImGui::Checkbox("festivized", &cfg.festivized))
+            edited = swapped = true;
+
+        if (rg)
+        {
+            const char* preview = "none";
+            for (int i = 0; i < rg->count; i++)
+                if (rg->variants[i].defindex == cfg.reskinDef && rg->variants[i].style == cfg.reskinStyle)
+                    { preview = rg->variants[i].name; break; }
+            if (ImGui::BeginCombo("reskin", preview))
+            {
+                if (ImGui::Selectable("none", cfg.reskinDef == 0)) {
+                    cfg.reskinDef = 0; cfg.reskinStyle = 0; edited = swapped = true;
+                }
+                for (int i = 0; i < rg->count; i++) {
+                    const bool sel = (cfg.reskinDef == rg->variants[i].defindex
+                                   && cfg.reskinStyle == rg->variants[i].style);
+                    if (ImGui::Selectable(rg->variants[i].name, sel)) {
+                        SkinPickItem(cfg, SKP_RESKIN);
+                        cfg.reskinDef   = rg->variants[i].defindex;
+                        cfg.reskinStyle = rg->variants[i].style;
+                        edited = swapped = true;
+                    }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            if (const ReskinInfo* ri = cfg.reskinDef > 0 ? Skin_FindReskinInfo(cfg.reskinDef) : nullptr)
+                if (ri->specialTaunt) ImGui::TextDisabled("taunt kill: server-side only");
+        }
+    }
+    if (we.canAustralia || hasFestive || we.canFestivize || rg) menu_group_end();
+
+    if (menu_group_begin("spells"))
+    {
+        // Exorcism fits every weapon; pumpkin bombs / halloween fire only where TF2 has them.
+        auto spell = [&](const char* label, uint8_t bit) {
+            bool on = (cfg.spellFlags & bit) != 0;
+            if (ImGui::Checkbox(label, &on)) {
+                cfg.spellFlags = (uint8_t)((cfg.spellFlags & ~bit) | (on ? bit : 0));
+                edited = true;
+            }
+        };
+        spell("exorcism", kCfgSpell_Exorcism);
+        if (we.spells & kSpell_Pumpkin) spell("pumpkin bombs", kCfgSpell_Pumpkin);
+        if (we.spells & kSpell_Fire)    spell("halloween fire", kCfgSpell_Fire);
+
+        update_button();
+    }
+    menu_group_end();
+
+    menu_columns_end();
+
+    if (edited)  cfg.enabled = true;
+    if (swapped) g_skinNeedsUpdate = true;
+}
+
+// botox tab_fonts: one page per face, "<face> font" settings | "font list". botox pages
+// indicators / esp map to TF2 (fonts.h); its chud hud / default hud pages rewrite CS:GO's
+// panorama fonts.conf and have no TF2 equivalent. Applies live: render.cpp rebuilds the atlas
+// (indicators) and aim/helpers.cpp recreates the vgui face (esp) once the pick settles.
+static const char* kFontsSub[2] = { "indicators", "esp" };
+static int s_fontsSub = 0;
+static const char* const kFontFlagNames[FF_COUNT] = {
+    "no hinting", "no autohint", "force autohint", "light hinting", "monohinting", "bold", "oblique", "monochrome" };
+
+static void FontPage(const char* name, char* face, size_t faceSize, int* size, int* flags, void (*reset)(),
+                     const std::vector<std::string>& list, ImGuiTextFilter& filter)
+{
+    menu_columns_begin();
+
+    if (menu_group_begin(name))
+    {
+        ImGui::SliderInt("size", size, 0, 50, "%d");
+        ImGui::MultiCombo("font flags", flags, kFontFlagNames, FF_COUNT);
+        if (ImGui::Button("reset to default", ImVec2(-1.f, 15.f))) reset();
+        if (ImGui::Button("reload fonts", ImVec2(-1.f, 15.f))) Fonts_RequestReload();
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("font list"))
+    {
+        filter.Draw("search for a font");
+        if (ImGui::BeginListBox("##font list", ImVec2(0.f, 300.f)))
+        {
+            for (const auto& n : list)
+                if (filter.PassFilter(n.c_str()) && ImGui::Selectable(n.c_str(), _stricmp(face, n.c_str()) == 0))
+                    strncpy_s(face, faceSize, n.c_str(), _TRUNCATE);
+            ImGui::EndListBox();
+        }
+    }
+    menu_group_end();
+
+    menu_columns_end();
+}
+
+static void Tab_Fonts()
+{
+    if (s_fontsSub == 1)
+    {
+        static ImGuiTextFilter s_espFilter;
+        FontPage("esp font", g_fontEspName, sizeof(g_fontEspName), &g_fontEspSize, &g_fontEspFlags,
+                 Fonts_ResetEsp, Fonts_Families(), s_espFilter);
+    }
+    else
+    {
+        static ImGuiTextFilter s_indFilter;
+        FontPage("indicator font", g_fontIndName, sizeof(g_fontIndName), &g_fontIndSize, &g_fontIndFlags,
+                 Fonts_ResetIndicator, Fonts_FileNames(), s_indFilter);
+    }
+    // UNIT_MENU_SLOT fonts
+}
+
+// botox config_panel(visuals = false, ..., list_rows 12): file name, list, then create /
+// save / load / remove / refresh / open folder, with yes/no confirmations. Backed by
+// config.cpp's named cfgs in C:\botox-tf2 (names shown without ".cfg").
+static bool CfgNameGetter(void* data, int idx, const char** out)
+{
+    *out = (*static_cast<std::vector<std::string>*>(data))[idx].c_str();
+    return true;
+}
+
+static void ConfigPanel()
+{
+    static std::vector<std::string> s_names;
+    static bool s_listed = false, s_save = false, s_load = false, s_remove = false;
+    static int  s_selected = 0;
+    static char s_file[64] = "";
+    auto refresh = []() {
+        s_names = ListConfigs();
+        for (auto& n : s_names) if (n.size() > 4) n.resize(n.size() - 4);
+    };
+    if (!s_listed) { refresh(); s_listed = true; }
+
+    ImGui::InputText("config file name", s_file, sizeof(s_file));
+
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 2.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 3.f));
+    ImGui::ListBox("##config list", &s_selected, CfgNameGetter, &s_names, (int)s_names.size(), 12);
+    ImGui::PopStyleVar();
+
+    if (s_selected < 0 || s_selected >= (int)s_names.size()) s_selected = 0;
+    const std::string sel = s_names.empty() ? "" : s_names[s_selected];
+
+    if (ImGui::Button("create", ImVec2(-1.f, 15.f)) && s_file[0]) { SaveConfigNamed(s_file); refresh(); }
+    if (ImGui::Button("save", ImVec2(-1.f, 15.f)))   s_save = true;
+    if (ImGui::Button("load", ImVec2(-1.f, 15.f)))   s_load = true;
+    if (ImGui::Button("remove", ImVec2(-1.f, 15.f))) s_remove = true;
+    if (ImGui::Button("refresh", ImVec2(-1.f, 15.f))) refresh();
+    if (ImGui::Button("open folder", ImVec2(-1.f, 15.f)))
+        ShellExecuteA(nullptr, "open", CONFIG_DIR, nullptr, nullptr, SW_SHOWNORMAL);
+
+    // nothing listed: a save/load/remove on "" would hit nothing
+    if (s_names.empty()) s_save = s_load = s_remove = false;
+
+    SavePopup("save confirmation", s_save, ImVec2(220.f, -1.f), [&]() {
+        if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f))) { SaveConfigNamed(sel.c_str()); s_save = false; }
+        ImGui::SameLine();
+        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) s_save = false;
+    });
+    SavePopup("load confirmation", s_load, ImVec2(220.f, -1.f), [&]() {
+        if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f))) { LoadConfigNamed(sel.c_str()); s_load = false; }
+        ImGui::SameLine();
+        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) s_load = false;
+    });
+    SavePopup("remove confirmation", s_remove, ImVec2(220.f, -1.f), [&]() {
+        if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f)))
+        {
+            DeleteConfigNamed(sel.c_str());
+            refresh();
+            s_selected = 0;
+            s_remove = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) s_remove = false;
+    });
+}
+
+// botox tab_settings: col1 "config" + "system", col2 "visuals config" + "menu". botox's
+// visuals-only config panel needs config.cpp to split its table by category (it has no such
+// split) and botox network has no TF2 server -- both left out. menu key is TF2-only (botox
+// hardcodes insert), kept in system.
+static void Tab_Settings()
+{
+    menu_columns_begin();
+
+    if (menu_group_begin("config"))
+        ConfigPanel();
+    menu_group_end();
+
+    if (menu_group_begin("system"))
+    {
+        // install-time diags ran before this was ever ticked, so their lines went nowhere.
+        // Replay the ones that were kept the moment the log opens.
+        if (ImGui::Checkbox("debug log", &g_debugLogEnable) && g_debugLogEnable)
+        {
+            DebugLog_FlushEarly();
+            Scoreboard_LogInstallOnce();
+            LagRes_LogInstallOnce();
+        }
+        ImGui::Checkbox("safe mode", &g_safeMode);
+
+        ImGui::Label("menu key");
+        int menuKey = g_menuKey;
+        int dummyMode = 1;
+        ImGui::Keybind("menu keybind", &menuKey, &dummyMode, false);
+        g_menuKey = menuKey ? menuKey : VK_INSERT;
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("menu"))
+    {
+        ImGui::ColorRow("accent color##accent color", g_accentColor, ImGuiColorEditFlags_NoAlpha);
+
+        // botox: edits a copy, commits on release -- the whole menu rescales under the cursor
+        // otherwise. 50% floor, not botox's 25%: RenderMenu resets anything under 0.5 to 1.
+        static float s_dpiEdit = 100.f;
+        static bool s_dpiActive = false;
+        if (!s_dpiActive) s_dpiEdit = g_dpiScale * 100.f;
+        ImGui::SliderFloat("dpi scale", &s_dpiEdit, 50.f, 200.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
+        s_dpiActive = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit()) g_dpiScale = s_dpiEdit / 100.f;
+    }
+    menu_group_end();
+
+    menu_columns_end();
+    // UNIT_MENU_SLOT settings
+}
+
+// ==== tab bar =======================================================================
+// botox's own tab/page shape (botox_menu_spec.md section 2): aimbot | visuals (esp,
+// world, screen) | movement (main, indicators, calculator, recorder) | misc (main,
+// player list) | inventory (= skinchanger) | fonts | settings.
+enum MenuTab { TAB_AIMBOT, TAB_VISUALS, TAB_MOVEMENT, TAB_MISC, TAB_INVENTORY, TAB_FONTS, TAB_SETTINGS, TAB_COUNT };
+static const char* kTabNames[TAB_COUNT] = { "aimbot", "visuals", "movement", "misc", "inventory", "fonts", "settings" };
+static int s_tab = TAB_AIMBOT;
+
+// botox_menu_spec.md section 2: pages per tab. aimbot/inventory/fonts/settings have
+// none; visuals/movement/misc carry the sidebar's flyout.
+static const SidebarTab kSidebar[TAB_COUNT] = {
+    { kTabNames[TAB_AIMBOT],    nullptr,     0 },
+    { kTabNames[TAB_VISUALS],   kVisualsSub, 3 },
+    { kTabNames[TAB_MOVEMENT],  kMoveSub,    4 },
+    { kTabNames[TAB_MISC],      nullptr,     0 },
+    { kTabNames[TAB_INVENTORY], nullptr,     0 },
+    { kTabNames[TAB_FONTS],     kFontsSub,   2 },
+    { kTabNames[TAB_SETTINGS],  nullptr,     0 },
+};
+
+// botox_menu_spec.md section 1, build_date_text() literal (menu.cpp lines 22-45): the
+// PE timestamp of this module, via localtime_s, falling back to __DATE__ if that read
+// fails. Format "<d> <mon> <yyyy>", lowercase 3-letter month -- NOT the day name (botox
+// has no weekday in the title, that was this fork's own embellishment).
+static const char* BuildDateText()
+{
+    static char s_text[20] = { 0 };
+    if (s_text[0]) return s_text;
+
+    static const char* kMon[12] = { "jan","feb","mar","apr","may","jun",
+                                    "jul","aug","sep","oct","nov","dec" };
+
+    HMODULE mod = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&BuildDateText), &mod))
+    {
+        const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(mod);
+        if (dos->e_magic == IMAGE_DOS_SIGNATURE)
+        {
+            const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                reinterpret_cast<const std::uint8_t*>(mod) + dos->e_lfanew);
+            std::tm local = { };
+            const std::time_t stamp = nt->FileHeader.TimeDateStamp;
+            if (nt->Signature == IMAGE_NT_SIGNATURE && localtime_s(&local, &stamp) == 0)
+            {
+                _snprintf(s_text, sizeof(s_text), "%d %s %d",
+                          local.tm_mday, kMon[local.tm_mon], local.tm_year + 1900);
+                return s_text;
+            }
+        }
+    }
+
+    // __DATE__ fallback: "Mmm dd yyyy", space-padded day ("Aug  5 2026")
+    const int day  = (__DATE__[4] == ' ' ? 0 : (__DATE__[4] - '0') * 10) + (__DATE__[5] - '0');
+    const int year = (__DATE__[7] - '0') * 1000 + (__DATE__[8] - '0') * 100 +
+                     (__DATE__[9] - '0') * 10   + (__DATE__[10] - '0');
+    int m = 0;
+    for (int i = 0; i < 12; ++i)
+        if (_strnicmp(__DATE__, kMon[i], 3) == 0) { m = i; break; }
+    _snprintf(s_text, sizeof(s_text), "%d %s %d", day, kMon[m], year);
+    return s_text;
+}
+
+// botox menu.cpp save_popup("eject confirmation", ..., ImVec2(220, -1)): fixed 220 wide,
+// 20px #191919 title band with the id centred in verdana bold, accent fade line under it,
+// then yes / no as two 15px buttons sharing the row.
+static void EjectPopup()
+{
+    const char* id = "eject confirmation";
+    ImGui::SetNextWindowSize(ImVec2(220.f, 0.f));
+    if (!ImGui::BeginPopup(id)) return;
+    PopupChrome(id, nullptr, ImHashStr(id));
+    if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f)))
+    {
+        g_eject = true;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("no", ImVec2(-1.f, 15.f))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+// botox m_anim_progress: render.cpp composites the menu's draw lists as ONE layer at this
+// alpha (ImGui_ImplDX9_RenderDrawDataFaded), not style alpha -- that skipped every hand-drawn
+// band, title, tab and border, so the chrome popped while the widgets faded.
+static float s_animProgress = 0.f;
+float Menu_FadeAlpha() { return ImSaturate(s_animProgress); }
+
+void RenderMenu()
+{
+    ImGuiIO& io = ImGui::GetIO();
+
+    // live accent (settings tab RowColor edits g_accentColor directly; this is the one
+    // place it is pushed into the style every widget already reads it through)
+    ImGui::GetStyle().Colors[ImGuiCol_Accent] =
+        ImVec4(g_accentColor[0], g_accentColor[1], g_accentColor[2], g_accentColor[3]);
+
+    // whole-menu dpi scale (settings tab slider). ScaleAllSizes mutates the CURRENT
+    // style multiplicatively -- applying it every frame would compound, so it only runs
+    // on the frame the value actually changed, as a ratio against what was last applied.
+    {
+        // a bad saved value (0, negative, NaN) would zero out the style forever via the
+        // ratio below -- same floor/ceiling as the settings slider's own range.
+        if (!(g_dpiScale >= 0.5f && g_dpiScale <= 2.f)) g_dpiScale = 1.f;
+        static float s_appliedDpi = 1.f;
+        if (g_dpiScale != s_appliedDpi)
+        {
+            ImGui::GetStyle().ScaleAllSizes(g_dpiScale / s_appliedDpi);
+            io.FontGlobalScale = g_dpiScale;
+            s_appliedDpi = g_dpiScale;
+        }
+    }
+
+    // botox menu.cpp on_end_scene, verbatim (botox_menu_spec.md section 1): fixed
+    // 750 x (640 - (menu_band_height - menu_bottom_band_height)) = 750x627, centred once,
+    // never resized by the user. m_anim_progress is the open/close fade (section 7); while
+    // it has not reached 1 the window eats no input, same as botox's eject-safety gate.
+    if (g_eject) s_animProgress = 0.f;   // eject snaps shut, never fades under a release
+    else
+    {
+        const float step = (std::min)(io.DeltaTime, 1.f / 30.f) / 0.12f;   // menu_anim_duration
+        s_animProgress = ImClamp(s_animProgress + (g_showMenu ? step : -step), 0.f, 1.f);
+    }
+    if (!g_showMenu && s_animProgress <= 0.f) return;
+
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
+                            ImGuiCond_Once, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(750.f, 640.f - (25.f - 12.f)), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
+                             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoScrollWithMouse;   // the ##content child scrolls, not the frame
+    if (s_animProgress < 0.999f) flags |= ImGuiWindowFlags_NoInputs;
+
+    if (!ImGui::Begin("botox", NULL, flags))
+    {
+        ImGui::End();
+        return;
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 wp = ImGui::GetWindowPos();
+    const ImVec2 wz = ImGui::GetWindowSize();
+    const float rnd = ImGui::GetStyle().WindowRounding;
+
+    // ---- botox on_end_scene order: top band, window border, accent line under the band;
+    // bottom band + accent line on its top edge. Lines = RenderFadedGradientLine (bright
+    // centre, fading to both ends), full window width.
+    // Bands + border each get botox's own PushClipRect(.., false): the window's clip rect is
+    // inset WindowPadding.x/2 = 4px per side, which cut the bands and the side border short.
+    dl->PushClipRect(wp, ImVec2(wp.x + wz.x, wp.y + mf::kHeaderH), false);
+    dl->AddRectFilled(wp, ImVec2(wp.x + wz.x, wp.y + mf::kHeaderH), kBandBg, rnd, ImDrawFlags_RoundCornersTop);
+    dl->PopClipRect();
+    dl->PushClipRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), false);
+    dl->AddRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), kWindowBorder, rnd);
+    dl->PopClipRect();
+    RenderFadedGradientLine(dl, ImVec2(wp.x, wp.y + mf::kHeaderH - 1.f), ImVec2(wz.x, 1.f), ImColor(Accent()));
+
+    const float botY = wp.y + wz.y - 12.f;   // menu_bottom_band_height
+    dl->PushClipRect(ImVec2(wp.x, botY), ImVec2(wp.x + wz.x, wp.y + wz.y), false);
+    dl->AddRectFilled(ImVec2(wp.x, botY), ImVec2(wp.x + wz.x, wp.y + wz.y), kBandBg, rnd, ImDrawFlags_RoundCornersBottom);
+    dl->PopClipRect();
+    RenderFadedGradientLine(dl, ImVec2(wp.x, botY), ImVec2(wz.x, 1.f), ImColor(Accent()));
+
+    // ---- title: "botox" bold white, then " | <date>" regular accent, same baseline,
+    // centred as one unit in the top band.
+    {
+        ImGui::PushFont(BoldFont());
+        char title[8] = "botox";
+        const ImVec2 ws = ImGui::CalcTextSize(title);
+        ImGui::PopFont();
+        ImGui::PushFont(RegFont());
+        char date[24];
+        _snprintf(date, sizeof(date), " | %s", BuildDateText());
+        const ImVec2 ds = ImGui::CalcTextSize(date);
+        ImGui::PopFont();
+
+        const float tx = wp.x + (wz.x - ws.x - ds.x) * 0.5f;
+        const float ty = wp.y + (mf::kHeaderH - ws.y) * 0.5f;
+        ImGui::PushFont(BoldFont());
+        dl->AddText(ImVec2(tx, ty), IM_COL32_WHITE, title);
+        ImGui::PopFont();
+        ImGui::PushFont(RegFont());
+        dl->AddText(ImVec2(tx + ws.x, ty), Accent(), date);
+        ImGui::PopFont();
+    }
+
+    // ---- sidebar: botox's stacked boxed tabs (botox_menu_spec.md section 2) -----------
+    // tab_x = window content-left (WindowPadding.x), tab_y = pos.y+25 in LOCAL coords,
+    // i.e. 25 + WindowPadding.y once SidebarTab_Draw adds the window origin back on.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float sidebarX = st.WindowPadding.x;
+    const float sidebarTop = mf::kHeaderH + st.WindowPadding.y;
+    // botox's tab_button is draw-list only; ours is an InvisibleButton, which moves the
+    // cursor. Eject is the last one, at the window floor, so without this restore the
+    // content below starts under eject -- off the bottom of the window, every tab blank.
+    const ImVec2 contentStart = ImGui::GetCursorPos();
+    {
+        static int s_noPage = -1;
+        float tabY = sidebarTop;
+        for (int i = 0; i < TAB_COUNT; ++i)
+        {
+            int& page = (i == (int)TAB_VISUALS)  ? s_visualsSub
+                      : (i == (int)TAB_MOVEMENT) ? s_moveSub
+                      : (i == (int)TAB_MISC)     ? s_miscSub
+                      : (i == (int)TAB_FONTS)    ? s_fontsSub
+                      : s_noPage;
+            if (SidebarTab_Draw(kSidebar[i], i, s_tab == i, page, sidebarX, tabY, io.DeltaTime))
+                s_tab = i;
+        }
+
+        // eject: same box look, pinned to the sidebar's bottom (spec section 2):
+        // tab_y = pos.y + size.y - WindowPadding.y - bottom_band_height - tab_height.
+        float ejectY = wz.y - st.WindowPadding.y - 12.f - mf::kTabH;
+        int ejectNoPage = -1;
+        if (SidebarTab_Draw(SidebarTab{ "eject", nullptr, 0 }, TAB_COUNT, false, ejectNoPage,
+                            sidebarX, ejectY, io.DeltaTime))
+            ImGui::OpenPopup("eject confirmation");
+
+        EjectPopup();
+    }
+    ImGui::SetCursorPos(contentStart);
+
+    // ---- content: botox_menu_spec.md section 2 -- Indent past the sidebar, drop 25px
+    // under the title band, PushID per tab so two tabs never share a cached group height.
+    // One borderless, bg-less child stands in for botox's two column children: it clips
+    // the boxes above the bottom band (avail.y - menu_bottom_band_height, same as
+    // menu_columns_begin) and scrolls a tab taller than the window with the wheel.
+    ImGui::Indent(mf::kTabW + st.ItemSpacing.x);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + mf::kHeaderH);
+    ImGui::PushID(s_tab);
+    ImGui::BeginChild("##content", ImVec2(0.f, ImGui::GetContentRegionAvail().y - 12.f), false,
+                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
+
+    FlowBegin();
+    switch (s_tab)
+    {
+    // Aimbot / triggerbot / melee. The body lives in src/hacks/aim/aim.cpp because it
+    // reads that tree's ConfigVar metadata.
+    case TAB_AIMBOT:    Aim_RenderMenuTab(); break;   // unitF groups render inside its columns
+    case TAB_VISUALS:   Tab_VisualsRoot();    break;
+    case TAB_MOVEMENT:  Tab_MovementRoot();   break;
+    case TAB_MISC:      Tab_MiscRoot();       break;
+    case TAB_INVENTORY: Tab_Inventory();      break;
+    case TAB_FONTS:     Tab_Fonts();          break;
+    case TAB_SETTINGS:  Tab_Settings();       break;
+    }
+    FlowEnd();
+
+    ImGui::EndChild();
+    ImGui::PopID();
+    ImGui::Unindent(mf::kTabW + st.ItemSpacing.x);
+
+    ImGui::End();
+}
