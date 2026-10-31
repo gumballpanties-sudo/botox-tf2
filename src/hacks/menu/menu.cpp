@@ -1191,6 +1191,8 @@ static void Page_MovementMain()
                 ImGui::Keybind("fake no fall key", &g_fmNoFallKey, &g_fmNoFallMode);
             }, ImVec2(200.f, -1));
 
+        ImGui::Checkbox("wallbug fix (sv_wallbug 1)", &g_fmWallbugFix);
+
         ImGui::Checkbox("crouch jump", &g_fmCrouchJump);
         if (g_fmCrouchJump)
             ImGui::OptionPopup("crouch jump settings", [&]() {
@@ -2110,9 +2112,21 @@ static void Tab_Skins()
         if (ImGui::Checkbox("australium", &cfg.australium)) g_skinNeedsUpdate = true;
         if (!we.canAustralia) ImGui::EndDisabled();
 
-        if (!we.canFestivize) ImGui::BeginDisabled();
+        // The lights belong to the def the weapon ends up WEARING (ResolveWeaponTarget's order),
+        // and the Festive variants and most reskins have none -- k_festiveDefs is the schema's say.
+        const int wornDef = (cfg.festive && we.festiveIdx > 0) ? we.festiveIdx
+                          : (cfg.reskinDef > 0)                 ? cfg.reskinDef
+                          : (cfg.weaponSkinDef > 0)             ? cfg.weaponSkinDef
+                          :                                       we.redir;
+        const bool canFest = Skin_DefHasFestive(wornDef);
+        if (!canFest) ImGui::BeginDisabled();
         if (ImGui::Checkbox("festivized", &cfg.festivized)) g_skinNeedsUpdate = true;
-        if (!we.canFestivize) ImGui::EndDisabled();
+        if (!canFest) ImGui::EndDisabled();
+        if (!canFest && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            MenuTooltip(wornDef == we.redir
+                ? "this weapon has no festivizer lights in the game's schema."
+                : "the picked festive / reskin / warpaint variant has no festivizer lights.\n"
+                  "clear it to festivize the base weapon.");
 
         const bool hasFestive = (we.festiveIdx > 0);
         if (!hasFestive) ImGui::BeginDisabled();

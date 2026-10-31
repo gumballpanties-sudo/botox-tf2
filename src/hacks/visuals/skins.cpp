@@ -29,6 +29,7 @@ static int s_offHViewModel0   = 0;   // DT_BasePlayer          m_hViewModel[0]
 static int s_offSkin          = 0;   // DT_BaseAnimating       m_nSkin
 static int s_offSequence      = 0;   // DT_BaseAnimating       m_nSequence
 static int s_offTeamNum       = 0;   // DT_BaseEntity          m_iTeamNum
+static int s_offWeaponState   = 0;   // DT_BaseCombatWeapon    m_iState (2 = WEAPON_IS_ACTIVE)
 // There was a fourth model field here, sig-derived out of DrawOverriddenViewmodel's first
 // instruction. It resolved to 3664 and climbed by ~2 a second in the dih-sk3 log, so it was a
 // frame counter and the sig was wrong. Deleted with its diag column: TF2 builds the attachment
@@ -341,6 +342,10 @@ void Skin_RedirectIndex(int& d)
         case  665: d=194; break; // Festive Knife
         case 1006: d= 61; break; // Festive Ambassador
         case 1142: d=210; break; // Festive Revolver
+        // Promo / re-release copies of a listed weapon (festivizable in the schema)
+        case  832: d=811; break; // Promo Huo-Long Heater
+        case  834: d=813; break; // Promo Neon Annihilator
+        case 1206: d=298; break; // Iron Curtain 2026
         // Reskin variants -> the base weapon's config key
         case 30667: d=190; break; // Batsaber           -> Bat
         case   739: d=192; break; // Lollichop          -> Fire Axe
@@ -1279,6 +1284,7 @@ static void ResolveSkinOffsets()
     if (s_offSkin          == 0) s_offSkin          = ResolveOffset("DT_BaseAnimating", "m_nSkin");
     if (s_offSequence      == 0) s_offSequence      = ResolveOffset("DT_BaseAnimating", "m_nSequence");
     if (s_offTeamNum       == 0) s_offTeamNum       = ResolveOffset("DT_BaseEntity", "m_iTeamNum");
+    if (s_offWeaponState   == 0) s_offWeaponState   = ResolveOffset("DT_BaseCombatWeapon", "m_iState");
     if (s_offGoldRagdoll   == 0) s_offGoldRagdoll   = ResolveOffset("DT_TFRagdoll", "m_bGoldRagdoll");
     if (s_offRagdollPlayer == 0) s_offRagdollPlayer = ResolveOffset("DT_TFRagdoll", "m_hPlayer");
     // m_nStreaks lives inside m_Shared; FindPropOffset walks the nested table and adds both
@@ -1646,6 +1652,41 @@ static void SweepAttachmentSkin(int teamNum)
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// ==== festivizer lights =========================================================================
+// The lights are attachment models, and CEconEntity::UpdateAttachmentModels (econ_entity.cpp:1079)
+// is the only thing that builds them: it runs from OnDataChanged and reads is_festivized (attr
+// 2053) off the attribute list AT THAT MOMENT. Toggling the box is a full update, so the weapon is
+// re-created and its CREATED rebuild runs while the age gate still holds Skin_Apply back -- no 2053
+// yet, no lights. After that only a networked change to the weapon rebuilds the list: a minigun,
+// a medigun or a sniper rifle churns netvars every few frames and lit up, a melee, a sapper or an
+// unfired shotgun sent nothing and stayed dark until the next weapon switch. That was "festivizer
+// works on some weapons".
+//
+// So the held weapon goes through its own data-changed pair once, after the attributes are on it.
+// Pre first so every "old" copy (m_iOldState, m_bOldResetParity, m_iOldTeam) equals the current
+// value and nothing reads it as a state change -- the same no-op delta a quiet snapshot is.
+// Stage 5 only: our half runs AFTER the original's ProcessOnDataChangedEvents, so a weapon created
+// this frame has already had its CREATED pass (InitializeAttributes, the attribute manager's outer)
+// before we touch it. Holstered weapons need nothing: AttachmentModelsShouldBeVisible is false for
+// them, and the deploy snapshot (m_iState -> active) rebuilds them with 2053 already present.
+static void* s_festRefreshedWpn = nullptr;   // the weapon instance already rebuilt, null = none
+
+__declspec(noinline) static void RefreshAttachmentModels(unsigned int hWeapon)
+{
+    __try {
+        // IClientEntityList::GetClientNetworkable (slot 0): the networkable sub-object itself, so
+        // no assumption about where it sits inside C_BaseEntity.
+        void* pNet = VCall<void*>(g_entityList, 0, (int)(hWeapon & 0x3FFF));
+        if (!pNet || !SEH_VtableSane(pNet)) return;
+        void** vt = *reinterpret_cast<void***>(pNet);
+        using Fn = void(__fastcall*)(void*, int);
+        ((Fn)vt[4])(pNet, 1);   // OnPreDataChanged(DATA_UPDATE_DATATABLE_CHANGED)
+        ((Fn)vt[5])(pNet, 1);   // OnDataChanged -> UpdateAttachmentModels
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        DebugLog("skins: SEH in festivizer refresh");
+    }
+}
+
 static void __fastcall h_FrameStageNotify(int stage)
 {
     MiscHookGuard _g;
@@ -1707,6 +1748,7 @@ static void __fastcall h_FrameStageNotify(int stage)
         // A demo's streak outlives the demo: the next one carries it on (demostreak.h).
         if (!s_demo.active) ResetStreak("left server");
         memset(s_goldPending, 0, sizeof(s_goldPending));
+        s_festRefreshedWpn    = nullptr;
         ClearSeqRemap();
     }
     s_wasInGame = bInGame;
@@ -1742,6 +1784,8 @@ static void __fastcall h_FrameStageNotify(int stage)
                 if (cfg.enabled && cfg.reskinDef > 0) GetReskinViewmodelIdx(cfg.reskinDef);
         TriggerForceFullUpdate("skin changed");
         g_skinNeedsUpdate = false;
+        // The full update can hand the re-created weapon the very same address back.
+        s_festRefreshedWpn = nullptr;
     }
 
     if (pLocal != s_lastLocalEnt) {
@@ -1755,6 +1799,7 @@ static void __fastcall h_FrameStageNotify(int stage)
         s_activeReskinInfo    = nullptr;
         s_activeBaseInfo      = nullptr;
         s_activeNeedsRemap    = false;
+        s_festRefreshedWpn    = nullptr;
         ClearSeqRemap();
         return;
     }
@@ -1792,6 +1837,7 @@ static void __fastcall h_FrameStageNotify(int stage)
     if (s_offMyWeapons <= 0 || s_offItemDefIndex <= 0 || s_offAttrList <= 0) return;
 
     const int teamNum = (s_offTeamNum > 0) ? SEH_ReadInt(pLocal, s_offTeamNum) : 0;
+    const unsigned int hActive = (s_offActiveWeapon > 0) ? SEH_ReadHandle(pLocal, s_offActiveWeapon, 0) : 0;
 
     for (int i = 0; i < 48; i++) {
         const unsigned int hWeapon = SEH_ReadHandle(pLocal, s_offMyWeapons, i);
@@ -1814,6 +1860,16 @@ static void __fastcall h_FrameStageNotify(int stage)
         }
 
         Skin_Apply(pWeapon, wt.configKey);
+
+        // Festivizer lights: rebuild the held weapon's attachment list once, now that 2053 is
+        // on it. See RefreshAttachmentModels for why nothing else would.
+        if (stage == 5 && wt.cfg->festivized && hWeapon == hActive
+            && pWeapon != s_festRefreshedWpn && s_offWeaponState > 0
+            && SEH_ReadInt(pWeapon, s_offWeaponState) == 2 /* WEAPON_IS_ACTIVE */) {
+            s_festRefreshedWpn = pWeapon;
+            RefreshAttachmentModels(hWeapon);
+            DebugLog("skins: festivizer refresh def=%d key=%d", origDefIdx, wt.configKey);
+        }
     }
 }
 

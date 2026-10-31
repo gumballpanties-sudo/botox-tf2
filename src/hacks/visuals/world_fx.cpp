@@ -4,6 +4,7 @@
 #include "../screen/screenfx.h"   // ScreenFx_FindClientMode -- shared IClientMode lookup
 #include "../movement/prediction.h"   // g_globalVars -- framecount + absoluteframetime, main thread only
 #include "viewmodel_fps.h"            // g_vmFps.Frame -- the camera the low fps viewmodel re-attaches to
+#include "../network/netregion.h"     // FindMatSystemSurface -- cloak meter hook
 
 // ==== fullbright + disable interp ===================================================
 // Both are plain convar pokes -- gap.md flags them "trivial... no hook needed". Ridden on
@@ -128,8 +129,51 @@ static void __fastcall h_OverrideView(void* rcx, void* pView)
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// ==== low fps viewmodel: cloak meter -- IMatSystemSurface::DrawPanelIn3DSpace, slot 166 ====
+// The spy watch meter is a C_VGuiScreen (vgui_pda_panel.cpp) parented to a viewmodel
+// attachment. It reads LIVE bones, so it slid smooth while the held watch stepped.
+// C_VGuiScreen::DrawModel (c_vguiscreen.cpp:552) hands &m_PanelToWorld here, then
+// DrawScreenOverlay draws its z quad from the same member -- so stepping it in place moves
+// both. VMatrix rows 0..2 are byte-identical to a bone matrix3x4: run it through the same
+// Core as one bone, keyed by the vpanel, and it steps on the same frames as the gun.
+// Slot: IMatSystemSurface.h order, DrawColoredText 162 (confirmed live, netregion.cpp) + 4,
+// no overloads in between.
+// Gate: ViewmodelDrawn = the viewmodel already went through Apply this frame, i.e. we are in
+// DrawViewModels. World vgui screens (dispenser etc.) draw before it and stay live.
+static constexpr int k_drawPanelIn3DSlot = 166;
+using DrawPanelIn3D_t = void(__fastcall*)(void*, uintptr_t, const void*, int, int, float, float);
+static DrawPanelIn3D_t o_DrawPanelIn3D = nullptr;
+
+static void VmLowFps_Panel(uintptr_t vpanel, const void* mat)
+{
+    __try {
+        auto* m = reinterpret_cast<VmFps::Mat34*>(const_cast<void*>(mat));
+        const VmFps::Mat34* held = g_vmFps.Apply(reinterpret_cast<const void*>(vpanel), m, 1);
+        if (held != m) *m = *held;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void __fastcall h_DrawPanelIn3D(void* rcx, uintptr_t vpanel, const void* mat,
+                                       int pw, int ph, float ww, float wh)
+{
+    MiscHookGuard _g;
+    if (g_vmLowFps && !g_eject && mat && vpanel && g_globalVars
+        && g_vmFps.OnFrame(g_globalVars->framecount) && g_vmFps.ViewmodelDrawn())
+        VmLowFps_Panel(vpanel, mat);
+    o_DrawPanelIn3D(rcx, vpanel, mat, pw, ph, ww, wh);
+}
+
 void WorldFx_InstallViewHook()
 {
+    static bool s_panelTried = false;
+    if (!s_panelTried) {
+        s_panelTried = true;
+        if (void* surf = FindMatSystemSurface())
+            InstallVTableHook(surf, k_drawPanelIn3DSlot, "worldfx: DrawPanelIn3DSpace",
+                              (void*)h_DrawPanelIn3D, (void**)&o_DrawPanelIn3D);
+        else DebugLog("worldfx: surface NOT found, cloak meter stays live");
+    }
+
     if (o_OverrideView) return;
     void* mode = ScreenFx_FindClientMode();
     if (!mode) return;

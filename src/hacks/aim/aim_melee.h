@@ -22,6 +22,7 @@ enum EBsGate
 	BSG_ODDS,         // the chance of a backstab is under BsMath::k_pTake
 	BSG_TURN,         // good odds on his predicted turn, not at the guard point (BsMath::TurnGuarded)
 	BSG_HOLD,         // good odds, but the next tick is clearly better
+	BSG_THIN,         // connects by less than our relative motion, solid next tick (BsMath::ThinPad)
 	BSG_COUNT
 };
 const char* BsGateName(int iGate);
@@ -70,7 +71,8 @@ private:
 		float m_flExtrap = 0.f;      // how far past his newest record his position was guessed, s
 		float m_flSlack = -1.f, m_flPad = 0.f;
 		float m_flDist = 0.f, m_flSpeed = 0.f;
-		int   m_iK = 1;              // yaw estimator: 0 hold, 1 half rate, 2 full rate
+		float m_flRel = 0.f;         // 2D speed between us and him, u/s (ThinPad)
+		int   m_iK = 1;             // yaw estimator: 0 hold, 1 half rate, 2 full rate
 		int   m_iHeld = 0;
 		bool  m_bReachNext = true;
 	};

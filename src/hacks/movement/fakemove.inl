@@ -21,6 +21,9 @@
 //    means zero vertical travel this tick.
 //  - m_outJumpVel is reset in PlayerMove and set > 0 by CheckJumpButton on a real jump.
 //  - FinishMove writes m_nOldButtons = m_nButtons, so skipping ProcessMovement is clean.
+//  - Oct 2026: ClipVelocity does `backoff = min(backoff,0) - DIST_EPSILON` -> 0.03125 u/s off
+//    every plane, which is what killed wallbugs / pixelwalks. `sv_wallbug 1` (replicated,
+//    added Oct 5 2026) is Valve's own switch back. The wallbug fix bit flips it while hosting.
 
 #include "fm_slide.h"
 #include "fm_seam.h"
@@ -739,6 +742,40 @@ static bool FakeMove_WallJumpReady(void* pLocal)
                    g_fmWallJumpSeam ? &FM_JumpSeam : nullptr);
 }
 
+// ---- wallbug fix: sv_wallbug 1 while we host (same local gate as every FM bit: the server
+// hook saw our cmd in the last second). Real IConVar SetValue so the engine's replicate
+// callback runs; client.dll's copy is a child of the same parent anyway, so prediction and
+// server read one value. Old value handed back on toggle off, disconnect, eject.
+static void FM_WallbugCvar(bool want)
+{
+    static ConVar* cv = nullptr;
+    static unsigned long long nextFindMs = 0;
+    static bool applied = false, missingLogged = false;
+    static int saved = 0;
+    if (!cv)
+    {
+        if (!want || !g_cvar) return;
+        const unsigned long long now = GetTickCount64();
+        if (now < nextFindMs) return;
+        nextFindMs = now + 2000;   // server.dll registers it when the listen server comes up
+        cv = g_cvar->FindVarWalk("sv_wallbug");
+        if (!cv)
+        {
+            if (!missingLogged) { missingLogged = true; DebugLog("fakemove: sv_wallbug not found (game older than Oct 5 2026?)"); }
+            return;
+        }
+    }
+    if (want == applied) return;
+    if (want) saved = static_cast<int>(cv->GetFloat());
+    const int to = want ? 1 : saved;
+    const bool ok = cv->SetValueInt("sv_wallbug", to);
+    if (!ok) cv->ForceInt(to);   // layout miss: raw write still lands on the shared parent
+    applied = want;
+    DebugLog("fakemove: sv_wallbug -> %d%s", to, ok ? "" : " (raw write)");
+}
+
+void FakeMove_Restore() { FM_WallbugCvar(false); }
+
 // per cmd, after the bind snapshot + netvars: lazy hook install + resolve binds.
 // Lazy because server.dll only matters once a listen server is up; installing from the game
 // thread is safe -- neither ProcessMovement can be mid-call on this thread inside CreateMove.
@@ -774,4 +811,6 @@ static void FakeMove_Tick()
         if (On(g_fmHeadSurf,   g_fmHeadSurfKey,   g_fmHeadSurfMode))   b |= FM_HEADSURF;
     }
     s_fmBits = b;
+    FM_WallbugCvar(g_fmEnabled && g_fmWallbugFix && !g_eject
+                   && GetTickCount64() - s_fmServerSeenMs < 1000);
 }

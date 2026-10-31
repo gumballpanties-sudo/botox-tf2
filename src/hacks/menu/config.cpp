@@ -543,6 +543,7 @@ static const CfgEntry kEntries[] = {
     { "fmNoFall",         CfgEntry::BOOL,   &g_fmNoFall, 0 },
     { "fmNoFallKey",      CfgEntry::INT,    &g_fmNoFallKey, 0 },
     { "fmNoFallMode",     CfgEntry::INT,    &g_fmNoFallMode, 0 },
+    { "fmWallbugFix",     CfgEntry::BOOL,   &g_fmWallbugFix, 0 },
     { "fmCrouchJump",     CfgEntry::BOOL,   &g_fmCrouchJump, 0 },
     { "fmCrouchJumpKey",  CfgEntry::INT,    &g_fmCrouchJumpKey, 0 },
     { "fmCrouchJumpMode", CfgEntry::INT,    &g_fmCrouchJumpMode, 0 },

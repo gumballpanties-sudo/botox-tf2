@@ -497,6 +497,7 @@ static void MainThread()
     ResetFogCvars();
     NetSettings_Shutdown();// net cvars back at the player's own value
     Crosshair_Restore();   // hand "crosshair" back at the player's value
+    FakeMove_Restore();    // sv_wallbug back (listen server keeps cvars across maps)
     // sv_skyname needs nothing here -- h_R_DrawSkyBox restores it inside every draw, and the
     // hook drain above guarantees the last one finished.
 

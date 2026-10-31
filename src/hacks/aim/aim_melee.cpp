@@ -452,6 +452,7 @@ const char* BsGateName(int iGate)
 	case BSG_ODDS:      return "odds";
 	case BSG_TURN:      return "turn";
 	case BSG_HOLD:      return "hold";
+	case BSG_THIN:      return "thin";
 	}
 	return "?";
 }
@@ -660,15 +661,26 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 		if (I::GlobalVars->tickcount - tHold.m_iTick > 1 || I::GlobalVars->tickcount < tHold.m_iTick)
 			tHold.m_iCount = 0;   // a fresh hold, not the tail of an old one
 
-		const BsMath::EDecision eDec = BsMath::Decide(g.p, gN.p, bReachNext, tHold.m_iCount);
+		// thin reach (bs_math.h ThinPad): our own server position is a prediction too
+		const BsMath::V3 vRel = BsMath::Velocity(trHit) - ToBs(pLocal->m_vecVelocity());
+		const float flRel = BsMath::Len2D(vRel);
+		const float flThin = BsMath::ThinPad(flPad, flRel);
+		const bool bThin = flSlack >= 0.f && flSlack < flThin;
+		const bool bSolidNext = flSlackNext >= flThin;
+
+		const BsMath::EDecision eDec = BsMath::Decide(g.p, gN.p, bReachNext, tHold.m_iCount, bThin, bSolidNext);
 		// why=turn: bs15 would have swung on the bet alone this tick and the guard stopped it -- by
 		// refusing outright or by turning a sure swing into a hold
 		const bool bGuardStopped = eDec != BsMath::DEC_FIRE
-			&& BsMath::Decide(o.p, gN.best.p, bReachNext, tHold.m_iCount) == BsMath::DEC_FIRE;
+			&& BsMath::Decide(o.p, gN.best.p, bReachNext, tHold.m_iCount, bThin, bSolidNext) == BsMath::DEC_FIRE;
+		// why=thin: the hold is the reach's, not the odds' (without it this tick would fire)
+		const bool bThinHeld = eDec == BsMath::DEC_HOLD
+			&& BsMath::Decide(g.p, gN.p, bReachNext, tHold.m_iCount) == BsMath::DEC_FIRE;
 		const int iGate = !bReach ? BSG_REACH
 			: o.facing <= 0.f ? BSG_FACING
 			: bGuardStopped ? BSG_TURN
 			: eDec == BsMath::DEC_ODDS ? BSG_ODDS
+			: bThinHeld ? BSG_THIN
 			: eDec == BsMath::DEC_HOLD ? BSG_HOLD
 			: BSG_FIRE;
 
@@ -686,6 +698,7 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 		tOut.m_flSlack = flSlack; tOut.m_flPad = flPad;
 		tOut.m_flDist = BsMath::Len2D(vHC - vEye);
 		tOut.m_flSpeed = m_aBoxSpeed[iRes];
+		tOut.m_flRel = flRel;
 		tOut.m_iK = e.k; tOut.m_iHeld = tHold.m_iCount;
 		tOut.m_bReachNext = bReachNext;
 
@@ -698,7 +711,7 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 			continue;   // an angle with slightly worse odds may connect solidly
 		// counted on the DECISION, not the label: a guard-made hold logs why=turn and must still run
 		// out after k_patience ticks
-		if ((iGate == BSG_HOLD || iGate == BSG_TURN) && eDec == BsMath::DEC_HOLD && tHold.m_iTick != I::GlobalVars->tickcount)
+		if ((iGate == BSG_HOLD || iGate == BSG_TURN || iGate == BSG_THIN) && eDec == BsMath::DEC_HOLD && tHold.m_iTick != I::GlobalVars->tickcount)
 		{	// once per command even when two targets' swings resolve onto the same man
 			++tHold.m_iCount;
 			tHold.m_iTick = I::GlobalVars->tickcount;
@@ -969,7 +982,7 @@ static inline void DrawVisuals(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 {
 	static bool s_bStamped = false; // tells which knife build wrote a log (bs14 tier=, bs15 p=, bs16 p= pb= pg=)
-	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs16 (bs15 odds + turn guard). Turn guard UNVERIFIED IN GAME."); }
+	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs17 (bs16 + thin-reach hold). Thin hold UNVERIFIED IN GAME."); }
 	m_bBackstabLegit = Vars::Aimbot::Melee::BackstabAimType.Value == Vars::Aimbot::Melee::BackstabAimTypeEnum::Legit;
 	const int iAimType = GetAimType(pWeapon);
 	// Wall clock for everything that has to line up with player_hurt: inside engine prediction
@@ -1141,12 +1154,13 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 		m_flPendNext = pWeapon->m_flNextPrimaryAttack();
 		m_flWhiffTime = -1.f;
 		DebugLog("BS: STAB idx=%d p=%.3f pb=%.3f pg=%.3f gm=%.1f sc=%.1f next=%.3f margin=%.1f fac=%.1f sig=%.1f bear=%.2f k=%d rate=%.0f "
-			"hor=%.3f lerp=%.3f ext=%.3f slack=%.1f pad=%.2f rnext=%d held=%d d=%.1f spd=%.0f my=%.0f legit=%d n=%d",
+			"hor=%.3f lerp=%.3f ext=%.3f slack=%.1f pad=%.2f thinpad=%.2f rnext=%d held=%d d=%.1f spd=%.0f my=%.0f rel=%.0f legit=%d n=%d",
 			tBest.m_iIndex, tBest.m_flP, tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flGuardMargin, tBest.m_flSigCore,
 			tBest.m_flPNext, tBest.m_flMargin, tBest.m_flFacing, tBest.m_flSigma,
 			tBest.m_flSigBear, tBest.m_iK, tBest.m_flRate, tBest.m_flHorizon, flLerp, tBest.m_flExtrap,
-			tBest.m_flSlack, tBest.m_flPad, int(tBest.m_bReachNext), tBest.m_iHeld, tBest.m_flDist,
-			tBest.m_flSpeed, pLocal->m_vecVelocity().Length2D(), int(m_bBackstabLegit), nTargets);
+			tBest.m_flSlack, tBest.m_flPad, BsMath::ThinPad(tBest.m_flPad, tBest.m_flRel), int(tBest.m_bReachNext),
+			tBest.m_iHeld, tBest.m_flDist, tBest.m_flSpeed, pLocal->m_vecVelocity().Length2D(), tBest.m_flRel,
+			int(m_bBackstabLegit), nTargets);
 
 		G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
 		Vec3 vAim = tBest.m_vAim;
@@ -1166,7 +1180,7 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 		DebugLog("BS: miss why=%s idx=%d p=%.3f pb=%.3f pg=%.3f gm=%.1f sc=%.1f next=%.3f margin=%.1f fac=%.1f sig=%.1f bear=%.2f k=%d "
 			"rate=%.0f hor=%.3f lerp=%.3f ext=%.3f slack=%.1f pad=%.2f held=%d d=%.1f spd=%.0f legit=%d "
 			"fovcap=%.0f | us=%.0f/%.0f | gates cd=%d nt=%d ntr=%d rng=%d fov=%d blk=%d miss=%d ign=%d "
-			"rch=%d fac=%d odds=%d turn=%d hold=%d | fires=%d stabs=%d front=%d whiff=%d",
+			"rch=%d fac=%d odds=%d turn=%d hold=%d thin=%d | fires=%d stabs=%d front=%d whiff=%d",
 			BsGateName(tBest.m_iGate), tBest.m_iIndex, tBest.m_flP, tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flGuardMargin,
 			tBest.m_flSigCore, tBest.m_flPNext, tBest.m_flMargin,
 			tBest.m_flFacing, tBest.m_flSigma, tBest.m_flSigBear, tBest.m_iK, tBest.m_flRate, tBest.m_flHorizon,
@@ -1176,7 +1190,7 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 			m_aGateHits[BSG_COOLDOWN], m_aGateHits[BSG_NOTARGET], m_aGateHits[BSG_NOTRACK],
 			m_aGateHits[BSG_RANGE], m_aGateHits[BSG_FOV], m_aGateHits[BSG_BLOCKED], m_aGateHits[BSG_TRACEMISS],
 			m_aGateHits[BSG_IGNORED], m_aGateHits[BSG_REACH], m_aGateHits[BSG_FACING], m_aGateHits[BSG_ODDS],
-			m_aGateHits[BSG_TURN], m_aGateHits[BSG_HOLD], m_iFires, m_iStabs, m_iFrontStabs, m_iWhiffs);
+			m_aGateHits[BSG_TURN], m_aGateHits[BSG_HOLD], m_aGateHits[BSG_THIN], m_iFires, m_iStabs, m_iFrontStabs, m_iWhiffs);
 		memset(m_aGateHits, 0, sizeof(m_aGateHits));
 		m_flCostSum = m_flCostMax = 0.0;
 		m_iCostN = 0;

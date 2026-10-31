@@ -72,6 +72,7 @@ namespace VmFps
         const Mat34* Apply(const void* model, const Mat34* bones, int count)
         {
             if (!bones || !model || count <= 0 || count > kMaxBones) return bones;
+            m_drawn = m_frame;
 
             Slot* slot = nullptr;
             for (auto& e : m_slot) if (e.model == model) { slot = &e; break; }
@@ -103,6 +104,10 @@ namespace VmFps
         // Frame() ran for this game frame. The draw gates on it: no camera this frame (hook not
         // installed, odd view) = live bones, never a pose held from whenever the camera last came.
         bool OnFrame(int frameCount) const { return m_frame == frameCount; }
+
+        // A viewmodel part went through Apply this frame = DrawViewModels is running (or ran).
+        // Gates the cloak meter: viewmodel vgui screens draw in that pass, world ones before it.
+        bool ViewmodelDrawn() const { return m_drawn == m_frame; }
 
     private:
         struct Slot {
@@ -140,6 +145,7 @@ namespace VmFps
         Mat34  m_cam{};
         double m_clock = 0.0;
         int    m_frame = -1;
+        int    m_drawn = -2;
         float  m_last  = 0.f;
         bool   m_step  = false;
     };

@@ -713,15 +713,27 @@ namespace BsMath
 	constexpr float k_pGain    = 0.03f;   // "clearly better"
 	constexpr int   k_patience = 4;       // ticks a better tick may be waited for (60 ms)
 
+	// THIN REACH (bs17). The pad above prices HIS position only; ours on the server is a client
+	// prediction, and with both of us running one tick of relative motion is ~9u. bs16's whiff
+	// (slack 0.6, pad 0.43, both ~300 u/s) had a solid swing one tick later -- a whiff costs the
+	// whole 0.8 s swing. So a swing that clears the pad by less than k_relLead ticks of relative
+	// motion waits, ONLY while the next tick reaches past that and keeps its odds. Never a refusal.
+	// ponytail: k_relLead is a guess -- calibrate on slack= / rel= of STAB lines vs WHIFF.
+	constexpr float k_relLead = 0.5f;
+	inline float ThinPad(float pad, float relSpeed2D) { return pad + k_relLead * relSpeed2D * k_tick; }
+
 	enum EDecision { DEC_FIRE, DEC_ODDS, DEC_HOLD };
-	inline EDecision Decide(float p, float pNext, bool reachNext, int held)
+	// thin = this tick's slack is under ThinPad, solidNext = the next tick's is not
+	inline EDecision Decide(float p, float pNext, bool reachNext, int held, bool thin = false, bool solidNext = false)
 	{
-		if (p >= k_pSure)
-			return DEC_FIRE;
 		if (p < k_pTake)
 			return DEC_ODDS;
-		if (!reachNext || pNext < p + k_pGain || held >= k_patience)
-			return DEC_FIRE;   // the window is closing, flat, or has been waited on long enough
+		if (held >= k_patience)
+			return DEC_FIRE;   // waited on long enough
+		if (thin && solidNext && pNext >= std::min(p, k_pSure))
+			return DEC_HOLD;   // a solid swing one tick on, no worse odds: do not risk the whiff
+		if (p >= k_pSure || !reachNext || pNext < p + k_pGain)
+			return DEC_FIRE;   // sure, the window is closing, or flat
 		return DEC_HOLD;
 	}
 }

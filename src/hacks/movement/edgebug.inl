@@ -243,6 +243,19 @@ static bool EbSteepRing(void* pLocal)
     return false;
 }
 
+// slope filter (SimpleVisual EdgeBugSurfaceUsable): sweep the hull one tick along vel from the
+// candidate's pre-sim origin. A face under 0.7 nz never grounds (CategorizePosition,
+// gamemovement.cpp:3864) so it can't reset gravity -- ClipVelocity shaving vz down a ramp is a
+// slide, not a bug. Open air = usable (sim decides). Disp + brush same rule: nz >= 0.7.
+static bool EbSurfaceUsable(void* pLocal, const Vec3& from, const Vec3& vel)
+{
+    TraceFilterWorldProps filter; filter.Setup(pLocal);
+    GameTrace_t tr{};
+    TraceHull(from, from + vel * TickInterval(), EntV3(pLocal, g_offMins), EntV3(pLocal, g_offMaxs),
+              MASK_PLAYERSOLID, &filter, &tr);
+    return tr.fraction >= 1.f || tr.plane.normal.z >= k_ebStandable;
+}
+
 // lookahead is a DISTANCE (2-3 ticks of travel at 64): stepped in 64-tick units at any rate
 static bool EbIsNearEdge(void* pLocal)
 {
@@ -852,7 +865,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         int contactTick = -1;
         const float g = EbHalfGravTick(grav);
         const int probeEvery = std::clamp(EbTicks(2), 1, 8);
-        int tailCut = 0, nJumpChecks = 0, nBlocked = 0, nStance = 0;
+        int tailCut = 0, nJumpChecks = 0, nBlocked = 0, nStance = 0, nRejSurf = 0;
         constexpr float k_ebTurn = 4.f;
         const float ebCap = std::clamp(g_edgeBugStrafeAngleMax, 15.f, 180.f);
         const bool userMoveDead = fabsf(userFwd) < 0.1f && fabsf(userSide) < 0.1f
@@ -1070,11 +1083,17 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 const int flNow = EntI(pLocal, g_offFlags);
                 if (EbCheck(pLocal, searchVelBackup.z, velNow.z, g, (flNow & FL_ONGROUND) != 0, mode))
                 {
-                    if (i + 1 >= maxTicks) { latch(i, EntV3(pLocal, g_offOrigin), (flNow & FL_DUCKING) != 0); break; }
-                    pending = i;
-                    pendingPos = EntV3(pLocal, g_offOrigin);
-                    pendingVz = velNow.z;
-                    pendingDucked = (flNow & FL_DUCKING) != 0;
+                    // ramp scrape, not a lip: drop the candidate, run keeps falling (the real lip is
+                    // usually a few ticks down). s_ebRun[i].origin + searchVelBackup = tick i pre-sim
+                    if (!EbSurfaceUsable(pLocal, s_ebRun[i].origin, searchVelBackup)) nRejSurf++;
+                    else if (i + 1 >= maxTicks) { latch(i, EntV3(pLocal, g_offOrigin), (flNow & FL_DUCKING) != 0); break; }
+                    else
+                    {
+                        pending = i;
+                        pendingPos = EntV3(pLocal, g_offOrigin);
+                        pendingVz = velNow.z;
+                        pendingDucked = (flNow & FL_DUCKING) != 0;
+                    }
                 }
                 searchVelBackup = velNow;
                 // tail probe: past reach tick, nothing pending, ticks left worth saving
@@ -1208,17 +1227,18 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         }
         // win = slider window, run = trimmed window, reach = first hull contact, edge = lip found,
         // base/sw/rel/bnd/ebv = runs per pass, sims = spent/ceiling, us = spent/share, con = closest
-        // floor, jc/blk/stc = jump checks / jump-eating finds / stance refusals, duck = latched hull,
+        // floor, jc/blk/stc = jump checks / jump-eating finds / stance refusals, surf = ramp
+        // scrapes refused (face nz < 0.7), duck = latched hull,
         // pre = prefix snapshots saved / runs resumed / sim ticks skipped, snap = their copy cost us,
         // bre = bend runs resumed / ticks skipped, deep = 1 full / 0 half share for bend + ebanat,
         // bc = bend order start (-1 = pass skipped)
         DebugLog("EB: mode=%d win=%d run=%d reach=%d edge=%d vars=%d base=%d sw=%d rel=%d bnd=%d ebv=%d sims=%d/%d cut=%d "
-                 "us=%lld/%lld con=%d vz=%.2f found=%d var=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d duck=%d fb=%d "
+                 "us=%lld/%lld con=%d vz=%.2f found=%d var=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d surf=%d duck=%d fb=%d "
                  "pre=%d/%d/%d snap=%lld bre=%d/%d deep=%d bc=%d",
                  mode, maxTicks, runTicks, reachTick, s_ebEdgeTargetValid ? 1 : 0, searchCount, baseRuns, sweepRuns,
                  releaseRuns, bendRuns, ebRuns, totalPredictions, maxPredictions, tailCut, budget.UsedUs(), budget.capUs,
                  bestContact, s_ebVelBackup.z, s_ebDetected ? 1 : 0, s_ebLastVariant, s_ebDetected ? s_ebLockTicks : -1,
-                 s_ebPlanCount, wantPaths, nJumpChecks, nBlocked, nStance,
+                 s_ebPlanCount, wantPaths, nJumpChecks, nBlocked, nStance, nRejSurf,
                  sel >= 0 ? (s_ebPlans[sel].ducked ? 1 : 0) : -1, s_ebFollowBlocked ? 1 : 0,
                  famSaves, famResumes, famSkipped, Pred_SnapUs() - snapUs0,
                  bendResumes, bendSkipped, deepFull ? 1 : 0, bendStart);

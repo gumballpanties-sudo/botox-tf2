@@ -689,6 +689,8 @@ extern bool g_fmAirStuckKeepVel;  // resume momentum on release
 extern bool g_fmAirStuckNearOnly; // only freeze with a brush/prop within g_fmAirStuckNearDist
 extern float g_fmAirStuckNearDist;
 extern bool g_fmNoFall;     extern int g_fmNoFallKey;     extern int g_fmNoFallMode;
+extern bool g_fmWallbugFix;       // sv_wallbug 1 while hosting (pre Oct-2026 ClipVelocity)
+void FakeMove_Restore();          // eject: sv_wallbug back to the value it had
 extern bool g_fmCrouchJump; extern int g_fmCrouchJumpKey; extern int g_fmCrouchJumpMode;
 extern bool g_fmRampBoost;  extern int g_fmRampBoostKey;  extern int g_fmRampBoostMode;
 extern float g_fmRampBoostMult;

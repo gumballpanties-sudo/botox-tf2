@@ -646,7 +646,7 @@ static int h_DrawColoredText(void* thisptr, unsigned int font, int x, int y,
 //   BF E5 00 00 00     mov edi,0E5h      = GRAPH_RED 229
 //   FF 90 10 05 00 00  call [rax+510h]   = slot 0x510/8 = 162
 // Sig verified unique (1 hit) against tf/bin/x64/client.dll.
-static void* FindMatSystemSurface()
+void* FindMatSystemSurface()
 {
     if (HMODULE hClient = GetModuleHandleA("client.dll")) {
         uint8_t* a = PatternScan(hClient,

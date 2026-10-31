@@ -31,6 +31,7 @@ void NetSettings_Status(char* buf, int cb);
 // the DrawColoredText hook) and add a free pixel offset. Past every engine clamp, so the
 // graph goes anywhere -- off screen included. TF2 itself has no y knob at all.
 void NetGraph_Install();             // creates all detours, leaves them disarmed
+void* FindMatSystemSurface();        // client.dll's g_pMatSystemSurface, CreateInterface fallback
 void NetGraph_Tick();                // arms/disarms with the toggles (the recolor hook
                                      // formats every colored VGUI string and the position
                                      // hook runs for every panel, so "off" must mean gone)

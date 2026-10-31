@@ -647,6 +647,7 @@ bool g_fmAirStuckKeepVel = true;
 bool g_fmAirStuckNearOnly = false;
 float g_fmAirStuckNearDist = 8.f;
 bool g_fmNoFall = false;     int g_fmNoFallKey = 0;     int g_fmNoFallMode = 1;
+bool g_fmWallbugFix = false; // local listen server: sv_wallbug 1 (Valve's Oct-2026 revert switch)
 bool g_fmCrouchJump = false; int g_fmCrouchJumpKey = 0; int g_fmCrouchJumpMode = 1;
 bool g_fmRampBoost = false;  int g_fmRampBoostKey = 0;  int g_fmRampBoostMode = 1;
 float g_fmRampBoostMult = 1.5f;

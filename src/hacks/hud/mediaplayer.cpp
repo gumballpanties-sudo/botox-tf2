@@ -3,20 +3,22 @@
 #include "watermark_styles.h"   // Watermark_MediaLook / Watermark_MediaFrame -- the style's colours + box
 #include "mp_art.h"      // cover art scale + centre crop (gate tested, no winrt in it)
 #include "mp_time.h"     // timeline -> position + length (gate tested, no winrt in it)
+#include <ole2.h>        // WIN32_LEAN_AND_MEAN drops it; media_file.h's propvarutil.h needs V_VT
+#include "kopuz.h"       // botox globals/media_player/kopuz.h, verbatim
+#include "media_file.h"  // botox globals/media_player/media_file.h, verbatim
 #include "../../dependencies/imgui/imgui_internal.h"   // GImGui->HoveredWindow: a menu window over the player eats the click
 
-// botox csgo-sdk/globals/media_player + misc.cpp draw_media_player, ported: the winrt half is
-// the same GlobalSystemMediaTransportControlsSessionManager poll on a background thread,
-// because those calls block for milliseconds and must never sit on the render thread.
+// botox csgo-sdk/globals/media_player/media_player.cpp on_update + run_command + main.cpp
+// media_player_thread, 1:1: playing SMTC session > playing kopuz > audible app (song file it has
+// open, else its window title; discord + apps with a mic stream skipped) > paused kopuz > paused
+// session. Controls: SMTC session / kopuz rpc / WM_APPCOMMAND to the app, media key last.
 //
-// ONE CHANGE from the original. The thumbnail is decoded HERE (winrt BitmapDecoder ->
-// SoftwareBitmap Bgra8) instead of by D3DXCreateTextureFromFileInMemory: this dll links d3d9
-// only, and pulling in the legacy d3dx9 redist for one PNG decode is a dependency for nothing.
-// The render thread then does the part that must be its: CreateTexture + LockRect + a row copy.
-// The panel itself is botox's: fonts, colours and frame follow the watermark style (g_wmStyle),
-// buttons show while the menu is open. Lyrics + waveform visualizer are not ported (no lyrics
-// fetch, no audio capture thread here).
+// ONE CHANGE: art. botox hands the encoded bytes to D3DXCreateTextureFromFileInMemory; this dll
+// links d3d9 only, so the same bytes go through winrt BitmapDecoder -> BGRA8 here and the render
+// thread does CreateTexture + LockRect. Lyrics + visualizer are not ported (panel has neither).
 #pragma comment(lib, "windowsapp")
+#pragma comment(lib, "ole32")
+#pragma comment(lib, "shell32")
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -24,8 +26,13 @@
 #include <winrt/Windows.Media.Control.h>
 #include <winrt/Windows.Storage.Streams.h>
 
+#include <audiopolicy.h>
+#include <endpointvolume.h>
+#include <mmdeviceapi.h>
+
 #include <algorithm>
 #include <chrono>
+#include <cwctype>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -36,10 +43,11 @@ namespace wgi = winrt::Windows::Graphics::Imaging;
 namespace wmc = winrt::Windows::Media::Control;
 namespace wss = winrt::Windows::Storage::Streams;
 
+using Session = wmc::GlobalSystemMediaTransportControlsSession;
+using Manager = wmc::GlobalSystemMediaTransportControlsSessionManager;
+
 // ==== shared state ==============================================================================
-// Written by the poll thread, read by the render thread. Everything but the two atomics is
-// under s_mtx; the copies taken out of it are small (two short strings, one pixel vector that
-// only moves on a track change).
+// Written by the poll thread, read by the render thread. Everything but the atomics is under s_mtx.
 static std::mutex s_mtx;
 static std::string s_title, s_artist;
 
@@ -51,12 +59,23 @@ static long long s_totalMs = 0, s_curMs = 0;
 static double s_rate = 1.0;                    // playback speed, for the render-side slide
 static std::chrono::steady_clock::time_point s_stamp{};
 
-static std::atomic<bool> s_has{ false };       // a session with a title is up
-static std::atomic<bool> s_playing{ false };
+static std::atomic<bool> s_has{ false };       // botox m_has_media
+static std::atomic<bool> s_playing{ false };   // botox m_is_playing
 
-// unit E (media_ex.cpp): in-game transport control. Poll thread picks this up and clears it
-// back to -1 -- a request that lands between polls waits at most one poll interval (1s).
-static std::atomic<int>  s_pendingCmd{ -1 };
+// botox m_source_app / m_source_kind: session's AppUserModelId (no session: audible app's exe path)
+enum Source : int { source_none, source_session, source_kopuz, source_app };
+static std::wstring s_source;
+static Source s_kind = source_none;
+
+// botox e_command: 1 previous, 2 toggle, 3 next. 0 = none
+static std::atomic<int> s_pendingCmd{ 0 };
+
+// poll thread only. an audible-only app ( no SMTC ) goes silent once paused, keep it shown as paused
+static bool s_appPaused = false;
+static std::chrono::steady_clock::time_point s_appPausedAt{};
+static std::vector<unsigned char> s_thumb;     // encoded bytes currently shown (botox m_thumbnail)
+static std::wstring s_thumbKey;
+static int s_thumbWait = 0;
 
 // Render thread only.
 static IDirect3DTexture9* s_tex = nullptr;
@@ -64,178 +83,648 @@ static IDirect3DTexture9* s_tex = nullptr;
 static HANDLE s_thread = nullptr;
 
 // ==== poll thread ===============================================================================
-static std::string ToUtf8(const winrt::hstring& text)
+static std::string ToUtf8(std::wstring_view text)
 {
     if (text.empty()) return {};
-    const int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0, nullptr, nullptr);
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0, nullptr, nullptr);
     if (size <= 0) return {};
     std::string out((size_t)size, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), out.data(), size, nullptr, nullptr);
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), out.data(), size, nullptr, nullptr);
     return out;
 }
 
-// Thumbnail stream -> straight-alpha BGRA8 bytes, always kArt x kArt.
-//
-// Straight and not premultiplied: ImGui's dx9 backend blends SRCALPHA/INVSRCALPHA, which is
-// the straight-alpha equation.
-//
-// The decoder does the scale AND the crop (mp_art.h, gate test tests/mediaplayer_test.cpp).
-// 64 because it is a power of two: a d3d9 device that only advertises
-// D3DPTEXTURECAPS_NONPOW2CONDITIONAL has rules about the rest (no wrap addressing, no mips),
-// and the cheapest way not to care is to never hand it a non-pow2 texture.
+// Encoded image (jpg / png / bmp / webp ..) -> straight-alpha BGRA8, always kArt x kArt.
+// Straight, not premultiplied: ImGui's dx9 backend blends SRCALPHA/INVSRCALPHA. Scale + crop in
+// the decoder (mp_art.h, gate test tests/mediaplayer_test.cpp). 64 = pow2, no NONPOW2 rules.
 static constexpr uint32_t kArt = 64;
 
-static bool DecodeThumb(const wss::IRandomAccessStreamWithContentType& stream,
-                        std::vector<unsigned char>& out, int& w, int& h)
+static bool DecodeArt(const std::vector<unsigned char>& bytes, std::vector<unsigned char>& out, int& w, int& h)
 {
-    const auto decoder = wgi::BitmapDecoder::CreateAsync(stream).get();
+    if (bytes.empty()) return false;
+    try {
+        wss::Buffer in((uint32_t)bytes.size());
+        std::copy(bytes.begin(), bytes.end(), in.data());
+        in.Length((uint32_t)bytes.size());
+        wss::InMemoryRandomAccessStream stream;
+        stream.WriteAsync(in).get();
+        stream.Seek(0);
 
-    const uint32_t sw = decoder.PixelWidth(), sh = decoder.PixelHeight();
-    if (!sw || !sh) return false;
+        const auto decoder = wgi::BitmapDecoder::CreateAsync(stream).get();
+        const uint32_t sw = decoder.PixelWidth(), sh = decoder.PixelHeight();
+        if (!sw || !sh) return false;
 
-    const mp::ArtCrop c = mp::ArtCropFor(sw, sh, kArt);
+        const mp::ArtCrop c = mp::ArtCropFor(sw, sh, kArt);
+        wgi::BitmapTransform tr;
+        tr.InterpolationMode(wgi::BitmapInterpolationMode::Fant);
+        tr.ScaledWidth(c.scaledW);
+        tr.ScaledHeight(c.scaledH);
+        wgi::BitmapBounds b{};
+        b.X = c.x; b.Y = c.y; b.Width = c.w; b.Height = c.h;
+        tr.Bounds(b);
 
-    wgi::BitmapTransform tr;
-    tr.InterpolationMode(wgi::BitmapInterpolationMode::Fant);
-    tr.ScaledWidth(c.scaledW);
-    tr.ScaledHeight(c.scaledH);
-    wgi::BitmapBounds b{};
-    b.X = c.x; b.Y = c.y; b.Width = c.w; b.Height = c.h;
-    tr.Bounds(b);
+        const auto bmp = decoder.GetSoftwareBitmapAsync(wgi::BitmapPixelFormat::Bgra8,
+                                                        wgi::BitmapAlphaMode::Straight, tr,
+                                                        wgi::ExifOrientationMode::IgnoreExifOrientation,
+                                                        wgi::ColorManagementMode::DoNotColorManage).get();
+        if (!bmp) return false;
+        w = (int)bmp.PixelWidth();
+        h = (int)bmp.PixelHeight();
+        if (w <= 0 || h <= 0 || w > 2048 || h > 2048) return false;
 
-    const auto bmp = decoder.GetSoftwareBitmapAsync(wgi::BitmapPixelFormat::Bgra8,
-                                                    wgi::BitmapAlphaMode::Straight, tr,
-                                                    wgi::ExifOrientationMode::IgnoreExifOrientation,
-                                                    wgi::ColorManagementMode::DoNotColorManage).get();
-    if (!bmp) return false;
-
-    w = (int)bmp.PixelWidth();
-    h = (int)bmp.PixelHeight();
-    if (w <= 0 || h <= 0 || w > 2048 || h > 2048) return false;
-
-    wss::Buffer buf((uint32_t)(w * h * 4));
-    bmp.CopyToBuffer(buf);
-    if (buf.Length() < (uint32_t)(w * h * 4)) return false;
-
-    out.assign(buf.data(), buf.data() + (size_t)w * h * 4);
-    return true;
+        wss::Buffer buf((uint32_t)(w * h * 4));
+        bmp.CopyToBuffer(buf);
+        if (buf.Length() < (uint32_t)(w * h * 4)) return false;
+        out.assign(buf.data(), buf.data() + (size_t)w * h * 4);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
-static void PollOnce(wmc::GlobalSystemMediaTransportControlsSessionManager& mgr)
+namespace
 {
-    try {
-        const auto session = mgr.GetCurrentSession();
-        if (session == nullptr) { s_has = false; s_playing = false; return; }
+    template<typename t>
+    void safe_release(t*& pointer)
+    {
+        if (pointer) { pointer->Release(); pointer = nullptr; }
+    }
 
-        // unit E in-game media control: fire-and-forget, errors ignored -- a control call on a
-        // session with nothing playing (e.g. a browser tab with no active media) is a no-op
-        // the transport API already handles, not this thread's problem.
-        const int cmd = s_pendingCmd.exchange(-1);
-        if (cmd == 0)      { try { session.TryTogglePlayPauseAsync().get(); } catch (...) {} }
-        else if (cmd == 1) { try { session.TrySkipNextAsync().get(); } catch (...) {} }
-        else if (cmd == 2) { try { session.TrySkipPreviousAsync().get(); } catch (...) {} }
+    std::wstring lower(std::wstring text)
+    {
+        for (auto& c : text) c = (wchar_t)std::towlower(c);
+        return text;
+    }
 
-        const auto info = session.TryGetMediaPropertiesAsync().get();
+    // "C:\x\Chrome.EXE" / "Spotify.exe" / "MSEdge" -> "chrome" / "spotify" / "msedge"
+    std::wstring exe_stem(std::wstring name)
+    {
+        name = lower(std::move(name));
+        if (const auto slash = name.find_last_of(L"\\/"); slash != std::wstring::npos) name.erase(0, slash + 1);
+        if (name.size() > 4 && name.ends_with(L".exe")) name.resize(name.size() - 4);
+        return name;
+    }
 
-        std::string title  = ToUtf8(info.Title());
-        std::string artist = ToUtf8(info.Artist());
+    // apple music desktop sends "artist — album": cut at em dash
+    std::wstring strip_album(std::wstring artist)
+    {
+        const auto dash = artist.find(L'\u2014');
+        if (dash == std::wstring::npos) return artist;
+        artist.resize(dash);
+        while (!artist.empty() && std::iswspace(artist.back())) artist.pop_back();
+        return artist;
+    }
 
-        // Decode on a TRACK CHANGE only. This runs once a second and the decode plus the texture
-        // upload behind it are the expensive half; the track name is what the art belongs to, so
-        // it is the key. A failed decode does not take the key, so the next poll retries it.
+    // a hung app must not freeze the media thread: null on timeout / error
+    template<typename op_t>
+    auto await_for(const op_t& op) -> decltype(op.GetResults())
+    {
+        if (op.wait_for(std::chrono::seconds(2)) == wf::AsyncStatus::Completed) return op.GetResults();
+        op.Cancel();
+        return nullptr;
+    }
+
+    bool is_playing(const Session& session)
+    {
+        try {
+            const auto info = session.GetPlaybackInfo();
+            return info && info.PlaybackStatus() == wmc::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // GetCurrentSession = what windows last focused, often null or a paused tab while another app plays
+    Session pick_session(const Manager& manager)
+    {
+        const auto current = manager.GetCurrentSession();
+        if (current && is_playing(current)) return current;
+
+        const auto sessions = manager.GetSessions();
+        for (const auto& session : sessions)
+            if (is_playing(session)) return session;
+
+        if (current) return current;
+        return sessions.Size() ? sessions.GetAt(0) : nullptr;
+    }
+
+    std::vector<unsigned char> read_thumbnail(const wmc::GlobalSystemMediaTransportControlsSessionMediaProperties& info)
+    {
+        try {
+            const auto reference = info.Thumbnail();
+            if (!reference) return {};
+
+            const auto stream = await_for(reference.OpenReadAsync());
+            if (!stream || !stream.Size() || stream.Size() > 16u * 1024u * 1024u) return {};
+
+            wss::Buffer buffer((uint32_t)stream.Size());
+            const auto read = await_for(stream.ReadAsync(buffer, buffer.Capacity(), wss::InputStreamOptions::ReadAhead));
+            if (!read) return {};
+            return { read.data(), read.data() + read.Length() };
+        } catch (...) {
+            return {};
+        }
+    }
+
+    std::wstring process_path(const DWORD pid)
+    {
+        const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!process) return {};
+        wchar_t path[MAX_PATH]{};
+        DWORD size = MAX_PATH;
+        const bool ok = QueryFullProcessImageNameW(process, 0, path, &size);
+        CloseHandle(process);
+        return ok ? lower(path) : std::wstring{};
+    }
+
+    // exe paths with an active stream on the default `flow` device, `sounding` = peak above silence too
+    std::vector<std::wstring> session_apps(IMMDeviceEnumerator* enumerator, const EDataFlow flow, const bool sounding)
+    {
+        std::vector<std::wstring> out{};
+        IMMDevice* device                 = nullptr;
+        IAudioSessionManager2* manager    = nullptr;
+        IAudioSessionEnumerator* sessions = nullptr;
+        int count                         = 0;
+
+        if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(flow, eConsole, &device)) &&
+            SUCCEEDED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&manager))) &&
+            SUCCEEDED(manager->GetSessionEnumerator(&sessions)) && SUCCEEDED(sessions->GetCount(&count))) {
+            for (int i = 0; i < count; i++) {
+                IAudioSessionControl* control   = nullptr;
+                IAudioSessionControl2* control2 = nullptr;
+                IAudioMeterInformation* meter   = nullptr;
+                AudioSessionState state         = AudioSessionStateInactive;
+                DWORD pid                       = 0;
+                float peak                      = 0.f;
+
+                if (SUCCEEDED(sessions->GetSession(i, &control)) && SUCCEEDED(control->GetState(&state)) && state == AudioSessionStateActive &&
+                    SUCCEEDED(control->QueryInterface(IID_PPV_ARGS(&control2))) && control2->IsSystemSoundsSession() == S_FALSE &&
+                    SUCCEEDED(control2->GetProcessId(&pid)) && pid &&
+                    (!sounding || (SUCCEEDED(control->QueryInterface(IID_PPV_ARGS(&meter))) && SUCCEEDED(meter->GetPeakValue(&peak)) && peak > 0.001f))) {
+                    if (auto path = process_path(pid); !path.empty()) out.push_back(std::move(path));
+                }
+
+                safe_release(meter);
+                safe_release(control2);
+                safe_release(control);
+            }
+        }
+
+        safe_release(sessions);
+        safe_release(manager);
+        safe_release(device);
+        return out;
+    }
+
+    std::wstring window_title(const std::wstring& path)
+    {
+        struct search_t {
+            const std::wstring* m_path;
+            std::wstring m_title;
+        } search{ &path, {} };
+
+        EnumWindows(
+            [](HWND window, LPARAM param) -> BOOL {
+                auto& search = *reinterpret_cast<search_t*>(param);
+
+                // own windows skipped before GetWindowText: same-process text is a SendMessage to the game thread
+                DWORD pid = 0;
+                GetWindowThreadProcessId(window, &pid);
+                if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) || pid == GetCurrentProcessId()) return TRUE;
+
+                wchar_t text[512]{};
+                if (!GetWindowTextW(window, text, 512) || process_path(pid) != *search.m_path) return TRUE;
+
+                search.m_title = text;
+                return FALSE;
+            },
+            reinterpret_cast<LPARAM>(&search));
+
+        return search.m_title;
+    }
+
+    // "12. Artist - Title.mp3 - VLC media player" / "Artist - Title [foobar2000]" -> "Artist", "Title"
+    void split_title(std::wstring text, const std::wstring& stem, std::wstring& artist, std::wstring& title)
+    {
+        std::size_t last = 0;
+        for (const wchar_t* cut : { L" - ", L" [", L" | " })
+            if (const auto at = text.rfind(cut); at != std::wstring::npos) last = (std::max)(last, at);
+        if (last && lower(text.substr(last)).find(stem) != std::wstring::npos) text.resize(last);
+
+        std::size_t digits = 0;
+        while (digits < text.size() && std::iswdigit(text[digits])) digits++;
+        if (digits && text.compare(digits, 2, L". ") == 0) text.erase(0, digits + 2);
+
+        if (const auto dot = text.rfind(L'.'); dot != std::wstring::npos) {
+            static constexpr const wchar_t* k_media[]{ L".mp3", L".flac", L".wav", L".ogg", L".opus", L".m4a", L".aac", L".wma", L".mp4", L".mkv", L".webm" };
+            const auto ext = lower(text.substr(dot));
+            if (std::find_if(std::begin(k_media), std::end(k_media), [&](const wchar_t* e) { return ext == e; }) != std::end(k_media))
+                text.resize(dot);
+        }
+
+        const auto at = text.find(L" - ");
+        artist = at != std::wstring::npos ? text.substr(0, at) : std::wstring{};
+        title  = at != std::wstring::npos ? text.substr(at + 3) : text;
+    }
+
+    /* no GSMTC player ( vlc 3, winamp, broken SMTC ): an app that makes sound and has no mic stream ( voice chat ).
+       one with a song file open beats one with only a window title ( discord tab in a browser ) */
+    bool find_audio_app(std::wstring& path, std::wstring& window, std::vector<std::wstring>& files)
+    {
+        IMMDeviceEnumerator* enumerator = nullptr;
+        if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator))))
+            return false;
+
+        const auto playing = session_apps(enumerator, eRender, true);
+        const auto talking = session_apps(enumerator, eCapture, false);
+        enumerator->Release();
+
+        const std::wstring self = process_path(GetCurrentProcessId());
+        std::vector<std::wstring> titled{};
+        for (const auto& app : playing) {
+            // discord / ptb / canary: call + notification sounds, never a song
+            if (app == self || exe_stem(app).starts_with(L"discord") || std::find(talking.begin(), talking.end(), app) != talking.end() ||
+                std::find(titled.begin(), titled.end(), app) != titled.end())
+                continue;
+
+            if (files = n_media_file::open_media(app); !files.empty()) {
+                path   = app;
+                window = window_title(app);
+                return true;
+            }
+
+            if (!window_title(app).empty()) titled.push_back(app);
+        }
+
+        if (titled.empty()) return false;
+
+        path   = titled.front();
+        window = window_title(path);
+        return true;
+    }
+
+    // botox get_position_ms
+    double position_ms()
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        auto current = (double)s_curMs;
+        if (s_playing)
+            current += s_rate * (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - s_stamp).count();
+        return current;
+    }
+}
+
+// botox impl_t::on_update
+static void OnUpdate(const Manager& manager)
+{
+    const auto clear = []() {
+        s_has     = false;
+        s_playing = false;
+        std::lock_guard<std::mutex> lock(s_mtx);
+        s_source.clear();
+        s_kind = source_none;
+    };
+
+    struct now_t {
+        std::string m_title{}, m_artist{};
+        std::wstring m_source{};
+        Source m_kind{};
+        std::optional<std::vector<unsigned char>> m_thumbnail{}; // nullopt = keep
+        long long m_total_ms{}, m_current_ms{};
+        std::chrono::steady_clock::time_point m_stamp{ std::chrono::steady_clock::now() };
+        double m_rate{ 1.0 };
+        bool m_playing{};
+    };
+
+    const auto publish = [](now_t& now) {
+        // art changed: decode here, outside the lock (botox: render thread D3DX, see top)
+        bool artChanged = now.m_thumbnail && *now.m_thumbnail != s_thumb;
         std::vector<unsigned char> px;
         int pw = 0, ph = 0;
-        bool haveArt = false, dropArt = false;
-        static std::string s_artKey;   // poll thread only
-        const std::string artKey = title + "\n" + artist;
-        if (!info.Thumbnail()) {
-            // New track with no art at all: the last track's cover must not stay on screen.
-            dropArt = !s_artKey.empty();
-            s_artKey.clear();
-        } else if (artKey != s_artKey) {
-            const auto stream = info.Thumbnail().OpenReadAsync().get();
-            haveArt = DecodeThumb(stream, px, pw, ph);
-            if (haveArt) s_artKey = artKey;
-            else         DebugLog("media: thumbnail decode failed");
+        if (artChanged) {
+            s_thumb = std::move(*now.m_thumbnail);
+            if (!DecodeArt(s_thumb, px, pw, ph)) { px.clear(); pw = ph = 0; }
         }
-
-        bool playing = false;
-        double rate = 1.0;
-        if (const auto playback = session.GetPlaybackInfo()) {
-            playing = playback.PlaybackStatus() == wmc::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
-            if (const auto r = playback.PlaybackRate()) rate = r.Value();   // IReference, often null
-        }
-
-        // Position is dated LastUpdatedTime, NOT the moment we read it -- see mp_time.h. Age the
-        // snapshot by hand or the bar snaps back to the last push every poll.
-        const auto timeline = session.GetTimelineProperties();
-        long long ageMs = 0;
-        if (const auto lastUpd = timeline.LastUpdatedTime(); lastUpd.time_since_epoch().count() > 0)
-            ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(winrt::clock::now() - lastUpd).count();
-
-        const auto ms = [](const wf::TimeSpan& t) {
-            return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t).count(); };
-        const mp::Track track = mp::TrackAt(ms(timeline.StartTime()), ms(timeline.EndTime()),
-                                            ms(timeline.MinSeekTime()), ms(timeline.MaxSeekTime()),
-                                            ms(timeline.Position()), ageMs, rate, playing);
-
         {
             std::lock_guard<std::mutex> lock(s_mtx);
-            s_title  = title;
-            s_artist = artist;
-            if (haveArt) {
+
+            s_title  = std::move(now.m_title);
+            s_artist = std::move(now.m_artist);
+            s_source = std::move(now.m_source);
+            s_kind   = now.m_kind;
+            if (now.m_kind != source_app) s_appPaused = false;
+
+            if (artChanged) {
                 s_px = std::move(px);
                 s_pxW = pw; s_pxH = ph;
                 s_pxDirty = true;
-            } else if (dropArt) {
-                s_px.clear();
-                s_pxW = s_pxH = 0;
-                s_pxDirty = true;   // the tick below releases the texture and builds nothing
             }
-            s_totalMs = track.totalMs;
-            s_curMs   = track.curMs;
-            s_rate    = rate;
-            s_stamp   = std::chrono::steady_clock::now();
+
+            s_totalMs = now.m_total_ms;
+            s_curMs   = now.m_current_ms;
+            s_stamp   = now.m_stamp;
+            s_rate    = now.m_rate;
         }
 
-        s_playing = playing;
-        s_has     = !title.empty();
+        s_playing = now.m_playing;
+        s_has     = true;
+    };
+
+    /* art on track change, again the next 5 updates ( a skip shows the new title with the old or no art first ), then every 3rd
+       while still missing. a failed re-read never wipes shown art, a bad thumbnail never hides the player */
+    const auto thumbnail = [](const std::wstring& key, const auto& read, const bool retry = true) -> std::optional<std::vector<unsigned char>> {
+        if (key != s_thumbKey) {
+            s_thumbKey  = key;
+            s_thumbWait = 0;
+            return read();
+        }
+
+        const int wait = ++s_thumbWait;
+        if (!retry || (wait > 5 && (!s_thumb.empty() || wait % 3))) return std::nullopt;
+
+        auto art = read();
+        if (art.empty() && !s_thumb.empty()) return std::nullopt;
+        return art;
+    };
+
+    const auto from_session = [&](const Session& session) {
+        const auto info = await_for(session.TryGetMediaPropertiesAsync());
+        if (!info) return;
+
+        now_t now{};
+        now.m_source    = session.SourceAppUserModelId();
+        now.m_kind      = source_session;
+        now.m_title     = ToUtf8(info.Title());
+        now.m_artist    = ToUtf8(strip_album(std::wstring{ info.Artist() }));
+        now.m_thumbnail = thumbnail(now.m_source + L'\n' + std::wstring{ info.Title() } + L'\n' + std::wstring{ info.Artist() },
+                                    [&] { return read_thumbnail(info); });
+
+        const auto timeline = session.GetTimelineProperties();
+
+        /* Position is at LastUpdatedTime, not now (browsers only push it on play / pause / seek).
+           zero or future stamp = never filled, treat as fresh. */
+        auto age = winrt::clock::now() - timeline.LastUpdatedTime();
+        if (timeline.LastUpdatedTime().time_since_epoch().count() == 0 || age.count() < 0) age = {};
+
+        now.m_total_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(timeline.EndTime() - timeline.StartTime()).count();
+        now.m_current_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timeline.Position() - timeline.StartTime()).count();
+        now.m_stamp -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(age);
+
+        if (const auto playback = session.GetPlaybackInfo()) {
+            now.m_playing = playback.PlaybackStatus() == wmc::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+            if (const auto rate = playback.PlaybackRate(); rate && rate.Value() > 0.0) now.m_rate = rate.Value();
+        }
+
+        publish(now);
+    };
+
+    const auto from_kopuz = [&](n_kopuz::state_t& kopuz) {
+        now_t now{};
+        now.m_source     = kopuz.m_app;
+        now.m_kind       = source_kopuz;
+        now.m_title      = std::move(kopuz.m_title);
+        now.m_artist     = std::move(kopuz.m_artist);
+        now.m_total_ms   = kopuz.m_total_ms;
+        now.m_current_ms = kopuz.m_position_ms;
+        now.m_playing    = kopuz.m_playing;
+        now.m_thumbnail  = thumbnail(L"kopuz\n" + std::to_wstring(kopuz.m_art_version) + L'\n' + std::wstring(kopuz.m_art_request.begin(), kopuz.m_art_request.end()),
+                                     [&] { return n_kopuz::get_artwork(kopuz.m_art_request); });
+        publish(now);
+    };
+
+    const auto from_audio = [&]() {
+        static std::wstring s_app{}, s_file{};
+        static n_media_file::tags_t s_tags{};
+        static std::chrono::steady_clock::time_point s_file_start{};
+        static bool s_file_timed{}, s_watching{};
+        static int s_quiet{};
+
+        std::wstring path{}, window{};
+        std::vector<std::wstring> files{};
+        if (!find_audio_app(path, window, files)) {
+            // paused from here: stays until the app closes, gap between songs: hold what's shown a few updates
+            if (s_appPaused && !s_app.empty() && s_has && !window_title(s_app).empty()) return true;
+
+            if (++s_quiet > 3) s_app.clear();
+            return !s_app.empty() && s_has.load();
+        }
+
+        s_quiet = 0;
+
+        // sounding again ( resumed in the app itself ). the pause needs a moment to go quiet, so not right after it
+        if (s_appPaused && path == s_app && std::chrono::steady_clock::now() - s_appPausedAt > std::chrono::seconds(2)) s_appPaused = false;
+        if (s_appPaused && path == s_app) return true;
+
+        // two updates in a row, a notification ding is shorter
+        if (path != s_app) {
+            s_app      = path;
+            s_watching = false;
+            s_file.clear();
+            return false;
+        }
+
+        /* the song file it has open beats the window title. one still open stays ( gapless players open the next early ).
+           position only known for a file that showed up while watching */
+        if (std::find(files.begin(), files.end(), s_file) == files.end()) {
+            const std::wstring file = files.empty() ? std::wstring{} : files.front();
+            s_file_timed = s_watching && !file.empty();
+            s_file_start = std::chrono::steady_clock::now();
+            s_file       = file;
+            s_tags       = {};
+            if (!file.empty()) n_media_file::read_tags(file, s_tags);
+        }
+        s_watching = true;
+
+        std::wstring artist{}, title{};
+        if (!s_file.empty()) {
+            artist = s_tags.m_artist;
+            title  = s_tags.m_title;
+            if (title.empty()) split_title(s_file.substr(s_file.find_last_of(L"\\/") + 1), exe_stem(path), artist, title);
+        } else
+            split_title(window, exe_stem(path), artist, title);
+
+        now_t now{};
+        now.m_source  = path;
+        now.m_kind    = source_app;
+        now.m_title   = ToUtf8(title);
+        now.m_artist  = ToUtf8(artist);
+        now.m_playing = true;
+        if (s_file_timed) {
+            now.m_total_ms = s_tags.m_total_ms;
+            now.m_stamp    = s_file_start;
+        }
+        now.m_thumbnail = thumbnail(s_file, [&] { return s_file.empty() ? std::vector<unsigned char>{} : n_media_file::read_cover(s_file); }, false);
+        publish(now);
+        return true;
+    };
+
+    /* playing beats paused, SMTC beats the rest. kopuz = own pipe api, its SMTC is broken.
+       audible window ( vlc 3, winamp ) before anything paused */
+    try {
+        const auto session = pick_session(manager);
+        if (session && is_playing(session)) return from_session(session);
+
+        n_kopuz::state_t kopuz{};
+        const bool has_kopuz = n_kopuz::get_state(kopuz);
+        if (has_kopuz && kopuz.m_playing) return from_kopuz(kopuz);
+
+        if (from_audio()) return;
+
+        if (has_kopuz) return from_kopuz(kopuz);
+
+        if (session) return from_session(session);
+
+        clear();
     } catch (...) {
-        s_has = false;
-        s_playing = false;
+        clear();
     }
 }
 
-static DWORD WINAPI MediaThread(LPVOID)
+namespace
 {
-    // Nothing in the game waits on this, and every call in it blocks -- same priority the other
-    // background workers run at so it takes a spare core instead of an engine thread's.
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    bool session_command(const Manager& manager, const std::wstring& source, const std::wstring& title, const int command, bool& found)
+    {
+        // browsers share one id across tabs: the shown title picks the tab
+        Session pick{ nullptr };
+        for (const auto& session : manager.GetSessions()) {
+            if (std::wstring_view{ session.SourceAppUserModelId() } != source) continue;
 
-    // Fresh thread has no apartment; winrt throws CO_E_NOTINITIALIZED without this.
-    try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
-
-    std::optional<wmc::GlobalSystemMediaTransportControlsSessionManager> mgr;
-
-    while (!g_eject) {
-        if (g_mpEnable) {
-            if (!mgr.has_value()) {
-                // Deferred, not done at load: RequestAsync is the slowest call here and a user
-                // who never turns the feature on should never pay it.
-                try { mgr = wmc::GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get(); }
-                catch (...) { mgr.reset(); }
-                if (!mgr.has_value()) {
-                    DebugLog("media: session manager unavailable");
-                    for (int i = 0; i < 20 && !g_eject; ++i) Sleep(250);   // 5s before retrying
-                    continue;
-                }
-            }
-            PollOnce(*mgr);
+            const auto info = await_for(session.TryGetMediaPropertiesAsync());
+            if (!pick || (info && std::wstring_view{ info.Title() } == title)) pick = session;
         }
 
-        // 1s of poll interval, checked for eject 4x inside it.
-        for (int i = 0; i < 4 && !g_eject; ++i) Sleep(250);
+        found = static_cast<bool>(pick);
+        if (!pick) return false;
+
+        const auto run = [](const auto& op) {
+            if (op.wait_for(std::chrono::seconds(2)) == wf::AsyncStatus::Completed) return op.GetResults();
+            op.Cancel();
+            return false;
+        };
+
+        if (command == 1) return run(pick.TrySkipPreviousAsync());
+        if (command == 3) return run(pick.TrySkipNextAsync());
+
+        // some apps only expose play + pause, no toggle
+        return run(pick.TryTogglePlayPauseAsync()) || run(is_playing(pick) ? pick.TryPauseAsync() : pick.TryPlayAsync());
     }
+
+    // no SMTC ( vlc 3, winamp, mpc ): the player's own windows, the way a keyboard media key reaches them
+    bool app_command(const std::wstring& path, const int command)
+    {
+        static constexpr short k_commands[]{ 0, APPCOMMAND_MEDIA_PREVIOUSTRACK, APPCOMMAND_MEDIA_PLAY_PAUSE, APPCOMMAND_MEDIA_NEXTTRACK };
+
+        struct search_t {
+            const std::wstring* m_path;
+            std::vector<HWND> m_windows;
+        } search{ &path, {} };
+
+        EnumWindows(
+            [](HWND window, LPARAM param) -> BOOL {
+                auto& search = *reinterpret_cast<search_t*>(param);
+                DWORD pid = 0;
+                GetWindowThreadProcessId(window, &pid);
+                if (IsWindowVisible(window) && !GetWindow(window, GW_OWNER) && pid != GetCurrentProcessId() && process_path(pid) == *search.m_path)
+                    search.m_windows.push_back(window);
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&search));
+
+        for (const HWND window : search.m_windows) {
+            DWORD_PTR handled = 0;
+            if (SendMessageTimeoutW(window, WM_APPCOMMAND, reinterpret_cast<WPARAM>(window), MAKELPARAM(0, k_commands[command]), SMTO_ABORTIFHUNG, 500, &handled) &&
+                handled)
+                return true;
+        }
+        return false;
+    }
+
+    // last resort: a real media key, windows routes it to whatever answers media keys
+    void media_key(const int command)
+    {
+        static constexpr WORD k_keys[]{ 0, VK_MEDIA_PREV_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_NEXT_TRACK };
+
+        INPUT input[2]{};
+        for (int i = 0; i < 2; i++) {
+            input[i].type       = INPUT_KEYBOARD;
+            input[i].ki.wVk     = k_keys[command];
+            input[i].ki.dwFlags = KEYEVENTF_EXTENDEDKEY | (i ? KEYEVENTF_KEYUP : 0);
+        }
+        SendInput(2, input, sizeof(INPUT));
+    }
+}
+
+// botox impl_t::run_command. true = ran one
+static bool RunCommand(const Manager& manager)
+{
+    const int command = s_pendingCmd.exchange(0);
+    if (command < 1 || command > 3) return false;
+
+    std::wstring source{}, title{};
+    Source kind{};
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        source = s_source;
+        kind   = s_kind;
+        title  = winrt::to_hstring(s_title).c_str();
+    }
+
+    static constexpr const char* k_kopuz[]{ "", "Previous", "Toggle", "Next" };
+
+    try {
+        bool found = false;
+        const bool sent =
+            (kind == source_session && (session_command(manager, source, title, command, found) || found)) ||
+            (kind == source_kopuz && !n_kopuz::detail::call(k_kopuz[command], {}).empty()) || (kind == source_app && app_command(source, command));
+        if (!sent) media_key(command);
+    } catch (...) {
+        media_key(command);
+    }
+
+    if (kind == source_app) {
+        s_appPaused = command == 2 && s_playing;
+        if (s_appPaused) {
+            const auto frozen = (long long)position_ms();
+            std::lock_guard<std::mutex> lock(s_mtx);
+            s_curMs     = frozen;
+            s_stamp     = std::chrono::steady_clock::now();
+            s_appPausedAt = s_stamp;
+            s_playing   = false;
+        }
+    }
+
+    return true;
+}
+
+// botox main.cpp media_player_thread
+static DWORD WINAPI MediaThread(LPVOID)
+{
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+
+    /* fresh thread, so it has no apartment yet - winrt throws CO_E_NOTINITIALIZED without this */
+    try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
+
+    std::optional<Manager> manager;
+    try { manager = Manager::RequestAsync().get(); } catch (...) {}
+    if (!manager.has_value()) {
+        DebugLog("media: failed to initialise media player");
+        return 0;
+    }
+
+    while (!g_eject) {
+        if (g_mpEnable) OnUpdate(*manager);
+
+        // a control click refreshes 250 ms later, the app needs that long to switch track
+        for (int i = 0; i < 20 && !g_eject; i++) {
+            if (RunCommand(*manager)) {
+                Sleep(250);
+                break;
+            }
+            Sleep(50);
+        }
+    }
+
+    // eject: drop the proxy on its own MTA thread while the process is healthy
+    try { manager.reset(); } catch (...) {}
     return 0;
 }
 
@@ -550,4 +1039,9 @@ void RenderMediaPlayer()
 }
 
 bool   MediaPlayer_HasSession()    { return g_mpEnable && s_has.load(); }
-void   MediaPlayer_RequestControl(int cmd) { s_pendingCmd = cmd; }
+// 0 toggle / 1 next / 2 previous -> botox e_command 2 / 3 / 1
+void   MediaPlayer_RequestControl(int cmd)
+{
+    static constexpr int k_map[3] = { 2, 3, 1 };
+    if (cmd >= 0 && cmd <= 2) s_pendingCmd = k_map[cmd];
+}
