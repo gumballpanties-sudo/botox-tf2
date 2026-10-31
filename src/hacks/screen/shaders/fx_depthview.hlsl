@@ -14,6 +14,13 @@
 //   c5 = upside down, reversed, logarithmic, far plane
 //   c6 = scale x, scale y, offset x px, offset y px
 //   c7 = multiplier, width, height, unused
+//   c8 = zNear, zFar (this frame's CViewSetup), unused, unused
+//
+// DIH: lin() is botox's reshade lin (far plane 1000) of RAW depth -- and raw depth moves with
+// the map's zFar (env_fog_controller farz, r_mapextents), so one slider value hit a different
+// distance on every map. Now: unproject with the real z range, re-project through TF2's
+// default one (VIEW_NEARZ 7, 16384*sqrt3 = 28377.9, view.cpp GetZFar), then lin. Default maps
+// read exactly as before; every other map reads like them. Sky (raw 1) stays 1.
 
 sampler2D s_depth:register(s0);
 sampler2D s_frame:register(s1);
@@ -25,7 +32,14 @@ float4 c4:register(c4);
 float4 c5:register(c5);
 float4 c6:register(c6);
 float4 c7:register(c7);
-float lin(float2 uv){float d=tex2Dlod(s_depth,float4(uv,0,0)).r;return d/(1000.0-d*999.0);}
+float4 c8:register(c8);
+float lin(float2 uv){
+	float d=tex2Dlod(s_depth,float4(uv,0,0)).r;
+	if(d>=1.0)return 1.0;
+	float z=c8.x*c8.y/(c8.y-d*(c8.y-c8.x));
+	float r=saturate(28377.9*(z-7.0)/(z*28370.9));
+	return r/(1000.0-r*999.0);
+}
 float lin_view(float2 uv){
 	if(c4.z<0.5)return lin(uv);
 	if(c5.x>0.5)uv.y=1.0-uv.y;

@@ -245,7 +245,7 @@ struct PsDrawData
     bool lineActive = false;       // finder scan column being stretched
     Vec3 lineA, lineB;
     Vec3 localOrigin;              // for the distance fade
-    char boxText[64] = {};         // "minijump to <z>" popup text
+    char boxText[96] = {};         // botox "<launch> to surf at <z> with <z> (stand)" popup text
     unsigned long long boxMs = 0;  // GetTickCount64 at fire (0 = none)
     unsigned long long aliveMs = 0;
 };

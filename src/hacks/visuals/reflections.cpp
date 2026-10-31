@@ -61,6 +61,7 @@ static bool Ensure(IDirect3DDevice9* dev, const D3DSURFACE_DESC& desc)
 
 struct ReflSaved
 {
+    IDirect3DSurface9*           depthStencil;   // nulled for the quad, the gun draws after this
     IDirect3DPixelShader9*       ps;
     IDirect3DVertexShader9*      vs;
     IDirect3DVertexDeclaration9* decl;
@@ -70,15 +71,20 @@ struct ReflSaved
     UINT  streamOffset, streamStride;
     DWORD fvf;
     D3DVIEWPORT9 vp;
-    DWORD rs[9];
+    DWORD rs[15];
     DWORD samp[2][6];
     float psc[3][4];   // the shaderapi caches ps constants -- the gun and hud draw after this
 };
-static const D3DRENDERSTATETYPE k_rsRefl[9] = {
+// Same list ssao/dof/frameblend save. CLIPPLANEENABLE is the water-map one: the engine's
+// water views (DF_CLIP_Z) and half-submerged entities (PushCustomClipPlane) can leave a user
+// clip plane on at the post slot, and it cut the fullscreen quad down to "some spots".
+static const D3DRENDERSTATETYPE k_rsRefl[15] = {
     D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE,
     D3DRS_SRCBLEND, D3DRS_DESTBLEND, D3DRS_CULLMODE, D3DRS_SCISSORTESTENABLE,
-    D3DRS_SRGBWRITEENABLE,
+    D3DRS_SRGBWRITEENABLE, D3DRS_BLENDOP, D3DRS_COLORWRITEENABLE, D3DRS_STENCILENABLE,
+    D3DRS_CLIPPLANEENABLE, D3DRS_FILLMODE, D3DRS_SEPARATEALPHABLENDENABLE,
 };
+constexpr int k_rsReflN = (int)(sizeof(k_rsRefl) / sizeof(k_rsRefl[0]));
 static const D3DSAMPLERSTATETYPE k_sampRefl[6] = {
     D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_MAGFILTER,
     D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE,
@@ -86,6 +92,7 @@ static const D3DSAMPLERSTATETYPE k_sampRefl[6] = {
 
 static void ReflSave(IDirect3DDevice9* dev, ReflSaved& s)
 {
+    if (FAILED(dev->GetDepthStencilSurface(&s.depthStencil))) s.depthStencil = nullptr;
     dev->GetPixelShader(&s.ps);
     dev->GetVertexShader(&s.vs);
     dev->GetVertexDeclaration(&s.decl);
@@ -93,7 +100,7 @@ static void ReflSave(IDirect3DDevice9* dev, ReflSaved& s)
     dev->GetIndices(&s.indices);
     dev->GetFVF(&s.fvf);
     dev->GetViewport(&s.vp);
-    for (int i = 0; i < 9; ++i) dev->GetRenderState(k_rsRefl[i], &s.rs[i]);
+    for (int i = 0; i < k_rsReflN; ++i) dev->GetRenderState(k_rsRefl[i], &s.rs[i]);
     for (int u = 0; u < 2; ++u) {
         dev->GetTexture(u, &s.tex[u]);
         for (int i = 0; i < 6; ++i) dev->GetSamplerState(u, k_sampRefl[i], &s.samp[u][i]);
@@ -113,8 +120,10 @@ static void ReflRestore(IDirect3DDevice9* dev, ReflSaved& s)
         dev->SetTexture(u, s.tex[u]);
         for (int i = 0; i < 6; ++i) dev->SetSamplerState(u, k_sampRefl[i], s.samp[u][i]);
     }
-    for (int i = 0; i < 9; ++i) dev->SetRenderState(k_rsRefl[i], s.rs[i]);
+    for (int i = 0; i < k_rsReflN; ++i) dev->SetRenderState(k_rsRefl[i], s.rs[i]);
     dev->SetViewport(&s.vp);
+    dev->SetDepthStencilSurface(s.depthStencil);
+    if (s.depthStencil) s.depthStencil->Release();
     if (s.tex[0])  s.tex[0]->Release();
     if (s.tex[1])  s.tex[1]->Release();
     if (s.ps)      s.ps->Release();
@@ -147,6 +156,14 @@ void Reflections_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     ReflSaved st{};
     ReflSave(dev, st);
 
+    // proof for the water-map bug: what the engine left on that would cut or mask the quad
+    static bool s_leftLogged = false;
+    if (!s_leftLogged && (st.rs[12] || st.rs[11] || (st.rs[10] & 7) != 7 || st.rs[13] != D3DFILL_SOLID)) {
+        s_leftLogged = true;
+        DebugLog("reflections: engine left clipplanes=0x%lx stencil=%lu colorwrite=0x%lx fill=%lu at the post slot -- reset for the pass",
+                 st.rs[12], st.rs[11], st.rs[10], st.rs[13]);
+    }
+
     const float aspect   = (s_h > 0) ? (float)s_w / (float)s_h : 1.777778f;
     const float fovClamp = (view.fov < 1.f) ? 1.f : (view.fov > 170.f ? 170.f : view.fov);
     const float tanX     = tanf(fovClamp * 0.5f * 3.14159265f / 180.f);
@@ -174,6 +191,13 @@ void Reflections_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
     dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
     dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+    dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+    dev->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+    dev->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+                        D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
+    dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    dev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
     // lerp(dest, reflColor, alpha) via the blend unit -- the shader never reads the
     // backbuffer it is writing, only the StretchRect copy, so this is safe to enable.
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);

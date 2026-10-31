@@ -7,6 +7,8 @@
 #include "../movement/detections.h"
 #include "../movement/ps_lines.h"
 #include "../movement/recorder.h"
+#include "menu_chrome.h"   // menu_columns_* / menu_group_*
+#include <cstdio>
 
 void UnitB_Menu_movement_indicators()
 {
@@ -82,68 +84,86 @@ void UnitB_Menu_movement_calculator()
         }, ImVec2(220.f, -1));
 }
 
+// botox menu_tab_movement case 3, 1:1. Emits its own columns + groups (Page_MovementRecorder
+// only calls this).
 void UnitB_Menu_movement_recorder()
 {
-    ImGui::TextDisabled("movement recorder");
-    ImGui::Checkbox("enabled##rec", &g_recEnable);
-    if (!g_recEnable) return;
+    static bool s_firstList = true;
+    if (s_firstList) { Recorder_Refresh(); s_firstList = false; }
 
-    ImGui::Text("record");
-    MenuBindKey("record##reckey", &g_recRecordKey, &g_recRecordMode);
-    ImGui::SameLine();
-    if (ImGui::Button(Recorder_IsRecording() ? "stop##recbtn" : "record##recbtn"))
+    menu_columns_begin();
+
+    if (menu_group_begin("recorder"))
     {
-        if (Recorder_IsRecording()) Recorder_StopRecord(); else Recorder_StartRecord();
-    }
-    ImGui::Text("frames: %d", Recorder_FrameCount());
-
-    int trimStart, trimEnd, maxTicks;
-    Recorder_GetTrim(trimStart, trimEnd, maxTicks);
-    if (maxTicks > 0)
-    {
-        ImGui::TextDisabled("clipper");
-        bool changed = false;
-        changed |= ImGui::SliderInt("trim start##rec", &trimStart, 0, maxTicks);
-        changed |= ImGui::SliderInt("trim end##rec", &trimEnd, 0, maxTicks);
-        if (changed) Recorder_SetTrim(trimStart, trimEnd);
-
-        static char nameBuf[64] = "run1";
-        ImGui::InputText("name##rec", nameBuf, sizeof(nameBuf));
-        ImGui::SameLine();
-        if (ImGui::Button("save##recbtn")) { Recorder_Save(nameBuf); Recorder_Refresh(); }
-    }
-
-    ImGui::Separator();
-    ImGui::Text("play");
-    MenuBindKey("play##playkey", &g_recPlayKey, &g_recPlayMode);
-    ImGui::SameLine();
-    if (ImGui::Button(Recorder_IsPlaying() ? "stop##playbtn" : "play##playbtn"))
-    {
-        if (Recorder_IsPlaying()) Recorder_StopPlay(); else Recorder_StartPlay();
-    }
-    ImGui::Checkbox("original playback viewangles##rec", &g_recLockVa);
-    ImGui::Checkbox("lock while aiming to start##rec", &g_recLockGoingToStart);
-    ImGui::Checkbox("stop playback on movement##rec", &g_recStopOnMove);
-    if (g_recLockGoingToStart) ImGui::SliderFloat("approach distance##rec", &g_recApproachDist, 4.f, 128.f);
-    ImGui::Checkbox("force same weapons##rec", &g_recForceWeapon);
-
-    ImGui::Separator();
-    ImGui::TextDisabled("routes");
-    if (ImGui::Button("refresh##recbtn")) Recorder_Refresh();
-    const int count = Recorder_ClipCount();
-    const int sel = Recorder_GetSelected();
-    if (ImGui::BeginListBox("##recroutes", ImVec2(0, 120.f)))
-    {
-        for (int i = 0; i < count; ++i)
+        ImGui::Checkbox("movement recorder", &g_recEnable);
+        ImGui::Checkbox("show recording line", &g_recShowLine);
+        ImGui::Checkbox("show recorder timer", &g_recRender);
+        if (g_recRender)
+            ImGui::OptionPopup("recorder timer settings", [&]() {
+                ImGui::Combo("position##recorder timer", &g_recPosition, "top left\0bottom left\0bottom right\0");
+            }, ImVec2(200.f, -1));
+        ImGui::Checkbox("clipper", &g_recClipper);
+        if (g_recClipper)
         {
-            const bool isSel = (i == sel);
-            if (ImGui::Selectable(Recorder_ClipName(i), isSel)) Recorder_SetSelected(i);
+            ImGui::Checkbox("show clipper box", &g_recClipperBox);
+            ImGui::SliderFloat("clipper duration##recorder", &g_recClipSeconds, 1.f, 120.f, "%.0f s");
         }
-        ImGui::EndListBox();
+        ImGui::Checkbox("original playback viewangles", &g_recLockVa);
+        ImGui::Combo("playback yaw", &g_recYaw, "original\0left\0right\0backwards\0spinning\0");
+        if (g_recYaw == 4)
+            ImGui::SliderFloat("spin speed##recorder", &g_recSpinSpeed, -1800.f, 1800.f, "%.0f deg/s");
+        ImGui::SliderFloat("smooth start##recorder", &g_recSmoothStart, 0.f, 3.f, g_recSmoothStart > 0.01f ? "%.2f s" : "off");
+        ImGui::SliderFloat("smooth end##recorder", &g_recSmoothEnd, 0.f, 3.f, g_recSmoothEnd > 0.01f ? "%.2f s" : "off");
+        ImGui::Checkbox("lock while aiming to position", &g_recLockGoingToStart);
+        ImGui::Checkbox("stop playback on movement", &g_recStopOnMove);
+        ImGui::Checkbox("force same weapons", &g_recForceWeapon);
+
+        // press actions: a style (always on / toggle) would fire them on every menu close
+        int unused = 1;
+        ImGui::Label("start recording");
+        ImGui::Keybind("recorder start rec key", &g_recKeyStartRec, &unused, false);
+        ImGui::Label("stop recording");
+        ImGui::Keybind("recorder stop rec key", &g_recKeyStopRec, &unused, false);
+        ImGui::Label("save route");
+        ImGui::Keybind("recorder save key", &g_recKeySave, &unused, false);
+        ImGui::Label("start playback");
+        ImGui::Keybind("recorder start play key", &g_recKeyStartPlay, &unused, false);
+        ImGui::Label("stop playback");
+        ImGui::Keybind("recorder stop play key", &g_recKeyStopPlay, &unused, false);
+        ImGui::Label("clear route");
+        ImGui::Keybind("recorder clear key", &g_recKeyClear, &unused, false);
+        if (g_recClipper)
+        {
+            ImGui::Label("clip route");
+            ImGui::Keybind("recorder clip key", &g_recKeyClip, &unused, false);
+        }
     }
-    if (sel >= 0 && sel < count)
+    menu_group_end();
+
+    if (menu_group_begin("actions"))
     {
-        ImGui::SameLine();
-        if (ImGui::Button("delete##recbtn")) Recorder_Delete(sel);
+        static constexpr struct { const char* label; unsigned action; } kActions[] = {
+            { "start recording", REC_START_REC }, { "stop recording", REC_STOP_REC }, { "save route", REC_SAVE },
+            { "start playback", REC_START_PLAY }, { "stop playback", REC_STOP_PLAY }, { "clear route", REC_CLEAR },
+            { "clip route", REC_CLIP },
+        };
+        ImGui::BeginDisabled(!g_recEnable);
+        for (const auto& a : kActions)
+        {
+            if (a.action == REC_CLIP && !g_recClipper) continue;
+            char id[64];
+            snprintf(id, sizeof(id), "%s##recorder action", a.label);
+            if (ImGui::Button(id, ImVec2(-1.f, 15.f))) Recorder_Request(a.action);
+        }
+        ImGui::EndDisabled();
     }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("routes"))
+        Recorder_MenuRoutes();
+    menu_group_end();
+
+    menu_columns_end();
 }

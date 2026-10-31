@@ -1,333 +1,1132 @@
+// Movement recorder = botox hacks/movement/movement_recorder.cpp 1:1 (see recorder.h for what
+// was left out and why). Function names follow botox's so a side by side read lines up:
+// capture_user_input / apply_playback / on_create_move / on_frame_stage / camera_lock / render_*.
 #include "recorder.h"
-#include "prediction.h"   // EntV3
-#include <direct.h>
-#include <mutex>
-#include <algorithm>
+#include "prediction.h"            // EntV3 / EntI, g_globalVars
+#include "../aim/aim.h"            // Aim_ChatPrint
+#include "../../render/render.h"   // W2S_Project
+#include <atomic>
+#include <cfloat>
 #include <cstdio>
+#include <ctime>
+#include <deque>
 #include <filesystem>
+#include <mutex>
 
-// local IN_* copies -- same confirmed bit values movement.cpp defines file-local
 static constexpr int IN_JUMP      = 1 << 1;
 static constexpr int IN_DUCK      = 1 << 2;
 static constexpr int IN_FORWARD   = 1 << 3;
 static constexpr int IN_BACK      = 1 << 4;
 static constexpr int IN_MOVELEFT  = 1 << 9;
 static constexpr int IN_MOVERIGHT = 1 << 10;
-static constexpr int kWasdMask = IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT | IN_JUMP;
+static constexpr int IN_SPEED     = 1 << 17;
+static constexpr int kUserMoveMask = IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT | IN_JUMP | IN_DUCK;
 
-// IVEngineClient::GetLevelName, slot 51 -- same confirmed slot psassist.inl's EngineLevelName
-// uses (anchored against Time=14 / SetViewAngles=20). Duplicated here rather than exported:
-// psassist.inl's copy is file-local static, same as this one.
-static const char* RecLevelName()
+static constexpr float k_startRadius    = 28.f;
+static constexpr float k_posCloseEps    = 0.1f;
+static constexpr float k_approachGiveUp = 2.f;
+static constexpr float k_indicatorLerpK = 6.f;
+
+// ---- engine -----------------------------------------------------------------------------
+// IVEngineClient SetViewAngles 20 / GetViewAngles 19 (movement.cpp kEngine_*, file static
+// there), GetLevelName 51 (psassist.inl EngineLevelName).
+static void RecSetViewAngles(Vec3 ang)
+{
+    if (!g_engine) return;
+    __try { ((void(__fastcall*)(void*, Vec3&))(*(void***)g_engine)[20])(g_engine, ang); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static Vec3 RecGetViewAngles()
+{
+    Vec3 ang;
+    if (!g_engine) return ang;
+    __try { ((void(__fastcall*)(void*, Vec3&))(*(void***)g_engine)[19])(g_engine, ang); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return ang;
+}
+
+static const char* RecLevelNameRaw()
 {
     if (!g_engine) return "";
     const char* n = nullptr;
-    __try {
-        void** vt = *(void***)g_engine;
-        n = ((const char*(__fastcall*)(void*))vt[51])(g_engine);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { n = nullptr; }
+    __try { n = ((const char*(__fastcall*)(void*))(*(void***)g_engine)[51])(g_engine); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { n = nullptr; }
     return n ? n : "";
 }
 
-// m_hMyWeapons[slot] -> EHANDLE; & 0xFFFF is this codebase's own confirmed x64 decode
-// (psassist.inl AirDash's Atomizer check uses the same mask). Index IS the weapon slot.
-static int ActiveWeaponSlot(void* pLocal)
+// botox get_level_name_short: "maps/jump_beef.bsp" -> "jump_beef"
+static std::string RecLevelName()
 {
-    if (g_offMyWeapons <= 0 || g_offActiveWeapon <= 0) return -1;
-    const unsigned active = *(unsigned*)((uintptr_t)pLocal + g_offActiveWeapon);
-    if (active == 0xFFFFFFFF) return -1;
-    for (int i = 0; i < 48; ++i)
-    {
-        const unsigned h = *(unsigned*)((uintptr_t)pLocal + g_offMyWeapons + i * 4);
-        if (h == active) return i;
-    }
-    return -1;
+    std::string s = RecLevelNameRaw();
+    if (const size_t sl = s.find_last_of("/\\"); sl != std::string::npos) s.erase(0, sl + 1);
+    if (s.size() > 4 && s.compare(s.size() - 4, 4, ".bsp") == 0) s.resize(s.size() - 4);
+    return s;
 }
 
-// selects the weapon sitting in m_hMyWeapons[slot] for the NEXT cmd -- pCmd->weaponselect is
-// the standard CUserCmd field the engine reads it off (same struct this port already verified
-// for everything else in UserCmd_t, not a new assumption).
-static void ForceWeaponSlot(void* pLocal, UserCmd_t* pCmd, int slot)
+static float NowReal() { return g_globalVars ? g_globalVars->realtime : 0.f; }
+
+static int ServerTickrate()
 {
-    if (g_offMyWeapons <= 0 || slot < 0 || slot >= 48) return;
-    const unsigned h = *(unsigned*)((uintptr_t)pLocal + g_offMyWeapons + slot * 4);
+    const float iv = g_globalVars ? g_globalVars->interval_per_tick : 0.f;
+    return iv > 0.f ? (int)(1.f / iv + 0.5f) : 67;
+}
+
+// ---- weapons ----------------------------------------------------------------------------
+// m_hMyWeapons[i] / m_hActiveWeapon EHANDLEs: & 0xFFFF = entry (NUM_ENT_ENTRY_BITS 13, serial
+// shifted by 16), same decode psassist.inl's Atomizer check uses.
+static void* WeaponFromHandle(unsigned h)
+{
     const int idx = (int)(h & 0xFFFF);
-    if (h == 0xFFFFFFFF || idx < 1 || idx >= 2048) return;
-    pCmd->weaponselect = idx;
+    if (h == 0xFFFFFFFF || idx < 1 || idx >= 2048) return nullptr;
+    return GetClientEntity(idx);
 }
 
-struct RecClip { std::string file; std::string name; };
-
-static std::mutex              s_lock;
-static bool                    s_recording = false;
-static bool                    s_playing   = false;
-static bool                    s_approaching = false;
-static std::vector<RecFrame>   s_recordBuf;
-static std::vector<RecFrame>   s_playBuf;
-static size_t                  s_playIdx   = 0;
-static int                     s_trimStart = 0, s_trimEnd = 0;
-static std::vector<RecClip>    s_clips;
-static int                     s_selected  = -1;
-static std::string             s_currentMap;
-
-static std::string SafeName(const char* s)
+static unsigned MyWeaponHandle(void* pLocal, int i)
 {
-    std::string out = (s && s[0]) ? s : "unknown";
-    for (char& c : out) if (c == '/' || c == '\\' || c == ':') c = '_';
-    return out;
+    return *(unsigned*)((uintptr_t)pLocal + g_offMyWeapons + i * 4);
 }
 
-static std::string ClipPath(const std::string& map, const std::string& name)
+static bool WeaponsOK() { return g_offMyWeapons > 0 && g_offActiveWeapon > 0 && g_offItemDefIndex > 0; }
+
+// ---- state ------------------------------------------------------------------------------
+struct RecClip
 {
-    return std::string(kRecorderDir) + "\\" + SafeName(map.c_str()) + "__" + SafeName(name.c_str()) + ".rec";
+    std::string file, name, map;
+    int tickrate = 67;
+    std::vector<RecFrame> frames;
+    std::string Label() const { return tickrate == ServerTickrate() ? name : name + " (" + std::to_string(tickrate) + " tick)"; }
+};
+
+// one lock for everything: the game thread (cmd, frame stage, mouse) and the render thread
+// (menu, overlay, editor) both touch it. Recursive: botox's m_clips_mutex is too.
+static std::recursive_mutex  s_lock;
+static std::atomic<unsigned> s_requests{ 0u };
+
+static bool                  s_recording = false;
+static std::vector<RecFrame> s_recFrames;
+static std::deque<RecFrame>  s_clipBuf;
+
+static RecFrame s_userInput;
+static int      s_userMask = 0, s_userMaskPrev = 0;
+
+static bool   s_playing = false, s_wishStart = false;
+static size_t s_playIdx = 0;
+static int    s_approachTicks = 0;
+static float  s_stepReal = 0.f, s_smoothT0 = 0.f;
+static Vec3   s_smoothFrom;
+static unsigned long long s_pathStartMs = 0;
+static std::vector<RecFrame> s_playFrames;
+static std::string s_activeName;
+
+static std::vector<RecClip> s_clips;
+static int    s_selected = -1;
+static size_t s_clipsStamp = 0;
+static unsigned long long s_lastRefreshMs = 0;
+static std::string s_map;
+
+static bool   s_editorOpen = false;
+static int    s_editorClip = -1, s_editorStart = 0, s_editorEnd = 0;
+static char   s_editorName[128] = {};
+static unsigned long long s_editorOpenMs = 0;
+static int    s_nearClip = -1;              // route start within k_startRadius (ENTER opens it)
+
+static std::vector<float> s_pointProgress;
+static float  s_indAlpha = 0.f;
+
+// per cmd: CmdStart -> CmdEnd hand-off
+static bool   s_cmdBegun = false;
+static void*  s_cmdLocal = nullptr;
+static Vec3   s_cmdPos, s_cmdVel;
+// render snapshot of the local hull, written per cmd
+static bool   s_localAlive = false;
+static Vec3   s_localEye;
+
+static std::vector<std::string> s_msgs;     // chat lines, printed from the game thread
+
+static void Notify(const std::string& s)
+{
+    s_msgs.push_back(s);
+    DebugLog("REC: %s", s.c_str());
 }
 
-// ---- menu-facing controls ----------------------------------------------------------------
+static bool OwnsCmd() { return s_playing || s_wishStart; }
 
-void Recorder_StartRecord()
+// playback yaw != original = camera follows the route too, just turned
+static bool CameraLocked() { return g_recLockVa || g_recYaw != 0; }
+
+// ---- frames -----------------------------------------------------------------------------
+static RecFrame MakeFrame(void* pLocal, const UserCmd_t* c, const Vec3& pos, const Vec3& vel)
 {
-    std::lock_guard<std::mutex> l(s_lock);
-    if (s_playing) return;   // one owner of the cmd at a time
-    s_recordBuf.clear();
-    s_recording = true;
-    DebugLog("REC: record start");
+    RecFrame f;
+    f.pitch = c->viewangles.x; f.yaw = c->viewangles.y;
+    f.forward = c->forwardmove; f.side = c->sidemove; f.up = c->upmove;
+    f.buttons = c->buttons;
+    f.mouseDx = c->mousedx; f.mouseDy = c->mousedy;
+    f.posX = pos.x; f.posY = pos.y; f.posZ = pos.z;
+    f.velX = vel.x; f.velY = vel.y; f.velZ = vel.z;
+    f.hasVel = g_offVelocity > 0;
+    if (!pLocal || !WeaponsOK()) return f;
+    const unsigned active = *(unsigned*)((uintptr_t)pLocal + g_offActiveWeapon);
+    if (void* w = WeaponFromHandle(active)) f.weaponDef = EntI(w, g_offItemDefIndex);
+    else return f;
+    for (int i = 0; i < 48; ++i)
+        if (MyWeaponHandle(pLocal, i) == active) { f.weaponSlot = i; break; }
+    return f;
 }
 
-void Recorder_StopRecord()
+static void Replay(const RecFrame& f, UserCmd_t* c)
 {
-    std::lock_guard<std::mutex> l(s_lock);
-    s_recording = false;
-    s_trimStart = 0;
-    s_trimEnd   = (int)s_recordBuf.size();
-    DebugLog("REC: record stop (%d frames)", (int)s_recordBuf.size());
+    c->viewangles.x = f.pitch; c->viewangles.y = f.yaw;
+    c->forwardmove = f.forward; c->sidemove = f.side; c->upmove = f.up;
+    c->buttons = f.buttons;
+    c->mousedx = f.mouseDx; c->mousedy = f.mouseDy;
 }
 
-void Recorder_StartPlay()
+static bool Playable(const RecClip& c) { return !c.frames.empty() && c.tickrate == ServerTickrate(); }
+
+// ---- files ------------------------------------------------------------------------------
+static std::string SanitizeName(std::string name)
 {
-    std::lock_guard<std::mutex> l(s_lock);
-    if (s_recording || s_selected < 0 || s_selected >= (int)s_clips.size()) return;
-    std::vector<uint8_t> bytes;
-    FILE* f = fopen(s_clips[s_selected].file.c_str(), "rb");
-    if (!f) { DebugLog("REC: play failed, cannot open %s", s_clips[s_selected].file.c_str()); return; }
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fclose(f); return; }
-    bytes.resize((size_t)sz);
-    fread(bytes.data(), 1, (size_t)sz, f);
-    fclose(f);
-    if (!RecDeserialize(bytes, s_playBuf) || s_playBuf.empty())
-    {
-        DebugLog("REC: play failed, bad clip data %s", s_clips[s_selected].file.c_str());
-        return;
-    }
-    s_playIdx = 0;
-    s_playing = true;
-    s_approaching = g_recLockGoingToStart;
-    DebugLog("REC: play start (%d frames)", (int)s_playBuf.size());
+    for (char& ch : name)
+        if (ch == '<' || ch == '>' || ch == ':' || ch == '"' || ch == '/' || ch == '\\' || ch == '|' || ch == '?' || ch == '*')
+            ch = '_';
+    while (!name.empty() && isspace((unsigned char)name.front())) name.erase(name.begin());
+    while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
+    return name;
 }
 
-void Recorder_StopPlay()
-{
-    std::lock_guard<std::mutex> l(s_lock);
-    s_playing = false;
-    s_approaching = false;
-}
+static std::filesystem::path Root() { return std::filesystem::path(kRecorderDir); }
 
-void Recorder_Clear()
+static void EnsureRoot()
 {
-    std::lock_guard<std::mutex> l(s_lock);
-    s_recordBuf.clear();
-    s_trimStart = s_trimEnd = 0;
-}
-
-bool Recorder_IsRecording() { std::lock_guard<std::mutex> l(s_lock); return s_recording; }
-bool Recorder_IsPlaying()   { std::lock_guard<std::mutex> l(s_lock); return s_playing; }
-int  Recorder_FrameCount()  { std::lock_guard<std::mutex> l(s_lock); return (int)s_recordBuf.size(); }
-
-void Recorder_Refresh()
-{
-    std::lock_guard<std::mutex> l(s_lock);
-    s_currentMap = RecLevelName();
-    s_clips.clear();
-    s_selected = -1;
-    _mkdir(kRecorderDir);
-    const std::string prefix = SafeName(s_currentMap.c_str()) + "__";
     std::error_code ec;
-    if (!std::filesystem::exists(kRecorderDir, ec)) return;
-    for (const auto& ent : std::filesystem::directory_iterator(kRecorderDir, ec))
+    if (!std::filesystem::exists(Root(), ec)) std::filesystem::create_directories(Root(), ec);
+}
+
+static std::filesystem::path UniqueClipPath(std::string& name)
+{
+    name = SanitizeName(name);
+    if (name.empty()) name = "Clip";
+    std::error_code ec;
+    auto path = Root() / (name + ".rec");
+    if (!std::filesystem::exists(path, ec)) return path;
+    const std::string base = name;
+    for (int i = 1; i < 1000; ++i)
     {
-        if (ec || !ent.is_regular_file()) continue;
-        const std::string fn = ent.path().filename().string();
-        if (fn.rfind(prefix, 0) != 0) continue;              // not this map
-        if (fn.size() < 4 || fn.substr(fn.size() - 4) != ".rec") continue;
+        name = base + " " + std::to_string(i);
+        path = Root() / (name + ".rec");
+        if (!std::filesystem::exists(path, ec)) return path;
+    }
+    return path;
+}
+
+static bool ReadClip(const std::filesystem::path& path, RecClip& out)
+{
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return false;
+    std::vector<uint8_t> bytes;
+    fseek(f, 0, SEEK_END);
+    const long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz > 0) { bytes.resize((size_t)sz); bytes.resize(fread(bytes.data(), 1, (size_t)sz, f)); }
+    fclose(f);
+    RecClipData d;
+    if (!RecDeserialize(bytes, d)) return false;
+    out.file = path.filename().string();
+    out.name = path.stem().string();
+    out.map = std::move(d.map);
+    out.tickrate = d.tickrate;
+    out.frames = std::move(d.frames);
+    return true;
+}
+
+static bool WriteClip(const std::filesystem::path& path, const RecClip& c)
+{
+    RecClipData d;
+    d.map = c.map; d.tickrate = c.tickrate; d.frames = c.frames;
+    std::vector<uint8_t> bytes;
+    if (!RecSerialize(d, bytes)) return false;
+    FILE* f = _wfopen(path.c_str(), L"wb");
+    if (!f) return false;
+    const bool ok = fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
+    fclose(f);
+    return ok;
+}
+
+static void RefreshClips(bool onlyIfChanged)
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    EnsureRoot();
+
+    // listing stamp: re-parsing every clip each 5 s is the stall botox measured
+    std::vector<std::filesystem::path> files;
+    std::wstring stamp(s_map.begin(), s_map.end());
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(Root(), ec))
+    {
+        std::error_code fe;
+        if (!e.is_regular_file(fe) || e.path().extension() != ".rec") continue;
+        stamp += L'|' + e.path().filename().native() + L':' + std::to_wstring(e.file_size(fe)) + L':' +
+                 std::to_wstring(e.last_write_time(fe).time_since_epoch().count());
+        files.push_back(e.path());
+    }
+    const size_t hash = std::hash<std::wstring>{}(stamp);
+    if (onlyIfChanged && hash == s_clipsStamp) return;
+    s_clipsStamp = hash;
+
+    s_clips.clear();
+    for (const auto& p : files)
+    {
         RecClip c;
-        c.file = ent.path().string();
-        c.name = fn.substr(prefix.size(), fn.size() - prefix.size() - 4);
+        if (!ReadClip(p, c)) continue;
+        if (!s_map.empty() && !c.map.empty() && c.map != s_map) continue;
         s_clips.push_back(std::move(c));
     }
-    std::sort(s_clips.begin(), s_clips.end(), [](const RecClip& a, const RecClip& b) { return a.name < b.name; });
+    if (s_selected >= (int)s_clips.size()) s_selected = -1;
+    if (s_editorClip >= (int)s_clips.size()) s_editorOpen = false;
 }
 
-int Recorder_ClipCount() { std::lock_guard<std::mutex> l(s_lock); return (int)s_clips.size(); }
-
-const char* Recorder_ClipName(int index)
+static void SaveFrames(const std::vector<RecFrame>& frames, const char* kind)
 {
-    std::lock_guard<std::mutex> l(s_lock);
-    if (index < 0 || index >= (int)s_clips.size()) return "";
-    return s_clips[index].name.c_str();
+    if (s_map.empty()) return;
+    if (frames.size() < 2) { Notify("nothing to save"); return; }
+    EnsureRoot();
+
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &now);
+    char date[32] = {};
+    std::strftime(date, sizeof(date), "%Y-%m-%d_%H-%M-%S", &tm);
+
+    RecClip c;
+    c.map = s_map;
+    c.tickrate = ServerTickrate();
+    c.name = s_map + " " + kind + " " + date;
+    c.frames = frames;
+    const auto path = UniqueClipPath(c.name);
+    c.name = path.stem().string();
+    c.file = path.filename().string();
+
+    if (!WriteClip(path, c)) { Notify("save failed: " + path.string()); return; }
+    Notify("saved \"" + c.name + "\" " + std::to_string(c.frames.size()) + " ticks");
+    DebugLog("REC: saved %s ticks=%d tick=%d", c.file.c_str(), (int)c.frames.size(), c.tickrate);
+    s_clips.push_back(std::move(c));
+    s_selected = (int)s_clips.size() - 1;
 }
 
-void Recorder_Save(const char* name)
+static void ClipRoute()
 {
-    std::lock_guard<std::mutex> l(s_lock);
-    if (!name || !name[0] || s_recordBuf.empty()) return;
-    const int start = std::clamp(s_trimStart, 0, (int)s_recordBuf.size());
-    const int end   = std::clamp(s_trimEnd > 0 ? s_trimEnd : (int)s_recordBuf.size(), start, (int)s_recordBuf.size());
-    if (end <= start) return;
+    const float seconds = std::clamp(g_recClipSeconds, 1.f, 120.f);
+    const size_t want = (size_t)(seconds * (float)ServerTickrate());
+    const size_t take = std::min(want, s_clipBuf.size());
+    if (take < 2) { Notify("clip buffer empty"); return; }
 
-    std::vector<RecFrame> trimmed(s_recordBuf.begin() + start, s_recordBuf.begin() + end);
-    std::vector<uint8_t> bytes;
-    if (!RecSerialize(trimmed, bytes)) { DebugLog("REC: save failed, serialize"); return; }
-
-    _mkdir(kRecorderDir);
-    const std::string map = RecLevelName();
-    const std::string path = ClipPath(map, name);
-    FILE* f = fopen(path.c_str(), "wb");
-    if (!f) { DebugLog("REC: save failed, cannot open %s", path.c_str()); return; }
-    fwrite(bytes.data(), 1, bytes.size(), f);
-    fclose(f);
-    DebugLog("REC: saved %s (%d frames)", path.c_str(), (int)trimmed.size());
+    std::vector<RecFrame> frames(s_clipBuf.end() - (std::ptrdiff_t)take, s_clipBuf.end());
+    const size_t first = RecStillStart(frames);
+    if (first < frames.size() && frames.size() - first >= 2)
+        frames.erase(frames.begin(), frames.begin() + (std::ptrdiff_t)first);
+    else
+        Notify("clip starts moving: replay may drift");
+    SaveFrames(frames, "Clip");
 }
 
-void Recorder_Delete(int index)
+static void DeleteClip(size_t index)
 {
-    std::lock_guard<std::mutex> l(s_lock);
-    if (index < 0 || index >= (int)s_clips.size()) return;
-    remove(s_clips[index].file.c_str());
+    if (index >= s_clips.size()) return;
+    std::error_code ec;
+    std::filesystem::remove(Root() / s_clips[index].file, ec);
     s_clips.erase(s_clips.begin() + index);
-    if (s_selected == index) s_selected = -1;
-    else if (s_selected > index) --s_selected;
+    if (s_selected >= (int)s_clips.size()) s_selected = -1;
+    if (s_editorClip == (int)index) s_editorOpen = false;
+    else if (s_editorClip > (int)index) --s_editorClip;
 }
 
-void Recorder_SetSelected(int index) { std::lock_guard<std::mutex> l(s_lock); s_selected = index; }
-int  Recorder_GetSelected()          { std::lock_guard<std::mutex> l(s_lock); return s_selected; }
-
-bool Recorder_Load(int) { return true; } // StartPlay() reads s_selected directly; kept for API symmetry
-
-void Recorder_SetTrim(int start, int end)
+static void RenameClip(size_t index, const std::string& newName)
 {
-    std::lock_guard<std::mutex> l(s_lock);
-    s_trimStart = start; s_trimEnd = end;
-}
+    if (index >= s_clips.size()) return;
+    RecClip& c = s_clips[index];
+    std::string name = SanitizeName(newName);
+    if (name.empty()) name = c.name.empty() ? "Clip" : c.name;
 
-void Recorder_GetTrim(int& start, int& end, int& maxTicks)
-{
-    std::lock_guard<std::mutex> l(s_lock);
-    start = s_trimStart; end = s_trimEnd; maxTicks = (int)s_recordBuf.size();
-}
-
-// ---- game thread --------------------------------------------------------------------------
-
-void Recorder_OnCreateMove(void* pLocal, UserCmd_t* pCmd)
-{
-    if (!g_recEnable || !pLocal || !pCmd) return;
-
-    // raw input, read before anything below (recorder or any later feature) touches the cmd --
-    // stop-on-move has to see the player's OWN press, not a press the recorder itself injected
-    const int rawButtons = pCmd->buttons;
-
-    // record/play binds -- same toggle/hold/always-on runtime every other feature's bind uses
-    static bool s_recKeyWasDown = false, s_playKeyWasDown = false;
-    const bool recKeyDown  = MovementKeyOK(g_recRecordKey, g_recRecordMode);
-    const bool playKeyDown = MovementKeyOK(g_recPlayKey, g_recPlayMode);
-    if (recKeyDown && !s_recKeyWasDown) { if (Recorder_IsRecording()) Recorder_StopRecord(); else Recorder_StartRecord(); }
-    if (playKeyDown && !s_playKeyWasDown) { if (Recorder_IsPlaying()) Recorder_StopPlay(); else Recorder_StartPlay(); }
-    s_recKeyWasDown = recKeyDown;
-    s_playKeyWasDown = playKeyDown;
-
-    std::lock_guard<std::mutex> l(s_lock);
-
-    if (s_recording)
+    std::error_code ec;
+    const auto oldPath = Root() / c.file;
+    auto newPath = Root() / (name + ".rec");
+    if (newPath != oldPath && std::filesystem::exists(newPath, ec)) newPath = UniqueClipPath(name);
+    if (newPath != oldPath)
     {
-        RecFrame f{};
-        f.pitch = pCmd->viewangles.x; f.yaw = pCmd->viewangles.y;
-        f.forward = pCmd->forwardmove; f.side = pCmd->sidemove; f.up = pCmd->upmove;
-        f.buttons = pCmd->buttons; f.mouseDx = pCmd->mousedx; f.mouseDy = pCmd->mousedy;
-        f.weaponSlot = ActiveWeaponSlot(pLocal);
-        const Vec3 pos = g_offOrigin   > 0 ? EntV3(pLocal, g_offOrigin)   : Vec3();
-        const Vec3 vel = g_offVelocity > 0 ? EntV3(pLocal, g_offVelocity) : Vec3();
-        f.posX = pos.x; f.posY = pos.y; f.posZ = pos.z;
-        f.velX = vel.x; f.velY = vel.y; f.velZ = vel.z;
-        s_recordBuf.push_back(f);
-        if ((int)s_recordBuf.size() >= kRecMaxTick) { s_recording = false; DebugLog("REC: record cap hit"); }
+        std::filesystem::rename(oldPath, newPath, ec);
+        if (ec) std::filesystem::remove(oldPath, ec);
+    }
+    c.name = name;
+    c.file = name + ".rec";
+}
+
+static void OpenClipEditor(size_t index)
+{
+    if (index >= s_clips.size() || s_clips[index].frames.empty()) return;
+    s_editorOpen = true;
+    s_editorOpenMs = GetTickCount64();
+    s_editorClip = (int)index;
+    s_editorStart = 0;
+    s_editorEnd = (int)s_clips[index].frames.size() - 1;
+    memset(s_editorName, 0, sizeof(s_editorName));
+    strncpy_s(s_editorName, s_clips[index].name.c_str(), sizeof(s_editorName) - 1);
+}
+
+static void ApplyClipEditor()
+{
+    if (s_editorClip < 0 || s_editorClip >= (int)s_clips.size()) return;
+    RecClip& c = s_clips[s_editorClip];
+    if (c.frames.empty()) return;
+    const std::string oldFile = c.file;
+
+    const int maxFrame = (int)c.frames.size() - 1;
+    s_editorStart = std::clamp(s_editorStart, 0, maxFrame);
+    s_editorEnd   = std::clamp(s_editorEnd, 0, maxFrame);
+    if (s_editorStart > s_editorEnd) std::swap(s_editorStart, s_editorEnd);
+    if (s_editorStart > 0 || s_editorEnd < maxFrame)
+    {
+        std::vector<RecFrame> trimmed(c.frames.begin() + s_editorStart, c.frames.begin() + s_editorEnd + 1);
+        c.frames = std::move(trimmed);
+        s_editorStart = 0;
+        s_editorEnd = (int)c.frames.size() - 1;
+    }
+    RenameClip((size_t)s_editorClip, s_editorName);
+    WriteClip(Root() / s_clips[s_editorClip].file, s_clips[s_editorClip]);
+    s_editorOpen = false;
+    Notify("edited \"" + oldFile + "\" to \"" + s_clips[s_editorClip].file + "\"");
+}
+
+// ---- playback ---------------------------------------------------------------------------
+// botox yaw_offset / camera_at
+static float YawOffset(size_t idx)
+{
+    const float rate = (float)ServerTickrate();
+    return RecYawOffset(g_recYaw, s_playFrames.size(), idx, g_recSmoothEnd * rate, g_recSpinSpeed / rate);
+}
+
+// smooth start: blend from the view at play press to the route camera
+static Vec3 CameraAt(size_t idx, float now)
+{
+    const RecFrame& f = s_playFrames[std::min(idx, s_playFrames.size() - 1)];
+    const float dur = g_recSmoothStart;
+    const float w = dur > 0.01f ? RecSmoothstep((now - s_smoothT0) / dur) : 1.f;
+    if (w >= 1.f) return Vec3(f.pitch, std::remainder(f.yaw + YawOffset(idx), 360.f), 0.f);
+    const float pitch = s_smoothFrom.x + (f.pitch - s_smoothFrom.x) * w;
+    const float yaw = s_smoothFrom.y + std::remainder(f.yaw - s_smoothFrom.y, 360.f) * w + YawOffset(idx) * w;
+    return Vec3(pitch, std::remainder(yaw, 360.f), 0.f);
+}
+
+// true = already holding it (or nothing recorded / owned); false = cmd now asks for the switch.
+// botox matches the def first, then the weapon-data slot; TF2's stand-in for the slot is the
+// m_hMyWeapons index the clip was recorded with.
+static bool SelectWeapon(void* pLocal, UserCmd_t* c, const RecFrame& f)
+{
+    if (f.weaponSlot < 0 || !pLocal || !WeaponsOK()) return true;
+    const unsigned activeH = *(unsigned*)((uintptr_t)pLocal + g_offActiveWeapon);
+    void* active = WeaponFromHandle(activeH);
+    if (active && EntI(active, g_offItemDefIndex) == f.weaponDef) return true;
+
+    int sameDef = 0, sameSlot = 0;
+    for (int i = 0; i < 48; ++i)
+    {
+        const unsigned h = MyWeaponHandle(pLocal, i);
+        void* w = WeaponFromHandle(h);
+        if (!w) continue;
+        if (EntI(w, g_offItemDefIndex) == f.weaponDef) { sameDef = (int)(h & 0xFFFF); break; }
+        if (!sameSlot && i == f.weaponSlot) sameSlot = (int)(h & 0xFFFF);
+    }
+    const int target = sameDef ? sameDef : sameSlot;
+    if (!target || (active && (int)(activeH & 0xFFFF) == target)) return true;
+    c->weaponselect = target;
+    return false;
+}
+
+static void CaptureUserInput(UserCmd_t* c)
+{
+    s_userInput = MakeFrame(nullptr, c, s_cmdPos, s_cmdVel);
+    s_userMaskPrev = s_userMask;
+    s_userMask = c->buttons & kUserMoveMask;
+}
+
+// cmd-only: CmdStart/CmdPrePred lay it early too, so features + prediction see the replay
+static void ApplyPlayback(UserCmd_t* c)
+{
+    if (!c || !s_playing || s_playIdx >= s_playFrames.size() || !g_recEnable) return;
+    const Vec3 backupView = c->viewangles;
+    Replay(s_playFrames[s_playIdx], c);
+
+    if (g_recForceWeapon)
+    {
+        c->weaponselect = 0;
+        c->weaponsubtype = 0;
+        SelectWeapon(s_cmdLocal, c, s_playFrames[s_playIdx]);
     }
 
-    if (!s_playing) return;
-    if (s_playBuf.empty()) { s_playing = false; return; }
+    // movement fix keeps the recorded world wish dir under any sent view; same view = untouched,
+    // bit exact replay
+    Vec3 view = CameraLocked() ? CameraAt(s_playIdx, NowReal()) : backupView;
+    view.z = c->viewangles.z;
+    if (view.x == c->viewangles.x && view.y == c->viewangles.y) return;
+    CorrectMovement(c, c->viewangles, view);
+    c->viewangles = view;
+}
 
-    if (!s_approaching && g_recStopOnMove && (rawButtons & kWasdMask) != 0)
+static void ForceStop(bool keepPlayed = false)
+{
+    const bool wasPlaying = s_playing;
+    const size_t played = s_playIdx;
+    s_playing = false;
+    s_wishStart = false;
+    s_playIdx = 0;
+    s_approachTicks = 0;
+
+    // take over: the ticks already sent are the newest in the clip buffer, keep recording from there
+    if (keepPlayed && wasPlaying && played > 0)
     {
-        s_playing = false;
-        DebugLog("REC: playback cancelled, manual input");
+        const size_t n = std::min(played, s_clipBuf.size());
+        s_recFrames.assign(s_clipBuf.end() - (std::ptrdiff_t)n, s_clipBuf.end());
+        s_recording = true;
+        Notify("took over at tick " + std::to_string(n) + ", recording");
+    }
+}
+
+static void ResetAll()
+{
+    ForceStop();
+    s_recording = false;
+    s_clipBuf.clear();
+}
+
+static bool PlayClip(size_t index)
+{
+    if (index >= s_clips.size()) return false;
+    const RecClip& c = s_clips[index];
+    if (c.frames.empty()) return false;
+    if (!Playable(c))
+    {
+        Notify("\"" + c.name + "\" is " + std::to_string(c.tickrate) + " tick, server is " + std::to_string(ServerTickrate()));
+        return false;
+    }
+    const RecFrame& f0 = c.frames[0];
+    const float dist = s_cmdPos.DistTo(Vec3(f0.posX, f0.posY, f0.posZ));
+    if (dist >= k_startRadius) return false;
+
+    s_playFrames = c.frames;
+    s_activeName = c.name;
+    s_selected = (int)index;
+    s_wishStart = true;
+    s_approachTicks = 0;
+    s_smoothT0 = NowReal();
+    s_smoothFrom = RecGetViewAngles();
+    DebugLog("REC: play %s ticks=%d dist=%.2f yaw=%d in=%.2f out=%.2f", c.file.c_str(), (int)c.frames.size(),
+             dist, g_recYaw, g_recSmoothStart, g_recSmoothEnd);
+    return true;
+}
+
+// ---- game thread entry points -----------------------------------------------------------
+bool Recorder_OwnsCmd()
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    return OwnsCmd();
+}
+
+void Recorder_CmdStart(void* pLocal, UserCmd_t* pCmd)
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    s_cmdBegun = false;
+    s_localAlive = pLocal != nullptr;
+    if (!pCmd) return;
+    if (!g_recEnable || !pLocal)
+    {
+        s_requests.exchange(0u);   // botox: requests on a dead/disabled cmd are dropped
+        if (s_playing || s_wishStart || s_recording || !s_clipBuf.empty()) ResetAll();
         return;
     }
+    s_cmdLocal = pLocal;
+    s_cmdPos = g_offOrigin > 0 ? EntV3(pLocal, g_offOrigin) : Vec3();
+    s_cmdVel = g_offVelocity > 0 ? EntV3(pLocal, g_offVelocity) : Vec3();
+    s_localEye = s_cmdPos + (g_offViewOffset > 0 ? EntV3(pLocal, g_offViewOffset) : Vec3(0.f, 0.f, 68.f));
+    s_cmdBegun = true;
 
-    if (s_approaching)
+    CaptureUserInput(pCmd);
+    ApplyPlayback(pCmd);
+}
+
+void Recorder_CmdPrePred(UserCmd_t* pCmd)
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    if (s_cmdBegun) ApplyPlayback(pCmd);
+}
+
+// botox on_create_move, minus the alive/enabled checks CmdStart already made
+static void OnCreateMove(UserCmd_t* c)
+{
+    const unsigned requests = s_requests.exchange(0u);
+
+    struct Edge
     {
-        const Vec3 pos = g_offOrigin > 0 ? EntV3(pLocal, g_offOrigin) : Vec3();
-        const RecFrame& start = s_playBuf.front();
-        Vec3 to(start.posX - pos.x, start.posY - pos.y, 0.f);
-        const float dist = to.Length2D();
-        if (dist <= g_recApproachDist)
+        int* key;
+        bool was = false;
+        bool Pressed()
         {
-            s_approaching = false;   // close enough -- fall through to replay this same tick
+            const bool now = *key > 0 && *key < 256 && MovementKeyOK(*key, 1);
+            const bool edge = now && !was;
+            was = now;
+            return edge;
+        }
+    };
+    static Edge kStartRec{ &g_recKeyStartRec }, kStopRec{ &g_recKeyStopRec }, kSave{ &g_recKeySave },
+                kStartPlay{ &g_recKeyStartPlay }, kStopPlay{ &g_recKeyStopPlay }, kClear{ &g_recKeyClear },
+                kClip{ &g_recKeyClip };
+
+    const bool menu = g_showMenu;
+    const bool startRec  = (kStartRec.Pressed() && !menu)  || (requests & REC_START_REC);
+    const bool stopRec   = (kStopRec.Pressed() && !menu)   || (requests & REC_STOP_REC);
+    const bool save      = (kSave.Pressed() && !menu)      || (requests & REC_SAVE);
+    const bool startPlay = (kStartPlay.Pressed() && !menu) || (requests & REC_START_PLAY);
+    const bool stopPlay  = (kStopPlay.Pressed() && !menu)  || (requests & REC_STOP_PLAY);
+    const bool clear     = (kClear.Pressed() && !menu)     || (requests & REC_CLEAR);
+    const bool clip      = (kClip.Pressed() && !menu)      || (requests & REC_CLIP);
+
+    // fresh press only: still holding w from before play must not kill it
+    const bool userMoved = g_recStopOnMove && (s_userMask & ~s_userMaskPrev) != 0;
+    if ((stopPlay || userMoved) && OwnsCmd())
+    {
+        DebugLog("REC: stop play idx=%d/%d moved=%d", (int)s_playIdx, (int)s_playFrames.size(), userMoved ? 1 : 0);
+        ForceStop(true);
+        if (userMoved) Replay(s_userInput, c);
+    }
+
+    if (startRec && !OwnsCmd() && !s_recording)
+    {
+        s_recFrames.clear();
+        s_recording = true;
+        Notify("recording");
+    }
+    if (stopRec && s_recording)
+    {
+        s_recording = false;
+        Notify("stopped recording, " + std::to_string(s_recFrames.size()) + " ticks");
+    }
+    if (clear && !s_recording && !OwnsCmd())
+    {
+        s_recFrames.clear();
+        Notify("cleared route");
+    }
+    if (save)
+    {
+        s_recording = false;
+        SaveFrames(s_recFrames, "Route");
+    }
+    if (clip && g_recClipper) ClipRoute();
+
+    if (startPlay && !s_recording && !OwnsCmd())
+    {
+        size_t target = (size_t)-1;
+        const auto startDist = [](const RecClip& rc) { const RecFrame& f = rc.frames[0]; return s_cmdPos.DistTo(Vec3(f.posX, f.posY, f.posZ)); };
+        if (s_selected >= 0 && s_selected < (int)s_clips.size() && Playable(s_clips[s_selected])
+            && startDist(s_clips[s_selected]) < k_startRadius)
+            target = (size_t)s_selected;
+        else
+        {
+            float best = k_startRadius;
+            for (size_t i = 0; i < s_clips.size(); ++i)
+            {
+                if (s_clips[i].frames.empty()) continue;
+                const float d = startDist(s_clips[i]);
+                if (d < best && (Playable(s_clips[i]) || target == (size_t)-1)) { target = i; best = d; }
+            }
+        }
+        if (target != (size_t)-1) PlayClip(target);
+        else Notify("no route start nearby");
+    }
+
+    if (s_wishStart && !s_playFrames.empty())
+    {
+        const RecFrame& first = s_playFrames.front();
+        const Vec3 firstPos(first.posX, first.posY, first.posZ);
+        const float dist = s_cmdPos.DistTo(firstPos);
+
+        if (CameraLocked())
+        {
+            const Vec3 sv = CameraAt(0, NowReal());
+            c->viewangles.x = sv.x; c->viewangles.y = sv.y;
+            c->mousedx = 0; c->mousedy = 0;
+            RecSetViewAngles(sv);
+        }
+
+        const float giveUpTicks = k_approachGiveUp * (float)ServerTickrate();
+        const bool timedOut = (float)(++s_approachTicks) > giveUpTicks;
+        const bool atStart = dist <= k_posCloseEps || (timedOut && dist < 1.f);
+
+        // weapon sets max speed: start only once the recorded one is out
+        bool weaponOk = true;
+        if (g_recForceWeapon)
+        {
+            c->weaponselect = 0;
+            c->weaponsubtype = 0;
+            weaponOk = SelectWeapon(s_cmdLocal, c, first);
+        }
+
+        if (atStart && weaponOk)
+        {
+            s_wishStart = false;
+            s_playing = true;
+            s_playIdx = 0;
+            s_pathStartMs = GetTickCount64();
+            DebugLog("REC: start dist=%.3f approach=%d wpn=%d", dist, s_approachTicks, first.weaponDef);
+        }
+        else if (timedOut && !atStart)
+        {
+            DebugLog("REC: approach gave up dist=%.2f", dist);
+            Notify("couldn't reach route start");
+            ForceStop();
         }
         else
         {
-            const float yaw = atan2f(to.y, to.x) * (180.f / MV_PI);
-            if (g_recLockVa) { pCmd->viewangles.x = 0.f; pCmd->viewangles.y = yaw; }
-            const float yawRad = DEG2RADF(pCmd->viewangles.y);
-            const Vec3 fwd(cosf(yawRad), sinf(yawRad), 0.f), right(-sinf(yawRad), cosf(yawRad), 0.f);
-            const float f = to.Dot(fwd), s = to.Dot(right);
-            const float norm = std::max(fabsf(f), fabsf(s));
-            const float scale = norm > 1.f ? 1.f / norm : 1.f;
-            pCmd->forwardmove = f * scale * 450.f;
-            pCmd->sidemove    = s * scale * 450.f;
-            pCmd->upmove      = 0.f;
-            pCmd->buttons &= ~IN_JUMP;
-            return;
+            RecApproachMove(s_cmdPos.x, s_cmdPos.y, firstPos.x, firstPos.y, c->viewangles.y, c->forwardmove, c->sidemove);
+            c->upmove = 0.f;
+            c->buttons &= ~(IN_JUMP | IN_DUCK | IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT | IN_SPEED);
+            c->buttons |= first.buttons & IN_DUCK;
         }
     }
 
-    const RecFrame& fr = s_playBuf[s_playIdx];
-    if (g_recLockVa) { pCmd->viewangles.x = fr.pitch; pCmd->viewangles.y = fr.yaw; }
-    pCmd->forwardmove = fr.forward; pCmd->sidemove = fr.side; pCmd->upmove = fr.up;
-    pCmd->buttons   = fr.buttons;
-    pCmd->mousedx   = fr.mouseDx;
-    pCmd->mousedy   = fr.mouseDy;
-    if (g_recForceWeapon) ForceWeaponSlot(pLocal, pCmd, fr.weaponSlot);
+    if (s_playing)
+    {
+        if (s_playIdx >= s_playFrames.size())
+        {
+            DebugLog("REC: done ticks=%d", (int)s_playFrames.size());
+            ForceStop();
+        }
+        else
+        {
+            ApplyPlayback(c);
+            ++s_playIdx;
+            s_stepReal = NowReal();
+        }
+    }
 
-    ++s_playIdx;
-    if (s_playIdx >= s_playBuf.size()) { s_playing = false; DebugLog("REC: playback finished"); }
+    c->viewangles.x = std::clamp(c->viewangles.x, -89.f, 89.f);
+    c->viewangles.y = std::remainder(c->viewangles.y, 360.f);
+
+    const RecFrame f = MakeFrame(s_cmdLocal, c, s_cmdPos, s_cmdVel);
+
+    // clipper off: buffer only while playing, take over still needs the played ticks
+    if (g_recClipper || s_playing)
+    {
+        const size_t cap = (size_t)(std::clamp(g_recClipSeconds, 1.f, 120.f) * (float)ServerTickrate());
+        s_clipBuf.push_back(f);
+        while (s_clipBuf.size() > cap) s_clipBuf.pop_front();
+    }
+    else
+        s_clipBuf.clear();
+
+    if (s_recording)
+    {
+        s_recFrames.push_back(f);
+        if ((int)s_recFrames.size() >= kRecMaxTick) { s_recording = false; Notify("record cap hit"); }
+    }
 }
 
-void Recorder_RenderStatus()
+static bool OnCreateMoveSeh(UserCmd_t* c)
 {
-    bool rec, play, appr;
-    size_t frames;
-    { std::lock_guard<std::mutex> l(s_lock); rec = s_recording; play = s_playing; appr = s_approaching; frames = s_recordBuf.size(); }
-    if (!rec && !play) return;
+    __try { OnCreateMove(c); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
-    char text[64];
-    if (rec) snprintf(text, sizeof(text), "REC %d", (int)frames);
-    else     snprintf(text, sizeof(text), appr ? "REC: approaching" : "REC: playing");
+void Recorder_CmdEnd(UserCmd_t* pCmd)
+{
+    std::vector<std::string> msgs;
+    {
+        std::lock_guard<std::recursive_mutex> l(s_lock);
+        if (s_cmdBegun && pCmd)
+        {
+            s_cmdBegun = false;
+            if (!OnCreateMoveSeh(pCmd)) { DebugLog("REC: SEH in OnCreateMove"); ResetAll(); }
+        }
+        msgs.swap(s_msgs);
+    }
+    // detections.cpp chat look; ChatPrintf formats, so no '%' may reach it
+    for (std::string& m : msgs)
+    {
+        m.erase(std::remove(m.begin(), m.end(), '%'), m.end());
+        char line[320];
+        snprintf(line, sizeof(line), "\x07%02X%02X%02X" "recorder\x07" "BEBEBE | %s",
+                 (int)(g_accentColor[0] * 255), (int)(g_accentColor[1] * 255), (int)(g_accentColor[2] * 255), m.c_str());
+        Aim_ChatPrint(line);
+    }
+}
 
-    ImGuiIO& io = ImGui::GetIO();
+// botox on_frame_stage(FRAME_START)
+void Recorder_FrameStart()
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    if (!CameraLocked() || s_playFrames.empty()) return;
+    const float now = NowReal();
+
+    // approach: per frame so smooth start eases at fps, not tick rate
+    if (s_wishStart) { RecSetViewAngles(CameraAt(0, now)); return; }
+    if (!s_playing || s_playIdx == 0 || s_playIdx >= s_playFrames.size()) return;
+
+    // sent frame idx-1 last tick, idx goes out next: lerp by real time so the camera is smooth at any fps
+    const Vec3 from = CameraAt(s_playIdx - 1, now);
+    const Vec3 to = CameraAt(s_playIdx, now);
+    const float iv = g_globalVars ? g_globalVars->interval_per_tick : 0.f;
+    const float t = std::clamp(iv > 1e-6f ? (now - s_stepReal) / iv : 1.f, 0.f, 1.f);
+    RecSetViewAngles(Vec3(from.x + (to.x - from.x) * t, RecWrap180(from.y + RecWrap180(to.y - from.y) * t), 0.f));
+}
+
+// botox camera_lock
+void Recorder_MouseInput(float* x, float* y)
+{
+    if (!x || !y || !g_recEnable) return;
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    const bool lockva = CameraLocked();
+    if ((s_playing && lockva) || (s_wishStart && (lockva || g_recLockGoingToStart))) { *x = 0.f; *y = 0.f; }
+}
+
+// ---- render thread ----------------------------------------------------------------------
+void Recorder_Request(unsigned actions) { s_requests.fetch_or(actions); }
+
+void Recorder_Refresh() { RefreshClips(false); }
+
+bool Recorder_EditorOpen()
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    return s_editorOpen;
+}
+
+// botox: ENTER near a route start opens its editor; in the editor ESC closes, ENTER closes
+// unless a text field has it. 250 ms debounce so the opening press can't close it (the ps
+// point window uses the same rule).
+bool Recorder_EditorKey(unsigned vk)
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    if (!g_recEnable) return false;
+    if (s_editorOpen)
+    {
+        if (GetTickCount64() - s_editorOpenMs <= 250) return vk == VK_RETURN;
+        if (vk == VK_ESCAPE || (vk == VK_RETURN && !ImGui::GetIO().WantTextInput)) { s_editorOpen = false; return true; }
+        return false;
+    }
+    if (vk != VK_RETURN || s_nearClip < 0 || s_nearClip >= (int)s_clips.size() || OwnsCmd()) return false;
+    s_selected = s_nearClip;
+    OpenClipEditor((size_t)s_nearClip);
+    return s_editorOpen;
+}
+
+static ImU32 Rgba(int r, int g, int b, int a) { return IM_COL32(r, g, b, a); }
+
+static ImU32 AccentU32(float alpha)
+{
+    const ImVec4 c = ImGui::GetStyleColorVec4(ImGuiCol_Accent);
+    return ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, alpha));
+}
+
+// botox text_flag_outline | text_flag_dropshadow
+static void OutlinedText(ImDrawList* dl, ImFont* font, float size, ImVec2 p, ImU32 col, const char* text)
+{
+    const ImU32 black = IM_COL32(0, 0, 0, (col >> IM_COL32_A_SHIFT) & 0xFF);
+    dl->AddText(font, size, ImVec2(p.x + 1.f, p.y + 1.f), black, text);
+    dl->AddText(font, size, ImVec2(p.x - 1.f, p.y), black, text);
+    dl->AddText(font, size, ImVec2(p.x + 1.f, p.y), black, text);
+    dl->AddText(font, size, ImVec2(p.x, p.y - 1.f), black, text);
+    dl->AddText(font, size, ImVec2(p.x, p.y + 1.f), black, text);
+    dl->AddText(font, size, p, col, text);
+}
+
+static void WorldFloorDisc(ImDrawList* dl, const Vec3& c, float radius, ImU32 fill, ImU32 outline, int seg, float th)
+{
+    ImVec2 pts[64];
+    seg = std::min(seg, 64);
+    for (int i = 0; i < seg; ++i)
+    {
+        const float a = ((float)i / (float)seg) * 6.28318530718f;
+        if (!W2S_Project(Vec3(c.x + cosf(a) * radius, c.y + sinf(a) * radius, c.z + 1.f), pts[i])) return;
+    }
+    dl->AddConvexPolyFilled(pts, seg, fill);
+    dl->AddPolyline(pts, seg, outline, ImDrawFlags_Closed, th);
+}
+
+static Vec3 FramePos(const RecFrame& f) { return Vec3(f.posX, f.posY, f.posZ); }
+
+static void RenderPath(ImDrawList* dl, const std::vector<RecFrame>& frames, unsigned long long startMs)
+{
+    if (!g_recShowLine || frames.size() < 2) return;
+    const float progress = startMs ? std::clamp((float)(GetTickCount64() - startMs) / 250.f, 0.f, 1.f) : 1.f;
+    const ImVec4 acc = ImGui::GetStyleColorVec4(ImGuiCol_Accent);
+    const ImU32 col = Rgba((int)(255.f + (acc.x * 255.f - 255.f) * progress), (int)(255.f + (acc.y * 255.f - 255.f) * progress),
+                           (int)(255.f + (acc.z * 255.f - 255.f) * progress), (int)(255.f * progress));
+
+    WorldFloorDisc(dl, FramePos(frames[0]), k_startRadius * 0.45f, Rgba(0, 0, 0, 100), AccentU32(0.85f), 64, 1.5f);
+
+    ImVec2 prev;
+    bool hasPrev = false;
+    for (const RecFrame& f : frames)
+    {
+        ImVec2 cur;
+        const bool on = W2S_Project(FramePos(f), cur);
+        if (on && hasPrev) dl->AddLine(prev, cur, col, 0.5f);
+        prev = cur;
+        hasPrev = on;
+    }
+}
+
+static void RenderRoutePreview(ImDrawList* dl)
+{
+    if (s_clips.empty()) return;
+    const float dt = ImGui::GetIO().DeltaTime;
+    if (s_pointProgress.size() != s_clips.size()) s_pointProgress.assign(s_clips.size(), 1.f);
+    ImFont* font = g_menuReg ? g_menuReg : ImGui::GetFont();
+
+    for (size_t i = 0; i < s_clips.size(); ++i)
+    {
+        const RecClip& route = s_clips[i];
+        if (route.frames.empty()) continue;
+        const RecFrame& first = route.frames[0];
+        const Vec3 start = FramePos(first);
+        const float distance = s_cmdPos.DistTo(start);
+        if (distance < k_startRadius && s_nearClip < 0) s_nearClip = (int)i;
+
+        if (distance < k_startRadius && font)
+        {
+            Vec3 fwd;
+            AngleVectors(Vec3(first.pitch, first.yaw, 0.f), &fwd);
+            ImVec2 aim;
+            if (W2S_Project(s_localEye + fwd * 100.f, aim))
+            {
+                dl->AddCircleFilled(aim, 4.f, Rgba(0, 0, 0, 100), 32);
+                dl->AddCircle(aim, 4.f, Rgba(255, 255, 255, 255), 32);
+                const ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.f, "aim here");
+                OutlinedText(dl, font, font->FontSize, ImVec2(aim.x + 7.f, aim.y - ts.y * 0.5f), Rgba(255, 255, 255, 255), "aim here");
+            }
+        }
+
+        ImVec2 screen;
+        if (!W2S_Project(start, screen)) continue;
+        s_pointProgress[i] += (1.f - s_pointProgress[i]) * std::clamp(dt * 5.f, 0.f, 1.f);
+
+        float alphaMul = 1.f;
+        if (distance > 900.f) alphaMul = std::clamp((1000.f - distance) / 100.f, 0.f, 1.f);
+        if (alphaMul <= 0.f) continue;
+
+        WorldFloorDisc(dl, start, k_startRadius * 0.45f * s_pointProgress[i], Rgba(0, 0, 0, (int)(100.f * alphaMul)),
+                       AccentU32(0.85f * alphaMul), 64, 1.5f);
+
+        if (font && !route.name.empty())
+        {
+            const float size = font->FontSize * 0.82f;
+            const std::string title = route.Label();
+            const ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.f, title.c_str());
+            OutlinedText(dl, font, size, ImVec2(screen.x - ts.x * 0.5f, screen.y - 34.f), Rgba(225, 225, 225, (int)(255.f * alphaMul)),
+                         title.c_str());
+        }
+    }
+}
+
+static void RenderIndicator(ImDrawList* dl)
+{
+    if (!g_recRender) return;
+    const float dt = ImGui::GetIO().DeltaTime;
+    const float target = (s_recording || OwnsCmd()) ? 1.f : 0.f;
+    s_indAlpha = std::clamp(s_indAlpha + (target - s_indAlpha) * (1.f - std::exp(-k_indicatorLerpK * dt)), 0.f, 1.f);
+    if (s_indAlpha <= 0.01f) return;
+    ImFont* font = g_menuReg ? g_menuReg : ImGui::GetFont();
+
+    const std::string text = s_recording ? "rec " + std::to_string(s_recFrames.size())
+                                         : std::to_string(s_playIdx) + " / " + std::to_string(s_playFrames.size());
+    const ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.f, text.c_str());
+    const ImVec2 pad(7.f, 7.f), margin(4.f, 3.f);
+    const ImVec2 size(ts.x + margin.x * 2.f, ts.y + margin.y * 2.f);
+    const ImVec2 disp = ImGui::GetIO().DisplaySize;
+
+    ImVec2 pos;
+    switch (g_recPosition)
+    {
+    default:
+    case 0: pos = ImVec2(pad.x, pad.y); break;
+    case 1: pos = ImVec2(pad.x, disp.y - size.y - pad.y); break;
+    case 2: pos = ImVec2(disp.x - size.x - pad.x, disp.y - size.y - pad.y); break;
+    }
+    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), ImGui::GetColorU32(ImVec4(0.08f, 0.08f, 0.08f, s_indAlpha)));
+    dl->AddRectFilled(ImVec2(pos.x, pos.y - 1.f), ImVec2(pos.x + size.x, pos.y), AccentU32(s_indAlpha));
+    OutlinedText(dl, font, font->FontSize, ImVec2(pos.x + margin.x, pos.y + margin.y),
+                 ImGui::GetColorU32(ImVec4(1.f, 1.f, 1.f, s_indAlpha)), text.c_str());
+}
+
+static void RenderClipperBox()
+{
+    if (!g_recClipper || !g_recClipperBox) return;
+    const float dt = g_globalVars ? g_globalVars->interval_per_tick : 0.015f;
+    char buf[48] = {};
+    if (s_playing)               snprintf(buf, sizeof(buf), "%.1f / %.1f", (float)s_playIdx * dt, (float)s_playFrames.size() * dt);
+    else if (s_recording)        snprintf(buf, sizeof(buf), "rec %.1f", (float)s_recFrames.size() * dt);
+    else if (!s_clipBuf.empty()) snprintf(buf, sizeof(buf), "clip %.1f", (float)s_clipBuf.size() * dt);
+    else return;
+
+    if (g_menuReg) ImGui::PushFont(g_menuReg);
+    const float width = ImGui::CalcTextSize(buf).x + 14.f;
+    ImGui::SetNextWindowPos(ImVec2(24.f, 96.f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(width, 22.f), ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.04f, 0.04f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.f, 0.f, 0.f, 1.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 3.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5.f, 4.f));
+    if (ImGui::Begin("##mr_clipper_box", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar
+                         | ImGuiWindowFlags_NoFocusOnAppearing))
+    {
+        const ImVec2 ts = ImGui::CalcTextSize(buf);
+        ImGui::SetCursorPosX((ImGui::GetWindowSize().x - ts.x) * 0.5f);
+        ImGui::TextUnformatted(buf);
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+    if (g_menuReg) ImGui::PopFont();
+}
+
+static void RenderClipEditor()
+{
+    if (!s_editorOpen) return;
+    if (s_editorClip < 0 || s_editorClip >= (int)s_clips.size() || s_clips[s_editorClip].frames.empty()) { s_editorOpen = false; return; }
+    RecClip& clip = s_clips[s_editorClip];
+
+    const ImVec2 disp = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(disp.x - 330.f, 20.f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(310.f, 165.f), ImGuiCond_FirstUseEver);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.04f, 0.04f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.08f, 0.08f, 0.08f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.08f, 0.08f, 0.08f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed, ImVec4(0.08f, 0.08f, 0.08f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.02f, 0.02f, 0.02f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.02f, 0.02f, 0.02f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.f, 0.f, 0.f, 1.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 3.f);
+    if (g_menuReg) ImGui::PushFont(g_menuReg);
+
+    if (ImGui::Begin("recorder clip", &s_editorOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("%zu ticks  %d tick", clip.frames.size(), clip.tickrate);
+        ImGui::SetNextItemWidth(-1.f);
+        ImGui::InputText("##mr_editor_name", s_editorName, sizeof(s_editorName));
+
+        const int maxFrame = (int)clip.frames.size() - 1;
+        s_editorStart = std::clamp(s_editorStart, 0, maxFrame);
+        s_editorEnd   = std::clamp(s_editorEnd, 0, maxFrame);
+        ImGui::SetNextItemWidth(-1.f);
+        ImGui::SliderInt("##mr_start_frame", &s_editorStart, 0, maxFrame, "start tick %d");
+        ImGui::SetNextItemWidth(-1.f);
+        ImGui::SliderInt("##mr_end_frame", &s_editorEnd, 0, maxFrame, "end tick %d");
+
+        if (ImGui::Button("apply", ImVec2(-1.f, 15.f))) ApplyClipEditor();
+        if (ImGui::Button("close", ImVec2(-1.f, 15.f))) s_editorOpen = false;
+    }
+    ImGui::End();
+    if (g_menuReg) ImGui::PopFont();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(7);
+}
+
+// botox check_map_change, on the render tick like botox's paint
+static void CheckMapChange()
+{
+    static bool s_wasInGame = false;
+    if (!IsInGame())
+    {
+        if (s_wasInGame || !s_map.empty())
+        {
+            s_map.clear();
+            s_clips.clear();
+            s_selected = -1;
+            s_recFrames.clear();
+            s_editorOpen = false;
+            ResetAll();
+        }
+        s_wasInGame = false;
+        return;
+    }
+    const std::string level = RecLevelName();
+    if (level.empty() || (s_wasInGame && s_map == level)) return;
+    s_wasInGame = true;
+    s_map = level;
+    s_selected = -1;
+    s_editorOpen = false;
+    s_recFrames.clear();
+    ResetAll();
+    RefreshClips(false);
+    DebugLog("REC: joined %s, %d routes", s_map.c_str(), (int)s_clips.size());
+}
+
+static void RenderBody()
+{
+    CheckMapChange();
+    s_nearClip = -1;
+    if (!g_recEnable || !IsInGame()) { s_editorOpen = false; return; }
+
+    if (!OwnsCmd() && GetTickCount64() - s_lastRefreshMs > 5000)
+    {
+        s_lastRefreshMs = GetTickCount64();
+        RefreshClips(true);
+    }
+
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    ImFont* font = g_fontBold ? g_fontBold : ImGui::GetFont();
-    const float fs = font->FontSize;
-    const ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, text);
-    const ImVec2 p(roundf(io.DisplaySize.x * 0.5f - sz.x * 0.5f), 8.f);
-    const ImU32 col = rec ? IM_COL32(255, 70, 70, 255) : IM_COL32(255, 255, 255, 255);
-    dl->AddText(font, fs, ImVec2(p.x + 1.f, p.y + 1.f), IM_COL32(0, 0, 0, 255), text);
-    dl->AddText(font, fs, p, col, text);
+    if (s_localAlive)
+    {
+        if (OwnsCmd())        RenderPath(dl, s_playFrames, s_pathStartMs);
+        else if (s_recording) RenderPath(dl, s_recFrames, 0);
+        else                  RenderRoutePreview(dl);
+    }
+    RenderIndicator(dl);
+    RenderClipEditor();
+    RenderClipperBox();
+}
+
+static bool RenderSeh()
+{
+    __try { RenderBody(); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void Recorder_Render()
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    if (!RenderSeh()) s_editorOpen = false;
+}
+
+// botox menu_tab_movement "routes" group body
+void Recorder_MenuRoutes()
+{
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    if (s_map.empty())
+        ImGui::TextDisabled("join a map to see its routes");
+    else
+        ImGui::TextDisabled("%s   %d routes   server %d tick", s_map.c_str(), (int)s_clips.size(), ServerTickrate());
+
+    if (ImGui::BeginListBox("##recorder routes", ImVec2(-1.f, 220.f)))
+    {
+        for (size_t i = 0; i < s_clips.size(); ++i)
+        {
+            const RecClip& c = s_clips[i];
+            const float seconds = (float)c.frames.size() / (float)std::max(c.tickrate, 1);
+            char row[384];
+            snprintf(row, sizeof(row), "%s   %zu ticks  %.1fs##route %zu", c.Label().c_str(), c.frames.size(), seconds, i);
+            if (ImGui::Selectable(row, s_selected == (int)i, ImGuiSelectableFlags_AllowDoubleClick))
+            {
+                s_selected = (int)i;
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) OpenClipEditor(i);
+            }
+        }
+        ImGui::EndListBox();
+    }
+
+    const bool has = s_selected >= 0 && s_selected < (int)s_clips.size();
+    ImGui::BeginDisabled(!has);
+    if (ImGui::Button("edit route", ImVec2(-1.f, 15.f)) && has) OpenClipEditor((size_t)s_selected);
+    if (ImGui::Button("delete route", ImVec2(-1.f, 15.f)) && has) DeleteClip((size_t)s_selected);
+    ImGui::EndDisabled();
+
+    if (ImGui::Button("refresh routes", ImVec2(-1.f, 15.f))) RefreshClips(false);
 }

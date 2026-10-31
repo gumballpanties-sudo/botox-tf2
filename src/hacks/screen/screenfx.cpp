@@ -1157,7 +1157,7 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
                 // botox's own DoPostScreenSpaceEffects order: depth view, reflections, ao, dof,
                 // motion blur. Reflections ahead of ao/dof so they never shade a mirror image
                 // that itself still needs occlusion and a focus blur.
-                if (wantDv)   ScreenFxPasses_DepthView(dev, rt, desc, ScreenFx_DepthTexture());
+                if (wantDv)   ScreenFxPasses_DepthView(dev, rt, desc, ScreenFx_DepthTexture(), view);
                 if (wantRefl) Reflections_Draw(dev, rt, desc, ScreenFx_DepthTexture(), view);
                 // OCCLUSION FIRST. It belongs on sharp geometry: the other way round the
                 // blur would be finished before the creases were drawn, and every shadow

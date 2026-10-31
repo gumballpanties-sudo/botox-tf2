@@ -38,6 +38,7 @@ static bool s_psBail         = false;   // s_ps_bail
 static int  s_psTicks        = 0;       // `ticks`: latch + flip + 16 ( scaled )
 static int  s_psUnpinned     = 0;
 static int  s_psLastBy       = 0;
+static bool s_psParkHold     = false;   // this cmd starts parked: pinned, xy < 1, park on ( PixelSurf sets it )
 
 /* botox ps_cmd_start: your own duck key flipped on a live ride = you bailed, PS lets go until the ground */
 static void PsCmdStart(void* pLocal)
@@ -73,9 +74,8 @@ static bool PsWallAhead(void* pLocal, const int n, Vec3* normal = nullptr)
     return hit;
 }
 
-static bool PsWallTouch(void* pLocal, Vec3& normal)
+static bool PsWallTouch(void* pLocal, Vec3& normal, const Vec3& from)
 {
-    const Vec3 from = EntV3(pLocal, g_offOrigin);
     const Vec3 mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);
     const float dx[4] = { 0.05f, -0.05f, 0.f, 0.f }, dy[4] = { 0.f, 0.f, 0.05f, -0.05f };
     TraceFilterWorldProps fil; fil.Setup(pLocal);
@@ -90,6 +90,7 @@ static bool PsWallTouch(void* pLocal, Vec3& normal)
     }
     return best < 1.f;
 }
+static bool PsWallTouch(void* pLocal, Vec3& normal) { return PsWallTouch(pLocal, normal, EntV3(pLocal, g_offOrigin)); }
 
 /* botox movement.cpp:456-475: auto align off = pixel surf finds its own wall ( 16 x 1u hull rays ) */
 static void PsWallDetectFallback(void* pLocal)
@@ -137,6 +138,13 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         if (latched)
             DebugLog("PSU: yield by=%s", as_owns ? "as" : tb_owns ? "tb" : "wc");
         s_psShouldSurf = s_psShouldUnduck = false;
+        return;
+    }
+    /* parked ( PsPark below owns the move ): keep the stance the ride had. botox's stuck release and
+       hold() would unduck / push a hang that IS the goal here */
+    if (s_psParkHold) {
+        if (latched)
+            cmd->buttons = s_psShouldSurf ? cmd->buttons | IN_DUCK : cmd->buttons & ~IN_DUCK;
         return;
     }
 
@@ -196,9 +204,11 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         constexpr float k_leave_dot = 0.5f;
         if (len > 0.01f && (wish.x * n.x + wish.y * n.y) / len > k_leave_dot)
             return 0;
-        /* strafing into the face = 450 at the best along-wall strafe yaw ( wall eats the into part ), only if it keeps the pin */
+        /* strafing into the face = 450 at the best along-wall strafe yaw ( wall eats the into part ), only if it keeps the pin.
+           g_psWallStrafe: 1 = botox ( your keys into the face ), 2 = every ride tick, keys or not ( leaving still wins, above ) */
         constexpr float k_gain_dot = 0.25f;
-        if (len > 0.01f && -(wish.x * n.x + wish.y * n.y) / len > k_gain_dot) {
+        const bool keys_in = len > 0.01f && -(wish.x * n.x + wish.y * n.y) / len > k_gain_dot;
+        if (g_psWallStrafe == 2 || (g_psWallStrafe == 1 && keys_in)) {
             float gy = 0.f;
             if (as::WallStrafeYaw(n.x, n.y, s_prePredVel.x, s_prePredVel.y, CvarFloat("sv_air_max_wishspeed", 30.f), gy)) {
                 as::MoveTowardYaw(cmd->viewangles.y, gy, 450.f, cmd->forwardmove, cmd->sidemove);
@@ -309,12 +319,126 @@ static void PsRideDetect()
     s_psEv = ps::SurfEvidence{};
 }
 
+// ---- PARK AT THE END OF THE SURF ---------------------------------------------------------
+// A pixel surf seam is a solver artifact, so where it ends cannot be traced (psassist.inl, the
+// falsified flat-face prune). It is SIMMED: every ride cmd flies the cmd as it stands; if the pin
+// runs out inside the stopping window, it asks whether braking from the NEXT cmd still stops on
+// the pin. Yes = ride one more tick at full speed (and gain). No = brake now, straight against xy
+// (as::BrakeWish: exact stop once it fits in a tick, so it never reverses). Stopped (xy < 1, still
+// pinned) = hold the hang bare, or with PixelFinder's 10 u/s press into the face if bare drops.
+// Keys pointing off the wall (botox k_leave_dot) let go. Returns 0 none / 1 brake / 2 hold
+static int PsPark(void* pLocal, UserCmd_t* cmd, int& end_out)
+{
+    end_out = -1;
+    if (!g_psParkAtEnd || !On(g_pixelSurf, g_pixelSurfKey, g_pixelSurfMode) || s_psBail)
+        return 0;
+    if (!EntAlive(pLocal) || EntMoveType(pLocal) != MOVETYPE_WALK || (s_prePredFlags & FL_ONGROUND))
+        return 0;
+    if (s_airStuckHit || s_textureBugHit || s_tbOwnsCmd || s_wallClimbHit)
+        return 0;
+    const float pin = TargetPredictZVel();
+    const Vec3  v0  = s_prePredVel;
+    const float xy0 = v0.Length2D();
+    if (fabsf(v0.z - pin) >= 0.01f)
+        return 0;   // not on a pin this cmd
+    const int frame = PredCommandsPredicted() - 1;
+    RestoreToFrame(frame);
+    Vec3 n{};
+    if (!PsWallTouch(pLocal, n))
+        return 0;
+
+    const float fwd = cmd->forwardmove, side = cmd->sidemove;
+    {
+        const float y = DEG2RADF(cmd->viewangles.y);
+        const Vec3 wish(fwd * cosf(y) + side * sinf(y), fwd * sinf(y) - side * cosf(y), 0.f);
+        const float len = wish.Length2D();
+        if (len > 0.01f && (wish.x * n.x + wish.y * n.y) / len > 0.5f)
+            return 0;
+    }
+
+    const float ipt = TickInterval();
+    const float aa  = CvarFloat("sv_airaccelerate", 10.f);
+    const auto on_pin = [&]() {
+        return !(EntI(pLocal, g_offFlags) & FL_ONGROUND) && fabsf(EntV3(pLocal, g_offVelocity).z - pin) < 0.01f;
+    };
+    const auto brake_into = [&](const Vec3& v) {
+        MV_WriteWishWorld(cmd, Vec3(-v.x, -v.y, 0.f), as::BrakeWish(v.Length2D(), aa, ipt));
+    };
+
+    if (xy0 < 1.f) {
+        for (int k = 0; k < 2; k++) {
+            if (k == 0) cmd->forwardmove = cmd->sidemove = 0.f;
+            else        MV_WriteWishWorld(cmd, Vec3(-n.x, -n.y, 0.f), 10.f);
+            RestoreToFrame(frame);
+            const int base = EntI(pLocal, g_offTickBase);
+            bool ok = true;
+            for (int z = 0; z < 2 && ok; z++) {
+                EntSetI(pLocal, g_offTickBase, base + z);
+                Pred_Simulate(pLocal, cmd);
+                ok = on_pin();
+            }
+            RestoreToFrame(frame);
+            if (ok)
+                return 2;
+        }
+        cmd->forwardmove = fwd;
+        cmd->sidemove    = side;
+        return 0;
+    }
+
+    /* n ticks: `live` on the cmd as it stands, then braking. Returns the tick the pin broke ( -1 = held ),
+       stopped = xy fell under 1 with the pin still on */
+    const auto fly = [&](const int ticks, const int live, bool& stopped) -> int {
+        stopped = false;
+        RestoreToFrame(frame);
+        const int base = EntI(pLocal, g_offTickBase);
+        int broke = -1;
+        for (int z = 0; z < ticks; z++) {
+            if (z >= live) brake_into(EntV3(pLocal, g_offVelocity));
+            else { cmd->forwardmove = fwd; cmd->sidemove = side; }
+            EntSetI(pLocal, g_offTickBase, base + z);
+            Pred_Simulate(pLocal, cmd);
+            if (!on_pin()) { broke = z; break; }
+            if (z >= live && EntV3(pLocal, g_offVelocity).Length2D() < 1.f) { stopped = true; break; }
+        }
+        cmd->forwardmove = fwd;
+        cmd->sidemove    = side;
+        RestoreToFrame(frame);
+        return broke;
+    };
+
+    // worst-case stop: the wish is cropped to class maxspeed, 240 is TF2's slowest air class
+    const float decel = std::max(aa * 240.f * ipt, 1e-3f);
+    const int   ticks = std::min(static_cast<int>(ceilf(xy0 / decel)) + as::TicksScaled(4, ipt), 64);
+    if (SimsLeft() < 2 * ticks + 4 || TbBudgetExpired())
+        return 0;
+    bool stopped = false;
+    end_out = fly(ticks, ticks, stopped);
+    if (end_out < 0)
+        return 0;   // the ride outlasts the stopping window
+    if (fly(ticks + 1, 1, stopped) < 0 && stopped)
+        return 0;   // braking from next cmd still stops on it: keep the speed one more tick
+    brake_into(v0);
+    return 1;
+}
+
 // botox's pixel_surf, then the flags published under their old names
 static void PixelSurf(void* pLocal, UserCmd_t* pCmd)
 {
     if (!g_autoAlign) PsWallDetectFallback(pLocal);
 
+    s_psParkHold = g_psParkAtEnd && !(s_prePredFlags & FL_ONGROUND)
+                && fabsf(s_prePredVel.z - TargetPredictZVel()) < 0.01f && s_prePredVel.Length2D() < 1.f;
     PixelSurfImpl(pLocal, pCmd);
+    {
+        static int s_lastAct = 0;
+        int end = -1;
+        const int act = PsPark(pLocal, pCmd, end);
+        if (act != s_lastAct)
+            DebugLog("PSU: park %s spd=%.1f end=%d z=%.3f", act == 1 ? "brake" : act == 2 ? "hold" : "off",
+                     s_prePredVel.Length2D(), end, s_prePredOrigin.z);
+        s_lastAct = act;
+    }
 
     s_shouldPixelSurf = s_psShouldSurf || s_psShouldUnduck;
     s_psShouldDuck    = s_psShouldSurf;

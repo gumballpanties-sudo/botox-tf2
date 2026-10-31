@@ -1165,6 +1165,8 @@ static constexpr float k_psPressPad  = 32.f;
 static constexpr float k_psCatchZ  = 8.f;   // a pin this close to the saved z IS this seam
 static constexpr float k_psPastZ   = 16.f;  // fell this far under it: stop simming, nothing below can be it
 static constexpr int   k_psConfirm = 3;     // airborne pin ticks that make a CATCH and not a graze
+static constexpr int   k_psConfirmPress = 2;  // heroin: vz on the pin this tick AND the last
+static constexpr float k_psSeamZ   = 0.05f;   // heroin's hundredths window, a hair of float slack
 static constexpr float k_psMinApex = 8.f;   // smaller than any real launch (mini gains ~16)
 static constexpr float k_psLaunchVz    = 100.f; // a real launch reads ~262 after FinishGravity
 static constexpr int   k_psLaunchTries = 2;     // press, release, press -- more means it simply cannot
@@ -1193,12 +1195,24 @@ struct PsInputs_t
     float wishMag = 0.f;
 };
 
+// heroin pixeljump (FUN_18007f710): the WHOLE arc, launch tick included, presses 25 u/s
+// straight into the seam's wall (cos/sin(yaw(-n) - view) * 25, sim cmd and live cmd alike).
+// Momentum carries the hull, the press keeps it on the face when it gets there -- the zero-wish
+// arc here only ever reached a seam the player was already flying into (`pin0` on every line)
+static constexpr float k_psJumpPress = 25.f;
+
 static PsInputs_t PsHopInputs(int iType, int iSince, const Vec3& vOrigin, const Vec3& vVel,
-                              const Vec3& vTarget, float flHullReachXY)
+                              const Vec3& vTarget, float flHullReachXY, const Vec3* pWallN = nullptr)
 {
     PsInputs_t o;
     if (iSince < 0)
         return o;
+    if (pWallN)
+    {
+        o.wish = true;
+        o.wishDir = Vec3(-pWallN->x, -pWallN->y, 0.f);
+        o.wishMag = k_psJumpPress;
+    }
 
     const bool bMini = iType == JT_MINI || iType == JT_MINIDUCK;
     const bool bLong = iType == JT_LONG || iType == JT_LONGDUCK;
@@ -1223,7 +1237,7 @@ static PsInputs_t PsHopInputs(int iType, int iSince, const Vec3& vOrigin, const 
     // for the solver to clip and vz walks the free-fall ladder straight by. Descending
     // only, near the seam's height, and within reach of it -- the same window since
     // and now the sim flies it too, which is the whole rewrite
-    if (iSince >= 1 && vVel.z < 0.f)
+    if (!pWallN && iSince >= 1 && vVel.z < 0.f)
     {
         const Vec3 vFlat(vTarget.x - vOrigin.x, vTarget.y - vOrigin.y, 0.f);
         const float flFlat = vFlat.Length2D();
@@ -1261,7 +1275,7 @@ struct PsHop_t
 };
 
 static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vTarget,
-                        float flHullReachXY)
+                        float flHullReachXY, const Vec3* pWallN = nullptr)
 {
     PsHop_t r;
 
@@ -1332,7 +1346,7 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
         }
 
         const int iSince = iLaunch >= 0 ? t - iLaunch : (bPressNow ? 0 : -1);
-        const PsInputs_t in = PsHopInputs(iType, iSince, vNowPre, vVelPre, vTarget, flHullReachXY);
+        const PsInputs_t in = PsHopInputs(iType, iSince, vNowPre, vVelPre, vTarget, flHullReachXY, pWallN);
         if (in.jump) pCmd->buttons |= IN_JUMP;
         if (in.duck) pCmd->buttons |= IN_DUCK;
         if (in.wish) MV_WriteWishWorld(pCmd, in.wishDir, in.wishMag);
@@ -1401,8 +1415,13 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
             r.pinTicks++;
             if (iPinRun == 0)
             {
-                // a first pin only counts as OURS if it happens at this seam
-                if (bOverPoint && fabsf(flZ - vTarget.z) <= k_psCatchZ)
+                // a first pin only counts as OURS if it happens at this seam. With the wall press
+                // it is heroin's test: the seam's own height (FUN_18007dcc0, same unit, hundredths
+                // within 2) anywhere along the face -- a surf is a line, the saved point one spot on
+                // it. No press = the old over-the-point gate
+                const bool bAtSeam = pWallN ? fabsf(flZ - vTarget.z) <= k_psSeamZ
+                                            : bOverPoint && fabsf(flZ - vTarget.z) <= k_psCatchZ;
+                if (bAtSeam)
                 {
                     bPinAtSeam = true;
                     r.catchSince = iSince;
@@ -1416,7 +1435,10 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
                 // hull is already past; the thing the user asked for is the surf holding. So
                 // the sim keeps flying the SAME choreography the live tail will and requires
                 // the pin to still be there k_psConfirm ticks later
-                if (++iPinRun >= k_psConfirm)
+                // heroin's last gate: the hull still MOVED this tick (>= 0.005u), a stuck hang is
+                // not a surf
+                const bool bMoving = flStepXY >= 0.005f;
+                if (++iPinRun >= (pWallN ? k_psConfirmPress : k_psConfirm) && (bMoving || !pWallN))
                 {
                     r.caught = true;
                     break;
@@ -1458,6 +1480,8 @@ static int   s_asHopTick  = 0;      // ticks since the launch cmd, OUR counter. 
                                     // choked/rebuilt cmd stream can skip it, so the live
                                     // choreography counts commands the way the sim counts sims
 static Vec3  s_asHopTarget = {};
+static Vec3  s_asHopN = {}, s_asPendingN = {};          // the target's wall: the sim's press, replayed live
+static bool  s_asHopHasN = false, s_asPendingHasN = false;
 static bool  s_asSetHeld = false, s_asDelHeld = false;
 // the promise, so the outcome line is promise-vs-result and not another guess
 static int   s_asPromCatch = -1;
@@ -1565,14 +1589,33 @@ static void PsGroundHelp(UserCmd_t* pCmd, const Vec3& vOrigin, const Vec3& vTarg
 }
 
 // jump box popup ("minijump to <z>"), render thread reads
-static char s_asBoxText[64] = {};
+static char s_asBoxText[96] = {};
 static unsigned long long s_asBoxMs = 0;
 
-static void PsStampJumpBox(int iType, float flTargetZ)
+static void PsStampText(const char* szText)
 {
     std::lock_guard<std::mutex> l(g_psLock);
-    snprintf(s_asBoxText, sizeof(s_asBoxText), "%s to %.3f", PsTypeName(iType), flTargetZ);
+    snprintf(s_asBoxText, sizeof(s_asBoxText), "%s", szText);
     s_asBoxMs = GetTickCount64();
+}
+
+// botox pixelsurf_assist render(): "<launch> to surf at <z> with <origin z> (crouch|stand)",
+// std::to_string = %f, launch names n_assist::k_launch_names, at most one per 500 ms
+static void PsStampJumpBox(int iType, float flTargetZ)
+{
+    static unsigned long long s_renderAfter = 0;
+    const unsigned long long now = GetTickCount64();
+    if (now < s_renderAfter)
+        return;
+    s_renderAfter = now + 500;
+    const char* szLaunch = iType == JT_MINI || iType == JT_MINIDUCK ? "mj"
+                         : iType == JT_LONG || iType == JT_LONGDUCK ? "lj"
+                         : iType == JT_AIRDASH                      ? "double jump" : "jump";
+    const bool bCrouch = iType == JT_CROUCH || iType == JT_MINIDUCK || iType == JT_LONGDUCK;
+    char sz[96];
+    snprintf(sz, sizeof(sz), "%s to surf at %f with %f%s", szLaunch, flTargetZ, s_prePredOrigin.z,
+             bCrouch ? " (crouch)" : " (stand)");
+    PsStampText(sz);
 }
 
 // draw heartbeat + map tracking, and NOTHING else -- no sim, no press, no bookkeeping.
@@ -1794,7 +1837,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     s_asDelHeld = bDelHeld;
 
     // ---- every active saved point inside its own radius, nearest first -------------------
-    struct PsTarget_t { float dist; float rank; Vec3 pos; int mask; float engage; int idx; };
+    struct PsTarget_t { float dist; float rank; Vec3 pos; int mask; float engage; int idx; Vec3 n; bool hasN; };
     static constexpr int k_psMaxTargets = 8;   // == the slider's ceiling
     PsTarget_t aTargets[k_psMaxTargets];
     int nTargets = 0;
@@ -1841,13 +1884,46 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                 int k = nTargets < nWant ? nTargets++ : nWant - 1;
                 for (; k > 0 && aTargets[k - 1].rank > flRank; k--)
                     aTargets[k] = aTargets[k - 1];
-                aTargets[k] = { flDist, flRank, pt.pos, pt.typeMask, flRadius, i };
+                aTargets[k] = { flDist, flRank, pt.pos, pt.typeMask, flRadius, i, pt.normal, pt.hasNormal };
             }
             if (nTargets > 0)
                 s_psAssistActive = aTargets[0].idx;
             if (s_asPendingType != JT_NONE && s_asPendingIdx >= 0
                 && s_asPendingIdx < (int)s_psAssistPts.size())
                 s_psAssistActive = s_asPendingIdx;
+        }
+    }
+    // the wall each target sits on, traced once and cached on the point (heroin keeps it in the
+    // point record, +0xc). The point is stored ON the face at its pin height, so a short ray from
+    // our side at a few heights around it finds the face; no clean answer = asked again next cmd
+    for (int iT = 0; iT < nTargets; iT++)
+    {
+        PsTarget_t& t = aTargets[iT];
+        if (t.hasN)
+            continue;
+        Vec3 vOut(vOrigin.x - t.pos.x, vOrigin.y - t.pos.y, 0.f);
+        if (vOut.Length2D() < 1.f)
+            continue;
+        vOut.Normalize();
+        TraceFilterWorldProps f; f.Setup(pLocal);
+        static const float kDz[4] = { -0.5f, 0.5f, -4.f, 4.f };
+        for (const float dz : kDz)
+        {
+            const Vec3 vAt(t.pos.x, t.pos.y, t.pos.z + dz);
+            GameTrace_t tr{};
+            TraceLine(vAt + vOut * 16.f, vAt - vOut * 4.f, MASK_PLAYERSOLID, &f, &tr);
+            Vec3 vN(tr.plane.normal.x, tr.plane.normal.y, 0.f);
+            if (tr.startsolid || tr.fraction >= 1.f || fabsf(tr.plane.normal.z) >= 0.7f || vN.Length2D() < 0.1f)
+                continue;
+            vN.Normalize();
+            t.n = vN; t.hasN = true;
+            std::lock_guard<std::mutex> l(g_psLock);
+            if (t.idx < (int)s_psAssistPts.size())
+            {
+                s_psAssistPts[t.idx].normal = vN;
+                s_psAssistPts[t.idx].hasNormal = true;
+            }
+            break;
         }
     }
 
@@ -1864,7 +1940,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         if (s_asJumpType != JT_NONE)
         {
             const PsInputs_t in = PsHopInputs(s_asJumpType, s_asHopTick, vAt, s_prePredVel,
-                                              s_asHopTarget, flHullReachXY);
+                                              s_asHopTarget, flHullReachXY,
+                                              s_asHopHasN ? &s_asHopN : nullptr);
             // ---- THE HOP OWNS THESE TWO BITS, SET *AND* CLEAR ---------------------------
             // PsSimHop starts every simulated tick from `buttons & ~(IN_JUMP|IN_DUCK)` and then
             // adds exactly what PsHopInputs asks for. A live tail that only ORs is therefore
@@ -1876,12 +1953,19 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             if (in.jump) pCmd->buttons |= IN_JUMP; else pCmd->buttons &= ~IN_JUMP;
             if (in.duck || s_psAssistDuckHeld) pCmd->buttons |= IN_DUCK;
             else                               pCmd->buttons &= ~IN_DUCK;
+            // ---- ...AND THE MOVE. PsSimHop flies forwardmove = sidemove = 0 on every tick the seam
+            // press is off. Live used to leave the player's keys (and AutoStrafe's) in the cmd,
+            // and AutoAlign ran after: at 200 u/s a few ticks of air strafe are nothing, at 600+
+            // they move the hull a whole hull-width off the arc the sim proved, which is "the
+            // assist misses at speed". The assist owns the pair for the whole hop now, like the bits
             if (in.wish)
             {
                 MV_WriteWishWorld(pCmd, in.wishDir, in.wishMag);
-                s_psAssistPressIn = true;   // AutoAlign runs after us and writes the same pair
                 s_asOutPressed++;
             }
+            else
+                pCmd->forwardmove = pCmd->sidemove = 0.f;
+            s_psAssistPressIn = true;   // AutoAlign runs after us and must not re-steer the arc
             // the crouch types' duck is the one that must survive the hop being cleared at the
             // catch; long's t1-2 launch duck is a launch shape and is meant to be released
             if (s_asJumpType == JT_CROUCH || s_asJumpType == JT_LONGDUCK
@@ -1890,15 +1974,39 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                 if (in.duck) s_psAssistDuckHeld = true;
             }
         }
+        else if (s_asPendingType != JT_NONE)
+        {
+            // armed mid-air, waiting for the ground: the sim flew these pre-launch ticks with no
+            // jump, no duck and no wish. A held space keeps the m_nOldButtons latch set and the
+            // ground press gets refused; a held crouch is a 20u lift; a strafe moves the landing
+            if (!bOnGround)
+            {
+                pCmd->buttons &= ~(IN_JUMP | IN_DUCK);
+                pCmd->forwardmove = pCmd->sidemove = 0.f;
+                s_psAssistPressIn = true;
+            }
+        }
         else if (s_asRideHold)
         {
-            // keep the seam press on a caught surf. Same wish, same window, no duck decisions
-            const Vec3 vFlat(s_asRideTarget.x - vAt.x, s_asRideTarget.y - vAt.y, 0.f);
-            const float flFlat = vFlat.Length2D();
-            if (flFlat <= flHullReachXY + k_psPressPad && flFlat > 0.1f)
+            // keep the seam press on a caught surf, no duck decisions. INTO THE FACE the hull is
+            // touching: the old wish aimed at the saved point and quit 32u past it, so a fast ride
+            // (10u a tick at 650) lost its press after a handful of ticks. Point fallback when the
+            // face is not in contact this tick
+            Vec3 n{};
+            if (PsWallTouch(pLocal, n, vAt))
             {
-                MV_WriteWishWorld(pCmd, vFlat, k_psAssistPressWish);
+                MV_WriteWishWorld(pCmd, Vec3(-n.x, -n.y, 0.f), k_psAssistPressWish);
                 s_psAssistPressIn = true;
+            }
+            else
+            {
+                const Vec3 vFlat(s_asRideTarget.x - vAt.x, s_asRideTarget.y - vAt.y, 0.f);
+                const float flFlat = vFlat.Length2D();
+                if (flFlat <= flHullReachXY + k_psPressPad && flFlat > 0.1f)
+                {
+                    MV_WriteWishWorld(pCmd, vFlat, k_psAssistPressWish);
+                    s_psAssistPressIn = true;
+                }
             }
         }
         else if (bOnGround && g_psGroundHelp && nTargets > 0)
@@ -1912,6 +2020,15 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
 
     if (!bAssistOn || nTargets == 0)
     {
+        if (bAssistOn && g_psAssistJumpBox && s_asJumpType == JT_NONE && s_asPendingType == JT_NONE)
+        {
+            static unsigned long long s_lastUnreachable = 0;
+            if (const unsigned long long now = GetTickCount64(); now - s_lastUnreachable > 3000)
+            {
+                PsStampText("[-] point unreachable");
+                s_lastUnreachable = now;
+            }
+        }
         FlyLiveTail();
         return;
     }
@@ -1942,10 +2059,10 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         s_asJumpType = iPick;
         s_asHopTick = 0;
         s_asHopTarget = s_asPendingTarget;
+        s_asHopN = s_asPendingN;
+        s_asHopHasN = s_asPendingHasN;
         PsOutcomeBegin(vOrigin.z, s_asPendingTarget, iPick, s_asPromApex, s_asPromNeed,
                        s_asPromCatch);
-        if (g_psAssistJumpBox)
-            PsStampJumpBox(iPick, s_asPendingTarget.z);
         DebugLog("PS: pending fired=%s z=%.3f", PsTypeName(iPick), s_asPendingTarget.z);
         FlyLiveTail();      // tick 0 of the hop is THIS cmd
         return;
@@ -1988,7 +2105,9 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         // ground friction only subtracts). This is not a screen in front of the authority, it
         // is the authority's own ceiling stated before paying for it
         const float flSimTravelCap = Vec3(s_prePredVel.x, s_prePredVel.y, 0.f).Length2D()
-                                   * TickInterval() * float(k_psMaxHopTicks) + flHullReachXY;
+                                   * TickInterval() * float(k_psMaxHopTicks) + flHullReachXY
+                                   // the wall press adds up to its own 25 u/s toward the face
+                                   + (aTargets[iT].hasN ? k_psJumpPress * TickInterval() * float(k_psMaxHopTicks) : 0.f);
         const bool bWorthSimming = vDelta.z < 100.f && flFlat <= flSimTravelCap;
         if (bWorthSimming)
             nPlanned++;
@@ -2034,7 +2153,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                 // outright (PsHop_t::truncated), so half an arc is worse than none
                 if (SimsLeft() < 24 || TbBudgetUsedUs() + 600 > usTargetEnd)
                     break;
-                aCands[k].res = PsSimHop(pLocal, pCmd, aCands[k].type, vTarget, flHullReachXY);
+                aCands[k].res = PsSimHop(pLocal, pCmd, aCands[k].type, vTarget, flHullReachXY,
+                                         aTargets[iT].hasN ? &aTargets[iT].n : nullptr);
                 nSimmedCands++;
                 if (aCands[k].res.launchDelay >= 0 && aCands[k].res.apexGain > 0.f)
                     s_apexSeen[aCands[k].type] = aCands[k].res.apexGain;
@@ -2158,21 +2278,27 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             s_asJumpType = iPick;
             s_asHopTick = 0;
             s_asHopTarget = vTarget;
+            s_asHopN = aTargets[iT].n;
+            s_asHopHasN = aTargets[iT].hasN;
             PsOutcomeBegin(vOrigin.z, vTarget, iPick, s_asPromApex, s_asPromNeed, s_asPromCatch);
-            if (g_psAssistJumpBox)
-                PsStampJumpBox(iPick, vTarget.z);
         }
         else
         {
+            // botox renders on the plan take, airborne plans included -- the readout's origin z
+            // is where the plan was made from
             // the launch sits a few ticks out (or we are airborne): arm it and fire on the REAL
             // ground contact. +8 ticks of slack, and it is a countdown so a choked cmd stream
             // cannot leave it armed forever
             s_asPendingType = iPick;
             s_asPendingTicks = iDelay + 8;
             s_asPendingTarget = vTarget;
+            s_asPendingN = aTargets[iT].n;
+            s_asPendingHasN = aTargets[iT].hasN;
             s_asPendingIdx = iTargetIdx;
             s_asPendingLaunchZ = pPick->launchZ;
         }
+        if (g_psAssistJumpBox)
+            PsStampJumpBox(iPick, vTarget.z);
         break;              // this target owns the cmd -- never let a second one write buttons
     }
 

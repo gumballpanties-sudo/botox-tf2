@@ -2,56 +2,60 @@
 #include "../../globals/globals.h"
 #include "movement.h"
 #include "recorder_ser.h"
-#include <string>
-#include <vector>
 
-// Movement recorder: record a run's input (view + move + buttons) and play it back.
-// Port of botox hacks/movement/movement_recorder.cpp, trimmed to what a TAS-style route
-// replay needs: no jetpack replay (TF2 has no CS:GO jetpack). "Force same weapons" replays
-// the recorded m_hMyWeapons slot (confirmed via Amalgam SDK CBaseCombatCharacter.h +
-// this codebase's own EHANDLE decode convention, see recorder.cpp ActiveWeaponSlot/
-// ForceWeaponSlot).
-// Clips live under kRecorderDir, one file per clip, named "<map>__<name>.rec".
+// Movement recorder: botox hacks/movement/movement_recorder.cpp 1:1 on this pipeline.
+// Record a route (or clip the last N seconds), walk onto its start, replay it tick for tick.
+// Playback keeps the recorded WORLD wish dir under any sent view (CorrectMovement), so the
+// camera can be free, original, turned (left/right/back) or spinning.
+// Not ported: CS:GO jetpack replay, round freeze events (TF2 preround: the 2 s approach
+// give-up covers it), botox's detection-window toasts (messages go to chat instead).
+// Clips live under kRecorderDir, one ".rec" file per clip (map + tickrate inside the file).
 static constexpr const char* kRecorderDir = "C:\\botox-tf2\\recorder";
 
-inline bool  g_recEnable        = false;   // master: recorder bind polling runs at all
-inline int   g_recRecordKey     = 0, g_recRecordMode = 2;   // toggle by default
-inline int   g_recPlayKey       = 0, g_recPlayMode   = 2;
-inline bool  g_recLockVa        = false;   // playback drives viewangles too, not just move
-inline bool  g_recLockGoingToStart = false; // walk to the recorded start before replaying
-inline bool  g_recStopOnMove    = true;    // real WASD/jump during playback cancels it
-inline bool  g_recForceWeapon   = false;   // reselect the recorded m_hMyWeapons slot each frame
-inline float g_recApproachDist  = 24.f;    // hull radius -- "close enough" to start replaying
+inline bool  g_recEnable           = false;
+inline bool  g_recShowLine         = true;
+inline bool  g_recRender           = true;    // timer box
+inline int   g_recPosition         = 0;       // timer: top left / bottom left / bottom right
+inline bool  g_recLockVa           = true;    // original playback viewangles
+inline bool  g_recLockGoingToStart = true;    // freeze the mouse while walking to the start
+inline bool  g_recClipper          = false;   // rolling buffer of the last g_recClipSeconds
+inline bool  g_recClipperBox       = true;
+inline float g_recClipSeconds      = 15.f;
+inline bool  g_recStopOnMove       = false;   // fresh WASD/jump/duck press = take over
+inline bool  g_recForceWeapon      = true;
+inline int   g_recYaw              = 0;       // original / left / right / backwards / spinning
+inline float g_recSpinSpeed        = 360.f;   // deg/s
+inline float g_recSmoothStart      = 0.f;     // s
+inline float g_recSmoothEnd        = 0.f;     // s
+// press actions (no style: always on / toggle would fire them on every menu close)
+inline int g_recKeyStartRec = 0, g_recKeyStopRec = 0, g_recKeySave = 0, g_recKeyStartPlay = 0,
+           g_recKeyStopPlay = 0, g_recKeyClear = 0, g_recKeyClip = 0;
 
-// game-thread entry point, one call from Movement_RunImpl (after the pLocal/alive check).
-// Returns true if the recorder owns this cmd (playback approach/replay in progress) --
-// caller still runs the rest of the pipeline on the (now recorder-driven) cmd; it does NOT
-// block other features the way a dead/noclip return does.
-void Recorder_OnCreateMove(void* pLocal, UserCmd_t* pCmd);
+enum RecAction : unsigned
+{
+    REC_START_REC  = 1u << 0,
+    REC_STOP_REC   = 1u << 1,
+    REC_SAVE       = 1u << 2,
+    REC_START_PLAY = 1u << 3,
+    REC_STOP_PLAY  = 1u << 4,
+    REC_CLEAR      = 1u << 5,
+    REC_CLIP       = 1u << 6,
+};
 
-// ---- menu-facing controls (unitB_menu.cpp) -- render thread, all internally locked ----
-void Recorder_StartRecord();
-void Recorder_StopRecord();     // keeps the buffer so Save() can still write it
-void Recorder_StartPlay();
-void Recorder_StopPlay();
-void Recorder_Clear();          // discard the live recording buffer
-bool Recorder_IsRecording();
-bool Recorder_IsPlaying();
-int  Recorder_FrameCount();     // live recording buffer size (counter in the menu)
+// ---- game thread (Movement_RunImpl / Movement_Run) ----
+// Start: pLocal null = dead (resets). Captures the player's own input, then lays the replay
+// frame on the cmd so every feature + prediction sees the recorded input.
+void Recorder_CmdStart(void* pLocal, UserCmd_t* pCmd);
+void Recorder_CmdPrePred(UserCmd_t* pCmd);   // re-lay it: pre features may have rewritten it
+void Recorder_CmdEnd(UserCmd_t* pCmd);       // keys/actions, approach, step, record the final cmd
+bool Recorder_OwnsCmd();                     // playing or walking to the start
+void Recorder_FrameStart();                  // FrameStageNotify FRAME_START: per-frame camera
+void Recorder_MouseInput(float* x, float* y);// OverrideMouseInput: mouse lock
 
-void Recorder_Refresh();                 // rescan kRecorderDir for the current map
-int  Recorder_ClipCount();
-const char* Recorder_ClipName(int index); // display name, "" if index is stale
-void Recorder_Save(const char* name);     // writes the trimmed recording buffer as a new clip
-void Recorder_Delete(int index);
-void Recorder_SetSelected(int index);
-int  Recorder_GetSelected();
-bool Recorder_Load(int index);            // stages a clip for StartPlay()
-
-// clipper: trim range applied at Save() time, [start, end) ticks of the LIVE buffer
-void Recorder_SetTrim(int start, int end);
-void Recorder_GetTrim(int& start, int& end, int& maxTicks);
-
-// small "RECORDING" / "PLAYING" status line, top centre. Render thread, reads the same
-// mutex-guarded flags the menu does.
-void Recorder_RenderStatus();
+// ---- render thread ----
+void Recorder_Request(unsigned actions);     // menu buttons, consumed on the next cmd
+void Recorder_Render();                      // path, route starts, timer, clipper box, editor
+void Recorder_MenuRoutes();                  // "routes" group body (list, edit, delete, refresh)
+void Recorder_Refresh();
+bool Recorder_EditorOpen();                  // imgui owns input while true
+bool Recorder_EditorKey(unsigned vk);        // WndProc fresh keydown: ENTER opens/closes, ESC closes

@@ -1085,8 +1085,11 @@ static void Page_MovementMain()
             ImGui::OptionPopup("pixel surf settings", [&]() {
                 ImGui::Label("pixel surf keybind");
                 ImGui::Keybind("pixel surf key", &g_pixelSurfKey, &g_pixelSurfMode);
-                // route calc's pixel surf horizon only -- the surf itself is botox pixel_surf, no knobs
+                // route calc's pixel surf horizon only
                 SliderI("route predict ticks", &g_pixelSurfPredictTicks, 1, 32);
+                ImGui::Combo("wall strafe gain##ps", &g_psWallStrafe,
+                             "off\0" "when pressing into wall\0" "always\0");
+                ImGui::Checkbox("park at end of surf##ps", &g_psParkAtEnd);
             }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("tung surf", &g_tungSurf);
@@ -1134,6 +1137,7 @@ static void Page_MovementMain()
                 if (g_tbStyle == 0)
                 {
                     ImGui::Checkbox("ride assist##tbcalign", &g_tbcAlign);   // cumidere misc_auto_align
+                    ImGui::Checkbox("no park on off-grid walls##tbc", &g_tbNoOffgridStick);
                     return;
                 }
                 SliderF("reach", &g_tbReach, 1.f, 48.f, "%.0f");
@@ -1615,16 +1619,8 @@ static void Page_MovementCalculator()
 
 static void Page_MovementRecorder()
 {
-    menu_columns_begin();
-    if (menu_group_begin("movement recorder"))
-    {
-        // entire movement recorder feature set (unit B) -- not wired into the menu yet,
-        // see gap.md "movement/recorder".
-        // UNIT_MENU_SLOT movement_recorder
-        UnitB_Menu_movement_recorder();
-    }
-    menu_group_end();
-    menu_columns_end();
+    // UNIT_MENU_SLOT movement_recorder -- botox case 3: the unit fn owns its columns + groups
+    UnitB_Menu_movement_recorder();
 }
 
 static const char* kMoveSub[4] = { "main", "indicators", "calculator", "recorder" };

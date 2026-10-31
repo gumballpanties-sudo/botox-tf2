@@ -108,6 +108,8 @@ static void PsSurfFixTick(void* pLocal, UserCmd_t* pCmd)
 // state = result of last cmd, so compare it to the one before: still airborne, was falling
 // past the first-tick gravity value, and now sits exactly on it = vz got reset by an edge
 // (same test as EbProbe's first-tick branch, on real state). One tick late (15ms) by design.
+// Only counts when the EB assist plan was flying (s_ebDetected) in the last few cmds: the raw
+// vz test alone also trips on corrections / slopes / unassisted hits.
 // Mouse lock lives in edgebug.inl (EdgeBug_MouseInput).
 static const char* const kEbSounds[] = { "TFPlayer.CritHit", "TFPlayer.CritHitMini",
     "TFPlayer.DoubleDonk", "Achievement.Earned", "MVM.PlayerUpgraded" };
@@ -116,6 +118,10 @@ static void EdgeBugSoundPre(void* pLocal)
 {
     static float s_prevVz = 0.f;
     static bool  s_prevAir = false;
+    static int   s_assistGrace = 0;   // cmds left since the plan last flew; EdgeBugPre ran first,
+                                      // so a plan spent on the contact cmd is already dropped here
+    const int assisted = s_assistGrace;
+    s_assistGrace = s_ebDetected ? 3 : (s_assistGrace > 0 ? s_assistGrace - 1 : 0);
     if (!pLocal || g_offVelocity <= 0 || g_offFlags <= 0) { s_prevAir = false; return; }
     const float vz  = EntV3(pLocal, g_offVelocity).z;
     const bool  air = !(EntI(pLocal, g_offFlags) & FL_ONGROUND) && EntAlive(pLocal);
@@ -124,7 +130,8 @@ static void EdgeBugSoundPre(void* pLocal)
     const bool hit = s_prevAir && air && s_prevVz < flGravVel - kEps
                   && fabsf(vz - flGravVel) <= kEps;
     s_prevVz = vz; s_prevAir = air;
-    if (!hit || !g_edgeBugSound) return;
+    if (!hit || !assisted || !g_edgeBugSound) return;
+    s_assistGrace = 0;   // one sound per assisted EB
     const int i = std::clamp(g_edgeBugSoundId, 0, (int)(sizeof(kEbSounds) / sizeof(*kEbSounds)) - 1);
     PrCmd("playgamesound %s", kEbSounds[i]);   // client EmitSound on local player, no cheat flag
 }

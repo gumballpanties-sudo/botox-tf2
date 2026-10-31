@@ -65,6 +65,16 @@ inline bool WallStrafeYaw(float nx_in, float ny_in, float vx, float vy, float ca
     return true;
 }
 
+// park brake: wish magnitude straight against xy that takes xy to EXACTLY 0 in one AirAccelerate
+// tick when it can ( accelspeed = airaccel * wish * ipt ), else the full press. Never reverses:
+// a maxspeed crop below the result only brakes less
+inline float BrakeWish(float xy, float airaccel, float ipt, float cap = 450.f)
+{
+    const float a = airaccel * ipt;
+    if (a <= 0.f || xy <= 0.f) return 0.f;
+    return std::min(cap, xy / a);
+}
+
 // botox pixel_surf `pinned`: vz on the pin AND still sliding ( xy < 1 = a wall hang, not a surf )
 inline bool SurfPinned(float vz, float vxy, float pin) { return std::fabs(vz - pin) < 0.01f && vxy >= 1.f; }
 

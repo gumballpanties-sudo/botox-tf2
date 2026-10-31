@@ -571,6 +571,8 @@ bool  g_edgeBugViz = false;         // draw the latched plan (path + landing pad
 float g_edgeBugVizSize = 16.f;      // pad half-width; 16 = the player hull's own footprint
 bool g_pixelSurf = false;   int g_pixelSurfKey = 0;   int g_pixelSurfMode = 1;
 int  g_pixelSurfPredictTicks = 8;
+int  g_psWallStrafe = 1;     // 0 off / 1 keys into wall (botox) / 2 always on a ride
+bool g_psParkAtEnd  = false; // brake to a stop where the ride runs out, hang there
 // approach aids (both OFF by default -- see the memory note on the guide/speed fix)
 bool g_autoAlign = false;   // plain on/off, no bind
 // -- TB knob set rebuilt off coldtires. The -knobs (autocrouch, seam scan,

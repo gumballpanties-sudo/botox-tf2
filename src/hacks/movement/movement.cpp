@@ -2375,9 +2375,11 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     const int idx = GetLocalPlayerIndex();
     if (idx <= 0) return;
     void* pLocal = GetClientEntity(idx);
-    if (!pLocal || !EntAlive(pLocal)) return;
-
-    Recorder_OnCreateMove(pLocal, pCmd);   // unit B: may own forward/side/up/buttons/view this tick
+    const bool bAlive = pLocal && EntAlive(pLocal);
+    // botox create_move: capture the player's own input, then lay the replay frame on the cmd so
+    // every feature below + prediction sees it. Dead = reset. Its end half runs in Movement_Run.
+    Recorder_CmdStart(bAlive ? pLocal : nullptr, pCmd);
+    if (!bAlive) return;
 
     // a movement blocker (noclip, water, a stun/taunt cond) stops the MOVEMENT features.
     // It does not stop the MEASURING ones: the route calculator, the pixel calculator and the ps
@@ -2431,6 +2433,9 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         SmoothDemoView(pLocal, pCmd);
         JumpstatsTick(pLocal, pCmd);
     }
+
+    // botox: pre features may have rewritten it -- predict + detect on the exact recorded inputs
+    Recorder_CmdPrePred(pCmd);
 
     // ---- engine prediction (post features read predicted state; skip clean if sigs miss) ----
     s_prePredFlags = g_offFlags > 0 ? EntI(pLocal, g_offFlags) : 0;
@@ -2575,7 +2580,15 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
 
     // edge bug runs AFTER Pred_End (Aletherium: after EnginePrediction.End), probing the
     // ENGINE's predicted frames with its own re-established tick-time window
-    if (probesOK && !bMoveBlocked)
+    // botox: recorder owns cmd = eb post over a desynced replay overwrites recorded duck timing;
+    // and a plan latched by pre would hold the mouse lock, so drop it
+    if (Recorder_OwnsCmd())
+    {
+        EbDropPlan("recorder");
+        EbDonorReset();
+        EsReset(true);
+    }
+    else if (probesOK && !bMoveBlocked)
     {
         EdgeBugPost(pLocal, pCmd);
         EdgeSkipPost(pLocal, pCmd);   // same timing: after Pred_End, re-establishes its own window
@@ -2666,6 +2679,9 @@ void Movement_Run(UserCmd_t* pCmd)
         static bool s_logged = false;
         if (!s_logged) { s_logged = true; DebugLog("movement: SEH in Movement_Run"); }
     }
+    // botox records the FINAL cmd: out here so every early return in RunImpl (blocked move,
+    // water, taunt) still steps/records. No-op unless RunImpl's Recorder_CmdStart began this cmd.
+    Recorder_CmdEnd(pCmd);
     // Same reason as g_predWalkSims below, one level worse: a fault between Pred_Start and
     // Pred_End leaves gpGlobals->tickcount / curtime / frametime on the PREDICTION tick, and
     // the engine's CL_Move -> CL_SendMove -> CPrediction::Update run off those three the

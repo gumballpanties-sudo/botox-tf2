@@ -1128,6 +1128,7 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
     if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK)
         { s_tbPhase = TBP_OFF; s_tbRideLen = s_tbcRun = 0; return; }
 
+    const float user_fwd = pCmd->forwardmove, user_side = pCmd->sidemove;   // pre-align, for no-park
     const int al = g_tbcAlign ? TBC_Align(pLocal, pCmd, nBase) : 0;
 
     const Vec3 org  = EntV3(pLocal, g_offOrigin);
@@ -1205,6 +1206,20 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
     }
     Restore();   // hand the entity back on the base, like the botox style does
 
+    // NOT cumidere: botox style's "no off-grid stick". On a yaw-rotated wall a pin at park
+    // speed (xy <= 30) and the hug just glue the hull into the clip, no seam to ride. Drop
+    // both + align's press, player's own move back. A pin at speed still rides
+    const bool off_grid = fminf(fabsf(wall.plane.normal.x), fabsf(wall.plane.normal.y)) > 0.10f;
+    const bool no_park  = g_tbNoOffgridStick && off_grid
+                       && (!found || vel.Length2D() <= k_tbParkXyMax);
+    if (no_park)
+    {
+        found = false;
+        best_gap = 1.f;
+        pCmd->forwardmove = user_fwd;
+        pCmd->sidemove    = user_side;
+    }
+
     const bool hug = !found && best_gap < 0.2f;
     if (found || hug)
     {
@@ -1217,13 +1232,13 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
     s_tbRideLen     = s_tbcRun;
     s_tbPhase       = found ? (s_tbRideLen >= 2 ? TBP_RIDE : TBP_PIN) : hug ? TBP_HUG : TBP_SCAN;
 
-    if (g_debugLogEnable && DiagOk(s_tbcDiagTick, found || hug))
+    if (g_debugLogEnable && DiagOk(s_tbcDiagTick, found || hug || no_park))
         // al = TBC_Align bits: 1 wall, 2 press pinned, 4 riding, 8 key steer pinned, 16 speed gain
         DebugLog("TBC: pin=%d nat=%d al=%d hug=%d gap=%.3f off=%.3f fwd=%.3f side=%.3f vz=%.1f lvz=%.2f "
-                 "sims=%d xy=%.0f ang=%.2f n=%.2f %.2f %.2f sign=%.0f ride=%d", (int)found, (int)natural,
-                 al, (int)hug, best_gap, out_off, out_fwd, out_side, vel.z, last_vz, sims,
+                 "sims=%d xy=%.0f ang=%.2f n=%.2f %.2f %.2f sign=%.0f ride=%d og=%d np=%d", (int)found,
+                 (int)natural, al, (int)hug, best_gap, out_off, out_fwd, out_side, vel.z, last_vz, sims,
                  vel.Length2D(), ang, wall.plane.normal.x, wall.plane.normal.y, wall.plane.normal.z,
-                 sign, s_tbRideLen);
+                 sign, s_tbRideLen, (int)off_grid, (int)no_park);
 }
 
 // ============================================================================

@@ -50,10 +50,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float rawD = raw_depth(uv);
     // sky (far plane) and the gun's own depth slice (raw < vmCutoff) never reflect.
     if (rawD >= 0.9999 || rawD < c1.w) return float4(0, 0, 0, 0);
-    float lin = rawD / (1000.0 - rawD * 999.0);   // botox lin(): reshade linear, far plane 1000
+    // botox lin() (reshade, far plane 1000) -- through TF2's DEFAULT projection (7, 28377.9),
+    // not raw depth: raw moves with each map's zFar and the "distance" cutoff moved with it.
+    // Same remap as fx_depthview.hlsl lin().
+    float z = linear_z(rawD);
+    float r = saturate(28377.9 * (z - 7.0) / (z * 28370.9));
+    float lin = r / (1000.0 - r * 999.0);
     if (lin >= c2.y) return float4(0, 0, 0, 0);
 
-    float z = linear_z(rawD);
     float3 p = view_pos(uv, z);
 
     // normal off four neighbours, same "nearer step wins" rule as fx_ao_prepare -- the
@@ -81,7 +85,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     for (int i = 0; i < REFL_STEPS; ++i)
     {
         pos += rdir * stepLen;
-        if (pos.z <= c0.x || pos.z >= maxDist) break;
+        // maxDist is the ray's LENGTH (the loop spends it), not a depth: testing pos.z against
+        // it killed every ray from a surface farther than 300..3000u on its first step.
+        if (pos.z <= c0.x || pos.z >= c0.y) break;
 
         float2 suv = project(pos);
         if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) break;

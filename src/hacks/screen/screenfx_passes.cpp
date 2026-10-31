@@ -245,7 +245,8 @@ bool ScreenFxPasses_Frame(IDirect3DDevice9* dev, bool forceBackbuffer)
 // Render thread, from ScreenFx_Frame at the game's post slot, right after the depth resolve --
 // botox runs it first in its DoPostScreenSpaceEffects, ahead of reflections/ao/dof.
 void ScreenFxPasses_DepthView(IDirect3DDevice9* dev, IDirect3DSurface9* target,
-                              const D3DSURFACE_DESC& desc, IDirect3DTexture9* depth)
+                              const D3DSURFACE_DESC& desc, IDirect3DTexture9* depth,
+                              const FxViewSetup& view)
 {
     if (!dev || !target || !depth || s_dvFailed || (!g_emphasizeEnable && !g_showDepthEnable)) return;
     if (!ScreenFx_QuadReady(dev)) return;   // ps_3_0: the shared passthrough vs, not FF
@@ -298,7 +299,7 @@ void ScreenFxPasses_DepthView(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     static_assert(sizeof(k_rsVal) / sizeof(k_rsVal[0]) == sizeof(k_rs) / sizeof(k_rs[0]), "state list");
 
     DWORD oldRs[kRs]{}, oldSamp[2][6]{}, oldFvf = 0;
-    float oldC[8][4]{};
+    float oldC[9][4]{};
     IDirect3DSurface9* oldDs = nullptr;
     IDirect3DPixelShader9* oldPs = nullptr;
     IDirect3DVertexShader9* oldVs = nullptr;
@@ -322,13 +323,13 @@ void ScreenFxPasses_DepthView(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     dev->GetStreamSource(0, &oldStream, &oldOff, &oldStride);
     dev->GetIndices(&oldIdx);
     dev->GetViewport(&oldVp);
-    dev->GetPixelShaderConstantF(0, oldC[0], 8);
+    dev->GetPixelShaderConstantF(0, oldC[0], 9);
 
     // ---- draw, constants laid out exactly as botox's
     const float W = (float)desc.Width, H = (float)desc.Height;
     const float sx = g_showDepthScaleX > 0.001f ? g_showDepthScaleX : 0.001f;
     const float sy = g_showDepthScaleY > 0.001f ? g_showDepthScaleY : 0.001f;
-    const float c[8][4] = {
+    const float c[9][4] = {
         { g_emphasizeEnable ? 1.f : 0.f, g_showDepthEnable ? 1.f : 0.f, 1.f / W, 1.f / H },
         { g_emphasizeFocusDepth, g_emphasizeFocusRange, g_emphasizeFocusEdge, g_emphasizeSpherical ? 1.f : 0.f },
         { (float)g_emphasizeSphereFov, g_emphasizeSphereX, g_emphasizeSphereY, g_emphasizeAmount },
@@ -337,6 +338,7 @@ void ScreenFxPasses_DepthView(IDirect3DDevice9* dev, IDirect3DSurface9* target,
         { g_showDepthUpsideDown ? 1.f : 0.f, g_showDepthReversed ? 1.f : 0.f, g_showDepthLog ? 1.f : 0.f, g_showDepthFarPlane },
         { sx, sy, (float)g_showDepthOffsetX, (float)g_showDepthOffsetY },
         { g_showDepthMultiplier, W, H, 0.f },
+        { view.zNear, view.zFar, 0.f, 0.f },   // c8: lin() unprojects with the real z range
     };
 
     dev->SetDepthStencilSurface(nullptr);
@@ -349,7 +351,7 @@ void ScreenFxPasses_DepthView(IDirect3DDevice9* dev, IDirect3DSurface9* target,
         dev->SetSamplerState(u, D3DSAMP_MINFILTER, D3DTEXF_POINT);
         dev->SetSamplerState(u, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
     }
-    dev->SetPixelShaderConstantF(0, c[0], 8);
+    dev->SetPixelShaderConstantF(0, c[0], 9);
     dev->SetTexture(0, depth);
     dev->SetTexture(1, s_dvFrameTex);
     dev->SetRenderTarget(0, target);
@@ -360,7 +362,7 @@ void ScreenFxPasses_DepthView(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     ScreenFx_DrawQuad(dev, (int)desc.Width, (int)desc.Height);
 
     // ---- restore
-    dev->SetPixelShaderConstantF(0, oldC[0], 8);
+    dev->SetPixelShaderConstantF(0, oldC[0], 9);
     dev->SetPixelShader(oldPs);
     dev->SetVertexShader(oldVs);
     if (oldDecl) dev->SetVertexDeclaration(oldDecl); else dev->SetFVF(oldFvf);

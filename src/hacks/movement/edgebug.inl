@@ -1307,6 +1307,7 @@ static void __fastcall h_OverrideMouseInput(void* self, float* x, float* y)
 {
     o_OverrideMouseInput(self, x, y);
     __try { EdgeBug_MouseInput(x, y); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try { Recorder_MouseInput(x, y); } __except (EXCEPTION_EXECUTE_HANDLER) {}   // botox camera_lock
 }
 
 void* ScreenFx_FindClientMode();

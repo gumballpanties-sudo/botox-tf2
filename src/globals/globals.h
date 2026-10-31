@@ -609,6 +609,8 @@ extern bool  g_edgeBugViz;        // draw the latched plan: its flight path + a 
 extern float g_edgeBugVizSize;     // half-width of that pad, world units (def 16 = the hull)
 extern bool g_pixelSurf;   extern int g_pixelSurfKey;   extern int g_pixelSurfMode;
 extern int  g_pixelSurfPredictTicks; // seam look-ahead horizon, ticks (def 8, 1-32)
+extern int  g_psWallStrafe;   // ride gain: 0 off / 1 when your keys press into the wall (botox) / 2 always
+extern bool g_psParkAtEnd;    // sim the runout, brake so the ride stops on the seam, hold the hang
 // approach aids for the pixel surf FEATURE (both off by default)
 // -- park at the end of a surf (measure the runout, brake the tangent into it)
 extern bool g_autoAlign;   // plain on/off, no bind

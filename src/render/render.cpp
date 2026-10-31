@@ -229,20 +229,56 @@ static void RenderPsOverlay()
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const float W = io.DisplaySize.x, H = io.DisplaySize.y;
 
-    // jump box popup ("minijump to <z>"), 3s life, fades the last 0.4s
-    if (g_psAssistJumpBox && d.boxMs && d.boxText[0] && now >= d.boxMs)
+    // botox movement_add_window (movement.cpp WindowDetect): stack at 0.8 H growing up, newest at
+    // the bottom, 25 tall, 14 pad, 95 min wide, fade 0.25 / show 1.8 / fade 0.2, top accent line
+    // shrinking over the life, verdana 11 with a 1px quarter-alpha shadow, max 5, same text
+    // dropped inside 2 s
+    if (g_psAssistJumpBox)
     {
-        const float age = (now - d.boxMs) / 1000.f;
-        if (age < 3.f)
+        struct Win { std::string text; float t0; };
+        static std::vector<Win> s_wins;
+        static unsigned long long s_seenMs = 0;
+        constexpr float kIn = 0.25f, kShow = 1.8f, kOut = 0.2f, kLife = kIn + kShow + kOut;
+        const float tNow = now / 1000.f;
+        if (d.boxMs && d.boxMs != s_seenMs && d.boxText[0])
         {
-            const float a = std::min(1.f, (3.f - age) / 0.4f);
-            const ImVec2 ts = ImGui::CalcTextSize(d.boxText);
-            const ImVec2 c(W * 0.5f, H * 0.62f);
-            const ImVec2 p0(c.x - ts.x * 0.5f - 6.f, c.y - ts.y * 0.5f - 4.f);
-            const ImVec2 p1(c.x + ts.x * 0.5f + 6.f, c.y + ts.y * 0.5f + 4.f);
-            dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, int(160 * a)), 3.f);
-            dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
-                        IM_COL32(255, 255, 255, int(255 * a)), d.boxText);
+            s_seenMs = d.boxMs;
+            bool dup = false;
+            for (const Win& w : s_wins)
+                dup |= w.text == d.boxText && tNow - w.t0 < 2.f;
+            if (!dup)
+                s_wins.push_back({ d.boxText, tNow });
+        }
+        s_wins.erase(std::remove_if(s_wins.begin(), s_wins.end(),
+                     [&](const Win& w) { return tNow - w.t0 >= kLife; }), s_wins.end());
+        while (s_wins.size() > 5)
+            s_wins.erase(s_wins.begin());
+
+        ImFont* font = g_menuReg ? g_menuReg : ImGui::GetFont();
+        const float round = ImGui::GetStyle().WindowRounding;
+        const int n = (int)s_wins.size();
+        for (int i = 0; i < n; i++)
+        {
+            const Win& w = s_wins[i];
+            const float age = tNow - w.t0;
+            const float alpha = age < kIn ? age / kIn : age < kIn + kShow ? 1.f : std::max(0.f, 1.f - (age - kIn - kShow) / kOut);
+            const int a = int(alpha * 255.f);
+            const ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.f, w.text.c_str());
+            const ImVec2 sz(std::max(ts.x + 28.f, 95.f), 25.f);
+            const int stack = n - 1 - i;
+            const float cy = H * 0.8f - stack * (sz.y + 4.f);
+            const ImVec2 p(W * 0.5f - sz.x * 0.5f, cy - sz.y * 0.5f);
+            dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), IM_COL32(15, 15, 15, a), round);
+            dl->AddRect(ImVec2(p.x + 1.f, p.y + 1.f), ImVec2(p.x + sz.x - 1.f, p.y + sz.y - 1.f),
+                        IM_COL32(50, 50, 50, a), round);
+            const float prog = std::min(1.f, (age + 0.2f) / (kLife + 0.4f));
+            const float lw = (sz.x - 2.f) * (1.f - prog);
+            if (lw > 0.f)
+                dl->AddRectFilled(ImVec2(p.x + sz.x * 0.5f - lw * 0.5f, p.y), ImVec2(p.x + sz.x * 0.5f + lw * 0.5f, p.y + 1.f),
+                                  ImGui::GetColorU32(ImVec4(g_accentColor[0], g_accentColor[1], g_accentColor[2], alpha)));
+            const ImVec2 tp(p.x + (sz.x - ts.x) * 0.5f, p.y + (sz.y - ts.y) * 0.5f);
+            dl->AddText(font, font->FontSize, ImVec2(tp.x + 1.f, tp.y + 1.f), IM_COL32(0, 0, 0, a / 4), w.text.c_str());
+            dl->AddText(font, font->FontSize, tp, IM_COL32(240, 240, 240, a), w.text.c_str());
         }
     }
 
@@ -1463,7 +1499,7 @@ static void BuildImGuiFrame()
     if (s_frameBuilt) return;
     s_frameBuilt = true;
 
-    const bool psWinOpen = s_psPointWin >= 0;
+    const bool psWinOpen = s_psPointWin >= 0 || Recorder_EditorOpen();   // recorder clip editor = same input handoff
     const bool menuUp    = g_showMenu || psWinOpen;
 
     // Scale slider moved -> re-rasterize the indicator face at the new px. HERE and nowhere
@@ -1500,7 +1536,7 @@ static void BuildImGuiFrame()
     RenderMoveIndicators();
     RenderVelocityGraph();       // unit B
     RenderKeystrokeIndicator();  // unit B
-    Recorder_RenderStatus();     // unit B
+    Recorder_Render();           // unit B: path, route starts, timer, clipper box, clip editor
     RenderCrosshair();
     RenderSpectatorList();       // unit E: misc HUD
     RenderHitMarker();
@@ -1894,7 +1930,7 @@ chain:
         if (!g_noUnusual && s_noUnusualPrev) RestoreHatParticles();
         s_noUnusualPrev = g_noUnusual;
 
-        const bool psWinOpen = s_psPointWin >= 0;
+        const bool psWinOpen = s_psPointWin >= 0 || Recorder_EditorOpen();   // recorder clip editor = same input handoff
         const bool menuUp    = g_showMenu || psWinOpen;
         if (menuUp) ClipCursor(nullptr);
 
@@ -1964,7 +2000,7 @@ HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
 
 BOOL WINAPI h_SetCursorPos(int x, int y) {
     MiscHookGuard _g;
-    if (g_showMenu || s_psPointWin >= 0) return TRUE; // eat the recenter = view freezes
+    if (g_showMenu || s_psPointWin >= 0 || Recorder_EditorOpen()) return TRUE; // eat the recenter = view freezes
     return o_SetCursorPos(x, y);
 }
 
@@ -2021,11 +2057,13 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (wParam == VK_RETURN || wParam == VK_ESCAPE) { s_psPointWin = -1; return 0; }
             if (wParam == VK_BACK) { PS_PointDelete(s_psPointWin); s_psPointWin = -1; return 0; }
         }
+        // recorder: ENTER on a route start opens its clip editor, ESC/ENTER close it (botox)
+        if (s_psPointWin < 0 && Recorder_EditorKey((unsigned)wParam)) return 0;
     }
 
     // Menu up, or the point window open: imgui gets the input and the game is starved.
     // One context, one window, so routing is a straight handoff to the win32 backend.
-    if (g_showMenu || s_psPointWin >= 0)
+    if (g_showMenu || s_psPointWin >= 0 || Recorder_EditorOpen())
     {
         ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
         if (IsMenuInputMsg(msg))

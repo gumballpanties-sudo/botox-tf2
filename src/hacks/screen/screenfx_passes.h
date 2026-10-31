@@ -16,6 +16,9 @@ void ScreenFxPasses_NewFrame();
 void ScreenFxPasses_Destroy();
 
 // Emphasize + show depth (botox depth_view.cpp). Depth based, so screenfx.cpp's ScreenFx_Frame
-// draws it from the game's post slot right after its depth resolve, into target.
+// draws it from the game's post slot right after its depth resolve, into target. view = the
+// frame's z range, so the shader's lin() means the same distance on every map.
+struct FxViewSetup;   // screenfx.h
 void ScreenFxPasses_DepthView(IDirect3DDevice9* dev, IDirect3DSurface9* target,
-                              const D3DSURFACE_DESC& desc, IDirect3DTexture9* depth);
+                              const D3DSURFACE_DESC& desc, IDirect3DTexture9* depth,
+                              const FxViewSetup& view);

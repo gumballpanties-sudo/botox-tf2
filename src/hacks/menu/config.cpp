@@ -437,6 +437,8 @@ static const CfgEntry kEntries[] = {
     { "pixelSurfKey",     CfgEntry::INT,    &g_pixelSurfKey, 0 },
     { "pixelSurfMode",    CfgEntry::INT,    &g_pixelSurfMode, 0 },
 { "pixelSurfPredictTicks", CfgEntry::INT, &g_pixelSurfPredictTicks, 0 },
+    { "psWallStrafe",     CfgEntry::INT,    &g_psWallStrafe, 0 },
+    { "psParkAtEnd",      CfgEntry::BOOL,   &g_psParkAtEnd, 0 },
     { "autoAlign",        CfgEntry::BOOL,   &g_autoAlign, 0 },
     { "textureBug",       CfgEntry::BOOL,   &g_textureBug, 0 },
     { "textureBugKey",    CfgEntry::INT,    &g_textureBugKey, 0 },
@@ -951,15 +953,27 @@ static const CfgEntry kEntries[] = {
 
     // ---- unit B: movement recorder ----
     { "recEnable",          CfgEntry::BOOL, &g_recEnable, 0 },
-    { "recRecordKey",       CfgEntry::INT,  &g_recRecordKey, 0 },
-    { "recRecordMode",      CfgEntry::INT,  &g_recRecordMode, 0 },
-    { "recPlayKey",         CfgEntry::INT,  &g_recPlayKey, 0 },
-    { "recPlayMode",        CfgEntry::INT,  &g_recPlayMode, 0 },
+    { "recShowLine",        CfgEntry::BOOL, &g_recShowLine, 0 },
+    { "recRender",          CfgEntry::BOOL, &g_recRender, 0 },
+    { "recPosition",        CfgEntry::INT,  &g_recPosition, 0 },
     { "recLockVa",          CfgEntry::BOOL, &g_recLockVa, 0 },
     { "recLockGoingToStart",CfgEntry::BOOL, &g_recLockGoingToStart, 0 },
+    { "recClipper",         CfgEntry::BOOL, &g_recClipper, 0 },
+    { "recClipperBox",      CfgEntry::BOOL, &g_recClipperBox, 0 },
+    { "recClipSeconds",     CfgEntry::FLOAT,&g_recClipSeconds, 0 },
     { "recStopOnMove",      CfgEntry::BOOL, &g_recStopOnMove, 0 },
     { "recForceWeapon",     CfgEntry::BOOL, &g_recForceWeapon, 0 },
-    { "recApproachDist",    CfgEntry::FLOAT,&g_recApproachDist, 0 },
+    { "recYaw",             CfgEntry::INT,  &g_recYaw, 0 },
+    { "recSpinSpeed",       CfgEntry::FLOAT,&g_recSpinSpeed, 0 },
+    { "recSmoothStart",     CfgEntry::FLOAT,&g_recSmoothStart, 0 },
+    { "recSmoothEnd",       CfgEntry::FLOAT,&g_recSmoothEnd, 0 },
+    { "recKeyStartRec",     CfgEntry::INT,  &g_recKeyStartRec, 0 },
+    { "recKeyStopRec",      CfgEntry::INT,  &g_recKeyStopRec, 0 },
+    { "recKeySave",         CfgEntry::INT,  &g_recKeySave, 0 },
+    { "recKeyStartPlay",    CfgEntry::INT,  &g_recKeyStartPlay, 0 },
+    { "recKeyStopPlay",     CfgEntry::INT,  &g_recKeyStopPlay, 0 },
+    { "recKeyClear",        CfgEntry::INT,  &g_recKeyClear, 0 },
+    { "recKeyClip",         CfgEntry::INT,  &g_recKeyClip, 0 },
 };
 
 // botox g_config.folder(visuals): visuals files live one folder down
@@ -1260,6 +1274,8 @@ void LoadConfig(const char* path, bool visuals)
         // 0 means "hold the park forever" on purpose, so only a negative is nonsense.
         // 256 stops a garbage cfg gluing the player to a wall for four seconds.
         { &g_tbParkTicks,        0,  256, "tbParkTicks",        nullptr, nullptr },
+        // combo index: off / keys / always
+        { &g_psWallStrafe,       0,  2,   "psWallStrafe",       nullptr, nullptr },
         // 8 ticks of flight (0.12s) is short but still predicts; the ceiling is the
         // traced-path array.
         { &g_tbPredictTicks,     8,  128, "tbPredictTicks",     nullptr, nullptr },
