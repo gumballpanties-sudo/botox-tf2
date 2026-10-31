@@ -28,7 +28,7 @@
 #include "../hacks/misc/killeffects.h"
 #include "../hacks/hud/points.h"
 #include "../hacks/hud/spectator_list.h"
-#include "../hacks/esp/esp_fx.h"     // unit E5: cross-thread esp avatar snapshot, see RenderEspAvatars
+#include "../hacks/esp/esp_queue.h"  // botox m_draw_data: esp recorded on the game thread, replayed in RenderEspQueue
 #include "../hacks/menu/debugmenu.h"
 #include "../hacks/menu/fonts.h"          // fonts tab: indicator face picked at runtime
 #include "../dependencies/imgui/freetype/imgui_freetype.h"
@@ -175,7 +175,10 @@ static __declspec(noinline) const float(*PsEngineW2S())[4]
 // matrix of the frame it is drawing (captured at that frame's vgui paint, OvQueue below);
 // only set for the length of that build.
 static float s_rtMatrix[4][4];
+static ImFont* s_fontEsp = nullptr;          // BuildFontAtlas, esp replay
+static std::vector<ImVec2> s_espPolyScratch;  // RenderEspQueue polyline points, render thread only
 static bool  s_rtMatrixOk = false;
+static uint32_t s_rtEspSeq = 0;   // esp_queue.h frame of the build in progress, 0 = newest (see EspQ::CopyFrame)
 
 static const float(*PsW2SMatrix())[4]
 {
@@ -998,6 +1001,17 @@ static float MiFontPx() { return FontIndPx(g_fontIndSize, g_miScale); }
 static uint32_t s_indApplied = 0;   // Fonts_IndSig() of what the atlas holds
 static int s_indBuiltSize = kFontIndDefSize;
 static FontSettle s_indSettle;
+// One unloadable face fails the whole atlas, so a picked one is built alone first.
+static bool TestBuildFont(const std::string& path, float px, int builderFlags)
+{
+    ImFontAtlas test;
+    ImFontConfig cfg;
+    cfg.FontBuilderFlags = builderFlags;
+    ImFont* f = test.AddFontFromFileTTF(path.c_str(), px, &cfg, test.GetGlyphRangesDefault());
+    return f && test.Build() && f->FindGlyphNoFallback('0') && f->FindGlyphNoFallback('A');
+}
+static float EspFontPx() { return (float)std::clamp(g_fontEspSize, 6, 100); }
+
 static std::string ValidIndicatorFont(float px, int builderFlags)
 {
     if (g_fontIndSize <= 0) return "";   // botox: size 0 = stock font
@@ -1009,13 +1023,33 @@ static std::string ValidIndicatorFont(float px, int builderFlags)
         DebugLog("fonts: indicator font '%s' not found (%s) -- stock tahomabd", g_fontIndName, path.c_str());
         return "";
     }
-    ImFontAtlas test;
-    ImFontConfig cfg;
-    cfg.FontBuilderFlags = builderFlags;
-    ImFont* f = test.AddFontFromFileTTF(path.c_str(), px, &cfg, test.GetGlyphRangesDefault());
-    const bool ok = f && test.Build() && f->FindGlyphNoFallback('0') && f->FindGlyphNoFallback('A');
-    if (!ok) DebugLog("fonts: indicator font '%s' failed to build -- stock tahomabd", path.c_str());
-    return ok ? path : "";
+    if (TestBuildFont(path, px, builderFlags)) return path;
+    DebugLog("fonts: indicator font '%s' failed to build -- stock tahomabd", path.c_str());
+    return "";
+}
+
+// esp font page -> the ImGui face player/building esp draws with (aim/esp.cpp via RenderEspQueue).
+// Same rules as the indicator page: size 0 or the untouched default pick = botox's stock esp face
+// (verdana bd 11 mono); a face that will not build falls back to it. The page lists GDI families
+// (they also drive the vgui face of the world-entity labels), mapped to a file by Fonts_FamilyPath.
+static uint32_t s_espImApplied = 0;   // Fonts_EspSig() of what the atlas holds
+static FontSettle s_espSettle;
+static std::string ValidEspFont()
+{
+    if (g_fontEspSize <= 0) return "";
+    if (_stricmp(g_fontEspName, kFontEspDefName) == 0 && g_fontEspSize == kFontEspDefSize && g_fontEspFlags == kFontEspDefFlags) return "";
+    const std::string path = Fonts_FamilyPath(g_fontEspName);
+    if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        DebugLog("fonts: esp font '%s' not found (%s) -- stock verdana bd 11", g_fontEspName, path.c_str());
+        return "";
+    }
+    if (!TestBuildFont(path, EspFontPx(), g_fontEspFlags & 0xFF))
+    {
+        DebugLog("fonts: esp font '%s' failed to build -- stock verdana bd 11", path.c_str());
+        return "";
+    }
+    return path;
 }
 
 // Clear() frees every ImFont, so EVERY font pointer we keep is reassigned here and
@@ -1177,6 +1211,21 @@ static void BuildFontAtlas()
 
     g_fontAirflow14 = plain(sf_ui_display_semibold, sizeof(sf_ui_display_semibold), 14.f, 0, cyr); orElse(g_fontAirflow14, g_fontBold);
 
+    // botox esp face: font_name_verdana_bd_11, verdana_font_config (Monochrome|MonoHinting), what
+    // the "esp font" page defaults to. Cyrillic for player names.
+    s_espImApplied = Fonts_EspSig();
+    s_fontEsp = nullptr;
+    if (const std::string custom = ValidEspFont(); !custom.empty())
+    {
+        ImFontConfig c = { };
+        c.FontBuilderFlags = g_fontEspFlags & 0xFF;   // FontFlagBit i == builder flag 1 << i
+        s_fontEsp = io.Fonts->AddFontFromFileTTF(custom.c_str(), EspFontPx(), &c, cyr);
+        DebugLog("fonts: esp font %s %.0fpx flags 0x%x", custom.c_str(), EspFontPx(), g_fontEspFlags & 0xFF);
+    }
+    if (!s_fontEsp) s_fontEsp = sys("verdanab.ttf", 11.f, mono, cyr);
+    orElse(s_fontEsp, g_menuBold);
+    if (s_fontEsp) g_espQFontH.store(s_fontEsp->FontSize, std::memory_order_relaxed);
+
     // botox render.cpp: font_name_icon_13, compressed icon font, 0xe005..0xf8ff
     static const ImWchar kIconRanges[] = { 0xe005, 0xf8ff, 0 };
     g_fontIcon13 = io.Fonts->AddFontFromMemoryCompressedTTF(icon_font_compressed_data, icon_font_compressed_size, 13.f, nullptr, kIconRanges);
@@ -1184,23 +1233,147 @@ static void BuildFontAtlas()
     io.Fonts->Build();
 }
 
-// unit E5: ESP avatars. esp.cpp's DrawPlayers() (IEngineVGui::Paint, before this frame's
-// ImGui::NewFrame()) already snapshotted each visible player's box rect + steamid64 into
-// esp_fx.h's lock-guarded array -- drawn here, mid-frame, where Avatar_Get()/AddImage() are
-// actually valid. g_espAvatar is read on the esp.cpp side; an empty snapshot is a no-op loop.
-static void RenderEspAvatars()
+// botox draw_cached_data: replay the esp the game thread recorded (aim/esp.cpp, esp_queue.h) into
+// the background list, first, so every other overlay sits on top of it. A frame older than
+// 250 ms is a dead one (no local player, level change, paint stopped): nothing is drawn.
+static void RecolourVertsY(ImDrawList* dl, int first, uint32_t topCol, uint32_t botCol, float y0, float y1)
 {
-    EspFxAvatarSlot slots[kEspFxMaxAvatars];
-    const int n = EspFx_CopyAvatars(slots, kEspFxMaxAvatars);
-    if (n <= 0) return;
-
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    for (int i = 0; i < n; ++i)
+    const ImVec4 top = ImGui::ColorConvertU32ToFloat4(topCol), bot = ImGui::ColorConvertU32ToFloat4(botCol);
+    const float hgt = std::max(y1 - y0, 1.f);
+    for (int i = first; i < dl->VtxBuffer.Size; ++i)
     {
-        const ImTextureID tex = Avatar_Get(slots[i].steamid64, false);
-        if (!tex) continue;
-        dl->AddImage(tex, ImVec2(slots[i].minX, slots[i].minY), ImVec2(slots[i].maxX, slots[i].maxY));
+        ImDrawVert& v = dl->VtxBuffer[i];
+        const float t = std::clamp((v.pos.y - y0) / hgt, 0.f, 1.f), cov = ((v.col >> IM_COL32_A_SHIFT) & 0xFF) / 255.f;
+        v.col = ImGui::ColorConvertFloat4ToU32(ImVec4(top.x + (bot.x - top.x) * t, top.y + (bot.y - top.y) * t,
+            top.z + (bot.z - top.z) * t, (top.w + (bot.w - top.w) * t) * cov));
     }
+}
+
+static void RenderEspQueue()
+{
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    ImFont* font = s_fontEsp ? s_fontEsp : ImGui::GetFont();
+    // copied out under the lock, replayed outside it: Avatar_Get can create a texture, and the game
+    // thread's Commit must never spin behind that. s_rtEspSeq = the frame this build is for (multicore)
+    static EspFrame f;
+    EspQ::CopyFrame(s_rtEspSeq, f);
+    if (f.cmds.empty() || GetTickCount64() - f.stampMs > 250)
+        return;
+    // esp.cpp projects in ENGINE screen pixels (H::Draw size); ImGui draws in its DisplaySize (window
+    // client rect). Windowed + DPI scaling makes them differ, and unscaled every box and name lands
+    // off by that ratio. Everything this replay adds is rescaled at the end.
+    const ImGuiIO& io = ImGui::GetIO();
+    const float sx = f.srcW > 0.f ? io.DisplaySize.x / f.srcW : 1.f, sy = f.srcH > 0.f ? io.DisplaySize.y / f.srcH : 1.f;
+    static bool s_loggedSize = false;
+    if (!s_loggedSize)
+    {
+        s_loggedSize = true;
+        DebugLog("esp: engine screen %.0fx%.0f, imgui display %.0fx%.0f -> replay scale %.3f x %.3f",
+            f.srcW, f.srcH, io.DisplaySize.x, io.DisplaySize.y, sx, sy);
+    }
+    const int firstVtx = dl->VtxBuffer.Size;
+    const auto pt = [&](int i) { return ImVec2(f.pts[i * 2], f.pts[i * 2 + 1]); };
+    float lastTextLeft = 0.f;
+    ImVec2 buf[64];
+    for (const EspCmd& c : f.cmds)
+    {
+        switch (c.type)
+        {
+        case ESPC_LINE:
+            dl->AddLine(ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), c.col, c.thick);
+            break;
+        case ESPC_RECT:
+        {   // botox impl_t::rect
+            const float inset = (c.thick - 1.f) * 0.5f;
+            if (c.flags & ESPF_FILLED)
+                dl->AddRectFilled(ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), c.col, c.round);
+            else
+                dl->AddRect(ImVec2(c.x0 + inset, c.y0 + inset), ImVec2(c.x1 - inset, c.y1 - inset), c.col, std::max(c.round - inset, 0.f), 0, c.thick);
+            const float off = 0.5f + c.othick * 0.5f, inner = off + 2.f * inset;
+            if (c.flags & ESPF_OUT_INNER)
+                dl->AddRect(ImVec2(c.x0 + inner, c.y0 + inner), ImVec2(c.x1 - inner, c.y1 - inner), c.col2, std::max(c.round - inner, 0.f), 0, c.othick);
+            if (c.flags & ESPF_OUT_OUTER)
+                dl->AddRect(ImVec2(c.x0 - off, c.y0 - off), ImVec2(c.x1 + off, c.y1 + off), c.col2, c.round > 0.f ? c.round + off : 0.f, 0, c.othick);
+            break;
+        }
+        case ESPC_GRAD:
+        {   // draw_type_gradient_rect: rounded = a white fill re-coloured per vertex by height
+            if (c.round <= 0.f)
+            {
+                dl->AddRectFilledMultiColor(ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), c.col, c.col, c.col2, c.col2);
+                break;
+            }
+            const int first = dl->VtxBuffer.Size;
+            dl->AddRectFilled(ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), IM_COL32_WHITE, c.round);
+            RecolourVertsY(dl, first, c.col, c.col2, c.y0, c.y1);
+            break;
+        }
+        case ESPC_CORNER:
+        {   // draw_type_corner_rect
+            const float l = c.x0, t = c.y0, r = c.x1, b = c.y1, ax = c.ax, ay = c.ay, rad = c.round;
+            const auto corner = [&](ImVec2 from, ImVec2 centre, int aMin, int aMax, ImVec2 to)
+            {
+                dl->PathLineTo(from);
+                dl->PathArcToFast(centre, rad, aMin, aMax);
+                dl->PathLineTo(to);
+                dl->PathStroke(c.col, 0, c.thick);
+            };
+            corner(ImVec2(l, t + ay), ImVec2(l + rad, t + rad), 6, 9, ImVec2(l + ax, t));
+            corner(ImVec2(r - ax, t), ImVec2(r - rad, t + rad), 9, 12, ImVec2(r, t + ay));
+            corner(ImVec2(r, b - ay), ImVec2(r - rad, b - rad), 0, 3, ImVec2(r - ax, b));
+            corner(ImVec2(l + ax, b), ImVec2(l + rad, b - rad), 3, 6, ImVec2(l, b - ay));
+            break;
+        }
+        case ESPC_POLY:
+        {
+            const int n = std::min(c.pn, 64);
+            if (n < 3) break;
+            for (int i = 0; i < n; i++) buf[i] = pt(c.p0 + i);
+            dl->AddConvexPolyFilled(buf, n, c.col);
+            if (c.flags & ESPF_OUTLINE)
+                dl->AddPolyline(buf, n, c.col2, ImDrawFlags_Closed, c.thick);
+            break;
+        }
+        case ESPC_POLYLINE:
+        {
+            std::vector<ImVec2>& v = s_espPolyScratch;
+            v.clear();
+            for (int i = 0; i < c.pn; i++) v.push_back(pt(c.p0 + i));
+            const bool grad = (c.flags & ESPF_GRADIENT) != 0;
+            const int first = dl->VtxBuffer.Size;
+            dl->AddPolyline(v.data(), (int)v.size(), grad ? IM_COL32_WHITE : c.col, ImDrawFlags_None, c.thick);
+            if (grad)   // botox corner health bar: the fill recoloured top -> bottom over the track's height
+                RecolourVertsY(dl, first, c.col, c.col2, c.y0, c.y1);
+            break;
+        }
+        case ESPC_CIRCLE:
+            if (c.thick < 0.f) dl->AddCircleFilled(ImVec2(c.x0, c.y0), c.x1, c.col, 12);   // thick < 0 = filled
+            else               dl->AddCircle(ImVec2(c.x0, c.y0), c.x1, c.col, 32, c.thick);
+            break;
+        case ESPC_TEXT:
+        {   // botox impl_t::text, text_flag_dropshadow
+            const char* s = &f.text[c.p0];
+            const ImVec2 sz = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.f, s);
+            const ImVec2 at(floorf(c.x0 - sz.x * c.ax), floorf(c.y0 - sz.y * c.ay));
+            lastTextLeft = at.x;
+            if (c.flags & ESPF_SHADOW)
+                dl->AddText(font, font->FontSize, ImVec2(at.x + 1.f, at.y + 1.f), c.col2, s);
+            dl->AddText(font, font->FontSize, at, c.col, s);
+            break;
+        }
+        case ESPC_AVATAR:
+        {
+            const ImTextureID tex = Avatar_Get(c.sid, false);
+            if (!tex) break;
+            const float dx = (c.flags & ESPF_LEFT_OF_TEXT) ? lastTextLeft : 0.f;
+            dl->AddImageRounded(tex, ImVec2(c.x0 + dx, c.y0), ImVec2(c.x1 + dx, c.y1), ImVec2(0, 0), ImVec2(1, 1), c.col, c.round, ImDrawFlags_RoundCornersAll);
+            break;
+        }
+        }
+    }
+    if (fabsf(sx - 1.f) > 1e-3f || fabsf(sy - 1.f) > 1e-3f)
+        for (int i = firstVtx; i < dl->VtxBuffer.Size; ++i)
+            dl->VtxBuffer[i].pos.x *= sx, dl->VtxBuffer[i].pos.y *= sy;
 }
 
 // Build the whole imgui frame. Called once per frame by whoever gets there first: the
@@ -1224,7 +1397,8 @@ static void BuildImGuiFrame()
     // Scale is checked against the size the atlas was BUILT with, so only the debounce
     // reacts to the size slider.
     if (FontIndPx(s_indBuiltSize, g_miScale) != s_miFontPx ||
-        s_indSettle.Due(Fonts_IndSig(), s_indApplied, GetTickCount64()))
+        s_indSettle.Due(Fonts_IndSig(), s_indApplied, GetTickCount64()) ||
+        s_espSettle.Due(Fonts_EspSig(), s_espImApplied, GetTickCount64()))
     {
         BuildFontAtlas();
         ImGui_ImplDX9_InvalidateDeviceObjects();   // NewFrame re-uploads the atlas texture
@@ -1235,6 +1409,7 @@ static void BuildImGuiFrame()
     ImGui::NewFrame();
     ImGui::GetIO().MouseDrawCursor = menuUp;
 
+    RenderEspQueue();     // botox: esp under every other overlay (background list, first in)
     RenderBootScreen();   // foreground draw list draws last regardless of call order: always on top
     RenderPsOverlay();
     RenderRouteOverlay();
@@ -1248,7 +1423,6 @@ static void BuildImGuiFrame()
     RenderDetections();          // unit B
     Recorder_RenderStatus();     // unit B
     RenderCrosshair();
-    RenderEspAvatars();          // unit E5: steam avatars at the esp box, see esp.cpp DrawPlayers
     RenderSpectatorList();       // unit E: misc HUD
     RenderHitMarker();
     RenderKillEffects();
@@ -1306,7 +1480,7 @@ static const char* VGui_PanelName(void* panels, VPANEL_t vpanel)
 // single-threaded vgui pass would: same position, same frame, same matrix.
 // Ring of 8: the main thread runs at most a frame or two ahead of the replay, so a slot is
 // never rewritten before its call ran. Faked CFunctor, never freed (screenfx.cpp:496).
-struct OvFunctor { void** vfptr; float m[4][4]; bool ok; };
+struct OvFunctor { void** vfptr; float m[4][4]; bool ok; uint32_t espSeq; };
 static int   __fastcall OvFn_AddRef (void*)             { return 1; }
 static int   __fastcall OvFn_Release(void*)             { return 1; }
 static void* __fastcall OvFn_Dtor   (void* p, unsigned) { return p; }
@@ -1334,8 +1508,10 @@ static void __fastcall OvFn_Call(void* self)
 
     const OvFunctor* f = static_cast<const OvFunctor*>(self);
     if (f->ok) { memcpy(s_rtMatrix, f->m, sizeof(s_rtMatrix)); s_rtMatrixOk = true; }
+    s_rtEspSeq = f->espSeq;
     BuildImGuiFrame();
     s_rtMatrixOk = false;
+    s_rtEspSeq = 0;
     if (s_gameCount > 0) RenderSubset(s_gameLists, s_gameCount);   // scene is open: vgui's own
     s_vguiDrew = true;
 }
@@ -1347,6 +1523,7 @@ static bool OvQueue()
     f.vfptr = s_ovFnVt;
     const float(*m)[4] = PsEngineW2S();
     f.ok = m != nullptr;
+    f.espSeq = g_espQSeq.load(std::memory_order_acquire);   // this frame's esp, committed earlier in this paint
     if (m) memcpy(f.m, m, sizeof(f.m));
     return ScreenFx_QueueFunctor(&f);
 }

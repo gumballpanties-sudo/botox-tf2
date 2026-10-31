@@ -45,8 +45,6 @@ static FrameStageNotify_t   o_FrameStageNotify   = nullptr;
 static SetSequence_t        o_SetSequence        = nullptr;
 static TF_IsHolidayActive_t o_TF_IsHolidayActive = nullptr;
 static uintptr_t s_preWriteCallSite = 0;   // resolved = FSN(2) really is CL_ProcessPacketEntities
-static bool      s_setSeqViaAim     = false;   // aim tree's SetSequence hook calls Skins_RemapSequence
-static DWORD     s_fullUpdateTick   = 0;       // last cl_fullupdate we sent -- see Skins_OnGameEvent
 
 static void*    s_pLocalViewmodelEnt = nullptr;
 static void*    s_lastLocalEnt       = nullptr;
@@ -148,59 +146,61 @@ __declspec(noinline) static bool SEH_WriteBool(void* pEnt, int offset, bool val)
 }
 
 // ==== engine attribute API ======================================================================
-// CAttributeList::SetRuntimeAttributeValue (econ_item_view.cpp:1754) adds/sets the attribute
-// with the engine's own allocator and then calls m_pManager->OnAttributeValuesChanged, which
-// is what clears the attribute-hook cache the sheen / paintkit / particle code reads through.
-//
-// It needs no schema lookup: the ONLY thing it reads off the attribute definition is
-// m_nDefIndex (econ_item_schema.h:780, a WORD at +8 behind the KeyValues*). Disasm, client
-// 10-30 build, client+0x3A3260: `lea rdi,[rdx+8]` / `movzx r10d, word ptr [rdi]`, nothing else.
-// So a two-field stand-in is a complete definition for this call. (The old path looked the
-// def up through a CEconItemSchema VTABLE probe of slots 3..7 -- GetAttributeDefinition is
-// not virtual, those slots are GetRarityName & co, so it returned null and fell back to a raw
-// write with the wrong element layout, i.e. nothing applied.)
-struct AttrDefStub { void* kv; uint16_t defIndex; };
-
-// x64 CEconItemAttribute as the same function lays it out: stride 0x18, def index WORD at +8,
-// value at +0xC, refundable currency at +0x10 (`lea rcx,[rax+rax*2]` / `cmp word [rdx+rcx*8+8]`
-// / `movss xmm0,[rcx+0xC]`). types.h's CEconItemAttribute puts the value at +0x10 -- wrong.
-struct EconAttrX64 { void* vtbl; uint16_t defIndex; uint16_t _pad; float value; int refund; int _pad2; };
-static_assert(sizeof(EconAttrX64) == 0x18, "CEconItemAttribute x64 stride");
-
+// Setting an attribute through the schema is what makes the killstreak sheen proxy and the
+// paintkit material system notice it. Raw SetOrAdd only edits the list, so it is the fallback.
+static GetItemSchema_t            s_fnGetItemSchema            = nullptr;
+static GetAttributeDefinition_t   s_fnGetAttributeDefinition   = nullptr;
 static SetRuntimeAttributeValue_t s_fnSetRuntimeAttributeValue = nullptr;
 // Manual particle dispatch, for the Exorcism spell (see the player_death section below).
 static CTE_DispatchEffect_t       s_fnDispatchEffect           = nullptr;
 static Get_ParticleSystemIndex_t  s_fnGetParticleIndex         = nullptr;
 static bool                       s_sigsResolved               = false;
 
-// The list's own element, or null. CAttributeList = { vtbl, CUtlVector{mem,alloc,grow,size,elems},
-// m_pManager } -- the function reads the size at +0x18 and the memory at +8.
-__declspec(noinline) static const EconAttrX64* FindAttr(const CAttributeList* pList, uint16_t index)
+// Sentinel 1 in s_fnGetAttributeDefinition means "no direct sig, probe the vtable".
+// GetAttributeDefinitionByIndex sits at slot 4 in this build; 3..7 covers slot drift.
+__declspec(noinline) static void* SchemaGetAttrDef(void* pSchema, int index)
 {
-    __try {
-        const int n = pList->m_Attributes.m_Size;
-        const auto* mem = reinterpret_cast<const EconAttrX64*>(pList->m_Attributes.m_Memory.m_pMemory);
-        if (n <= 0 || n > 256 || reinterpret_cast<uintptr_t>(mem) < 0x10000) return nullptr;
-        for (int i = 0; i < n; ++i)
-            if (mem[i].defIndex == index) return &mem[i];
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    if (reinterpret_cast<uintptr_t>(s_fnGetAttributeDefinition) > 1)
+    {
+        void* pDef = nullptr;
+        __try { pDef = s_fnGetAttributeDefinition(pSchema, index); }
+        __except(EXCEPTION_EXECUTE_HANDLER) {}
+        return pDef;
+    }
+
+    void** vtbl = *reinterpret_cast<void***>(pSchema);
+    if (reinterpret_cast<uintptr_t>(vtbl) < 0x10000) return nullptr;
+
+    for (int slot = 3; slot <= 7; ++slot)
+    {
+        void* pDef = nullptr;
+        __try {
+            using Fn = void*(__fastcall*)(void*, int);
+            Fn fn = reinterpret_cast<Fn>(vtbl[slot]);
+            if (reinterpret_cast<uintptr_t>(fn) < 0x10000) continue;
+            pDef = fn(pSchema, index);
+        } __except(EXCEPTION_EXECUTE_HANDLER) { continue; }
+        if (reinterpret_cast<uintptr_t>(pDef) >= 0x10000) return pDef;
+    }
     return nullptr;
 }
 
 __declspec(noinline) static bool EngineSetAttribute(CAttributeList* pList, uint32_t index, float value)
 {
-    if (!s_fnSetRuntimeAttributeValue) return false;
-    // Same bits already there: skip, so the manager's cache is not thrown away every frame.
-    if (const EconAttrX64* a = FindAttr(pList, (uint16_t)index))
-        if (memcmp(&a->value, &value, sizeof(float)) == 0) return true;
-    const AttrDefStub def{ nullptr, (uint16_t)index };
     __try {
-        s_fnSetRuntimeAttributeValue(pList, (void*)&def, value);
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        static bool s_logged = false;
-        if (!s_logged) { s_logged = true; DebugLog("skins: SEH in SetRuntimeAttributeValue (attr %u)", index); }
-    }
+        if (s_fnGetItemSchema && s_fnGetAttributeDefinition && s_fnSetRuntimeAttributeValue)
+        {
+            void* pSchema = s_fnGetItemSchema();
+            if (!pSchema) goto fallback;
+            void* pDef = SchemaGetAttrDef(pSchema, (int)index);
+            if (!pDef) goto fallback;
+            s_fnSetRuntimeAttributeValue(pList, pDef, value);
+            return true;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+fallback:
+    pList->SetOrAdd((uint16_t)index, value);
     return false;
 }
 
@@ -215,33 +215,49 @@ static void ResolveSkinSigs()
     if (!hClient) return;
     s_sigsResolved = true;
 
-    // Each pattern was matched against the shipping x64 client.dll (10-30 build) and is unique
-    // there; the disasm that proves what the function is sits next to it. One log line per sig.
-    auto scan = [&](const char* what, const char* pat) -> uint8_t* {
-        uint8_t* a = PatternScan(hClient, pat);
-        if (a) DebugLog("skins: sig %s OK at client+0x%llX", what,
-                        (unsigned long long)(reinterpret_cast<uintptr_t>(a) - reinterpret_cast<uintptr_t>(hClient)));
-        else   DebugLog("skins: sig %s NOT FOUND", what);
-        return a;
-    };
+    // GetItemSchema()
+    if (uint8_t* a = PatternScan(hClient, "48 83 EC ? E8 ? ? ? ? 48 83 C0 ? 48 83 C4 ? C3 CC CC CC"))
+        s_fnGetItemSchema = reinterpret_cast<GetItemSchema_t>(a);
 
-    // CAttributeList::SetRuntimeAttributeValue -- `mov r9d,[rcx+18h]` (m_Attributes.Count()),
-    // `lea rdi,[rdx+8]` (&pAttrDef->m_nDefIndex). Without it NO attribute is applied: warpaint,
-    // killstreak, unusual, australium, festivizer, stat clock and spells all go through here.
-    if (uint8_t* a = scan("SetRuntimeAttributeValue",
-            "48 89 5C 24 ? 55 56 57 48 8B EC 48 83 EC ? 44 8B 49 18 48 8D 7A 08"))
-        s_fnSetRuntimeAttributeValue = reinterpret_cast<SetRuntimeAttributeValue_t>(a);
+    // CEconItemSchema::GetAttributeDefinitionByIndex
+    {
+        static const char* const kSigs[] = {
+            "89 54 24 ? 53 48 83 EC ? 48 8B D9 48 8D 54 24 ? 48 81 C1 ? ? ? ? E8 ? ? ? ? 8B D0 3B 83 ? ? ? ? 73 ? 8B 83 ? ? ? ? 83 F8 ? 74 ? 3B D0 7F ? 48 81 C3 ? ? ? ? 44 8B C2 83 FA ? 74 ? 48 8B 03 8B CA",
+            "48 89 5C 24 ? 57 48 83 EC ? 8B FA 48 8B D9 E8 ? ? ? ? 48 85 C0",
+            "48 8B C4 48 89 58 ? 48 89 70 ? 57 48 83 EC ? 41 8B F0 48 8B D9",
+            nullptr
+        };
+        uint8_t* a = nullptr;
+        for (int i = 0; kSigs[i] && !a; ++i) a = PatternScan(hClient, kSigs[i]);
+        s_fnGetAttributeDefinition = a
+            ? reinterpret_cast<GetAttributeDefinition_t>(a)
+            : reinterpret_cast<GetAttributeDefinition_t>(reinterpret_cast<void*>((uintptr_t)1));
+    }
 
-    // DispatchEffect(const char*, const CEffectData&) + GetParticleSystemIndex(const char*): the
-    // Exorcism ghosts are a server effect, so the client has to be told to draw them by hand.
-    // DispatchEffect builds a CPVSFilter and calls te->DispatchEffect (vtable +0x130);
-    // GetParticleSystemIndex returns 0 after its 0xFFFF "not found" Warning.
-    if (uint8_t* a = scan("DispatchEffect",
-            "48 89 5C 24 ? 57 48 83 EC ? 48 8B D9 48 8B FA 48 8D 4C 24 ? E8 ? ? ? ? 48 8D 05"))
+    // CAttributeList::SetRuntimeAttributeValue
+    {
+        static const char* const kSigs[] = {
+            "48 89 5C 24 10 55 56 57 48 8B EC 48 83 EC 50 44",
+            "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05",
+            nullptr
+        };
+        uint8_t* a = nullptr;
+        for (int i = 0; kSigs[i] && !a; ++i) a = PatternScan(hClient, kSigs[i]);
+        if (a) s_fnSetRuntimeAttributeValue = reinterpret_cast<SetRuntimeAttributeValue_t>(a);
+    }
+
+    // CTE_DispatchEffect + Get_ParticleSystemIndex: the Exorcism ghosts are a server effect,
+    // so the client has to be told to draw them by hand.
+    if (uint8_t* a = PatternScan(hClient, "48 89 5C 24 ? 57 48 83 EC ? 48 8B D9 48 8B FA 48 8D 4C 24"))
         s_fnDispatchEffect = reinterpret_cast<CTE_DispatchEffect_t>(a);
-    if (uint8_t* a = scan("GetParticleSystemIndex",
-            "40 53 48 83 EC ? 48 8B D9 48 85 C9 74 ? 48 8B 0D ? ? ? ? 48 8B D3 48 8B 01 FF 50 ? 3D FF FF 00 00"))
+    if (uint8_t* a = PatternScan(hClient,
+            "40 53 48 83 EC ? 48 8B D9 48 85 C9 74 ? 48 8B 0D ? ? ? ? 48 8B D3 48 8B 01 FF 50 ? 3D"))
         s_fnGetParticleIndex = reinterpret_cast<Get_ParticleSystemIndex_t>(a);
+
+    DebugLog("skins: sigs schema=%p attrdef=%p setattr=%p effect=%p particleidx=%p",
+             (void*)s_fnGetItemSchema, (void*)s_fnGetAttributeDefinition,
+             (void*)s_fnSetRuntimeAttributeValue,
+             (void*)s_fnDispatchEffect, (void*)s_fnGetParticleIndex);
 }
 
 // IVEngineClient::ClientCmd_Unrestricted -- slot 106. A full update is the only way to make
@@ -249,7 +265,6 @@ static void ResolveSkinSigs()
 static void TriggerForceFullUpdate(const char* reason)
 {
     DebugLog("skins: cl_fullupdate (%s)", reason);
-    s_fullUpdateTick = GetTickCount();
     if (!g_engine) return;
     __try {
         void** vtbl = *reinterpret_cast<void***>(g_engine);
@@ -532,14 +547,11 @@ __declspec(noinline) static int MI_GetModelIndex(const char* path)
     return r;
 }
 
-// RegisterDynamicModel, slot 52. Verified on the shipping engine.dll (10-30): the
-// VModelInfoClient006 factory returns the object whose vtable[52] opens with
-// `test r8b,r8b / jne / mov eax,-1` -- RegisterDynamicModel(name, bClientSide) refusing a
-// server-side request. [46] is GetCacheHandle (`cmp [rdx+20h],3 / movzx eax,word [rdx+48h]`),
-// [54] AddRefDynamicModel (`cmp edx,-1`). The old 52 -> 46 fallback called GetCacheHandle with
-// a string; gone. This call is the ONLY thing that makes a reskin nobody in the server owns
+// RegisterDynamicModel, slot 52. The result is validated by name before it is believed: a
+// wrong slot here is silent (46 would be GetCacheHandle and would hand back a plausible-looking
+// small integer), and this call is the ONLY thing that makes a reskin nobody in the server owns
 // drawable at all -- see GetReskinViewmodelIdx.
-static constexpr int s_registerSlot = 52;
+static int s_registerSlot = 52;   // switched to 46 only if 52 fails validation, then logged
 
 __declspec(noinline) static int MI_RegisterDynamicAt(int slot, const char* path)
 {
@@ -568,10 +580,21 @@ __declspec(noinline) static int MI_RegisterDynamic(const char* path)
     if (ModelIdxIs(r, path)) return r;
     // GetModelIndex answers for a model the register call did load even when the return value
     // was not the index (a wrong slot returns junk but does nothing), so ask by name too.
-    const int byName = MI_GetModelIndex(path);
+    int byName = MI_GetModelIndex(path);
+    if (ModelIdxIs(byName, path)) return byName;
+
+    const int other = (s_registerSlot == 52) ? 46 : 52;
+    const int r2 = MI_RegisterDynamicAt(other, path);
+    if (ModelIdxIs(r2, path)) {
+        DebugLog("skins: RegisterDynamicModel slot %d failed validation, slot %d works -- "
+                 "using %d from here", s_registerSlot, other, other);
+        s_registerSlot = other;
+        return r2;
+    }
+    byName = MI_GetModelIndex(path);
     if (ModelIdxIs(byName, path)) return byName;
     DebugLog("skins: RegisterDynamicModel gave nothing usable for '%s' (slot %d -> %d, "
-             "by name -> %d)", path, s_registerSlot, r, byName);
+             "slot %d -> %d)", path, s_registerSlot, r, other, r2);
     return -1;
 }
 
@@ -1380,12 +1403,12 @@ static void SkinsDiag(void* pLocal)
     static bool s_once = false;
     if (!s_once) {
         s_once = true;
-        DebugLog("skins diag: sigs setattr=%p effect=%p partidx=%p "
-                 "fsn=%p setseq=%p%s holiday=%p prewrite=%p",
+        DebugLog("skins diag: sigs schema=%p attrdef=%p setattr=%p effect=%p partidx=%p "
+                 "fsn=%p setseq=%p holiday=%p prewrite=%p",
+                 (void*)s_fnGetItemSchema, (void*)s_fnGetAttributeDefinition,
                  (void*)s_fnSetRuntimeAttributeValue, (void*)s_fnDispatchEffect,
                  (void*)s_fnGetParticleIndex, (void*)o_FrameStageNotify,
-                 (void*)o_SetSequence, s_setSeqViaAim ? "(aim hook)" : "",
-                 (void*)o_TF_IsHolidayActive, (void*)s_preWriteCallSite);
+                 (void*)o_SetSequence, (void*)o_TF_IsHolidayActive, (void*)s_preWriteCallSite);
         DebugLog("skins diag: off myWpns=%d activeWpn=%d defIdx=%d attrList=%d vmIdx=%d "
                  "customVM=%d hVM0=%d skin=%d team=%d | ragdoll gold=%d player=%d "
                  "| streaks local=%d res=%d | regSlot=%d",
@@ -1692,19 +1715,6 @@ static void __fastcall h_FrameStageNotify(int stage)
     const bool skinEnabling  = g_enableSkins && !s_skinWasEnabled;
     const bool skinDisabling = !g_enableSkins && s_skinWasEnabled;
     s_skinWasEnabled = g_enableSkins;
-
-    // One full update per burst of menu edits, not one per click: each one rebuilds every
-    // entity (debug.log 10-30 had four back to back). Fired 400 ms after the LAST request.
-    static bool  s_updPending = false;
-    static DWORD s_updReqTick = 0;
-    const bool updReq = skinEnabling || skinDisabling || (g_enableSkins && g_skinNeedsUpdate);
-    g_skinNeedsUpdate = false;
-    if (updReq) { s_updPending = true; s_updReqTick = GetTickCount(); }
-    if (s_updPending && GetTickCount() - s_updReqTick >= 400) {
-        s_updPending = false;
-        TriggerForceFullUpdate("skin changed");
-    }
-
     if (!g_enableSkins && !skinDisabling) return;
 
     const int localIdx = GetLocalPlayerIndex();
@@ -1718,7 +1728,7 @@ static void __fastcall h_FrameStageNotify(int stage)
 
     if (skinDisabling) KsColorRestoreAll();
 
-    if (updReq) {
+    if (skinEnabling || skinDisabling || g_skinNeedsUpdate) {
         s_activeReskin        = 0;
         s_activeBaseKey       = 0;
         s_activeFrom          = AS_DEFAULT;
@@ -1730,6 +1740,8 @@ static void __fastcall h_FrameStageNotify(int stage)
         if (g_enableSkins)
             for (auto& [id, cfg] : g_skinCfgs)
                 if (cfg.enabled && cfg.reskinDef > 0) GetReskinViewmodelIdx(cfg.reskinDef);
+        TriggerForceFullUpdate("skin changed");
+        g_skinNeedsUpdate = false;
     }
 
     if (pLocal != s_lastLocalEnt) {
@@ -1891,9 +1903,14 @@ __declspec(noinline) static bool WeaponHasExorcismAttr()
         void* pWpn = SEH_EntFromHandle(hActive);
         if (!pWpn || !SEH_VtableSane(pWpn)) return false;
 
-        const CAttributeList* pList = reinterpret_cast<const CAttributeList*>(
+        CAttributeList* pList = reinterpret_cast<CAttributeList*>(
             reinterpret_cast<uintptr_t>(pWpn) + s_offAttrList);
-        found = FindAttr(pList, 1009) != nullptr;
+        const int sz = pList->m_Attributes.m_Size;
+        auto* mem = pList->m_Attributes.m_Memory.m_pMemory;
+        if (!mem || sz <= 0 || sz >= 48) return false;
+        if (reinterpret_cast<uintptr_t>(mem) < 0x10000) return false;
+        for (int i = 0; i < sz; ++i)
+            if (mem[i].m_iAttributeDefinitionIndex == 1009) { found = true; break; }
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
     return found;
 }
@@ -2335,13 +2352,6 @@ void Skins_OnGameEvent(void* pEvent)
             strcmp(name, "teamplay_win_panel")      == 0 ||
             strcmp(name, "localplayer_changeclass") == 0 ||
             strcmp(name, "localplayer_changeteam")  == 0) {
-            // Our own cl_fullupdate rebuilds the local player, and the rebuild fires both
-            // localplayer_* events (debug.log 10-30: every "cl_fullupdate (skin changed)" was
-            // followed by a changeteam + changeclass reset). Same team, same class: keep it.
-            if (name[0] == 'l' && GetTickCount() - s_fullUpdateTick < 3000) {
-                DebugLog("skins: %s right after our cl_fullupdate, streak %d kept", name, StreakTotal());
-                return;
-            }
             ResetStreak(name);
             return;
         }
@@ -2452,19 +2462,21 @@ void Skins_Install()
     // entry "CBaseAnimating_SetSequence"). When it is live this create fails, o_SetSequence
     // stays null and h_SetSequence never runs -- the aim hook calls Skins_RemapSequence
     // instead, so the reskin animation remap works either way.
-    // Aim installs first and MinHook's jump overwrites the six prologue bytes the pattern opens
-    // with, so the plain scan misses whenever aim owns it. Scan unhooked first, then with those
-    // six wildcarded -- one line either way, never a false "NOT FOUND". (client+0x1D4BE0 on 10-30,
-    // `cmp [rcx+m_nSequence],edx / je / mov [rcx+m_nSequence],edx` = SetSequence.)
-    if (uint8_t* a = PatternScan(hClient, "40 53 48 83 EC ? 48 8B D9 39 91 ? ? ? ? 74 ? 89 91")) {
-        InstallHookAt(a, "skins: CBaseAnimating::SetSequence", (void*)h_SetSequence, (void**)&o_SetSequence);
-    } else if (uint8_t* h = PatternScan(hClient, "? ? ? ? ? ? 48 8B D9 39 91 ? ? ? ? 74 ? 89 91")) {
-        s_setSeqViaAim = true;
-        DebugLog("skins: CBaseAnimating::SetSequence at %p owned by the aim hook -- remap runs "
-                 "from there (aim/hooks.cpp calls Skins_RemapSequence)", (void*)h);
-    } else {
-        DebugLog("skins: CBaseAnimating::SetSequence NOT FOUND (hooked or not) -- reskin anim "
-                 "remap is off");
+    InstallPatternHook(hClient, "skins: CBaseAnimating::SetSequence",
+                       "40 53 48 83 EC ? 48 8B D9 39 91 ? ? ? ? 74 ? 89 91",
+                       (void*)h_SetSequence, (void**)&o_SetSequence);
+    if (!o_SetSequence) {
+        // dih-sk3 read "pattern NOT FOUND" as dih's scanner disagreeing with the aim tree's on
+        // the same bytes. It is not: aim installs first (its 25 hooks are logged well above
+        // this line) and MinHook's jump OVERWRITES the six prologue bytes the pattern opens
+        // with, so by the time this scan runs those bytes are gone. Re-scan with exactly those
+        // six wildcarded, which tells "someone got here first" apart from a broken signature.
+        if (uint8_t* a = PatternScan(hClient, "? ? ? ? ? ? 48 8B D9 39 91 ? ? ? ? 74 ? 89 91"))
+            DebugLog("skins: SetSequence at %p is ALREADY HOOKED (the aim tree owns it) -- "
+                     "the remap runs from its hook, nothing is missing", (void*)a);
+        else
+            DebugLog("skins: SetSequence -- no hooked OR unhooked match, the signature is "
+                     "broken and the anim remap will never run");
     }
 
     // Spoofed only while a Halloween spell is actually selected -- see h_TF_IsHolidayActive.

@@ -4397,6 +4397,15 @@ void ImGui::InputTextDeactivateHook(ImGuiID id)
 //  doing UTF8 > U16 > UTF8 conversions on the go to easily interface with stb_textedit. Ideally should stay in UTF-8 all the time. See https://github.com/nothings/stb/issues/188)
 bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_size, const ImVec2& size_arg, ImGuiInputTextFlags flags, ImGuiInputTextCallback callback, void* callback_user_data)
 {
+    // botox InputTextEx. MergedItem = the slider CTRL+click path handed us a bb to draw into;
+    // the menu layout offsets below must NOT apply there or hit-testing and rendering land on
+    // a shifted rect.
+    const bool merged_item = (flags & ImGuiInputTextFlags_MergedItem) != 0;
+
+    // label sits on its own line above the frame
+    if (!merged_item)
+        SetCursorPosY(GetCursorPos().y + 10.f);
+
     ImGuiWindow* window = GetCurrentWindow();
     if (window->SkipItems)
         return false;
@@ -4422,14 +4431,14 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
         BeginGroup();
     const ImGuiID id = window->GetID(label);
     const ImVec2 label_size = CalcTextSize(label, NULL, true);
-    const ImVec2 frame_size = CalcItemSize(size_arg, CalcItemWidth(), (is_multiline ? g.FontSize * 8.0f : label_size.y) + style.FramePadding.y * 2.0f); // Arbitrary default of 8 lines high for multi-line
-    const ImVec2 total_size = ImVec2(frame_size.x, frame_size.y + (label_size.x > 0.0f ? style.ItemInnerSpacing.y * 2 + label_size.y : 0.0f));
+    const ImVec2 frame_size = CalcItemSize(size_arg, CalcItemWidth(), (is_multiline ? g.FontSize * 8.0f : label_size.y) + style.FramePadding.y + 4.f * 2.0f); // Arbitrary default of 8 lines high for multi-line
 
-    ImRect frame_bb(window->DC.CursorPos, window->DC.CursorPos + frame_size);
-    const ImRect total_bb(frame_bb.Min, frame_bb.Min + total_size);
-
-    if (label_size.x > 0)
-        frame_bb = ImRect(ImVec2(frame_bb.Min.x, frame_bb.Max.y), total_bb.Max);
+    // botox: honor the caller's bb for MergedItem (slider text box); else the shared frame
+    // column, 17px tall
+    const ImRect frame_bb = merged_item ? ImRect(window->DC.CursorPos, window->DC.CursorPos + frame_size)
+                                        : ImRect(ImVec2(GetRowFrameLeft(), window->DC.CursorPos.y),
+                                                 ImVec2(GetRowFrameRight(), window->DC.CursorPos.y + 17.f));
+    const ImRect total_bb(frame_bb.Min, frame_bb.Max + ImVec2(label_size.x > 0.0f ? (style.ItemInnerSpacing.x + label_size.x) : 0.0f, 0.0f));
 
     ImGuiWindow* draw_window = window;
     ImVec2 inner_size = frame_size;
@@ -4438,7 +4447,7 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
     if (is_multiline)
     {
         ImVec2 backup_pos = window->DC.CursorPos;
-        ItemSize(total_bb, style.FramePadding.y);
+        ItemSize(total_bb, style.FramePadding.y + 4.f);
         if (!ItemAdd(total_bb, id, &frame_bb, ImGuiItemFlags_Inputable))
         {
             EndGroup();
@@ -4471,7 +4480,7 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
     else
     {
         // Support for internal ImGuiInputTextFlags_MergedItem flag, which could be redesigned as an ItemFlags if needed (with test performed in ItemAdd)
-        ItemSize(total_bb, style.FramePadding.y);
+        ItemSize(total_bb, style.FramePadding.y + 4.f);
         if (!(flags & ImGuiInputTextFlags_MergedItem))
             if (!ItemAdd(total_bb, id, &frame_bb, ImGuiItemFlags_Inputable))
                 return false;
@@ -5089,12 +5098,14 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
     // Render frame
     if (!is_multiline)
     {
-        //RenderNavHighlight(frame_bb, id);
-        RenderFrame(frame_bb.Min, frame_bb.Max, GetColorU32(ImGuiCol_FrameBg), true, style.FrameRounding);
+        // botox: #191919 fill (popup rounding), (50,50,50,100) outline
+        RenderNavHighlight(frame_bb, id);
+        RenderFrame(frame_bb.Min, frame_bb.Max, ImColor(25 / 255.f, 25 / 255.f, 25 / 255.f, 1.f), true, style.PopupRounding);
+        window->DrawList->AddRect(frame_bb.Min, frame_bb.Max, ImColor(50, 50, 50, 100), g.Style.FrameRounding);
     }
 
     const ImVec4 clip_rect(frame_bb.Min.x, frame_bb.Min.y, frame_bb.Min.x + inner_size.x, frame_bb.Min.y + inner_size.y); // Not using frame_bb.Max because we have adjusted size
-    ImVec2 draw_pos = is_multiline ? draw_window->DC.CursorPos : frame_bb.Min + style.FramePadding;
+    ImVec2 draw_pos = is_multiline ? draw_window->DC.CursorPos + ImVec2(5.f, 4.f) : frame_bb.Min + style.FramePadding + ImVec2(5.f, 2.f);
     ImVec2 text_size(0.0f, 0.0f);
 
     // Set upper limit of single-line InputTextEx() at 2 million characters strings. The current pathological worst case is a long line
@@ -5111,6 +5122,14 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
 
     // Render text. We currently only render selection when the widget is active or while scrolling.
     // FIXME: We could remove the '&& render_cursor' to keep rendering selection when inactive.
+
+    // botox: text (and the label) 50% -> 100% alpha while hovered / typing
+    auto text_animation = ImAnimationHelper(id, ImGui::GetIO().DeltaTime);
+    text_animation.Update(hovered || g.ActiveId == id ? 4.f : -4.f, 1.f, 0.5f, 1.f);
+    const ImColor text_color = GetColorU32(ImGuiCol_Text);
+    PushStyleColor(ImGuiCol_Text,
+                   ImVec4(text_color.Value.x, text_color.Value.y, text_color.Value.z, text_color.Value.w * text_animation.AnimationData->second));
+
     if (render_cursor || render_selection)
     {
         IM_ASSERT(state != NULL);
@@ -5261,7 +5280,7 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
         {
             state->CursorAnim += io.DeltaTime;
             bool cursor_is_visible = (!g.IO.ConfigInputTextCursorBlink) || (state->CursorAnim <= 0.0f) || ImFmod(state->CursorAnim, 1.20f) <= 0.80f;
-            ImVec2 cursor_screen_pos = ImFloor(draw_pos + cursor_offset - draw_scroll);
+            ImVec2 cursor_screen_pos = ImFloor(draw_pos + cursor_offset - draw_scroll) + ImVec2(0.f, 2.f);
             ImRect cursor_screen_rect(cursor_screen_pos.x, cursor_screen_pos.y - g.FontSize + 0.5f, cursor_screen_pos.x + 1.0f, cursor_screen_pos.y - 1.5f);
             if (cursor_is_visible && cursor_screen_rect.Overlaps(clip_rect))
                 draw_window->DrawList->AddLine(cursor_screen_rect.Min, cursor_screen_rect.GetBL(), GetColorU32(ImGuiCol_Text));
@@ -5323,8 +5342,10 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
         LogRenderedText(&draw_pos, buf_display, buf_display_end);
     }
 
-    if (label_size.x > 0)
-        RenderText(total_bb.Min, label);
+    if (label_size.x > 0 && !merged_item)
+        RenderText(ImVec2(frame_bb.Min.x, frame_bb.Min.y - g.Font->FontSize - 3.f), label);
+
+    PopStyleColor();
 
     if (value_changed && !(flags & ImGuiInputTextFlags_NoMarkEdited))
         MarkItemEdited(id);
@@ -6829,6 +6850,10 @@ bool ImGui::BeginListBox(const char* label, const ImVec2& size_arg)
     // Size default to hold ~7.25 items.
     // Fractional number of items helps seeing that we can scroll down/up without looking at scrollbar.
     ImVec2 size = ImFloor(CalcItemSize(size_arg, CalcItemWidth(), GetTextLineHeightWithSpacing() * 7.25f + style.FramePadding.y * 2.0f));
+
+    // botox BeginListBox: spans the shared frame column, the caller only decides the height
+    size.x = GetRowFrameRight() - window->DC.CursorPos.x;
+
     ImVec2 frame_size = ImVec2(size.x, ImMax(size.y, label_size.y));
     ImRect frame_bb(window->DC.CursorPos, window->DC.CursorPos + frame_size);
     ImRect bb(frame_bb.Min, frame_bb.Max + ImVec2(label_size.x > 0.0f ? style.ItemInnerSpacing.x + label_size.x : 0.0f, 0.0f));
@@ -6850,7 +6875,13 @@ bool ImGui::BeginListBox(const char* label, const ImVec2& size_arg)
         window->DC.CursorMaxPos = ImMax(window->DC.CursorMaxPos, label_pos + label_size);
     }
 
-    BeginChildFrame(id, frame_bb.GetSize());
+    BeginChildFrame(id, frame_bb.GetSize(), ImGuiWindowFlags_IsListBox);
+
+    // botox RenderChildBorder(parent, child, show_text = false): (50,50,50,100) outline on the
+    // parent's list, top corners rounded. botox gets it from border=true; ours runs border size 0.
+    ImGuiWindow* child = g.CurrentWindow;
+    window->DrawList->AddRect(child->Pos, child->Pos + child->Size, IM_COL32(50, 50, 50, 100),
+                              style.WindowRounding - 2.f, ImDrawFlags_RoundCornersTop);
     return true;
 }
 

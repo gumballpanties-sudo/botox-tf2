@@ -10,6 +10,7 @@
 #include "../movement/ps_lines.h"      // unit B
 #include "../movement/recorder.h"      // unit B
 #include "fonts.h"         // fonts tab
+#include "visual_keys.h"   // settings tab "visuals config"
 #include <cfloat>      // FLT_MAX -- the "this end was never bounded" sentinel below
 #include <algorithm>   // std::sort -- ListConfigs
 
@@ -92,6 +93,8 @@ static const CfgEntry kEntries[] = {
     { "specAlwaysShow",   CfgEntry::BOOL,   &g_specAlwaysShow, 0 },
     { "specStyle",        CfgEntry::INT,    &g_specStyle, 0 },
     { "specPos",          CfgEntry::INT,    &g_specPos, 0 },
+    { "specOffX",         CfgEntry::FLOAT,  &g_specOffX, 0 },
+    { "specOffY",         CfgEntry::FLOAT,  &g_specOffY, 0 },
     { "specShowTarget",   CfgEntry::BOOL,   &g_specShowTarget, 0 },
     { "specDelusionalLeft", CfgEntry::BOOL, &g_specDelusionalLeft, 0 },
     { "specListWidth",    CfgEntry::INT,    &g_specListWidth, 0 },
@@ -613,40 +616,126 @@ static const CfgEntry kEntries[] = {
     { "prTeleporterKey",  CfgEntry::INT,    &g_prTeleporterKey, 0 },
     { "prBotClass",       CfgEntry::INT,    &g_prBotClass, 0 },
 
-    { "espEnable",         CfgEntry::BOOL,   &g_espEnable, 0 },
-    { "espTeammates",      CfgEntry::BOOL,   &g_espTeammates, 0 },
-    { "espDistanceFade",   CfgEntry::BOOL,   &g_espDistanceFade, 0 },
-    { "espFadeNear",       CfgEntry::FLOAT,  &g_espFadeNear, 0 },
-    { "espFadeFar",        CfgEntry::FLOAT,  &g_espFadeFar, 0 },
-    { "espName",           CfgEntry::BOOL,   &g_espName, 0 },
-    { "espHealth",         CfgEntry::BOOL,   &g_espHealth, 0 },
-    { "espDistance",       CfgEntry::BOOL,   &g_espDistance, 0 },
-    { "espFlags",          CfgEntry::BOOL,   &g_espFlags, 0 },
-    { "espSkeleton",       CfgEntry::BOOL,   &g_espSkeleton, 0 },
-    { "espHitboxes",       CfgEntry::BOOL,   &g_espHitboxes, 0 },
-    { "espBoxStyle",       CfgEntry::INT,    &g_espBoxStyle, 0 },
-    { "espWorldEnable",    CfgEntry::BOOL,   &g_espWorldEnable, 0 },
-    { "espBuildings",      CfgEntry::BOOL,   &g_espBuildings, 0 },
-    { "espAmmoPacks",      CfgEntry::BOOL,   &g_espAmmoPacks, 0 },
-    { "espDroppedWeapons", CfgEntry::BOOL,   &g_espDroppedWeapons, 0 },
-    { "espProjectiles",    CfgEntry::BOOL,   &g_espProjectiles, 0 },
-    { "espOofArrows",      CfgEntry::BOOL,   &g_espOofArrows, 0 },
-    { "espProjPath",       CfgEntry::BOOL,   &g_espProjPath, 0 },
-    { "espProjPathColor",  CfgEntry::FLOAT4, g_espProjPathColor, 0 },
-    { "espEnemyColor", CfgEntry::FLOAT4, g_espEnemyColor, 0 },
-    { "espTeamColor", CfgEntry::FLOAT4, g_espTeamColor, 0 },
-    { "espSkeletonColor", CfgEntry::FLOAT4, g_espSkeletonColor, 0 },
-    { "espHitboxColor", CfgEntry::FLOAT4, g_espHitboxColor, 0 },
-    { "espFlagsColor", CfgEntry::FLOAT4, g_espFlagsColor, 0 },
-    { "espOofColor", CfgEntry::FLOAT4, g_espOofColor, 0 },
-    { "espSoundColor", CfgEntry::FLOAT4, g_espSoundColor, 0 },
-    { "espDmgColor", CfgEntry::FLOAT4, g_espDmgColor, 0 },
-    { "espBuildingColor", CfgEntry::FLOAT4, g_espBuildingColor, 0 },
-    { "espItemColor", CfgEntry::FLOAT4, g_espItemColor, 0 },
-    { "espProjColor", CfgEntry::FLOAT4, g_espProjColor, 0 },
-    { "espSoundPings",     CfgEntry::BOOL,   &g_espSoundPings, 0 },
-    { "espDamageNumbers",  CfgEntry::BOOL,   &g_espDamageNumbers, 0 },
-    { "espAvatar",         CfgEntry::BOOL,   &g_espAvatar, 0 },
+    { "espEnable",               CfgEntry::BOOL,   &g_espEnable, 0 },
+    { "espTeammates",            CfgEntry::BOOL,   &g_espTeammates, 0 },
+    { "espMaxDistance",          CfgEntry::FLOAT,  &g_espMaxDistance, 0 },
+    { "espDistanceFade",         CfgEntry::BOOL,   &g_espDistanceFade, 0 },
+    { "espSoundOnly",            CfgEntry::BOOL,   &g_espSoundOnly, 0 },
+    { "espSoundDuration",        CfgEntry::FLOAT,  &g_espSoundDuration, 0 },
+    { "espSoundFade",            CfgEntry::BOOL,   &g_espSoundFade, 0 },
+    { "espBox",                  CfgEntry::BOOL,   &g_espBox, 0 },
+    { "espBoxVisColors",         CfgEntry::BOOL,   &g_espBoxVisColors, 0 },
+    { "espBoxVisibleColor",      CfgEntry::FLOAT4, g_espBoxVisibleColor, 0 },
+    { "espBoxInvisibleColor",    CfgEntry::FLOAT4, g_espBoxInvisibleColor, 0 },
+    { "espBoxColor",             CfgEntry::FLOAT4, g_espBoxColor, 0 },
+    { "espBox3d",                CfgEntry::BOOL,   &g_espBox3d, 0 },
+    { "espBoxCorner",            CfgEntry::BOOL,   &g_espBoxCorner, 0 },
+    { "espBoxThickness",         CfgEntry::FLOAT,  &g_espBoxThickness, 0 },
+    { "espBoxRounding",          CfgEntry::FLOAT,  &g_espBoxRounding, 0 },
+    { "espBoxOutline",           CfgEntry::BOOL,   &g_espBoxOutline, 0 },
+    { "espBoxOutlineColor",      CfgEntry::FLOAT4, g_espBoxOutlineColor, 0 },
+    { "espBoxOutlineThickness",  CfgEntry::FLOAT,  &g_espBoxOutlineThickness, 0 },
+    { "espBoxOutlineSide",       CfgEntry::INT,    &g_espBoxOutlineSide, 0 },
+    { "espBoxFill",              CfgEntry::BOOL,   &g_espBoxFill, 0 },
+    { "espBoxFillColor",         CfgEntry::FLOAT4, g_espBoxFillColor, 0 },
+    { "espBoxFillGradient",      CfgEntry::BOOL,   &g_espBoxFillGradient, 0 },
+    { "espBoxFillBottomColor",   CfgEntry::FLOAT4, g_espBoxFillBottomColor, 0 },
+    { "espName",                 CfgEntry::BOOL,   &g_espName, 0 },
+    { "espNamePosition",         CfgEntry::INT,    &g_espNamePosition, 0 },
+    { "espNameVisColors",        CfgEntry::BOOL,   &g_espNameVisColors, 0 },
+    { "espNameVisibleColor",     CfgEntry::FLOAT4, g_espNameVisibleColor, 0 },
+    { "espNameInvisibleColor",   CfgEntry::FLOAT4, g_espNameInvisibleColor, 0 },
+    { "espNameColor",            CfgEntry::FLOAT4, g_espNameColor, 0 },
+    { "espHealthBar",            CfgEntry::BOOL,   &g_espHealthBar, 0 },
+    { "espHealthBarSide",        CfgEntry::INT,    &g_espHealthBarSide, 0 },
+    { "espHealthBarCornerPick",  CfgEntry::INT,    &g_espHealthBarCornerPick, 0 },
+    { "espHealthBarCornerRounding", CfgEntry::FLOAT,  &g_espHealthBarCornerRounding, 0 },
+    { "espHealthBarCornerSize",  CfgEntry::FLOAT,  &g_espHealthBarCornerSize, 0 },
+    { "espHealthBarThickness",   CfgEntry::FLOAT,  &g_espHealthBarThickness, 0 },
+    { "espHealthBarOutline",     CfgEntry::BOOL,   &g_espHealthBarOutline, 0 },
+    { "espHealthBarCustomColor", CfgEntry::BOOL,   &g_espHealthBarCustomColor, 0 },
+    { "espHealthBarColor",       CfgEntry::FLOAT4, g_espHealthBarColor, 0 },
+    { "espHealthBarGradient",    CfgEntry::BOOL,   &g_espHealthBarGradient, 0 },
+    { "espHealthBarBottomColor", CfgEntry::FLOAT4, g_espHealthBarBottomColor, 0 },
+    { "espHealthBarBgColor",     CfgEntry::FLOAT4, g_espHealthBarBgColor, 0 },
+    { "espHealthText",           CfgEntry::BOOL,   &g_espHealthText, 0 },
+    { "espHealthSuffix",         CfgEntry::BOOL,   &g_espHealthSuffix, 0 },
+    { "espHealthTextStyle",      CfgEntry::INT,    &g_espHealthTextStyle, 0 },
+    { "espHealthTextCustomColor", CfgEntry::BOOL,   &g_espHealthTextCustomColor, 0 },
+    { "espHealthTextColor",      CfgEntry::FLOAT4, g_espHealthTextColor, 0 },
+    { "espWeaponName",           CfgEntry::BOOL,   &g_espWeaponName, 0 },
+    { "espWeaponNameColor",      CfgEntry::FLOAT4, g_espWeaponNameColor, 0 },
+    { "espAmmoBar",              CfgEntry::BOOL,   &g_espAmmoBar, 0 },
+    { "espAmmoBarColor",         CfgEntry::FLOAT4, g_espAmmoBarColor, 0 },
+    { "espDistance",             CfgEntry::BOOL,   &g_espDistance, 0 },
+    { "espDistanceUnit",         CfgEntry::INT,    &g_espDistanceUnit, 0 },
+    { "espDistanceColor",        CfgEntry::FLOAT4, g_espDistanceColor, 0 },
+    { "espFlags",                CfgEntry::BOOL,   &g_espFlags, 0 },
+    { "espFlagList",             CfgEntry::INT,    &g_espFlagList, 0 },
+    { "espFlagsColor",           CfgEntry::FLOAT4, g_espFlagsColor, 0 },
+    { "espFlagsAlertColor",      CfgEntry::FLOAT4, g_espFlagsAlertColor, 0 },
+    { "espSkeleton",             CfgEntry::BOOL,   &g_espSkeleton, 0 },
+    { "espSkeletonVisColors",    CfgEntry::BOOL,   &g_espSkeletonVisColors, 0 },
+    { "espSkeletonVisibleColor", CfgEntry::FLOAT4, g_espSkeletonVisibleColor, 0 },
+    { "espSkeletonInvisibleColor", CfgEntry::FLOAT4, g_espSkeletonInvisibleColor, 0 },
+    { "espSkeletonColor",        CfgEntry::FLOAT4, g_espSkeletonColor, 0 },
+    { "espSkeletonType",         CfgEntry::INT,    &g_espSkeletonType, 0 },
+    { "espSkeletonThickness",    CfgEntry::FLOAT,  &g_espSkeletonThickness, 0 },
+    { "espHitboxes",             CfgEntry::BOOL,   &g_espHitboxes, 0 },
+    { "espHitboxesMode",         CfgEntry::INT,    &g_espHitboxesMode, 0 },
+    { "espHitboxColor",          CfgEntry::FLOAT4, g_espHitboxColor, 0 },
+    { "espHitboxesThickness",    CfgEntry::FLOAT,  &g_espHitboxesThickness, 0 },
+    { "espHitboxesDuration",     CfgEntry::FLOAT,  &g_espHitboxesDuration, 0 },
+    { "espBacktrackTrail",       CfgEntry::BOOL,   &g_espBacktrackTrail, 0 },
+    { "espAvatar",               CfgEntry::BOOL,   &g_espAvatar, 0 },
+    { "espAvatarPosition",       CfgEntry::INT,    &g_espAvatarPosition, 0 },
+    { "espAvatarSize",           CfgEntry::FLOAT,  &g_espAvatarSize, 0 },
+    { "espAvatarHeadScale",      CfgEntry::FLOAT,  &g_espAvatarHeadScale, 0 },
+    { "espDamageNumbers",        CfgEntry::BOOL,   &g_espDamageNumbers, 0 },
+    { "espDmgColor",             CfgEntry::FLOAT4, g_espDmgColor, 0 },
+    { "espDmgDuration",          CfgEntry::FLOAT,  &g_espDmgDuration, 0 },
+    { "espDmgSpeed",             CfgEntry::FLOAT,  &g_espDmgSpeed, 0 },
+    { "espDmgStack",             CfgEntry::BOOL,   &g_espDmgStack, 0 },
+    { "espOofArrows",            CfgEntry::BOOL,   &g_espOofArrows, 0 },
+    { "espOofType",              CfgEntry::INT,    &g_espOofType, 0 },
+    { "espOofColor",             CfgEntry::FLOAT4, g_espOofColor, 0 },
+    { "espOofWallColor",         CfgEntry::FLOAT4, g_espOofWallColor, 0 },
+    { "espOofSoundColor",        CfgEntry::FLOAT4, g_espOofSoundColor, 0 },
+    { "espOofSoundDuration",     CfgEntry::FLOAT,  &g_espOofSoundDuration, 0 },
+    { "espOofSoundFade",         CfgEntry::BOOL,   &g_espOofSoundFade, 0 },
+    { "espOofStyle",             CfgEntry::INT,    &g_espOofStyle, 0 },
+    { "espOofWidth",             CfgEntry::FLOAT,  &g_espOofWidth, 0 },
+    { "espOofHeight",            CfgEntry::FLOAT,  &g_espOofHeight, 0 },
+    { "espOofDistance",          CfgEntry::INT,    &g_espOofDistance, 0 },
+    { "espOofAvatar",            CfgEntry::BOOL,   &g_espOofAvatar, 0 },
+    { "espOofAspect",            CfgEntry::BOOL,   &g_espOofAspect, 0 },
+    { "espSoundPings",           CfgEntry::BOOL,   &g_espSoundPings, 0 },
+    { "espSoundColor",           CfgEntry::FLOAT4, g_espSoundColor, 0 },
+    { "espBuildings",            CfgEntry::BOOL,   &g_espBuildings, 0 },
+    { "espBuildingColor",        CfgEntry::FLOAT4, g_espBuildingColor, 0 },
+    { "espBldEnemyBox",          CfgEntry::BOOL,   &g_espBldEnemyBox, 0 },
+    { "espBldEnemyName",         CfgEntry::BOOL,   &g_espBldEnemyName, 0 },
+    { "espBldEnemyHealthBar",    CfgEntry::BOOL,   &g_espBldEnemyHealthBar, 0 },
+    { "espBldEnemyHealthText",   CfgEntry::BOOL,   &g_espBldEnemyHealthText, 0 },
+    { "espBldEnemyFlags",        CfgEntry::BOOL,   &g_espBldEnemyFlags, 0 },
+    { "espBldEnemyDistance",     CfgEntry::BOOL,   &g_espBldEnemyDistance, 0 },
+    { "espBldTeam",              CfgEntry::BOOL,   &g_espBldTeam, 0 },
+    { "espBldTeamOwnOnly",       CfgEntry::BOOL,   &g_espBldTeamOwnOnly, 0 },
+    { "espBldTeamColor",         CfgEntry::FLOAT4, g_espBldTeamColor, 0 },
+    { "espBldTeamBox",           CfgEntry::BOOL,   &g_espBldTeamBox, 0 },
+    { "espBldTeamName",          CfgEntry::BOOL,   &g_espBldTeamName, 0 },
+    { "espBldTeamHealthBar",     CfgEntry::BOOL,   &g_espBldTeamHealthBar, 0 },
+    { "espBldTeamHealthText",    CfgEntry::BOOL,   &g_espBldTeamHealthText, 0 },
+    { "espBldTeamFlags",         CfgEntry::BOOL,   &g_espBldTeamFlags, 0 },
+    { "espBldTeamDistance",      CfgEntry::BOOL,   &g_espBldTeamDistance, 0 },
+    { "espWorldEnable",          CfgEntry::BOOL,   &g_espWorldEnable, 0 },
+    { "espAmmoPacks",            CfgEntry::BOOL,   &g_espAmmoPacks, 0 },
+    { "espDroppedWeapons",       CfgEntry::BOOL,   &g_espDroppedWeapons, 0 },
+    { "espProjectiles",          CfgEntry::BOOL,   &g_espProjectiles, 0 },
+    { "espProjPath",             CfgEntry::BOOL,   &g_espProjPath, 0 },
+    { "espProjPathColor",        CfgEntry::FLOAT4, g_espProjPathColor, 0 },
+    { "espItemColor",            CfgEntry::FLOAT4, g_espItemColor, 0 },
+    { "espProjColor",            CfgEntry::FLOAT4, g_espProjColor, 0 },
 
     { "chamsEnable",       CfgEntry::BOOL,   &g_chamsEnable, 0 },
     { "chamsEnemy",        CfgEntry::BOOL,   &g_chamsEnemy, 0 },
@@ -863,14 +952,21 @@ static const CfgEntry kEntries[] = {
     { "recApproachDist",    CfgEntry::FLOAT,&g_recApproachDist, 0 },
 };
 
-void SaveConfig(const char* path)
+// botox g_config.folder(visuals): visuals files live one folder down
+static constexpr const char* kVisualsDir = "C:\\botox-tf2\\visuals";
+
+const char* ConfigFolder(bool visuals) { return visuals ? kVisualsDir : CONFIG_DIR; }
+
+void SaveConfig(const char* path, bool visuals)
 {
     _mkdir(CONFIG_DIR);
+    if (visuals) _mkdir(kVisualsDir);
     FILE* f = fopen(path, "w");
     if (!f) return;
 
     for (const auto& e : kEntries)
     {
+        if (visuals && !IsVisualCfgKey(e.key)) continue;
         switch (e.type)
         {
         case CfgEntry::BOOL:
@@ -901,21 +997,25 @@ void SaveConfig(const char* path)
         }
     }
 
-    // Skinchanger: a variable number of "skin_<def>_<field>" lines, one block per weapon that
-    // has an entry, so it cannot live in the flat kEntries table.
-    Skins_SaveCfg(f);
+    // botox: skins (inventory tab) and aimbot vars are never in a visuals file
+    if (!visuals)
+    {
+        // Skinchanger: a variable number of "skin_<def>_<field>" lines, one block per weapon that
+        // has an entry, so it cannot live in the flat kEntries table.
+        Skins_SaveCfg(f);
 
-    // Aimbot vars (src/hacks/aim/aim.cpp). Appended after dih's own entries;
-    // they are keyed by their registered "Vars::..." name so they cannot collide with kEntries.
-    Aim_SaveVars(f);
+        // Aimbot vars (src/hacks/aim/aim.cpp). Appended after dih's own entries;
+        // they are keyed by their registered "Vars::..." name so they cannot collide with kEntries.
+        Aim_SaveVars(f);
+    }
 
     fclose(f);
-    DebugLog("config saved: %s", path);
+    DebugLog("config saved%s: %s", visuals ? " (visuals)" : "", path);
 }
 
-// name -> "C:\botox-tf2\<name>.cfg". Path chars stripped so a name can't leave CONFIG_DIR.
+// name -> "<ConfigFolder>\<name>.cfg". Path chars stripped so a name can't leave the folder.
 // Returns false if nothing usable left.
-static bool CfgPathFromName(const char* name, char* out, size_t outSz)
+static bool CfgPathFromName(const char* name, char* out, size_t outSz, bool visuals)
 {
     char clean[128]; size_t n = 0;
     for (const char* p = name; *p && n + 1 < sizeof(clean); ++p)
@@ -924,15 +1024,15 @@ static bool CfgPathFromName(const char* name, char* out, size_t outSz)
     clean[n] = '\0';
     if (n > 4 && _stricmp(clean + n - 4, ".cfg") == 0) clean[n -= 4] = '\0';
     if (!n) return false;
-    snprintf(out, outSz, "%s\\%s.cfg", CONFIG_DIR, clean);
+    snprintf(out, outSz, "%s\\%s.cfg", ConfigFolder(visuals), clean);
     return true;
 }
 
-std::vector<std::string> ListConfigs()
+std::vector<std::string> ListConfigs(bool visuals)
 {
     std::vector<std::string> out;
     char pat[MAX_PATH];
-    snprintf(pat, sizeof(pat), "%s\\*.cfg", CONFIG_DIR);
+    snprintf(pat, sizeof(pat), "%s\\*.cfg", ConfigFolder(visuals));
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) return out;
@@ -944,28 +1044,28 @@ std::vector<std::string> ListConfigs()
     return out;
 }
 
-void SaveConfigNamed(const char* name)
+void SaveConfigNamed(const char* name, bool visuals)
 {
     char path[MAX_PATH];
-    if (CfgPathFromName(name, path, sizeof(path))) SaveConfig(path);
+    if (CfgPathFromName(name, path, sizeof(path), visuals)) SaveConfig(path, visuals);
 }
 
-void LoadConfigNamed(const char* name)
+void LoadConfigNamed(const char* name, bool visuals)
 {
     char path[MAX_PATH];
-    if (CfgPathFromName(name, path, sizeof(path))) LoadConfig(path);
+    if (CfgPathFromName(name, path, sizeof(path), visuals)) LoadConfig(path, visuals);
 }
 
-bool DeleteConfigNamed(const char* name)
+bool DeleteConfigNamed(const char* name, bool visuals)
 {
     char path[MAX_PATH];
-    if (!CfgPathFromName(name, path, sizeof(path))) return false;
+    if (!CfgPathFromName(name, path, sizeof(path), visuals)) return false;
     const bool ok = DeleteFileA(path) != 0;
     DebugLog("config %s: %s (err %lu)", ok ? "removed" : "remove FAILED", path, ok ? 0ul : GetLastError());
     return ok;
 }
 
-void LoadConfig(const char* path)
+void LoadConfig(const char* path, bool visuals)
 {
     FILE* f = fopen(path, "r");
     if (!f) return;
@@ -988,13 +1088,22 @@ void LoadConfig(const char* path)
         size_t vl = strlen(val);
         while (vl > 0 && (val[vl-1] == '\n' || val[vl-1] == '\r')) val[--vl] = '\0';
 
-        if (strcmp(key, "miOnlyActive") == 0) bLegacyMi = true;
+        // botox: a full cfg dropped in the visuals folder still only touches visuals
+        if (visuals)
+        {
+            if (!IsVisualCfgKey(key)) continue;
+        }
+        else if (strcmp(key, "miOnlyActive") == 0) bLegacyMi = true;
 
         // Aimbot var? Its key is namespaced ("Vars::..."), so it can never match one of
         // dih's own keys, and consuming it here keeps it out of the kEntries walk.
         if (Aim_LoadVar(key, val)) continue;
         // Same for the skinchanger's "enableSkins" / "skin_<def>_<field>" block.
         if (Skins_LoadCfg(key, val)) continue;
+        // esp rows from before the botox players port: one box combo (0 off, 1 corner, 2 full)
+        // and one "health" row that drew bar + number. Never written now, read once into the new rows
+        if (strcmp(key, "espBoxStyle") == 0) { const int v = atoi(val); g_espBox = v != 0; g_espBoxCorner = v == 1; continue; }
+        if (strcmp(key, "espHealth") == 0)   { g_espHealthBar = g_espHealthText = atoi(val) != 0; continue; }
 
         for (const auto& e : kEntries)
         {
@@ -1208,5 +1317,5 @@ void LoadConfig(const char* path)
         g_ccLevInWhite = g_ccLevInBlack + 0.01f;
     }
 
-    DebugLog("config loaded");
+    DebugLog("config loaded%s: %s", visuals ? " (visuals)" : "", path);
 }

@@ -8,6 +8,7 @@
 #include "../screen/blur_rect.h"
 #include "../../dependencies/data/kamibebra_gif_data.h"   // kamibebra spectator-list gif bleed
 #include "../../dependencies/data/airflow_data.h"        // airflow spectator-list + watermark icons
+#include "../../dependencies/imgui/imgui_internal.h"     // GImGui->HoveredWindow: menu window over the panel eats the click
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -160,6 +161,9 @@ static void AnchorPos(ImGuiIO& io, float w, float h, int pos, float margin, floa
     case WM_BOTTOM_CENTER: x = (io.DisplaySize.x - w) * 0.5f; y = io.DisplaySize.y - h - margin; break;
     case WM_BOTTOM_RIGHT:  x = io.DisplaySize.x - w - margin; y = io.DisplaySize.y - h - margin; break;
     }
+    // drag offset (SpecDrag below), kept on screen so a stale offset after a g_specPos change can't lose the panel
+    x = fmaxf(0.f, fminf(x + g_specOffX, io.DisplaySize.x - w));
+    y = fmaxf(0.f, fminf(y + g_specOffY, io.DisplaySize.y - h));
     x = floorf(x); y = floorf(y);
 }
 
@@ -1284,6 +1288,58 @@ static bool StyleNeedsRows(int style)
     }
 }
 
+// Styles that hardcode their x/y instead of calling AnchorPos. None of them push a clip rect
+// or a BlurRect, so SpecDrag can just shift the vertices they added.
+static bool StyleFixedPos(int style)
+{
+    switch (style) {
+    case 1: case 8: case 9: case 12: case 13: case 16: case 19: case 24:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Drag to reposition, menu open only: LMB drag moves, RMB resets to the bare g_specPos anchor.
+// Panel rect = bounds of the vertices this frame's Draw* added (from v0), so every style's
+// real footprint is the hit box with no per-style size bookkeeping. Delta lands next frame.
+static void SpecDrag(ImDrawList* dl, ImGuiIO& io, int v0)
+{
+    static bool s_drag = false;
+    ImDrawVert* v = dl->VtxBuffer.Data;
+    const int v1 = dl->VtxBuffer.Size;
+    if (v1 <= v0) { s_drag = false; return; }
+
+    ImVec2 mn(FLT_MAX, FLT_MAX), mx(-FLT_MAX, -FLT_MAX);
+    for (int i = v0; i < v1; ++i) { mn = ImMin(mn, v[i].pos); mx = ImMax(mx, v[i].pos); }
+
+    if (StyleFixedPos(g_specStyle)) {
+        // same on-screen clamp AnchorPos does, offset itself left untouched
+        const float dx = floorf(fmaxf(-mn.x, fminf(g_specOffX, io.DisplaySize.x - mx.x)));
+        const float dy = floorf(fmaxf(-mn.y, fminf(g_specOffY, io.DisplaySize.y - mx.y)));
+        for (int i = v0; i < v1; ++i) { v[i].pos.x += dx; v[i].pos.y += dy; }
+        mn.x += dx; mn.y += dy; mx.x += dx; mx.y += dy;
+    }
+
+    if (!g_showMenu) { s_drag = false; return; }
+
+    const ImVec2 m = io.MousePos;
+    const bool hovered = !GImGui->HoveredWindow && m.x >= mn.x && m.x <= mx.x && m.y >= mn.y && m.y <= mx.y;
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) s_drag = true;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_drag = false;
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) { g_specOffX = g_specOffY = 0.f; s_drag = false; }
+
+    if (s_drag) {
+        // delta clamped at the screen edge, so dragging past it and back doesn't feel sticky
+        g_specOffX += fmaxf(-mn.x, fminf(io.MouseDelta.x, io.DisplaySize.x - mx.x));
+        g_specOffY += fmaxf(-mn.y, fminf(io.MouseDelta.y, io.DisplaySize.y - mx.y));
+    }
+    if (hovered || s_drag) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        dl->AddRect(ImVec2(mn.x - 2.f, mn.y - 2.f), ImVec2(mx.x + 2.f, mx.y + 2.f), ImGui::GetColorU32(ImGuiCol_Accent));
+    }
+}
+
 void RenderSpectatorList()
 {
     if (!g_specEnable) return;
@@ -1291,13 +1347,16 @@ void RenderSpectatorList()
     // chillware v2 is an ImGui::Begin() window, not a background-draw-list panel, so it
     // can legitimately want to draw while the collected list is empty (menu open / always
     // show) even though every OTHER style bails out below on an empty + not-always-show list.
+    // It is already draggable as a real window, so SpecDrag skips it.
     if (StyleNeedsRows(g_specStyle)) {
         std::vector<SpecRow> rows = CollectSpectatorRows();
         if (g_specStyle == 21) { DrawChillwareV2(rows); return; }
+        if (rows.empty() && g_showMenu) rows.push_back({ "spectator", 0 });   // something to grab
         if (rows.empty() && !g_specAlwaysShow) return;
 
         ImGuiIO& io = ImGui::GetIO();
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        const int v0 = dl->VtxBuffer.Size;
         switch (g_specStyle) {
         case 5:  DrawChillware(dl, io, rows);      break;
         case 6:  DrawLobotomy(dl, io, rows);       break;
@@ -1310,15 +1369,18 @@ void RenderSpectatorList()
         case 22: DrawSkebob(dl, io, rows);         break;
         case 30: DrawHoweweware(dl, io, rows);     break;
         }
+        SpecDrag(dl, io, v0);
         return;
     }
 
     std::vector<std::string> specs = CollectSpectators();
+    if (specs.empty() && g_showMenu) specs.push_back("spectator");   // something to grab
     if (specs.empty() && !g_specAlwaysShow) return;
 
     ImGuiIO& io = ImGui::GetIO();
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const std::string localName = PlayerName(GetLocalPlayerIndex());
+    const int v0 = dl->VtxBuffer.Size;
 
     switch (g_specStyle)
     {
@@ -1344,4 +1406,5 @@ void RenderSpectatorList()
     case 31: DrawGamesenseList(dl, io, specs, localName); break;
     default: DrawDefault(dl, io, specs, localName);       break;   // style 0 + every not-ported index (32 kamidere)
     }
+    SpecDrag(dl, io, v0);
 }

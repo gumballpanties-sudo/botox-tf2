@@ -1610,7 +1610,9 @@ EmitSound_t o_EmitSound = nullptr;
 static void __fastcall h_EmitSound_impl(void* rcx, void* filter, int entindex, const void* epRaw)
 {
     // 10-31: sound chams (aim/chams.cpp) stamps the same peek; gated on its own list being set
-    const bool wantChamsSound = g_chamsEnable && g_chamsSoundCfg[0] && entindex <= 64;
+    // esp "only on sound" and the sound arrows read the same stamps (botox sound_esp is one store)
+    const bool wantChamsSound = entindex <= 64 && (g_chamsEnable && g_chamsSoundCfg[0]
+        || g_espEnable && g_espSoundOnly || g_espEnable && g_espOofArrows && g_espOofType != 0);
     if (!g_eject && (g_espSoundPings || wantChamsSound) && entindex > 0 && epRaw && g_offOrigin > 0)
     {
         __try {

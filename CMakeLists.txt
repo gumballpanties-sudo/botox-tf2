@@ -381,6 +381,12 @@ target_compile_options(menuchrome_test PRIVATE $<$<CONFIG:Release>:/UNDEBUG>)
 set_target_properties(menuchrome_test PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# Gate test for the settings tab "visuals config" key list (src/hacks/menu/visual_keys.h):
+# sorted + unique (binary search), visual keys in, settings/movement/aim/skin keys out.
+# Regenerate the list: python tools/gen_visual_keys.py --write
+# Build + run: cmake --build build --config Release --target visualkeys_test && build\Release\visualkeys_test.exe
+add_executable(visualkeys_test tests/visualkeys_test.cpp)
+
 # Gate test for the MV_DetectWallLines broadphase box (src/hacks/movement/mv_scanbound.h): the one
 # trace that replaces sixteen. Re-runs the scan loop's own per-direction arithmetic and asserts
 # the box contains every trace it would have run -- safe AND tight.

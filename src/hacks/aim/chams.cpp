@@ -527,6 +527,16 @@ void Chams_ReleaseMaterials()
 	for (auto& t : s_soundMs) t = 0.f;
 }
 
+// esp.cpp's sound gate + sound arrows (botox g_sound_esp m_last_sound / m_origin): false = never heard
+bool Chams_SoundStamp(int entindex, float& ms, float* origin)
+{
+	if (entindex <= 0 || entindex > 64 || s_soundMs[entindex] <= 0.f)
+		return false;
+	ms = s_soundMs[entindex];
+	origin[0] = s_soundOrigin[entindex][0]; origin[1] = s_soundOrigin[entindex][1]; origin[2] = s_soundOrigin[entindex][2];
+	return true;
+}
+
 void Chams_OnSound(int entindex, float volume, const float* origin)
 {
 	if (entindex <= 0 || entindex > 64 || !origin || volume < g_chamsSoundMinVolume)

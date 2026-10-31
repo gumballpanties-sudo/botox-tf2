@@ -60,6 +60,27 @@ static bool  s_ebCourseValid = false;
 static int   s_ebLastVariant = 0, s_ebLastBend = 0;
 static bool  s_esActive = false;   // edge skip plan flying (movement_edge.inl owns it)
 
+// ---- prefix reuse (TF2 port, not botox): sweep/release runs start from a base run's state ----
+// eb_stance.h MV_EbFamily says which ticks of a run equal its pair's base run. Base runs save a
+// Pred_Snap per tick from just before the earliest press window on; a press at k loads tick k
+// instead of re-flying ticks 0..k-1. Index = pair * 2 + fam. Edge skip owns slots 0..64.
+static constexpr int k_ebSnapBase = 80;
+static constexpr int k_ebFamRing  = 16;   // last 16 family ticks per family (window <= 7 wide)
+struct EbResume_t { int tick = -1; UserCmd_t c{}; Vec3 cur{}; float side = 1.f, lastYaw = 0.f; };
+static EbResume_t s_ebResume[8][k_ebFamRing];
+static EbCmd_t    s_ebFamCmds[8][k_ebMaxTicks];   // the family's recorded cmds, for the plan prefix
+static int        s_ebFamCmdN[8] = {};
+
+// ---- bend prefix + cursor (TF2 port, not botox): eb_stance.h MV_EbBend* ----
+// bend B saves its state at tick |B| (slot per variant + sign); a bigger bend of the same pair
+// starts there. Far contact: the bend pass resumes its order next search (s_ebBendCursor).
+static constexpr int k_ebBend[] = { 1, 2, 3, 4, 6, 8, 12 };   // botox pass 2
+static constexpr int k_ebBendMax = 12;
+static constexpr int k_ebBendSnap = k_ebSnapBase + 8 * k_ebFamRing;   // 16 slots after the families
+static EbResume_t s_ebBendRes[16];
+static EbCmd_t    s_ebBendCmds[16][k_ebBendMax];
+static int        s_ebBendCursor = 0;
+
 // ---- tick rules (botox tick_scale.h) ----
 static float EbScale() { return std::clamp(64.f * TickInterval(), 0.25f, 4.f); }
 static int   EbTicks(int ticksAt64) { return EsTicksPure(ticksAt64, 1.f / TickInterval()); }
@@ -419,6 +440,7 @@ static void EbDropPlan(const char* why)
     s_ebCurrentTick = 0;
     s_ebSteerSince = 0.f;
     s_ebFollowBlocked = false;
+    s_ebBendCursor = 0;
 }
 
 // ============================================================================
@@ -835,6 +857,19 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         const float ebCap = std::clamp(g_edgeBugStrafeAngleMax, 15.f, 180.f);
         const bool userMoveDead = fabsf(userFwd) < 0.1f && fabsf(userSide) < 0.1f
                                && fabsf(delta.y) < 0.01f && fabsf(delta.x) < 0.01f;
+        const int approxSlack = std::max(2, EbTicks(2));
+
+        // prefix reuse: no press window opens before reach + 1 - retry - slack (contact >= reach:
+        // the reach hull is the grown one). fam 0 feeds presses, fam 1 releases
+        Pred_SnapReserve(k_ebBendSnap + 16);
+        for (auto& ring : s_ebResume) for (auto& e : ring) e.tick = -1;
+        for (auto& e : s_ebBendRes) e.tick = -1;
+        int bendResumes = 0, bendSkipped = 0;
+        for (int& n : s_ebFamCmdN) n = 0;
+        const int famSaveFrom = std::max(1, reachTick + 1 - duckRetry - approxSlack);
+        const bool famWant[2] = { stance != 2, stance != 1 };
+        int famSaves = 0, famResumes = 0, famSkipped = 0;
+        const long long snapUs0 = Pred_SnapUs();
 
         // one pass. duckAt = press held from this tick (-1 = variant's own rule); undoAt = released
         // and left released (-1 = never); bend = first |bend| ticks pushed across the velocity
@@ -849,6 +884,42 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
             c.viewangles = origView; c.forwardmove = userFwd; c.sidemove = userSide; c.buttons = userButtons;
             Vec3 cur = origView;
             contactTick = -1;
+            // family state: same restore-then-load as edge skip (movement_edge.inl EsGrab)
+            const MvEbFam fam = MV_EbFamily(v, duckAt, undoAt, bend);
+            const int famIdx = fam.fam >= 0 ? (v >> 1) * 2 + fam.fam : -1;
+            const bool famFeed = famIdx >= 0 && famWant[fam.fam];
+            int i0 = 0;
+            if (famIdx >= 0 && fam.resumeAt >= 1)
+            {
+                int best = -1;
+                for (int r = 0; r < k_ebFamRing; r++)
+                {
+                    const int t = s_ebResume[famIdx][r].tick;
+                    if (t >= 1 && t <= fam.resumeAt && t <= s_ebFamCmdN[famIdx]
+                        && (best < 0 || t > s_ebResume[famIdx][best].tick)) best = r;
+                }
+                if (best >= 0 && Pred_SnapLoad(pLocal, k_ebSnapBase + famIdx * k_ebFamRing + best))
+                {
+                    const EbResume_t& e = s_ebResume[famIdx][best];
+                    i0 = e.tick; c = e.c; cur = e.cur;
+                    s_ebStrafeSide = e.side; s_ebStrafeLastYaw = e.lastYaw;
+                    searchVelBackup = EntV3(pLocal, g_offVelocity);
+                    memcpy(s_ebRun, s_ebFamCmds[famIdx], sizeof(EbCmd_t) * i0);
+                    famResumes++; famSkipped += i0;
+                }
+            }
+            // bend prefix: a smaller bend of this pair already flew the pushes up to its tick
+            const int bendSlot = MV_EbBendSlot(v, bend);
+            if (bendSlot >= 0 && i0 == 0 && MV_EbBendCanResume(s_ebBendRes[bendSlot].tick, bend)
+                && Pred_SnapLoad(pLocal, k_ebBendSnap + bendSlot))
+            {
+                const EbResume_t& e = s_ebBendRes[bendSlot];
+                i0 = e.tick; c = e.c; cur = e.cur;
+                s_ebStrafeSide = e.side; s_ebStrafeLastYaw = e.lastYaw;
+                searchVelBackup = EntV3(pLocal, g_offVelocity);
+                memcpy(s_ebRun, s_ebBendCmds[bendSlot], sizeof(EbCmd_t) * i0);
+                bendResumes++; bendSkipped += i0;
+            }
             auto replayUserMove = [&](bool duck)
             {
                 if (duck) c.buttons |= IN_DUCK; else c.buttons &= ~IN_DUCK;
@@ -912,7 +983,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 pl.ticks = tickIndex; pl.variant = v; pl.bend = bend; pl.end = endPos;
                 pl.ducked = ducked; pl.blocked = blocked;
             };
-            for (int i = 0; i < runTicks || (pending >= 0 && i < maxTicks); i++)
+            for (int i = i0; i < runTicks || (pending >= 0 && i < maxTicks); i++)
             {
                 {
                     const bool grounded = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
@@ -922,6 +993,25 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                         pending = -1;
                         break;
                     }
+                }
+                // keep this tick's family state (never mid-confirm: pending is run-local)
+                if (famFeed && pending < 0 && i >= famSaveFrom && i < fam.limit && i <= s_ebFamCmdN[famIdx])
+                {
+                    const int r = i % k_ebFamRing;
+                    EbResume_t& e = s_ebResume[famIdx][r];
+                    if (e.tick != i && Pred_SnapSave(pLocal, k_ebSnapBase + famIdx * k_ebFamRing + r))
+                    {
+                        e.tick = i; e.c = c; e.cur = cur; e.side = s_ebStrafeSide; e.lastYaw = s_ebStrafeLastYaw;
+                        famSaves++;
+                    }
+                }
+                // bend: state after all |bend| pushes, for the next bigger bend of the pair
+                if (bendSlot >= 0 && pending < 0 && i == abs(bend) && i <= k_ebBendMax
+                    && s_ebBendRes[bendSlot].tick != i && Pred_SnapSave(pLocal, k_ebBendSnap + bendSlot))
+                {
+                    EbResume_t& e = s_ebBendRes[bendSlot];
+                    e.tick = i; e.c = c; e.cur = cur; e.side = s_ebStrafeSide; e.lastYaw = s_ebStrafeLastYaw;
+                    memcpy(s_ebBendCmds[bendSlot], s_ebRun, sizeof(EbCmd_t) * i);
                 }
                 switch (v)
                 {
@@ -957,6 +1047,11 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 // confirm tick is past the replay: the player's own crouch (TF2: no duck hold)
                 if (pending >= 0) { if (userButtons & IN_DUCK) c.buttons |= IN_DUCK; else c.buttons &= ~IN_DUCK; }
                 s_ebRun[i] = { c.viewangles, c.forwardmove, c.sidemove, c.buttons, EntV3(pLocal, g_offOrigin) };
+                if (famIdx >= 0 && pending < 0 && i < fam.limit && i <= s_ebFamCmdN[famIdx])
+                {
+                    s_ebFamCmds[famIdx][i] = s_ebRun[i];
+                    s_ebFamCmdN[famIdx] = std::max(s_ebFamCmdN[famIdx], i + 1);
+                }
                 if (totalPredictions >= maxPredictions || budget.Expired()) break;
                 Pred_Simulate(pLocal, &c);
                 totalPredictions++;
@@ -1018,7 +1113,6 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         // PASS 1: DUCK TIMING, even variants, round robin on the offset (latest press first)
         int sweepFirst[8]{}, sweepLast[8]{};
         int maxOff = -1;
-        const int approxSlack = std::max(2, EbTicks(2));
         if (!enough())
         {
             for (int v = 0; v < 8; v += 2)
@@ -1043,26 +1137,30 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 }
             }
         }
+        // deep passes (bend, ebanat) get the full share only with a base contact close; far / none
+        // stop at half and the bend order carries over to the next search (TF2, eb_stance.h)
+        const bool deepFull = MV_EbDeepFull(bestContact, EbTicks(6));
+        auto deepOut = [&] { return outOfBudget() || (!deepFull && budget.UsedUs() + worstRunUs >= budget.capUs / 2); };
         // PASS 2: BEND, smallest first, near geometry + no usable plan yet
+        int bendStart = -1;
         if (autostrafe && nearGeometry && goodPlans() == 0)
         {
-            constexpr int k_bend[] = { 1, 2, 3, 4, 6, 8, 12 };
-            for (int b = 0; b < 2 * (int)std::size(k_bend) && !enough() && !outOfBudget(); b++)
+            const int total = 2 * (int)std::size(k_ebBend) * searchCount;
+            bendStart = MV_EbBendStart(s_ebBendCursor, total, deepFull);
+            int walked = 0;
+            for (; walked < total && !enough() && !deepOut(); walked++)
             {
-                const int bend = (b & 1) ? -k_bend[b / 2] : k_bend[b / 2];
-                if (abs(bend) >= runTicks) break;
-                for (int idx = 0; idx < searchCount && !enough() && !outOfBudget(); idx++)
-                {
-                    const int v = variantAt(idx);
-                    if (!baseRan[v]) continue;
-                    runVariant(v, -1, -1, bend);
-                    bendRuns++;
-                }
+                const MvEbBendAt e = MV_EbBendEntry((bendStart + walked) % total, searchCount, k_ebBend);
+                const int v = variantAt(e.idx);
+                if (abs(e.bend) >= runTicks || !baseRan[v]) continue;
+                runVariant(v, -1, -1, e.bend);
+                bendRuns++;
             }
+            s_ebBendCursor = MV_EbBendNext(bendStart, walked, total, enough());
         }
         // PASS 3: EBANAT SHAPES, zero usable plans only
         if (autostrafe && nearGeometry && goodPlans() == 0)
-            for (int v = 8; v < 16 && !enough() && !outOfBudget(); v++)
+            for (int v = 8; v < 16 && !enough() && !deepOut(); v++)
             {
                 if (stance == 2 && (v == 9 || v == 11 || v == 13 || v == 14)) continue;
                 runVariant(v, -1);
@@ -1110,14 +1208,20 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         }
         // win = slider window, run = trimmed window, reach = first hull contact, edge = lip found,
         // base/sw/rel/bnd/ebv = runs per pass, sims = spent/ceiling, us = spent/share, con = closest
-        // floor, jc/blk/stc = jump checks / jump-eating finds / stance refusals, duck = latched hull
+        // floor, jc/blk/stc = jump checks / jump-eating finds / stance refusals, duck = latched hull,
+        // pre = prefix snapshots saved / runs resumed / sim ticks skipped, snap = their copy cost us,
+        // bre = bend runs resumed / ticks skipped, deep = 1 full / 0 half share for bend + ebanat,
+        // bc = bend order start (-1 = pass skipped)
         DebugLog("EB: mode=%d win=%d run=%d reach=%d edge=%d vars=%d base=%d sw=%d rel=%d bnd=%d ebv=%d sims=%d/%d cut=%d "
-                 "us=%lld/%lld con=%d vz=%.2f found=%d var=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d duck=%d fb=%d",
+                 "us=%lld/%lld con=%d vz=%.2f found=%d var=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d duck=%d fb=%d "
+                 "pre=%d/%d/%d snap=%lld bre=%d/%d deep=%d bc=%d",
                  mode, maxTicks, runTicks, reachTick, s_ebEdgeTargetValid ? 1 : 0, searchCount, baseRuns, sweepRuns,
                  releaseRuns, bendRuns, ebRuns, totalPredictions, maxPredictions, tailCut, budget.UsedUs(), budget.capUs,
                  bestContact, s_ebVelBackup.z, s_ebDetected ? 1 : 0, s_ebLastVariant, s_ebDetected ? s_ebLockTicks : -1,
                  s_ebPlanCount, wantPaths, nJumpChecks, nBlocked, nStance,
-                 sel >= 0 ? (s_ebPlans[sel].ducked ? 1 : 0) : -1, s_ebFollowBlocked ? 1 : 0);
+                 sel >= 0 ? (s_ebPlans[sel].ducked ? 1 : 0) : -1, s_ebFollowBlocked ? 1 : 0,
+                 famSaves, famResumes, famSkipped, Pred_SnapUs() - snapUs0,
+                 bendResumes, bendSkipped, deepFull ? 1 : 0, bendStart);
     } while (false);
 
     if (s_ebDetected)

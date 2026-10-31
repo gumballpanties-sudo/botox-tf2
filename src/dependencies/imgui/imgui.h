@@ -1027,6 +1027,7 @@ enum ImGuiWindowFlags_
     ImGuiWindowFlags_Popup                  = 1 << 26,  // Don't use! For internal use by BeginPopup()
     ImGuiWindowFlags_Modal                  = 1 << 27,  // Don't use! For internal use by BeginPopupModal()
     ImGuiWindowFlags_ChildMenu              = 1 << 28,  // Don't use! For internal use by BeginMenu()
+    ImGuiWindowFlags_IsListBox              = 1 << 29,  // botox: BeginListBox child -- keeps its own bg + scrollbar (BeginChildEx strips both from every other child)
 };
 
 // Flags for ImGui::InputText()

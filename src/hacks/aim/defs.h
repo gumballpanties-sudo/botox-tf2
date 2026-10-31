@@ -10017,6 +10017,15 @@ public:
 	NETVAR(m_bBuilding, bool, "CBaseObject", "m_bBuilding");
 	NETVAR(m_bMiniBuilding, bool, "CBaseObject", "m_bMiniBuilding");
 	NETVAR(m_iUpgradeLevel, int, "CBaseObject", "m_iUpgradeLevel");
+	// esp (c_baseobject.cpp:55-75 recv table)
+	NETVAR(m_bPlacing, bool, "CBaseObject", "m_bPlacing");
+	NETVAR(m_bCarried, bool, "CBaseObject", "m_bCarried");
+	NETVAR(m_flPercentageConstructed, float, "CBaseObject", "m_flPercentageConstructed");
+	NETVAR(m_bDisabled, bool, "CBaseObject", "m_bDisabled");
+	NETVAR(m_hBuilder, EHANDLE, "CBaseObject", "m_hBuilder");
+	NETVAR(m_iUpgradeMetal, int, "CBaseObject", "m_iUpgradeMetal");
+	NETVAR(m_iUpgradeMetalRequired, int, "CBaseObject", "m_iUpgradeMetalRequired");
+	NETVAR(m_bPlasmaDisable, bool, "CBaseObject", "m_bPlasmaDisable");
 
 	void* IHasBuildPoints()
 	{

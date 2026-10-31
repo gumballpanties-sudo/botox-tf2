@@ -432,6 +432,11 @@ static void Page_VisualsEsp()
     }
     menu_group_end();
 
+    // botox puts "edicts" under "players" in this column; TF2's edicts that matter are buildings
+    if (menu_group_begin("buildings"))
+        UnitC_Menu_visuals_buildings();
+    menu_group_end();
+
     menu_columns_next();
     if (menu_group_begin("chams"))
         UnitC_Menu_visuals_chams();
@@ -1859,59 +1864,51 @@ static void Tab_MiscRoot()
 }
 
 // ==== skins =========================================================================
-// botox menu_tab_settings.cpp tab_inventory, "weapons" page, mapped onto TF2: the left
-// "weapons" box is botox's own (enable, weapon, paint kit list, wear, pattern, stattrak ->
-// stat clock, update, reset skins); the right column holds what TF2 has in place of the
-// knife box -- killstreak, unusual effect, item variant/reskin, spells. CS:GO-only rows
-// (name tag, sticker slots, paint colors, team split) have no TF2 counterpart and are not
-// drawn. Rows that cannot apply to the picked weapon are hidden, never greyed.
-//
-// Every widget edits one SkinCfg in g_skinCfgs, keyed by the weapon's REDIRECT index; an
-// edit marks that entry enabled. Anything that changes which item the weapon reports
-// (warpaint def, australium, festive, reskin) sets g_skinNeedsUpdate: skins.cpp turns a
-// burst of those into ONE cl_fullupdate.
+// Every widget here edits one SkinCfg in g_skinCfgs, keyed by the selected weapon's
+// REDIRECT index. Anything that changes which item the weapon reports (warpaint def,
+// reskin, festive) sets g_skinNeedsUpdate, which makes the FSN pass re-resolve the
+// models and ask the server for a full update -- a material override and a style skin
+// are only read off the item definition when the entity's data changes.
 
-// The four ways a weapon can report a different item are exclusive: ResolveWeaponTarget
-// wears exactly one def (festive > reskin > warpaint def > upgradeable twin), so a second
-// pick would be silently ignored. Picking one clears the others.
-enum SkinItemPick { SKP_PAINT, SKP_AUSTRALIUM, SKP_FESTIVE, SKP_RESKIN };
-static void SkinPickItem(SkinCfg& c, SkinItemPick keep)
+// Case-insensitive substring, for the two searchable combos below.
+static bool SkinFilterMatch(const char* haystack, const char* needle)
 {
-    if (keep != SKP_PAINT)      { c.paintKitId = 0; c.weaponSkinDef = 0; }
-    if (keep != SKP_AUSTRALIUM) c.australium = false;
-    if (keep != SKP_FESTIVE)    c.festive = false;
-    if (keep != SKP_RESKIN)     { c.reskinDef = 0; c.reskinStyle = 0; }
-}
-
-// Paint kit id the weapon wears right now, in k_warpaints terms (weapon-specific skins are
-// stored as their 15xxx def). 0 = default.
-static int SkinCurrentPaintKit(const SkinCfg& cfg)
-{
-    if (cfg.weaponSkinDef > 0) {
-        for (int j = 0; j < k_skinDefCount; j++)
-            if (k_skinDefs[j].skinDef == cfg.weaponSkinDef) return k_skinDefs[j].pkId;
-        return 0;
+    if (!needle || !needle[0]) return true;
+    for (const char* h = haystack; *h; ++h)
+    {
+        const char* hh = h;
+        const char* nn = needle;
+        while (*nn && tolower((unsigned char)*hh) == tolower((unsigned char)*nn)) { ++hh; ++nn; }
+        if (!*nn) return true;
     }
-    return cfg.paintKitId;
+    return false;
 }
 
-static const char* SkinPaintKitName(int pk)
+// The warpaint combo has to be re-pointed whenever the weapon changes, because a
+// weapon-specific skin is stored as a 15xxx def and the list is keyed by paint kit id.
+static void SkinSyncWarpaintSel(const SkinCfg& cfg, int& sel)
 {
-    for (int i = 1; i < k_warpaintCount; i++)
-        if (k_warpaints[i].defindex == pk) return k_warpaints[i].name;
-    return "default";
+    sel = 0;
+    if (cfg.weaponSkinDef > 0) {
+        int pkForDef = -1;
+        for (int j = 0; j < k_skinDefCount; j++)
+            if (k_skinDefs[j].skinDef == cfg.weaponSkinDef) { pkForDef = k_skinDefs[j].pkId; break; }
+        if (pkForDef >= 0)
+            for (int i = 1; i < k_warpaintCount; i++)
+                if (k_warpaints[i].defindex == pkForDef) { sel = i; break; }
+    } else if (cfg.paintKitId > 0) {
+        for (int i = 0; i < k_warpaintCount; i++)
+            if (k_warpaints[i].defindex == cfg.paintKitId) { sel = i; break; }
+    }
 }
 
-// TF2's five wear bands (econ_item_constants.cpp EconWear_ToIntCategory: <=0.2 .. >0.8).
-static const char* SkinWearFmt(float w)
+static void Tab_Skins()
 {
-    return w <= 0.2f ? "factory new %.4f" : w <= 0.4f ? "minimal wear %.4f" :
-           w <= 0.6f ? "field-tested %.4f" : w <= 0.8f ? "well-worn %.4f" : "battle scarred %.4f";
-}
-
-static void Tab_Inventory()
-{
-    static int s_wpnSel = 0;
+    static int  s_wpnSel     = 0;
+    static int  s_lastWpn    = -1;
+    static int  s_warpSel    = 0;
+    static char s_wpFilter[64]   = {};
+    static char s_partFilter[64] = {};
 
     // alphabetical display order, built once
     static int  s_wpnOrder[k_wpnCount];
@@ -1924,34 +1921,28 @@ static void Tab_Inventory()
         s_wpnOrderInit = true;
     }
 
-    // botox update_button: one full update for everything picked so far.
-    const auto update_button = []() {
-        if (ImGui::Button("update", ImVec2(-1.f, 15.f))) g_skinNeedsUpdate = true;
-    };
+    Section("skinchanger");
+    ImGui::Checkbox("enabled", &g_enableSkins);
+    if (ImGui::IsItemHovered())
+        MenuTooltip("client-side only. rewrites the item definition and the runtime\n"
+                    "attributes of the weapons in your own loadout, which is what your\n"
+                    "own renderer reads. nobody else sees any of it.");
 
-    bool edited = false;    // any change to the selected weapon's entry -> it is enabled
-    bool swapped = false;   // a change to the item the weapon reports -> full update
-
-    menu_columns_begin();
-
-    // One box, opened once; the selection is bound between its two halves because a pick in
-    // the weapon combo changes s_wpnSel this frame and every row below has to see it.
-    const bool weaponsOpen = menu_group_begin("weapons");
-    if (weaponsOpen)
+    ImGui::Spacing();
+    ImGui::TextDisabled("weapon");
+    if (ImGui::BeginCombo("##skwpn", k_wpnList[s_wpnSel].name))
     {
-        ImGui::Checkbox("enable weapon skins", &g_enableSkins);
-
-        if (ImGui::BeginCombo("weapon", k_wpnList[s_wpnSel].name))
-        {
-            for (int oi = 0; oi < k_wpnCount; oi++) {
-                const int i = s_wpnOrder[oi];
-                const bool sel = (s_wpnSel == i);
-                if (ImGui::Selectable(k_wpnList[i].name, sel)) s_wpnSel = i;
-                if (sel) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
+        for (int oi = 0; oi < k_wpnCount; oi++) {
+            const int i = s_wpnOrder[oi];
+            const bool sel = (s_wpnSel == i);
+            if (ImGui::Selectable(k_wpnList[i].name, sel)) s_wpnSel = i;
+            if (sel) ImGui::SetItemDefaultFocus();
         }
+        ImGui::EndCombo();
     }
+
+    // Bound AFTER the combo: a pick inside it changes s_wpnSel this frame, and the rest of
+    // the tab (and the change check below) has to see the weapon that is now selected.
     const WpnEntry& we = k_wpnList[s_wpnSel];
     const int selRedir = we.redir;
     SkinCfg& cfg = g_skinCfgs[selRedir];
@@ -1959,119 +1950,131 @@ static void Tab_Inventory()
     // twin has to be worn instead; canPaint means the stock def already accepts one.
     const bool hasPaint = we.canPaint || (we.stock != we.redir);
 
-    if (weaponsOpen)
-    {
-        // botox skin_selector: "paint kit: <name>", a search box, a 90px list. Weapon-specific
-        // skins (paint kit 1-86) are listed only when THIS weapon has a 15xxx def for them;
-        // generic war paints (87+) only when it can be painted at all.
-        int listed = 0;
-        for (int i = 1; i < k_warpaintCount; i++) {
-            const int pk = k_warpaints[i].defindex;
-            if (pk <= 86 ? Skin_FindSpecificDef(selRedir, pk) != 0 : hasPaint) ++listed;
-        }
-        const int curPk = SkinCurrentPaintKit(cfg);
-        if (listed > 0)
-        {
-            ImGui::Label("paint kit: %s", SkinPaintKitName(curPk));
-            ImGui::PushID("paint kit");
-            static ImGuiTextFilter s_kitFilter;
-            s_kitFilter.Draw("search##skin filter");
-            if (ImGui::BeginListBox("##skin list", ImVec2(0.f, 90.f)))
-            {
-                if (s_kitFilter.PassFilter("default") && ImGui::Selectable("default", curPk == 0)) {
-                    cfg.paintKitId = 0; cfg.weaponSkinDef = 0; edited = swapped = true;
-                }
-                for (int i = 1; i < k_warpaintCount; i++) {
-                    const int pk = k_warpaints[i].defindex;
-                    const int specific = (pk <= 86) ? Skin_FindSpecificDef(selRedir, pk) : 0;
-                    if (pk <= 86 ? specific == 0 : !hasPaint) continue;
-                    if (!s_kitFilter.PassFilter(k_warpaints[i].name)) continue;
-                    ImGui::PushID(pk);
-                    if (ImGui::Selectable(k_warpaints[i].name, pk == curPk)) {
-                        SkinPickItem(cfg, SKP_PAINT);
-                        if (specific) { cfg.paintKitId = 0;  cfg.weaponSkinDef = specific; }
-                        else          { cfg.paintKitId = pk; cfg.weaponSkinDef = 0; }
-                        edited = swapped = true;
-                    }
-                    ImGui::PopID();
-                }
-                ImGui::EndListBox();
-            }
-            ImGui::PopID();
-
-            // wear and pattern only mean something on a painted weapon
-            if (curPk > 0) {
-                edited |= SliderF("wear", &cfg.wear, 0.0001f, 1.f, SkinWearFmt(cfg.wear));
-                // attrs 866/867 carry a 64-bit seed; the bar covers botox's 0..1023 and a
-                // ctrl+click types any real item's seed.
-                const uint64_t lo = 0, hi = cfg.pattern > 1023 ? cfg.pattern : 1023;
-                edited |= ImGui::SliderScalar("pattern", ImGuiDataType_U64, &cfg.pattern, &lo, &hi, "%llu");
-            }
-        }
-
-        // botox "stattrak" + "kills". The clock model only exists on an item that carries a
-        // warpaint def's weapon_uses_stattrak_module string, so with no skin picked skins.cpp
-        // puts the weapon in a warpaint def whose paint is cancelled (k_noPaintKit).
-        if (ImGui::Checkbox("stat clock", &cfg.statClock)) edited = swapped = true;
-        if (cfg.statClock) {
-            if (SliderI("kills", &cfg.statKills, 0, 99999)) edited = true;
-            if (cfg.statKills < 0) cfg.statKills = 0;
-        }
-
-        update_button();
-
-        if (ImGui::Button("reset skins", ImVec2(-1.f, 15.f))) ImGui::OpenPopup("reset all weapon skins");
-        // botox save_popup( "reset all weapon skins", ..., ImVec2( 220, -1 ) )
-        ImGui::SetNextWindowSize(ImVec2(220.f, 0.f));
-        if (ImGui::BeginPopup("reset all weapon skins"))
-        {
-            PopupChrome("reset all weapon skins", nullptr, ImHashStr("reset all weapon skins"));
-            if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f))) {
-                // values only: the key set is sealed at install (skins.cpp Skins_Install)
-                for (auto& [key, c] : g_skinCfgs) c = SkinCfg{};
-                g_skinNeedsUpdate = true;
-                DebugLog("skins: reset all weapon skins");
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("no", ImVec2(-1.f, 15.f))) ImGui::CloseCurrentPopup();
-            ImGui::EndPopup();
-        }
+    if (s_lastWpn != s_wpnSel) {
+        s_lastWpn = s_wpnSel;
+        SkinSyncWarpaintSel(cfg, s_warpSel);
+        s_wpFilter[0] = '\0';
     }
-    menu_group_end();
 
-    menu_columns_next();
+    ImGui::Checkbox("enabled for this weapon", &cfg.enabled);
 
-    if (menu_group_begin("killstreak"))
+    // ---- warpaint ------------------------------------------------------------------
+    Section("warpaint");
+    if (!hasPaint) ImGui::BeginDisabled();
+    ImGui::TextDisabled("paint");
+    if (ImGui::BeginCombo("##skwarp", k_warpaints[s_warpSel].name))
+    {
+        ImGui::InputText("##skwpfilter", s_wpFilter, sizeof(s_wpFilter));
+        ImGui::Separator();
+        for (int i = 0; i < k_warpaintCount; i++)
+        {
+            const int pk = k_warpaints[i].defindex;
+            // 0 is "(none)". 1-86 are weapon-specific skins, shown only when THIS weapon
+            // has a matching 15xxx def; 87+ are generic warpaints, shown only if paintable.
+            if (i != 0) {
+                if (pk > 0 && pk <= 86) { if (Skin_FindSpecificDef(selRedir, pk) == 0) continue; }
+                else if (!hasPaint)     { continue; }
+            }
+            if (!SkinFilterMatch(k_warpaints[i].name, s_wpFilter)) continue;
+
+            const bool sel = (s_warpSel == i);
+            if (ImGui::Selectable(k_warpaints[i].name, sel))
+            {
+                s_warpSel = i;
+                if (i == 0)                 { cfg.paintKitId = 0;  cfg.weaponSkinDef = 0; }
+                else if (pk > 0 && pk <= 86){ cfg.paintKitId = 0;  cfg.weaponSkinDef = Skin_FindSpecificDef(selRedir, pk); }
+                else                        { cfg.paintKitId = pk; cfg.weaponSkinDef = 0; }
+                g_skinNeedsUpdate = true;
+            }
+            if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::TextDisabled("paint kit id");
+    if (ImGui::InputInt("##skkit", &cfg.paintKitId, 1, 10))
+    {
+        if (cfg.paintKitId < 0) cfg.paintKitId = 0;
+        // A hand-typed 1-86 means a weapon-specific skin, which is stored as its 15xxx def.
+        if (cfg.paintKitId >= 1 && cfg.paintKitId <= 86) {
+            const int sd = Skin_FindSpecificDef(selRedir, cfg.paintKitId);
+            if (sd > 0) { cfg.weaponSkinDef = sd; cfg.paintKitId = 0; }
+        } else {
+            cfg.weaponSkinDef = 0;
+        }
+        SkinSyncWarpaintSel(cfg, s_warpSel);
+        g_skinNeedsUpdate = true;
+    }
+
+    ImGui::TextDisabled("wear");
+    // The band name alone is not a usable slider format: ImGui rounds the dragged value by
+    // formatting it and PARSING THE RESULT BACK, so a format with no conversion specifier
+    // reads back as nothing and the widget shows an empty bar. Keep the number in it.
+    SliderF("##skwear", &cfg.wear,  0.f, 1.f,
+            cfg.wear < 0.07f ? "factory new %.2f"  :
+            cfg.wear < 0.15f ? "minimal wear %.2f" :
+            cfg.wear < 0.38f ? "field-tested %.2f" :
+            cfg.wear < 0.45f ? "well-worn %.2f"    : "battle scarred %.2f");
+
+    ImGui::TextDisabled("pattern seed");
+    {
+        static uint64_t step = 1, stepFast = 1000;
+        ImGui::InputScalar("##skpat", ImGuiDataType_U64, &cfg.pattern, &step, &stepFast);
+    }
+    if (!hasPaint) { ImGui::EndDisabled(); ImGui::TextDisabled("(this weapon takes no warpaint)"); }
+
+    // ---- killstreak ----------------------------------------------------------------
+    Section("killstreak");
     {
         static const char* const kTier[]  = { "none","basic","specialized","professional" };
         static const char* const kSheen[] = { "none","team shine","deadly daffodil","manndarin",
                                               "mean green","agonizing emerald","villainous violet","hot rod" };
         static const char* const kEff[]   = { "none","fire horns","cerebral discharge","tornado",
                                               "flames","singularity","incinerator","hypno-beam" };
-        edited |= ImGui::Combo("tier", &cfg.ksTier, kTier, 4);
+        ImGui::TextDisabled("tier");
+        ImGui::Combo("##sktier", &cfg.ksTier, kTier, 4);
         if (cfg.ksTier >= 2) {
-            edited |= ImGui::Combo("sheen", &cfg.ksSheen, kSheen, 8);
-            if (ImGui::Checkbox("custom color", &cfg.ksCustomColor)) edited = swapped = true;
+            ImGui::TextDisabled("sheen");
+            ImGui::Combo("##sksheen", &cfg.ksSheen, kSheen, 8);
+            if (ImGui::Checkbox("custom color", &cfg.ksCustomColor)) g_skinNeedsUpdate = true;
+            if (ImGui::IsItemHovered())
+                MenuTooltip("recolors BOTH the sheen and the eye glow: the two read one row of\n"
+                            "the same table in client.dll, so the row the sheen above picks is\n"
+                            "rewritten with this color while the weapon is out. with no sheen\n"
+                            "picked it uses team shine's row. other players holding that same\n"
+                            "sheen are recolored too -- it is one table for the whole client.");
             if (cfg.ksCustomColor)
-                edited |= ImGui::ColorEdit3("##skkscol", cfg.ksColor,
-                                            ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+                ImGui::ColorEdit3("##skkscol", cfg.ksColor,
+                                  ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
         }
-        if (cfg.ksTier == 3)
-            edited |= ImGui::Combo("kill effect", &cfg.ksEffect, kEff, 8);
+        if (cfg.ksTier == 3) {
+            ImGui::TextDisabled("kill effect");
+            ImGui::Combo("##skkseff", &cfg.ksEffect, kEff, 8);
+        }
+        if (cfg.ksTier > 0) {
+            ImGui::TextDisabled("streak count is faked locally");
+            if (ImGui::IsItemHovered())
+                MenuTooltip("the attributes alone give a sheen once every 5 seconds and no\n"
+                            "eye glow at all: both are paced by your NETWORKED kill streak,\n"
+                            "which a server that never issued the item keeps at zero. dih\n"
+                            "counts your kills itself and writes that count. eyes need 5.");
+        }
     }
-    menu_group_end();
 
-    // attrs 134 + 370. botox name_selector shape: "label: current", search, 90px list. Every id
-    // the game's schema defines is offered (data/particledata.h), grouped as TF2 groups them.
-    if (menu_group_begin("unusual"))
+    // ---- particle ------------------------------------------------------------------
+    // attrs 134 + 370. Every id the game's own schema defines is offered, not just the
+    // four Gun Mettle weapon unusuals -- a cosmetic effect attaches to a weapon fine.
+    Section("particle");
     {
-        ImGui::Label("effect: %s", cfg.unusual < 0 ? "none" : Particle_Name(cfg.unusual));
-        ImGui::PushID("unusual");
-        static ImGuiTextFilter s_partFilter;
-        s_partFilter.Draw("search##name filter");
-        if (ImGui::BeginListBox("##name list", ImVec2(0.f, 90.f)))
+        char preview[96];
+        if (cfg.unusual < 0) snprintf(preview, sizeof(preview), "none");
+        else snprintf(preview, sizeof(preview), "%s (%d)", Particle_Name(cfg.unusual), cfg.unusual);
+
+        ImGui::TextDisabled("unusual effect");
+        if (ImGui::BeginCombo("##skpart", preview))
         {
+            ImGui::InputText("##skpartfilter", s_partFilter, sizeof(s_partFilter));
+            ImGui::Separator();
             for (int g = 0; g < k_particleGroupCount; ++g)
             {
                 const ParticleGroup& pg = k_particleGroups[g];
@@ -2079,87 +2082,140 @@ static void Tab_Inventory()
                 for (int i = 0; i < pg.count; ++i)
                 {
                     const ParticleEntry& pe = pg.items[i];
-                    if (!s_partFilter.PassFilter(pe.name)) continue;
-                    if (!headerDrawn) { ImGui::TextDisabled("%s", pg.name); headerDrawn = true; }
-                    ImGui::PushID(g * 10000 + i);
-                    if (ImGui::Selectable(pe.name, cfg.unusual == pe.id)) { cfg.unusual = pe.id; edited = true; }
-                    ImGui::PopID();
-                }
-            }
-            ImGui::EndListBox();
-        }
-        ImGui::PopID();
-    }
-    menu_group_end();
-
-    const ReskinGroup* rg = Skin_FindReskinGroup(selRedir);
-    const bool hasFestive = we.festiveIdx > 0;
-    if ((we.canAustralia || hasFestive || we.canFestivize || rg) && menu_group_begin("variant"))
-    {
-        if (we.canAustralia && ImGui::Checkbox("australium", &cfg.australium)) {
-            if (cfg.australium) SkinPickItem(cfg, SKP_AUSTRALIUM);
-            edited = swapped = true;
-        }
-        if (hasFestive && ImGui::Checkbox("festive", &cfg.festive)) {
-            if (cfg.festive) { SkinPickItem(cfg, SKP_FESTIVE); cfg.festivized = false; }
-            edited = swapped = true;
-        }
-        // a Festive weapon already has its lights
-        if (we.canFestivize && !cfg.festive && ImGui::Checkbox("festivized", &cfg.festivized))
-            edited = swapped = true;
-
-        if (rg)
-        {
-            const char* preview = "none";
-            for (int i = 0; i < rg->count; i++)
-                if (rg->variants[i].defindex == cfg.reskinDef && rg->variants[i].style == cfg.reskinStyle)
-                    { preview = rg->variants[i].name; break; }
-            if (ImGui::BeginCombo("reskin", preview))
-            {
-                if (ImGui::Selectable("none", cfg.reskinDef == 0)) {
-                    cfg.reskinDef = 0; cfg.reskinStyle = 0; edited = swapped = true;
-                }
-                for (int i = 0; i < rg->count; i++) {
-                    const bool sel = (cfg.reskinDef == rg->variants[i].defindex
-                                   && cfg.reskinStyle == rg->variants[i].style);
-                    if (ImGui::Selectable(rg->variants[i].name, sel)) {
-                        SkinPickItem(cfg, SKP_RESKIN);
-                        cfg.reskinDef   = rg->variants[i].defindex;
-                        cfg.reskinStyle = rg->variants[i].style;
-                        edited = swapped = true;
+                    if (!SkinFilterMatch(pe.name, s_partFilter)) continue;
+                    if (!headerDrawn) {
+                        if (g) ImGui::Separator();
+                        ImGui::TextDisabled("%s", pg.name);
+                        headerDrawn = true;
                     }
+                    char lbl[96];
+                    if (pe.id < 0) snprintf(lbl, sizeof(lbl), "%s", pe.name);
+                    else           snprintf(lbl, sizeof(lbl), "%s (%d)", pe.name, pe.id);
+                    const bool sel = (cfg.unusual == pe.id);
+                    if (ImGui::Selectable(lbl, sel)) cfg.unusual = pe.id;
                     if (sel) ImGui::SetItemDefaultFocus();
                 }
-                ImGui::EndCombo();
             }
-            if (const ReskinInfo* ri = cfg.reskinDef > 0 ? Skin_FindReskinInfo(cfg.reskinDef) : nullptr)
-                if (ri->specialTaunt) ImGui::TextDisabled("taunt kill: server-side only");
+            ImGui::EndCombo();
+        }
+        ImGui::TextDisabled("particle id");
+        if (ImGui::InputInt("##skpartid", &cfg.unusual, 1, 10) && cfg.unusual < -1)
+            cfg.unusual = -1;
+    }
+
+    // ---- variant -------------------------------------------------------------------
+    Section("variant");
+    {
+        if (!we.canAustralia) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("australium", &cfg.australium)) g_skinNeedsUpdate = true;
+        if (!we.canAustralia) ImGui::EndDisabled();
+
+        if (!we.canFestivize) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("festivized", &cfg.festivized)) g_skinNeedsUpdate = true;
+        if (!we.canFestivize) ImGui::EndDisabled();
+
+        const bool hasFestive = (we.festiveIdx > 0);
+        if (!hasFestive) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("festive", &cfg.festive)) g_skinNeedsUpdate = true;
+        if (!hasFestive) ImGui::EndDisabled();
+    }
+
+    // ---- reskin --------------------------------------------------------------------
+    Section("reskin");
+    {
+        const ReskinGroup* rg = Skin_FindReskinGroup(selRedir);
+        const char* preview = "(none)";
+        if (rg && cfg.reskinDef > 0)
+            for (int i = 0; i < rg->count; i++)
+                if (rg->variants[i].defindex == cfg.reskinDef
+                    && rg->variants[i].style == cfg.reskinStyle)
+                    { preview = rg->variants[i].name; break; }
+
+        if (!rg) ImGui::BeginDisabled();
+        if (ImGui::BeginCombo("##skreskin", preview))
+        {
+            const bool noneSel = (cfg.reskinDef == 0);
+            if (ImGui::Selectable("(none)", noneSel))
+                { cfg.reskinDef = 0; cfg.reskinStyle = 0; g_skinNeedsUpdate = true; }
+            if (noneSel) ImGui::SetItemDefaultFocus();
+            if (rg) for (int i = 0; i < rg->count; i++) {
+                const bool sel = (cfg.reskinDef   == rg->variants[i].defindex
+                               && cfg.reskinStyle == rg->variants[i].style);
+                if (ImGui::Selectable(rg->variants[i].name, sel)) {
+                    cfg.reskinDef   = rg->variants[i].defindex;
+                    cfg.reskinStyle = rg->variants[i].style;
+                    g_skinNeedsUpdate = true;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (!rg) { ImGui::EndDisabled(); ImGui::TextDisabled("(no reskins for this weapon)"); }
+
+        // What the picked item carries in items_game.txt, so a wrong-looking Saxxy or
+        // Gold Frying Pan can be told apart from a wrong pick.
+        if (cfg.reskinDef > 0) {
+            if (const ReskinInfo* ri = Skin_FindReskinInfo(cfg.reskinDef)) {
+                if (ri->turnToGold) ImGui::TextDisabled("turns victims to gold");
+                if (ri->specialTaunt) {
+                    ImGui::TextDisabled("taunt kill: server-side only");
+                    if (ImGui::IsItemHovered())
+                        MenuTooltip("special_taunt (attr 551) is read by the SERVER when it picks\n"
+                                    "the taunt to run. it never reaches your client, so this one\n"
+                                    "cannot be faked locally. the gold statue can and is.");
+                }
+                if (ri->styleCount > 0)
+                    ImGui::TextDisabled("skin %d / %d (red / blu)",
+                                        (int)ri->skinRed[cfg.reskinStyle < ri->styleCount ? cfg.reskinStyle : 0],
+                                        (int)ri->skinBlu[cfg.reskinStyle < ri->styleCount ? cfg.reskinStyle : 0]);
+                if (ri->anim != Skin_BaseAnimSlot(selRedir))
+                    ImGui::TextDisabled("animations remapped");
+            } else {
+                ImGui::TextDisabled("no model info -- def index only");
+            }
         }
     }
-    if (we.canAustralia || hasFestive || we.canFestivize || rg) menu_group_end();
 
-    if (menu_group_begin("spells"))
+    // ---- extras --------------------------------------------------------------------
+    Section("extras");
     {
-        // Exorcism fits every weapon; pumpkin bombs / halloween fire only where TF2 has them.
-        auto spell = [&](const char* label, uint8_t bit) {
-            bool on = (cfg.spellFlags & bit) != 0;
-            if (ImGui::Checkbox(label, &on)) {
-                cfg.spellFlags = (uint8_t)((cfg.spellFlags & ~bit) | (on ? bit : 0));
-                edited = true;
-            }
-        };
-        spell("exorcism", kCfgSpell_Exorcism);
-        if (we.spells & kSpell_Pumpkin) spell("pumpkin bombs", kCfgSpell_Pumpkin);
-        if (we.spells & kSpell_Fire)    spell("halloween fire", kCfgSpell_Fire);
-
-        update_button();
+        // Available on every weapon. The clock model only exists on an item that carries a
+        // warpaint def's static weapon_uses_stattrak_module string, so with no skin picked the
+        // weapon is put in a warpaint def whose paint is then cancelled (skins.cpp, k_noPaintKit)
+        // -- the clock appears, the weapon still looks stock.
+        ImGui::Checkbox("stat clock", &cfg.statClock);
+        if (cfg.statClock) {
+            ImGui::TextDisabled("kills");
+            if (ImGui::InputInt("##skstatk", &cfg.statKills, 1, 100) && cfg.statKills < 0)
+                cfg.statKills = 0;
+            if (cfg.reskinDef > 0)
+                ImGui::TextDisabled("no clock on a reskin -- the reskin owns the def index");
+        }
     }
-    menu_group_end();
 
-    menu_columns_end();
+    {
+        const bool hasPumpkin = (we.spells & kSpell_Pumpkin) != 0;
+        const bool hasFire    = (we.spells & kSpell_Fire)    != 0;
+        bool exo = (cfg.spellFlags & kCfgSpell_Exorcism) != 0;
+        bool pmp = (cfg.spellFlags & kCfgSpell_Pumpkin)  != 0;
+        bool fir = (cfg.spellFlags & kCfgSpell_Fire)     != 0;
+        if (ImGui::Checkbox("spell: exorcism", &exo))
+            cfg.spellFlags = (cfg.spellFlags & ~kCfgSpell_Exorcism) | (exo ? kCfgSpell_Exorcism : 0);
+        if (!hasPumpkin) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("spell: pumpkin bombs", &pmp))
+            cfg.spellFlags = (cfg.spellFlags & ~kCfgSpell_Pumpkin) | (pmp ? kCfgSpell_Pumpkin : 0);
+        if (!hasPumpkin) ImGui::EndDisabled();
+        if (!hasFire) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("spell: halloween fire", &fir))
+            cfg.spellFlags = (cfg.spellFlags & ~kCfgSpell_Fire) | (fir ? kCfgSpell_Fire : 0);
+        if (!hasFire) ImGui::EndDisabled();
+    }
 
-    if (edited)  cfg.enabled = true;
-    if (swapped) g_skinNeedsUpdate = true;
+    ImGui::Spacing();
+    if (ImGui::Button("apply", ImVec2(-1.f, 0.f))) g_skinNeedsUpdate = true;
+    if (ImGui::IsItemHovered())
+        MenuTooltip("re-resolves the reskin models and asks the server for a full update.\n"
+                    "only needed when something did not take on its own.");
 }
 
 // botox tab_fonts: one page per face, "<face> font" settings | "font list". botox pages
@@ -2220,81 +2276,97 @@ static void Tab_Fonts()
     // UNIT_MENU_SLOT fonts
 }
 
-// botox config_panel(visuals = false, ..., list_rows 12): file name, list, then create /
-// save / load / remove / refresh / open folder, with yes/no confirmations. Backed by
-// config.cpp's named cfgs in C:\botox-tf2 (names shown without ".cfg").
+// botox config_panel(visuals, ..., list_rows 12): file name, list, then create / save / load /
+// remove / refresh / open folder, with yes/no confirmations. visuals = the second panel: only
+// the visuals-tab keys (visual_keys.h), files in C:\botox-tf2\visuals. Names shown without ".cfg".
 static bool CfgNameGetter(void* data, int idx, const char** out)
 {
     *out = (*static_cast<std::vector<std::string>*>(data))[idx].c_str();
     return true;
 }
 
-static void ConfigPanel()
+static void ConfigPanel(const bool visuals)
 {
-    static std::vector<std::string> s_names;
-    static bool s_listed = false, s_save = false, s_load = false, s_remove = false;
-    static int  s_selected = 0;
-    static char s_file[64] = "";
-    auto refresh = []() {
-        s_names = ListConfigs();
-        for (auto& n : s_names) if (n.size() > 4) n.resize(n.size() - 4);
+    struct PanelState {
+        std::vector<std::string> names;
+        bool listed = false, save = false, load = false, remove = false;
+        int  selected = 0;
+        char file[64] = "";
     };
-    if (!s_listed) { refresh(); s_listed = true; }
+    static PanelState s_panels[2];
+    PanelState& p = s_panels[visuals];
 
-    ImGui::InputText("config file name", s_file, sizeof(s_file));
+    auto refresh = [&p, visuals]() {
+        p.names = ListConfigs(visuals);
+        for (auto& n : p.names) if (n.size() > 4) n.resize(n.size() - 4);
+    };
+    if (!p.listed) { refresh(); p.listed = true; }
+
+    ImGui::InputText(visuals ? "visuals file name" : "config file name", p.file, sizeof(p.file));
 
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 2.f);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 3.f));
-    ImGui::ListBox("##config list", &s_selected, CfgNameGetter, &s_names, (int)s_names.size(), 12);
+    ImGui::ListBox(visuals ? "##visuals config list" : "##config list", &p.selected, CfgNameGetter, &p.names,
+                   (int)p.names.size(), 12);
     ImGui::PopStyleVar();
 
-    if (s_selected < 0 || s_selected >= (int)s_names.size()) s_selected = 0;
-    const std::string sel = s_names.empty() ? "" : s_names[s_selected];
+    if (p.selected < 0 || p.selected >= (int)p.names.size()) p.selected = 0;
+    const std::string sel = p.names.empty() ? "" : p.names[p.selected];
 
-    if (ImGui::Button("create", ImVec2(-1.f, 15.f)) && s_file[0]) { SaveConfigNamed(s_file); refresh(); }
-    if (ImGui::Button("save", ImVec2(-1.f, 15.f)))   s_save = true;
-    if (ImGui::Button("load", ImVec2(-1.f, 15.f)))   s_load = true;
-    if (ImGui::Button("remove", ImVec2(-1.f, 15.f))) s_remove = true;
+    if (ImGui::Button("create", ImVec2(-1.f, 15.f)) && p.file[0]) { SaveConfigNamed(p.file, visuals); refresh(); }
+    if (ImGui::Button("save", ImVec2(-1.f, 15.f)))   p.save = true;
+    if (ImGui::Button("load", ImVec2(-1.f, 15.f)))   p.load = true;
+    if (ImGui::Button("remove", ImVec2(-1.f, 15.f))) p.remove = true;
     if (ImGui::Button("refresh", ImVec2(-1.f, 15.f))) refresh();
     if (ImGui::Button("open folder", ImVec2(-1.f, 15.f)))
-        ShellExecuteA(nullptr, "open", CONFIG_DIR, nullptr, nullptr, SW_SHOWNORMAL);
+    {
+        // first press before anything was saved: the folder must exist to open
+        CreateDirectoryA(CONFIG_DIR, nullptr);
+        CreateDirectoryA(ConfigFolder(visuals), nullptr);
+        ShellExecuteA(nullptr, "open", ConfigFolder(visuals), nullptr, nullptr, SW_SHOWNORMAL);
+    }
 
     // nothing listed: a save/load/remove on "" would hit nothing
-    if (s_names.empty()) s_save = s_load = s_remove = false;
+    if (p.names.empty()) p.save = p.load = p.remove = false;
 
-    SavePopup("save confirmation", s_save, ImVec2(220.f, -1.f), [&]() {
-        if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f))) { SaveConfigNamed(sel.c_str()); s_save = false; }
+    SavePopup("save confirmation", p.save, ImVec2(220.f, -1.f), [&]() {
+        if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f))) { SaveConfigNamed(sel.c_str(), visuals); p.save = false; }
         ImGui::SameLine();
-        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) s_save = false;
+        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) p.save = false;
     });
-    SavePopup("load confirmation", s_load, ImVec2(220.f, -1.f), [&]() {
-        if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f))) { LoadConfigNamed(sel.c_str()); s_load = false; }
+    SavePopup("load confirmation", p.load, ImVec2(220.f, -1.f), [&]() {
+        if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f))) { LoadConfigNamed(sel.c_str(), visuals); p.load = false; }
         ImGui::SameLine();
-        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) s_load = false;
+        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) p.load = false;
     });
-    SavePopup("remove confirmation", s_remove, ImVec2(220.f, -1.f), [&]() {
+    SavePopup("remove confirmation", p.remove, ImVec2(220.f, -1.f), [&]() {
         if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f)))
         {
-            DeleteConfigNamed(sel.c_str());
+            DeleteConfigNamed(sel.c_str(), visuals);
             refresh();
-            s_selected = 0;
-            s_remove = false;
+            p.selected = 0;
+            p.remove = false;
         }
         ImGui::SameLine();
-        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) s_remove = false;
+        if (ImGui::Button("no", ImVec2(-1.f, 15.f))) p.remove = false;
     });
 }
 
-// botox tab_settings: col1 "config" + "system", col2 "visuals config" + "menu". botox's
-// visuals-only config panel needs config.cpp to split its table by category (it has no such
-// split) and botox network has no TF2 server -- both left out. menu key is TF2-only (botox
+// botox tab_settings: col1 "config" + "system", col2 "visuals config" + "menu". Left out, no
+// TF2 counterpart: "botox network" (no TF2 server) and "dpi scale panels" (botox render.cpp's
+// panel-dpi layer; this DLL's hud panels have no dpi path). menu key is TF2-only (botox
 // hardcodes insert), kept in system.
 static void Tab_Settings()
 {
+    // botox menu_internal.h color_picker_no_alpha_flags
+    constexpr ImGuiColorEditFlags kPickerNoAlpha = ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB |
+        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop |
+        ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoBorder;
+
     menu_columns_begin();
 
     if (menu_group_begin("config"))
-        ConfigPanel();
+        ConfigPanel(false);
     menu_group_end();
 
     if (menu_group_begin("system"))
@@ -2319,9 +2391,13 @@ static void Tab_Settings()
 
     menu_columns_next();
 
+    if (menu_group_begin("visuals config"))
+        ConfigPanel(true);
+    menu_group_end();
+
     if (menu_group_begin("menu"))
     {
-        ImGui::ColorRow("accent color##accent color", g_accentColor, ImGuiColorEditFlags_NoAlpha);
+        ImGui::ColorRow("accent color##accent color", g_accentColor, kPickerNoAlpha);
 
         // botox: edits a copy, commits on release -- the whole menu rescales under the cursor
         // otherwise. 50% floor, not botox's 25%: RenderMenu resets anything under 0.5 to 1.
@@ -2330,6 +2406,8 @@ static void Tab_Settings()
         if (!s_dpiActive) s_dpiEdit = g_dpiScale * 100.f;
         ImGui::SliderFloat("dpi scale", &s_dpiEdit, 50.f, 200.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
         s_dpiActive = ImGui::IsItemActive();
+        // commit on release only: x*100/100 is not exact, and RenderMenu rescales the whole
+        // style on any change, so a per-frame write would drift every size
         if (ImGui::IsItemDeactivatedAfterEdit()) g_dpiScale = s_dpiEdit / 100.f;
     }
     menu_group_end();
@@ -2581,7 +2659,7 @@ void RenderMenu()
     case TAB_VISUALS:   Tab_VisualsRoot();    break;
     case TAB_MOVEMENT:  Tab_MovementRoot();   break;
     case TAB_MISC:      Tab_MiscRoot();       break;
-    case TAB_INVENTORY: Tab_Inventory();      break;
+    case TAB_INVENTORY: Tab_Skins();          break;
     case TAB_FONTS:     Tab_Fonts();          break;
     case TAB_SETTINGS:  Tab_Settings();       break;
     }

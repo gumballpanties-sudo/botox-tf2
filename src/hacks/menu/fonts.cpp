@@ -100,6 +100,39 @@ std::string Fonts_FindPath(const char* name)
     return s_winFonts + "\\" + (name ? name : "") + ".ttf";
 }
 
+// esp page lists GDI families (the vgui face takes a family), but the ImGui esp face needs a file.
+// Windows' font registry maps "Rubik SemiBold (TrueType)" -> "Rubik-SemiBold.ttf" (machine fonts,
+// relative to the Fonts folder; per-user fonts carry a full path). No exact entry -> botox
+// find_path's stem/family-key match, which still catches "Verdana" -> verdana.ttf.
+std::string Fonts_FamilyPath(const char* family)
+{
+    EnsureScanned();
+    const std::string want = ToLower(family ? family : "");
+    for (HKEY root : { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER })
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExA(root, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 0, KEY_READ, &key) != ERROR_SUCCESS)
+            continue;
+        std::string found;
+        char name[256], data[MAX_PATH];
+        for (DWORD i = 0;; ++i)
+        {
+            DWORD nName = sizeof(name), nData = sizeof(data), type = 0;
+            if (RegEnumValueA(key, i, name, &nName, nullptr, &type, (BYTE*)data, &nData) != ERROR_SUCCESS) break;
+            if (type != REG_SZ || nData == 0) continue;
+            data[std::min<DWORD>(nData, sizeof(data) - 1)] = '\0';
+            std::string n = ToLower(name);
+            if (const size_t p = n.find(" ("); p != std::string::npos) n.resize(p);   // " (TrueType)" / " (OpenType)"
+            if (n != want) continue;
+            found = strchr(data, '\\') ? std::string(data) : s_winFonts + "\\" + data;
+            break;
+        }
+        RegCloseKey(key);
+        if (!found.empty()) return found;
+    }
+    return Fonts_FindPath(family);
+}
+
 static int CALLBACK OnFamily(const LOGFONTA* lf, const TEXTMETRICA*, DWORD, LPARAM p)
 {
     if (lf->lfFaceName[0] && lf->lfFaceName[0] != '@')   // '@' = vertical CJK duplicate

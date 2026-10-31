@@ -131,6 +131,72 @@ inline MvEbPress MV_EbSweepWindow(int centre, bool approx, int runTicks, bool tw
     return w;
 }
 
+// ================= prefix reuse (TF2 port, not botox) =========================================
+// Variants 0..7 come in pairs p = v >> 1: even = unducked, odd = same move ducked from tick 0.
+// A run shares its opening ticks with one of two FAMILIES of its pair:
+//   fam 0 = the even base run (no duck),  fam 1 = the odd base run (ducked from 0).
+// sweep   (even v, duckAt k)     = fam 0 for ticks < k, then pressed -> resumes at k
+// release (even v, duckAt 0, k)  = fam 1 for ticks < k, then let go  -> resumes at k
+// base runs (duckAt/undoAt -1) ARE their family for the whole run and only feed it.
+// limit = ticks of this run that equal the family (states before tick `limit` may be saved),
+// resumeAt = tick whose family state the run may start from (-1 = start at 0).
+struct MvEbFam { int fam; int limit; int resumeAt; };
+inline MvEbFam MV_EbFamily(int v, int duckAt, int undoAt, int bend)
+{
+    constexpr int kAll = 1 << 30;
+    if (v < 0 || v >= 8 || bend != 0) return { -1, 0, -1 };
+    const bool odd = (v & 1) != 0;
+    if (duckAt < 0 && undoAt < 0) return { odd ? 1 : 0, kAll, -1 };
+    if (odd) return { -1, 0, -1 };
+    if (duckAt > 0 && undoAt < 0) return { 0, duckAt, duckAt };
+    if (duckAt == 0 && undoAt > 0) return { 1, undoAt, undoAt };
+    return { -1, 0, -1 };
+}
+
+// ================= deep pass cost (TF2 port, not botox) =======================================
+// botox spends the whole clock share whenever reach says geometry is near. 10-31 log: 515 of 667
+// searches hit the cap, 6 of them found; far / no contact = 525 no-find searches at ~7ms each.
+// FULL deep passes (bend, ebanat) only when a base run grounded within nearTicks; else they stop
+// at half the cap and the next search picks their order up where this one stopped.
+inline bool MV_EbDeepFull(int bestContact, int nearTicks)
+{
+    return bestContact >= 0 && bestContact <= nearTicks;
+}
+
+// bend pass order = botox's: bend-major (+1, -1, +2, -2, ... from bends[]), variant index minor.
+// at = position in that order, total = 2 * nBends * searchCount.
+struct MvEbBendAt { int bend; int idx; };
+inline MvEbBendAt MV_EbBendEntry(int at, int searchCount, const int* bends)
+{
+    const int b = at / searchCount;
+    return { (b & 1) ? -bends[b / 2] : bends[b / 2], at % searchCount };
+}
+// where this search's bend pass starts: full = botox order from 0, half = the carried cursor
+inline int MV_EbBendStart(int cursor, int total, bool full)
+{
+    return (full || cursor <= 0 || cursor >= total) ? 0 : cursor;
+}
+// cursor for the next search: walked = entries consumed (run or skipped), found = a plan ended
+// the pass. Finished or found = back to 0 (botox order); cut by the clock = carry on from there.
+inline int MV_EbBendNext(int start, int walked, int total, bool found)
+{
+    return (found || walked >= total || total <= 0) ? 0 : (start + walked) % total;
+}
+
+// bend B pushes ticks 0..|B|-1, then flies the variant. Same variant + same sign, |B'| >= t: ticks
+// 0..t-1 are pushes in both, so B' may start from B's state at tick t (saved at t = |B|).
+// slot = (variant, sign), variants 0..7 only (the bend pass runs base variants).
+inline int MV_EbBendSlot(int v, int bend)
+{
+    if (v < 0 || v >= 8 || bend == 0) return -1;
+    return v * 2 + (bend < 0 ? 1 : 0);
+}
+inline bool MV_EbBendCanResume(int savedTick, int bend)
+{
+    const int n = bend < 0 ? -bend : bend;
+    return savedTick >= 1 && savedTick <= n;
+}
+
 // ================= stance (TF2) ===============================================================
 // iStance: 0 = prefer standing (any, but a ducked find that eats the jump is only a fallback),
 // 1 = ducked only, 2 = standing only. bDucked = the hull's FL_DUCKING on the bug tick.

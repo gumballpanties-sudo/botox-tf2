@@ -38,6 +38,7 @@ extern int  g_fontEspFlags;
 const std::vector<std::string>& Fonts_FileNames();   // botox m_font_file_names (file stems)
 const std::vector<std::string>& Fonts_Families();    // GDI families (esp page)
 std::string Fonts_FindPath(const char* name);        // botox find_path: stem -> full path
+std::string Fonts_FamilyPath(const char* family);    // esp page: GDI family -> font file (registry, then find_path)
 void Fonts_RequestReload();                          // botox "reload fonts" button
 void Fonts_ResetIndicator();
 void Fonts_ResetEsp();

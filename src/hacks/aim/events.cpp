@@ -3,12 +3,7 @@
 #include "core.h"
 #include "crithack.h"
 #include "aim_melee.h"
-#include "../esp/esp_fx.h"   // Unit C2: damage numbers -- see esp.h's banner for why this is a
-                             // plain-primitive header instead of dih's globals.h
-
-// Unit C's own g_esp* toggle, declared the same way esp.cpp already does (plain extern, no
-// dih globals.h include -- see esp.h's banner comment).
-extern bool g_espDamageNumbers;
+#include "esp.h"   // damage numbers + on-hit hitboxes (botox n_players on_player_hurt / hitboxes_on_hurt)
 
 bool CEventListener::Initialize()
 {
@@ -62,9 +57,6 @@ void CEventListener::FireGameEvent(IGameEvent* pEvent)
 	}
 	case FNV1A::Hash32Const("player_hurt"):
 	{
-		if (!g_espDamageNumbers)
-			break;
-
 		const int iDamage = pEvent->GetInt("damageamount");
 		if (iDamage <= 0)
 			break;
@@ -81,9 +73,7 @@ void CEventListener::FireGameEvent(IGameEvent* pEvent)
 		if (!pVictim)
 			break;
 
-		const bool bCrit = pEvent->GetBool("crit") || pEvent->GetBool("minicrit");
-		const Vec3 vOrigin = pVictim->GetAbsOrigin();
-		EspFx_PushDamageNum(vOrigin.x, vOrigin.y, vOrigin.z + 64.f, iDamage, bCrit);
+		F::Esp.OnPlayerHurt(pVictim, iDamage);
 		break;
 	}
 	}

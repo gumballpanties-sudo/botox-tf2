@@ -135,6 +135,8 @@ extern bool  g_specEnable;
 extern bool  g_specAlwaysShow;
 extern int   g_specStyle;
 extern int   g_specPos;      // WatermarkPos
+extern float g_specOffX;     // screen-px drag offset on top of the g_specPos anchor
+extern float g_specOffY;
 extern bool  g_specShowTarget;     // botox m_spectators_list_show_target
 extern bool  g_specDelusionalLeft; // botox m_spectators_list_delusional_left
 extern int   g_specListWidth;      // botox m_spectators_list_width (interwebz style)
@@ -887,40 +889,7 @@ extern bool g_netvarsReady;
 // -- Unit C: ESP (src/hacks/aim/esp.cpp draws these; values read via plain extern, same
 // primitive-only declarations duplicated there -- see esp.h's banner comment for why esp.cpp
 // does not include this header) ----------------------------------------------------------
-extern bool  g_espEnable;
-extern bool  g_espTeammates;
-extern bool  g_espDistanceFade;
-extern float g_espFadeNear;
-extern float g_espFadeFar;
-extern bool  g_espName;
-extern bool  g_espHealth;
-extern bool  g_espDistance;
-extern bool  g_espFlags;
-extern bool  g_espSkeleton;
-extern bool  g_espHitboxes;
-extern int   g_espBoxStyle;       // 0 off, 1 2d corner, 2 2d full
-extern bool  g_espWorldEnable;
-extern bool  g_espBuildings;
-extern bool  g_espAmmoPacks;
-extern bool  g_espDroppedWeapons;
-extern bool  g_espProjectiles;
-extern bool  g_espOofArrows;
-extern bool  g_espProjPath;
-extern float g_espProjPathColor[4];
-extern float g_espEnemyColor[4];
-extern float g_espTeamColor[4];
-extern float g_espSkeletonColor[4];
-extern float g_espHitboxColor[4];
-extern float g_espFlagsColor[4];
-extern float g_espOofColor[4];
-extern float g_espSoundColor[4];
-extern float g_espDmgColor[4];
-extern float g_espBuildingColor[4];
-extern float g_espItemColor[4];
-extern float g_espProjColor[4];
-extern bool  g_espSoundPings;      // CSoundEmitterSystem_EmitSound ping (visuals.cpp hook)
-extern bool  g_espDamageNumbers;   // player_hurt floating numbers (aim/events.cpp)
-extern bool  g_espAvatar;          // unit E5/spec: steam avatar drawn at the esp box, default off
+#include "../hacks/esp/esp_vars.h"
 
 // -- Unit C2: chams (visuals.cpp, piggybacked on the existing h_DrawModelExecute hook --
 // no 2nd MinHook on DrawModelExecute). Players only: colour-modulated ForcedMaterialOverride,
