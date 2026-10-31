@@ -38,3 +38,5 @@ docs/
 tools/
 CLAUDE.md
 README.md
+build.log
+build_cfg.log
