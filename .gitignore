@@ -33,3 +33,8 @@
 
 build/
 backups/
+tests/
+docs/
+tools/
+CLAUDE.md
+README.md
