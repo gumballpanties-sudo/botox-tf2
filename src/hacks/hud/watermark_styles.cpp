@@ -1214,6 +1214,58 @@ static void DrawGamesense(ImDrawList* dl, ImGuiIO& io)
     for (const auto& p : parts) { put(separator, IM_COL32(210, 210, 210, 255)); put(p, IM_COL32(255, 255, 255, 230)); }
 }
 
+// style 22: heroin -- heroin-new FUN_18004b9f0, ImGui window "watermark_menu" redrawn on the list.
+// Default ImGuiStyle (padding 8), bg = its primary color, menu accent where heroin uses its accent.
+static constexpr ImU32 kHeroinBg   = IM_COL32(37, 39, 48, 255);   // cfg primary color (0x1803531a8)
+static constexpr ImU32 kHeroinDark = IM_COL32(15, 15, 15, 255);   // 0x180350f70
+// window rect [min, max): fill, three insets (dark / accent 25% / dark), accent + black outside
+static void HeroinBox(ImDrawList* dl, ImVec2 min, ImVec2 max)
+{
+    const float x = min.x, y = min.y, r = max.x, b = max.y;
+    dl->AddRectFilled(min, max, kHeroinBg);
+    dl->AddRect(ImVec2(x + 1.f, y + 1.f), ImVec2(r - 2.f, b - 2.f), kHeroinDark);
+    dl->AddRect(ImVec2(x + 2.f, y + 2.f), ImVec2(r - 3.f, b - 3.f), AccentF(0.25f));
+    dl->AddRect(ImVec2(x + 3.f, y + 3.f), ImVec2(r - 4.f, b - 4.f), kHeroinDark);
+    dl->AddRect(ImVec2(x - 1.f, y - 1.f), ImVec2(r, b), Accent());
+    dl->AddRect(ImVec2(x - 2.f, y - 2.f), ImVec2(r + 1.f, b + 1.f), IM_COL32(0, 0, 0, 255));
+}
+static void DrawHeroin(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontHeroinArialBd16);
+    const float px = font->FontSize;
+    const auto w = [&](const std::string& s) { return ImguiW(font, s); };   // ImGui::CalcTextSize, ceiled
+
+    // fps: frametime ema 0.1, the shown number refreshed once a second
+    static float avg = 0.f, shownAvg = 0.f;
+    static double next = 0.0;
+    avg = avg > 0.f ? io.DeltaTime * 0.1f + avg * 0.9f : io.DeltaTime;
+    if (next < ImGui::GetTime()) { next = ImGui::GetTime() + 1.0; shownAvg = avg; }
+
+    const std::string brand = Brand();
+    std::string rest = " / dev", fps;
+    if (g_wmShowTime) rest += " | " + Clock("%H:%M:%S");
+    if (g_wmShowFPS) { rest += " | "; fps = std::to_string(shownAvg > 0.f ? (int)(1.f / shownAvg) : 0); }
+
+    // Text + SameLine(0, 0) chain, window AlwaysAutoResize inside constraints (50,25)-(300,250)
+    const float contentW = w(brand) + w(rest) + w(fps) + (g_wmShowFPS ? w(" fps") : 0.f);
+    const float width = std::clamp(contentW + 16.f, 50.f, 300.f), height = std::clamp(px + 16.f, 25.f, 250.f);
+    // heroin places it with FramePadding.x * 2 (= 8) and leaves the fps number out of the measure
+    const float measured = w(brand) + w(rest + (g_wmShowFPS ? " fps" : ""));
+    const float x = floorf(io.DisplaySize.x - (8.f + measured + io.DisplaySize.x * g_wmHeroinX));
+    const float y = floorf(g_wmHeroinY * io.DisplaySize.y);
+    SetBox(x - 2.f, y - 2.f, x + width + 1.f, y + height + 1.f);
+
+    HeroinBox(dl, ImVec2(x, y), ImVec2(x + width, y + height));
+
+    constexpr ImU32 white = IM_COL32(255, 255, 255, 255), grey = IM_COL32(153, 153, 153, 255);
+    float tx = x + 8.f;
+    const auto put = [&](const std::string& s, ImU32 c) { dl->AddText(font, px, ImVec2(tx, y + 8.f), c, s.c_str()); tx += w(s); };
+    put(brand, white);
+    put(rest, grey);
+    put(fps, white);
+    if (g_wmShowFPS) put(" fps", grey);
+}
+
 // style 8: airflow -- spectator_list.cpp draw_watermark_airflow(). sf ui display semibold 14.
 // Two rounded pills over a live backbuffer blur: left = airflow logo (accent) + brand, right =
 // local avatar + "user | HH:MM ping ms". botox modulates the blur image white (left) / (100) grey
@@ -1317,6 +1369,7 @@ void Watermark_Draw()
     case 18: return DrawDnaClarity(dl, io);
     case 20: return DrawHoweweware(dl, io);
     case 21: return DrawGamesense(dl, io);
+    case 22: return DrawHeroin(dl, io);
     default: return DrawDefault(dl, io);
     }
 }
@@ -1353,6 +1406,8 @@ MediaLook Watermark_MediaLook(int style)
     case 19: return { true, accent, white, 0 };
     case 20: return { false, accent, kHowewewareGrey, 0 };
     case 21: return { true, PackColor(g_wmGsSenseColor), IM_COL32(255, 255, 255, 230), 0 };
+    // heroin FUN_18004b0f0 music display: white title, artist white at 0.5, +1 black shadow
+    case 22: return { true, white, IM_COL32(255, 255, 255, 127), 1 };
     default: return { true, white, accent, 0 };   // style 0: menu accent
     }
 }
@@ -1430,6 +1485,7 @@ void Watermark_MediaFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, int style)
         GamesenseFrame(dl, ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f));
         if (g_wmGsBar) GamesenseBar(dl, ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f));
         break;
+    case 22: HeroinBox(dl, ImVec2(min.x + 2.f, min.y + 2.f), ImVec2(max.x - 1.f, max.y - 1.f)); break;   // outer rings stay in [min, max]
     default: break;
     }
 }

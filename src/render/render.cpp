@@ -82,24 +82,18 @@ static unsigned long long s_psPointWinOpenMs = 0; // debounce: opening ENTER mus
 
 namespace {
 
-// ---- Pixelsurf_points: finder hits (assist.cpp:276-281, 315, 340-345) -------------
-// dih: reference 0.5s appear + speed 5 stacked two lags (linear prog, then exp chase of
-// target*prog) -- point hit full size ~1s after the scan published it. the appear
-// animation is GONE. The scan publishes a chunk at a time and a spot that fades in reads as
-// the scan being slow -- a hit pops at full size, exactly like the texturebug rings beside it
-constexpr float kFndVanish    = 0.5f;   // disappearance_duration
-constexpr float kFndSizeSpeed = 20.0f;  // size_animation_speed (ref 5)
-constexpr float kFndSize      = 9.0f;   // normal_size
-constexpr float kFndSizeHover = 12.0f;  // in_crosshair_size
-constexpr float kFndHoverPx   = 9.0f;   // InCrosshair(x, y, 9.f)
-constexpr float kFndFillA     = 100.f;  // filled_alpha  = progress * 100
-constexpr float kFndRingA     = 255.f;  // outline_alpha = progress * 255
-// the finder ring was the one colour left in the overlay (0,255,0). The menu, the
-// crosshair and the saved-point rings are all monochrome, so it is white now like everything
-// else, and DASHED so it still reads apart from a saved point at a glance
-constexpr int   kFndRingWhite = 255;
-constexpr int   kFndDashes    = 12;     // dashes around the ring
-constexpr float kFndDashDuty  = 0.55f;  // fraction of each dash slot that is drawn
+// ---- finder dots: botox points_ui.cpp pf_render_dots, 1:1 ---------------------------------
+// Four lists, botox's lists[] order: headbounce (red), pixeljump (yellow), surf (green),
+// texturebug (cyan). Dots of different types on one spot share ONE ring split into arcs.
+constexpr int   kPfTypes     = 4;
+constexpr float kPfDotSize   = 9.f;
+constexpr float kPfHoverSize = 12.f;
+constexpr float kPfFadeTime  = 0.5f;
+constexpr float kPfTop       = -3.14159265f * 0.5f;
+constexpr float kPfTurn      = 6.2831853f;
+constexpr float kPfSameXY    = 2.f;
+constexpr float kPfSameZ     = 0.5f;
+constexpr int   kPfRgb[kPfTypes][3] = { { 255, 0, 0 }, { 255, 220, 0 }, { 0, 255, 0 }, { 0, 200, 255 } };
 
 // ---- RenderPoints: saved targets (assist.cpp:2318-2395) --------------------------
 constexpr float kPtNear       = 300.f;  // full size out to here
@@ -119,16 +113,16 @@ constexpr int   kSegments     = 32;     // both circles of both features
 constexpr int   kActiveWhite = 255;     // active ring
 constexpr int   kIdleGrey    = 100;     // inactive ring
 
-// AnimatedPoint (assist.cpp:33). Render-thread only: the movement thread owns the point
-// lists, this owns how they animate, so there is nothing to lock.
+// botox AnimatedPoint. Render-thread only: the movement thread owns the point lists, this
+// owns how they animate, so there is nothing to lock.
 struct FinderAnim
 {
     Vec3  pos;
-    float prog      = 1.f;   // animation_progress (1 on birth: a hit pops)
+    float prog      = 0.f;   // animation_progress
     bool  removing  = false;
     float size      = 0.f;   // current_size
 };
-std::vector<FinderAnim> s_fndAnim;
+std::vector<FinderAnim> s_fndAnim[kPfTypes];
 std::vector<float>      s_ptScale;   // points_check_t::currentScale, one per saved point
 
 inline bool SameSpot(const Vec3& a, const Vec3& b)   // vec3_t operator== on the reference
@@ -139,22 +133,22 @@ inline bool SameSpot(const Vec3& a, const Vec3& b)   // vec3_t operator== on the
 inline float Clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
 inline float LerpF(float a, float b, float t) { return a + (b - a) * t; }
 
-void PsOverlayResetAnim() { s_fndAnim.clear(); s_ptScale.clear(); }
+void PsOverlayResetAnim() { for (auto& l : s_fndAnim) l.clear(); s_ptScale.clear(); }
 
-// dashed ring: ImDrawList has no dash support, so walk the circle in kFndDashes slots and
-// stroke the first kFndDashDuty of each one. Arc segments scale with radius so a 3px ring
-// does not cost the same as a 12px one
-inline void DashedCircle(ImDrawList* dl, const ImVec2& c, float r, ImU32 col, float thick)
+// botox pf_fade: live points fade in, dropped ones fade out over kPfFadeTime, then go
+void PfFade(std::vector<FinderAnim>& list, const std::vector<Vec3>& points, float dt)
 {
-    if (r < 1.f) return;
-    const int seg = r < 6.f ? 2 : 3;                 // segments per dash
-    const float slot = 6.28318530718f / float(kFndDashes);
-    for (int i = 0; i < kFndDashes; i++)
+    for (auto& a : list) a.removing = true;
+    for (const Vec3& p : points)
     {
-        const float a0 = slot * float(i);
-        dl->PathArcTo(c, r, a0, a0 + slot * kFndDashDuty, seg);
-        dl->PathStroke(col, 0, thick);
+        auto it = std::find_if(list.begin(), list.end(), [&p](const FinderAnim& a) { return SameSpot(a.pos, p); });
+        if (it == list.end()) list.push_back({ p });
+        else                  it->removing = false;
     }
+    for (auto& a : list)
+        a.prog = std::clamp(a.prog + (a.removing ? -dt : dt) / kPfFadeTime, 0.f, 1.f);
+    list.erase(std::remove_if(list.begin(), list.end(), [](const FinderAnim& a) { return a.removing && a.prog <= 0.f; }),
+               list.end());
 }
 
 } // namespace
@@ -314,84 +308,91 @@ static void RenderPsOverlay()
         return dx * dx + dy * dy <= r * r;
     };
 
-    // ---- finder hits: Pixelsurf_points (assist.cpp:273-360) --------------------------
-    // Every point in the live list is matched against the animation list by position: new
-    // ones grow in over 0.5s, ones the scan dropped shrink out over 0.5s and are erased.
-    // The finder off = an empty live list, so the ones on screen shrink out instead of
-    // vanishing on the frame the checkbox moved.
+    // ---- finder dots: botox pf_render_dots (points_ui.cpp), 1:1 ---------------------------------
+    // Per type list fades in/out over 0.5s. Dots within 2u xy / 0.5u z share one ring: one type =
+    // full circle in its colour, several = the ring split into one arc per type, clockwise from the
+    // top in list order. Hovered ring (nearest live one within 9px of the crosshair) grows 9 -> 12.
+    // Map-scan seams ride the texturebug list: botox has no map scan, they are the same mark.
     {
-        for (auto& a : s_fndAnim) a.removing = true;
+        static std::vector<Vec3> hb, pj, tb;
+        static const std::vector<Vec3> none;
+        hb.clear(); pj.clear(); tb.clear();
+        if (bFinder) PF_GetExtraPts(pj, hb);
+        if (!g_psFinderHeadbounce) hb.clear();
+        if (!g_psFinderPixeljump)  pj.clear();
+        if (bFinder && g_psFinderTb) tb = d.tbPts;
+        if (g_psMapLines) tb.insert(tb.end(), d.mapTbPts.begin(), d.mapTbPts.end());
 
-        if (bFinder)
-            for (const Vec3& p : d.finderPts)
+        const std::vector<Vec3>* live[kPfTypes] = { &hb, &pj, bFinder ? &d.finderPts : &none, &tb };
+        for (int t = 0; t < kPfTypes; t++) PfFade(s_fndAnim[t], *live[t], dt);
+
+        struct Group
+        {
+            Vec3 pos;
+            FinderAnim* dot[kPfTypes] = {};
+            int   slot[kPfTypes] = {};
+            int   types = 0;
+            float progress = 0.f, size = 0.f;
+            bool  live = false, drawn = false;
+            ImVec2 screen;
+        };
+        struct Member { FinderAnim* dot; int group; };
+        static std::vector<Group> groups;
+        static std::vector<Member> members;
+        groups.clear(); members.clear();
+        for (int t = 0; t < kPfTypes; t++)
+            for (auto& a : s_fndAnim[t])
             {
-                auto it = std::find_if(s_fndAnim.begin(), s_fndAnim.end(),
-                                       [&p](const FinderAnim& a) { return SameSpot(a.pos, p); });
-                // a found spot POPS, like the texturebug rings next to it. The scan hands
-                // them over a chunk at a time, so a grow-in read as lag on the scan itself
-                if (it == s_fndAnim.end()) s_fndAnim.push_back({ p, 1.f, false, kFndSize });
-                else                       it->removing = false;
+                auto g = std::find_if(groups.begin(), groups.end(), [&](const Group& q) {
+                    const float dx = q.pos.x - a.pos.x, dy = q.pos.y - a.pos.y;
+                    return std::fabs(q.pos.z - a.pos.z) < kPfSameZ && dx * dx + dy * dy < kPfSameXY * kPfSameXY;
+                });
+                if (g == groups.end()) { g = groups.emplace(groups.end()); g->pos = a.pos; }
+                if (!g->dot[t]) { g->dot[t] = &a; g->slot[t] = g->types++; }
+                g->progress = std::max(g->progress, a.prog);
+                g->live |= !a.removing;
+                members.push_back({ &a, int(g - groups.begin()) });
             }
 
-        for (auto& a : s_fndAnim)
+        int hovered = -1;
+        float hoveredSq = FLT_MAX;
+        for (int i = 0; i < (int)groups.size(); i++)
         {
-            if (a.removing)
+            Group& g = groups[i];
+            g.drawn = W2S(g.pos, g.screen);
+            if (!g.drawn || !g.live || !InCross(g.screen, kPfDotSize)) continue;
+            const float dx = W * 0.5f - g.screen.x, dy = H * 0.5f - g.screen.y;
+            if (dx * dx + dy * dy < hoveredSq) { hoveredSq = dx * dx + dy * dy; hovered = i; }
+        }
+
+        const float ease = 1.f - expf(-5.f * dt);
+        for (auto& m : members)
+        {
+            const float target = (m.group == hovered ? kPfHoverSize : kPfDotSize) * m.dot->prog;
+            m.dot->size += (target - m.dot->size) * ease;
+            groups[m.group].size = std::max(groups[m.group].size, m.dot->size);
+        }
+
+        for (const Group& g : groups)
+        {
+            if (!g.drawn || g.size <= 0.f) continue;
+            dl->AddCircleFilled(g.screen, g.size, IM_COL32(0, 0, 0, int(g.progress * 100.f)), kSegments);
+            float a0[kPfTypes] = {}, a1[kPfTypes] = {};
+            ImU32 col[kPfTypes] = {};
+            for (int t = 0; t < kPfTypes; t++)
             {
-                a.prog -= dt / kFndVanish;
-                if (a.prog < 0.f) a.prog = 0.f;
+                if (!g.dot[t]) continue;
+                const int s = g.slot[t];
+                a0[s] = kPfTop + s * kPfTurn / g.types;
+                a1[s] = a0[s] + kPfTurn / g.types;
+                col[s] = IM_COL32(kPfRgb[t][0], kPfRgb[t][1], kPfRgb[t][2], int(g.dot[t]->prog * 255.f));
             }
-            else a.prog = 1.f;
-
-            ImVec2 s;
-            const bool hov = W2S(a.pos, s) && InCross(s, kFndHoverPx);
-
-            const float target = a.removing ? 0.f : (hov ? kFndSizeHover : kFndSize);
-            // frame-rate independent approach, exactly the reference's easing
-            a.size += (target - a.size) * (1.f - expf(-kFndSizeSpeed * dt));
-        }
-
-        s_fndAnim.erase(std::remove_if(s_fndAnim.begin(), s_fndAnim.end(),
-                        [](const FinderAnim& a) { return a.removing && a.prog <= 0.f; }),
-                        s_fndAnim.end());
-
-        ImVec2 s;
-        for (const auto& a : s_fndAnim)
-        {
-            if (!W2S(a.pos, s)) continue;
-            dl->AddCircleFilled(s, a.size, IM_COL32(0, 0, 0, int(a.prog * kFndFillA)), kSegments);
-            DashedCircle(dl, s, a.size,
-                         IM_COL32(kFndRingWhite, kFndRingWhite, kFndRingWhite, int(a.prog * kFndRingA)),
-                         1.f);
-        }
-    }
-
-    // ---- texturebug seams: same marker, RED ring. Static, no grow/shrink anim --
-    // the seam pass is one shot on release, so there is nothing to animate between.
-    // They are the FINDER's results (psassist.inl PfScanSeams), so they follow its switch
-    if (bFinder)
-    {
-        ImVec2 s;
-        for (const Vec3& p : d.tbPts)
-        {
-            if (!W2S(p, s)) continue;
-            const float r = InCross(s, kFndHoverPx) ? kFndSizeHover : kFndSize;
-            dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, int(kFndFillA)), kSegments);
-            DashedCircle(dl, s, r, IM_COL32(255, 40, 40, int(kFndRingA)), 1.f);
-        }
-    }
-
-    // ---- whole-map scan: the texturebug seams it found, same red ring as the finder's -------
-    // Under the MAP scan's switch, not the finder's, for the same reason the lines are: the scan
-    // is minutes of work and its marks are meant to outlive the aim scan being switched off.
-    if (g_psMapLines)
-    {
-        ImVec2 s;
-        for (const Vec3& p : d.mapTbPts)
-        {
-            if (!W2S(p, s)) continue;
-            const float r = InCross(s, kFndHoverPx) ? kFndSizeHover : kFndSize;
-            dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, int(kFndFillA)), kSegments);
-            DashedCircle(dl, s, r, IM_COL32(255, 40, 40, int(kFndRingA)), 1.f);
+            if (g.types == 1) { dl->AddCircle(g.screen, g.size, col[0], kSegments, 1.f); continue; }
+            for (int i = 0; i < g.types; i++)
+            {
+                dl->PathArcTo(g.screen, g.size, a0[i], a1[i], kSegments / g.types);
+                dl->PathStroke(col[i], 0, 1.f);
+            }
         }
     }
 
@@ -1445,6 +1446,19 @@ static void BuildFontAtlas()
     g_fontGamesenseSfBold15 = donor(sf_pro_display_bold, sizeof(sf_pro_display_bold), 15.f, ImGuiFreeTypeBuilderFlags_Bitmap); orElse(g_fontGamesenseSfBold15, g_fontBold);
 
     g_fontAirflow14 = plain(sf_ui_display_semibold, sizeof(sf_ui_display_semibold), 14.f, 0, cyr); orElse(g_fontAirflow14, g_fontBold);
+
+    // heroin-new (Documents\!) FUN_18004d980: arialbd 16 = its Fonts[0] (watermark + music display),
+    // AddFontDefault = speclist "regular", tahoma 16 / tahomabd 14 = "interwebz", tahoma 14 = legacy
+    {
+        ImFontConfig h = flagged(ImGuiFreeTypeBuilderFlags_LightHinting);   // OversampleH 2, PixelSnapH
+        h.OversampleH = 2; h.OversampleV = 1; h.PixelSnapH = true;
+        g_fontHeroinArialBd16 = sys("arialbd.ttf", 16.f, h);                  orElse(g_fontHeroinArialBd16, g_fontBold);
+        ImFontConfig p = h;
+        g_fontHeroinProggy13  = io.Fonts->AddFontDefault(&p);                 orElse(g_fontHeroinProggy13, g_fontReg);
+    }
+    g_fontHeroinTahoma16   = sys("tahoma.ttf", 16.f, mono);                   orElse(g_fontHeroinTahoma16, g_fontReg);
+    g_fontHeroinTahomaBd14 = sys("tahomabd.ttf", 14.f, mono);                 orElse(g_fontHeroinTahomaBd14, g_fontBold);
+    g_fontHeroinTahoma14   = sys("tahoma.ttf", 14.f, mono);                   orElse(g_fontHeroinTahoma14, g_fontReg);
 
     // botox esp face: font_name_verdana_bd_11, verdana_font_config (Monochrome|MonoHinting), what
     // the "esp font" page defaults to. Cyrillic for player names.

@@ -2391,6 +2391,154 @@ static void DrawKamidere(ImDrawList* dl, ImGuiIO& io)
     dl->PopClipRect();
 }
 
+// ==== style 33: heroin -- heroin-new speclist mode 0 legacy / 1 regular / 2 interwebz ==========
+// List = FUN_18002ee40: in-eye / chase spectators. "display all spectators" (= listed players "all")
+// or interwebz -> every one as "name -> target", flagged when the target is local (or the player the
+// dead local is watching); else only local's spectators, by name, all flagged.
+struct HeroinRow { std::string text; bool local; };
+
+static std::vector<HeroinRow> HeroinRows()
+{
+    std::vector<HeroinRow> rows;
+    const std::vector<SpecEntry>& raw = RawEntries();
+    if (raw.empty()) return rows;
+
+    int ref = GetLocalPlayerIndex();
+    if (void* pLocal = GetClientEntity(ref)) {
+        int mode = 0, life = 0;
+        unsigned int handle = 0xFFFFFFFFu;
+        if (ReadObsState(pLocal, mode, handle, life) && life != 0 && (mode == OBS_IN_EYE || mode == OBS_CHASE)) {
+            const int t = n_unitE::DecodeEHandleIndex(handle);
+            if (t >= 1 && t <= 64) ref = t;
+        }
+    }
+
+    const bool all = g_specHeroinType == 2 || g_specListType == 0;
+    for (const SpecEntry& e : raw) {
+        if (e.obsMode != OBS_IN_EYE && e.obsMode != OBS_CHASE) continue;
+        const bool local = e.targetIndex == ref;
+        if (all) rows.push_back({ e.name + " -> " + e.target, local });
+        else if (local) rows.push_back({ e.name, true });
+    }
+    return rows;
+}
+
+static constexpr ImU32 kHeroinBg = IM_COL32(37, 39, 48, 255);   // cfg primary color
+
+// mode 0 (FUN_180096fe0): tahoma 14 at (5, 5 + 15 i), font flag "outline" (heroin default), local = accent
+static void DrawHeroinLegacy(ImDrawList* dl)
+{
+    ImFont* f = Font(g_fontHeroinTahoma14);
+    const std::vector<HeroinRow> rows = HeroinRows();
+    if (rows.empty()) {
+        if (g_showMenu) OutlinedText(dl, f, f->FontSize, ImVec2(5.f, 5.f), IM_COL32(255, 255, 255, 255), "no spectators");
+        return;
+    }
+    float y = 5.f;
+    for (const HeroinRow& r : rows) {
+        OutlinedText(dl, f, f->FontSize, ImVec2(5.f, y), r.local ? AccentU32(255) : IM_COL32(255, 255, 255, 255), r.text.c_str());
+        y += 15.f;
+    }
+}
+
+// mode 1 (FUN_18004a860): ImGui window "speclist", proggy 13, item spacing y 3, fades at 13.3/s,
+// constraints (100,30)-(300,300), six nested rects + a 2px accent line. Every colour is scaled by
+// the pushed Alpha once, the accent 25% ring and the line twice (GetColorU32 on a pre-scaled vec4).
+static void DrawHeroinRegular(ImDrawList* dl, ImGuiIO& io)
+{
+    const std::vector<HeroinRow> rows = HeroinRows();
+    static float alpha = 0.f;
+    alpha = ImSaturate(alpha + (rows.empty() && !g_showMenu ? -13.333333f : 13.333333f) * io.DeltaTime);
+    if (alpha <= 0.f) return;
+
+    ImFont* f = Font(g_fontHeroinProggy13);
+    const float px = f->FontSize;
+    float textW = 0.f;
+    for (const HeroinRow& r : rows) textW = (std::max)(textW, ImguiTextW(f, r.text.c_str()));
+    const float contentH = rows.empty() ? 0.f : 3.f + (float)rows.size() * px + (float)(rows.size() - 1) * 3.f;
+    const float w = ImClamp(textW + 16.f, 100.f, 300.f), h = ImClamp(contentH + 16.f, 30.f, 300.f);
+    float x, y;
+    Place(w, h, x, y);
+    const float r = x + w, b = y + h, a2 = alpha * alpha;
+
+    const ImU32 dim = IM_COL32(23, 24, 30, (int)(255.f * alpha));   // secondary (42,44,56) * 0.55
+    dl->AddRect(ImVec2(x - 1.f, y - 1.f), ImVec2(r + 1.f, b + 1.f), dim);
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(r, b), WithAlpha(kHeroinBg, alpha));
+
+    dl->PushClipRect(ImVec2(x, y), ImVec2(r, b), true);
+    float ty = y + 8.f + 3.f;
+    for (const HeroinRow& row : rows) {
+        const ImU32 c = (g_specListType != 0 || row.local) ? IM_COL32(255, 255, 255, 255) : IM_COL32(153, 153, 153, 255);
+        dl->AddText(f, px, ImVec2(x + 8.f, ty), WithAlpha(c, alpha), row.text.c_str());
+        ty += px + 3.f;
+    }
+    dl->PopClipRect();
+
+    dl->AddRect(ImVec2(x + 1.f, y + 1.f), ImVec2(r - 1.f, b - 1.f), dim);
+    dl->AddRect(ImVec2(x, y), ImVec2(r, b), AccentU32((int)(255.f * alpha)));
+    dl->AddRect(ImVec2(x + 3.f, y + 3.f), ImVec2(r - 3.f, b - 3.f), dim);
+    dl->AddRect(ImVec2(x + 4.f, y + 4.f), ImVec2(r - 4.f, b - 4.f), AccentU32((int)(255.f * 0.25f * a2)));
+    dl->AddRect(ImVec2(x + 5.f, y + 5.f), ImVec2(r - 5.f, b - 5.f), dim);
+    dl->AddLine(ImVec2(x + 6.f, y + 7.f), ImVec2(r - 7.f, y + 7.f), AccentU32((int)(255.f * a2)), 2.f);
+}
+
+// mode 2 (FUN_18004c550): slanted "SPECTATOR LIST" header + striped 20px rows, tahoma 16 / bd 14.
+// Width = last frame's widest row + 5 (floor 155) + 60, like heroin's static.
+static void DrawHeroinInterwebz(ImDrawList* dl)
+{
+    static int s_widest = 155;
+    const std::vector<HeroinRow> rows = HeroinRows();
+    const float w = (float)(s_widest + 60);
+    const float listH = (float)(((int)rows.size() + 1) * 20);
+    float x, y;
+    Place(w + 20.f, listH, x, y);
+
+    const ImU32 header = IM_COL32(59, 59, 59, 255);
+    for (int i = 1; i < 20; ++i)
+        dl->AddLine(ImVec2(x + (float)i, y + 20.f - (float)i), ImVec2(x + (float)i + w, y + 20.f - (float)i), header, 1.f);
+
+    for (int k = 1; k <= (int)rows.size(); ++k) {
+        const ImU32 c = (k & 1) ? IM_COL32(45, 45, 45, 255) : IM_COL32(75, 75, 75, 255);
+        const ImVec2 mn(x, y + 20.f * (float)k), mx(x + w, y + 20.f * (float)k + 20.f);
+        dl->AddRectFilled(mn, mx, c);
+        dl->AddRect(mn, mx, c);
+    }
+
+    ImFont* title = Font(g_fontHeroinTahoma16);
+    const float tw = ImguiTextW(title, "SPECTATOR LIST");
+    dl->AddText(title, title->FontSize, ImVec2(x - tw / 2.5f + w * 0.5f, y + 2.5f), AccentU32(255), "SPECTATOR LIST");
+
+    const ImU32 line = IM_COL32(85, 85, 85, 255);
+    const float r = x + w, b = y + listH;
+    dl->AddLine(ImVec2(x + 20.f, y), ImVec2(r + 20.f, y), line, 1.f);
+    dl->AddLine(ImVec2(x, y + 20.f), ImVec2(r, y + 20.f), line, 1.f);
+    dl->AddLine(ImVec2(x, y + 20.f), ImVec2(x, b), line, 1.f);
+    dl->AddLine(ImVec2(r, y + 20.f), ImVec2(r, b), line, 1.f);
+    dl->AddLine(ImVec2(x, b), ImVec2(r, b), line, 1.f);
+    dl->AddLine(ImVec2(x, y + 20.f), ImVec2(x + 20.f, y), line, 1.f);
+    dl->AddLine(ImVec2(r, y + 20.f), ImVec2(r + 20.f, y), line, 1.f);
+
+    ImFont* f = Font(g_fontHeroinTahomaBd14);
+    s_widest = 155;
+    float ty = y + 23.f;
+    for (const HeroinRow& row : rows) {
+        const float rw = ImguiTextW(f, row.text.c_str());
+        if ((float)s_widest < rw) s_widest = (int)(rw + 5.f);
+        dl->AddText(f, f->FontSize, ImVec2(x + 5.f, ty), row.local ? AccentU32(255) : IM_COL32(255, 255, 255, 255), row.text.c_str());
+        ty += 20.f;
+    }
+}
+
+static void DrawHeroin(ImDrawList* dl, ImGuiIO& io)
+{
+    if (!IsInGame() && !g_showMenu) return;
+    switch (g_specHeroinType) {
+    case 0:  DrawHeroinLegacy(dl);        break;
+    case 2:  DrawHeroinInterwebz(dl);     break;
+    default: DrawHeroinRegular(dl, io);   break;
+    }
+}
+
 // ==== drag + dispatch ==========================================================================
 // Styles that hardcode their x/y instead of calling Place(); SpecDrag shifts the vertices they added
 // (none of them push a clip rect or a BlurRect).
@@ -2399,6 +2547,7 @@ static bool StyleFixedPos(int style)
     switch (style) {
     case 1: case 9: case 12: case 13: case 16: case 19: case 24: return true;
     case 0: return g_specListType == 1;   // draw_spectating_local
+    case 33: return g_specHeroinType == 0;   // heroin legacy: fixed (5, 5)
     default: return false;
     }
 }
@@ -2479,6 +2628,7 @@ static void DrawStyle(ImDrawList* dl, ImGuiIO& io)
     case 30: DrawHoweweware(dl);        break;
     case 31: DrawGamesense(dl);         break;
     case 32: DrawKamidere(dl, io);      break;
+    case 33: DrawHeroin(dl, io);        break;
     default: break;
     }
 }

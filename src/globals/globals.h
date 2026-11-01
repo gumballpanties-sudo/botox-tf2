@@ -84,6 +84,11 @@ extern ImFont* g_fontCucumberTahoma14;   // tahoma 14  NoHinting
 extern ImFont* g_fontCucumberVerdana14;  // verdana 14  NoHinting (cucumber measures the user with it)
 extern ImFont* g_fontHowewewareMinecraft14; // minecraft ttf 14  NoHinting
 extern ImFont* g_fontGamesenseSfBold15;  // sf_pro_display_bold 15  Bitmap (drawn at 13)
+extern ImFont* g_fontHeroinArialBd16;    // arialbd 16  LightHinting (heroin watermark + music display)
+extern ImFont* g_fontHeroinProggy13;     // ImGui ProggyClean 13  LightHinting (heroin speclist regular)
+extern ImFont* g_fontHeroinTahoma16;     // tahoma 16  Monochrome|MonoHinting (heroin interwebz title)
+extern ImFont* g_fontHeroinTahomaBd14;   // tahoma bd 14  Monochrome|MonoHinting (heroin interwebz rows)
+extern ImFont* g_fontHeroinTahoma14;     // tahoma 14  Monochrome|MonoHinting (heroin legacy list)
 
 // -- Menu settings tab (stage 4: appearance + safety) ------------------------------
 extern float g_accentColor[4]; // live ImGuiCol_Accent, pushed every frame in RenderMenu
@@ -736,6 +741,7 @@ extern bool g_fmAirStuckNearOnly; // only freeze with a brush/prop within g_fmAi
 extern float g_fmAirStuckNearDist;
 extern bool g_fmNoFall;     extern int g_fmNoFallKey;     extern int g_fmNoFallMode;
 extern bool g_fmWallbugFix;       // sv_wallbug 1 while hosting (pre Oct-2026 ClipVelocity)
+extern bool g_wbProbe;            // log fall-zeroing ticks to debug.log (WBPROBE), any server
 void FakeMove_Restore();          // eject: sv_wallbug back to the value it had
 extern bool g_fmCrouchJump; extern int g_fmCrouchJumpKey; extern int g_fmCrouchJumpMode;
 extern bool g_fmRampBoost;  extern int g_fmRampBoostKey;  extern int g_fmRampBoostMode;

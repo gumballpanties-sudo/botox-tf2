@@ -31,6 +31,9 @@ inline bool  g_wmLumiShadowColor = false;
 
 inline bool  g_wmSkebobTyping    = false;
 
+// heroin-new watermark_offset_x / _y: fraction of the screen, heroin default 0.01
+inline float g_wmHeroinX = 0.01f, g_wmHeroinY = 0.01f;
+
 inline bool  g_wmDnaGlow         = true;
 inline int   g_wmDnaGlowTicks    = 15;
 inline bool  g_wmDnaGlowSpotted  = false;    // TF2: "spotted" = an enemy our eye can see (aim/wm_aim.cpp)

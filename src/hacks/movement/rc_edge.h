@@ -72,4 +72,26 @@ inline bool NearestEdge(float x0, float y0, float zRef, F floor, Edge& out)
     }
     return found;
 }
+
+// ---- THE MARKER RAY'S FAN: A DISK, NOT A CIRCLE ----------------------------------------------
+// The centre ray misses a handrail by a pixel and lands on the floor under it. The old fan was ONE
+// ring of 8 rays at 1.1 deg: it sampled a circle, so a 2u rail lying between the centre and the
+// ring (or between two of its 45 deg spokes) fell through and the marker went on the floor below.
+// Three rings at 1/3, 2/3, 3/3 of 1.1 deg with 8 / 16 / 24 rays: every sample ~0.005 * dist from
+// its neighbours, so any 2u bar crossing the disk is hit out to 300u (tests/rcedge_test.cpp 11).
+// ponytail: fixed 1.1 deg disk; a rail thinner than 0.0067 * dist (2u at 300u) can still slip
+inline constexpr float k_fanDeg   = 1.1f;
+inline constexpr int   k_fanRings = 3;
+inline constexpr int   k_fanRays  = 8 * (1 + 2 + 3);   // 48, ring i holds 8 * i
+
+// ray k's offset from the centre, in tan units along the view's right / up axes
+inline void FanOffset(int k, float& right, float& up)
+{
+    int ring = 1;
+    while (k >= 8 * ring) { k -= 8 * ring; ring++; }
+    const float rad = std::tan(k_fanDeg * float(ring) / float(k_fanRings) * 3.14159265f / 180.f);
+    const float a   = 6.28318530718f * float(k) / float(8 * ring);
+    right = std::cos(a) * rad;
+    up    = std::sin(a) * rad;
+}
 }

@@ -1480,6 +1480,8 @@ static void Page_MovementMain()
             }, ImVec2(240.f, -1));
 
         ImGui::EndDisabled();
+        // not fake movement: works on any server (client prediction), so outside the master switch
+        ImGui::Checkbox("wallbug probe (log)", &g_wbProbe);
     }
     menu_group_end();
 
@@ -1940,10 +1942,10 @@ static void Page_MiscMain()
                 void GifTex_PathInput(const char*, const char*, char*, size_t);   // hud/gif_tex.cpp
 
                 int& style = g_wmStyle;
-                if (style < 0 || style > 21) style = 0;
+                if (style < 0 || style > 22) style = 0;
                 ImGui::Combo("style##watermark style", &style,
                     "default\0kamibebra\0clarity\0clarity v2\0delusional\0interwebz\0havoc\0onetap\0airflow\0ev0lve\0legendware\0"
-                    "interium\0skebob\0cumidere\0illusory\0lumi\0billware\0dna\0dna clarity\0cucumber\0howeweware\0gamesense\0");
+                    "interium\0skebob\0cumidere\0illusory\0lumi\0billware\0dna\0dna clarity\0cucumber\0howeweware\0gamesense\0heroin\0");
 
                 ImGui::InputTextWithHint("name##watermark text", "botox", g_wmLabel, 25);
 
@@ -1972,6 +1974,13 @@ static void Page_MiscMain()
                     ImGui::ColorRow("sense color##watermark gamesense", g_wmGsSenseColor, alphaFlags);
                     ImGui::SliderFloat("offset x##watermark gamesense", &g_wmGsX, -1000.f, 1000.f, "%.0f px");
                     ImGui::SliderFloat("offset y##watermark gamesense", &g_wmGsY, -500.f, 500.f, "%.0f px");
+                }
+
+                if (style == 22) {   // heroin-new watermark popup: show fps / show time / x, y offset
+                    ImGui::Checkbox("show fps##watermark heroin", &g_wmShowFPS);
+                    ImGui::Checkbox("show time##watermark heroin", &g_wmShowTime);
+                    ImGui::SliderFloat("x offset##watermark heroin", &g_wmHeroinX, 0.f, 1.f, "%.3f");
+                    ImGui::SliderFloat("y offset##watermark heroin", &g_wmHeroinY, 0.f, 1.f, "%.3f");
                 }
 
                 if (style == 12)
@@ -2109,13 +2118,17 @@ static void Page_MiscMain()
                     cs != 26 && cs != 28 && cs != 29 && cs != 30 && cs != 31 && (cs != 25 || lumiType == 1))
                     ImGui::Combo("listed players##spectatorlist player", &g_specListType, "all spectators\0local spectators\0");
 
-                if (g_specStyle > 32 || g_specStyle < 0) g_specStyle = 0;
+                if (g_specStyle > 33 || g_specStyle < 0) g_specStyle = 0;
                 ImGui::Combo("style##spectatorlist style", &g_specStyle,
                     "default\0delusional\0interwebz\0windows xp\0clarity\0chillware\0lobotomy v2\0kamibebra\0eyes\0cumhacck\0clarity v2\0"
                     "airplane\0bhop cheat\0millionware\0aimware\0havoc\0onetap\0airflow\0ev0lve\0legendware\0interium\0chillware v2\0"
-                    "skebob\0cumidere\0illusory\0lumi\0billware\0inkabanium\0dna\0cucumber\0howeweware\0gamesense\0kamidere\0");
+                    "skebob\0cumidere\0illusory\0lumi\0billware\0inkabanium\0dna\0cucumber\0howeweware\0gamesense\0kamidere\0heroin\0");
                 const int style = g_specStyle;
 
+                if (style == 33) {   // heroin-new "speclist mode"
+                    if (g_specHeroinType < 0 || g_specHeroinType > 2) g_specHeroinType = 1;
+                    ImGui::Combo("speclist mode##spectatorlist heroin", &g_specHeroinType, "legacy\0regular\0interwebz\0");
+                }
                 if (style == 25) {
                     if (g_specLumiType < 0 || g_specLumiType > 2) g_specLumiType = 0;
                     ImGui::Combo("type##spectatorlist lumi type", &g_specLumiType, "default\0new\0interwebz\0");

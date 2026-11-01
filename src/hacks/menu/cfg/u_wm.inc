@@ -54,3 +54,5 @@
     { "wmGifOffsetY",        CfgEntry::FLOAT,  &g_wmGifOffsetY, 0 },
     { "wmGifAlpha",          CfgEntry::FLOAT,  &g_wmGifAlpha, 0 },
     { "wmGifFlip",           CfgEntry::BOOL,   &g_wmGifFlip, 0 },
+    { "wmHeroinX",           CfgEntry::FLOAT,  &g_wmHeroinX, 0 },
+    { "wmHeroinY",           CfgEntry::FLOAT,  &g_wmHeroinY, 0 },

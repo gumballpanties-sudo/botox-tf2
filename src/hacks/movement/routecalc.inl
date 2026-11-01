@@ -307,13 +307,12 @@ static bool RcRay(void* pLocal, const Vec3& vEye, const Vec3& vDir, GameTrace_t&
 
 // THIN GEOMETRY. A single ray through the crosshair centre misses a handrail, a pipe or a fence
 // post by a pixel and lands on the wall 400u behind it, which is a marker for a different height.
-// A ring of rays a degree out from the centre grabs it: the NEAREST hit wins, because the thing
-// in front is the thing you were aiming at. A flat wall answers every ray at the same distance
-// (the off-axis ones are fractionally LONGER), so the ring can only take the marker off centre
-// when something genuinely nearer is inside the ring -- and it has to be nearer by 2u to do it.
-static constexpr float k_rcFanDeg = 1.1f;   // ~2u across at 100u, ~19u at 1000u
-static constexpr int   k_rcFanN   = 8;
-static constexpr float k_rcFanWin = 2.f;    // units a ring hit must beat the centre by
+// A disk of rays a degree out from the centre grabs it (rce::FanOffset, rc_edge.h -- one ring of
+// 8 sampled a circle and let rails fall through onto the floor under them): the NEAREST hit wins,
+// because the thing in front is the thing you were aiming at. A flat wall answers every ray at the
+// same distance (the off-axis ones are fractionally LONGER), so the fan can only take the marker
+// off centre when something genuinely nearer is inside it -- and it has to be nearer by 2u to do it.
+static constexpr float k_rcFanWin = 2.f;    // units a fan hit must beat the centre by
 
 static bool RcAimWorld(void* pLocal, const Vec3& vEye, const Vec3& vAngles, GameTrace_t& out)
 {
@@ -324,11 +323,11 @@ static bool RcAimWorld(void* pLocal, const Vec3& vEye, const Vec3& vAngles, Game
 
     GameTrace_t nearest{};
     float flNear = 1e9f;
-    const float t = tanf(k_rcFanDeg * 3.14159265f / 180.f);
-    for (int k = 0; k < k_rcFanN; k++)
+    for (int k = 0; k < rce::k_fanRays; k++)
     {
-        const float a = 6.28318531f * float(k) / float(k_rcFanN);
-        Vec3 d = fwd + right * (cosf(a) * t) + up * (sinf(a) * t);
+        float r, u;
+        rce::FanOffset(k, r, u);
+        Vec3 d = fwd + right * r + up * u;
         d.Normalize();
         GameTrace_t tr{};
         if (!RcRay(pLocal, vEye, d, tr)) continue;
@@ -346,7 +345,13 @@ static bool RcAimWorld(void* pLocal, const Vec3& vEye, const Vec3& vAngles, Game
 // standable player clip top inside that height is the floor you would really land on. 82u = a
 // standing hull: a clip taller than that is not a ledge you get onto, so the caller aims through it
 static constexpr float k_rcClipClimb = 82.f;
-static bool RcClipTop(void* pLocal, const GameTrace_t& tr, Vec3& top)
+// Same drop for a SOLID face (a handrail's side, a ledge's lip): the fan's nearest hit on a thin
+// rail is its side far more often than its 2u top, and that was refused as a wall. A standable top
+// within a step of the hit is the floor you meant; a taller face starts the drop inside the solid
+// (startsolid) and stays a wall, so a real wall is still refused
+static constexpr float k_rcLipClimb = 18.f;   // engine step height
+static bool RcClipTop(void* pLocal, const GameTrace_t& tr, Vec3& top,
+                      float climb = k_rcClipClimb, bool needClip = true)
 {
     Vec3 n(tr.plane.normal.x, tr.plane.normal.y, 0.f);
     const float len = sqrtf(n.x * n.x + n.y * n.y);
@@ -355,8 +360,9 @@ static bool RcClipTop(void* pLocal, const GameTrace_t& tr, Vec3& top)
     const Vec3 inside = tr.endpos - n;
     TraceFilterRcMarker filter; filter.Setup(pLocal);
     GameTrace_t down{};
-    TraceLine(inside + Vec3(0.f, 0.f, k_rcClipClimb), inside, MASK_PLAYERSOLID, &filter, &down);
-    if (down.startsolid || down.fraction >= 1.f || down.plane.normal.z <= 0.7f || !(down.contents & 0x10000))
+    TraceLine(inside + Vec3(0.f, 0.f, climb), inside, MASK_PLAYERSOLID, &filter, &down);
+    if (down.startsolid || down.fraction >= 1.f || down.plane.normal.z <= 0.7f
+        || (needClip && !(down.contents & 0x10000)))
         return false;
     top = down.endpos;   // a line trace stops 1/32 over the plane: already the landing height
     return true;
@@ -1253,6 +1259,7 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
     bool bClip = bWorld && (trace.contents & 0x10000) != 0 && (trace.contents & 0x1) == 0;
     bool bClipTop = false;   // the hit was a clip's side: the marker went on the clip's top
     bool bClipThrough = false;   // ...too tall a clip: aimed through it at what you see
+    bool bLipTop = false;        // the hit was a solid face's side: the marker went on its top
     // a teammate in front is not solid: the world behind him gets the marker, the note says why
     const char* mateNote = bMate ? " - the teammate in front was skipped, teammate heads are not solid" : "";
     bool bNotSolid = false;   // building hit that the engine does not let you stand on
@@ -1333,6 +1340,16 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
         // and say so, so the fix is to aim at the top instead of to wonder why the answer is wrong.
         // botox "allow selecting invalid pixels": the wall hit is a pixelsurf marker anyway, at the
         // crosshair's z, unverified (no finder pinned it)
+        // ...unless it is the SIDE of something you can stand on top of: a handrail, a ledge lip,
+        // a prop's edge. The top within a step of the hit is the floor you meant (RcClipTop, solid)
+        else if (fabsf(trace.plane.normal.z) <= 0.7f && !g_rcAllowInvalid
+                 && RcClipTop(pLocal, trace, pt.pos, k_rcLipClimb, false))
+        {
+            pt.type = rs::PT_GROUND;
+            bLipTop = true;
+            DebugLog("RC: marker on a face side -- took the top %.2fu up, z %.4f",
+                     pt.pos.z - trace.endpos.z, pt.pos.z);
+        }
         else if (fabsf(trace.plane.normal.z) <= 0.7f && g_rcAllowInvalid)
             pt.type = rs::PT_SURF;
         else if (fabsf(trace.plane.normal.z) <= 0.7f)
@@ -1387,6 +1404,7 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
             if (bClipTop && !bHead)   s_rcMessage += " - on top of a player clip (invisible)";
             else if (bClip && !bHead) s_rcMessage += " - on a player clip brush (invisible, but it is what you stand on)";
             if (bClipThrough && !bHead) s_rcMessage += " - aimed through a player clip too tall to stand on";
+            if (bLipTop) s_rcMessage += " - hit its side, placed on its top";
             if (flSnapDist >= 0.f)
             {
                 snprintf(buf, sizeof(buf), " - snapped to the edge %.1fu away", flSnapDist);

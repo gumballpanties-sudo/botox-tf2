@@ -704,7 +704,8 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
                 // g_psFinderPixeljump: a pin no FALL catches but the pocket is open is a real
                 // catch too -- just one a JUMP into the seam has to make, not a drop onto it.
                 // Own list, own marker: mixing it into s_pfFound would read as a plain surf
-                if (!bFall && g_psFinderPixeljump && bReach)
+                // (not for the map scan: these lists are drawn as crosshair-finder dots)
+                if (!bFall && g_psFinderPixeljump && bReach && !s_pfQuiet)
                 {
                     std::lock_guard<std::mutex> l(g_psLock);
                     s_pfJumpPts.push_back(Vec3(vWallXY.x, vWallXY.y, flPinZ));
@@ -723,7 +724,7 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
                 s_pfFound.push_back(Vec3(vWallXY.x, vWallXY.y, flPinZ));
                 s_pfHeightHit = true;
             }
-            else if (g_psFinderHeadbounce)
+            else if (g_psFinderHeadbounce && !s_pfQuiet)
             {
                 // g_psFinderHeadbounce: TryPin found no descent catch here -- try the ceiling
                 // (ascent) catch instead. Same column, same height step, opposite sign
@@ -1068,7 +1069,7 @@ static void PixelFinder(void* pLocal, UserCmd_t* pCmd)
     s_pfBaseButtons = pCmd->buttons;   // frozen for the whole scan, not re-read per cmd
 
     s_pfFound.clear();
-    s_pfJumpPts.clear(); s_pfHeadbouncePts.clear();
+    { std::lock_guard<std::mutex> l(g_psLock); s_pfJumpPts.clear(); s_pfHeadbouncePts.clear(); }   // render copies them
     s_pfNextI = 0; s_pfNextLat = 0; s_pfHeightHit = false;
     s_pfMs = 0.0; s_pfChunks = 0; s_pfProbes = 0; s_pfPruned = 0;
     s_pfCells = 0; s_pfFalls = 0; s_pfConf = 0; s_pfNoStand = 0;

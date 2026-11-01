@@ -266,6 +266,7 @@ struct PsDrawData
 };
 void PS_GetDrawData(PsDrawData& out);
 void PS_GetBox(PsDrawData& out);   // boxText/boxMs only -- no vector copies
+void PF_GetExtraPts(std::vector<Vec3>& jump, std::vector<Vec3>& headbounce);   // finder pixeljump / headbounce pins
 
 // ==== whole-map pixel surf scan (psmap.inl) ====
 // The menu button toggles it; the scan itself lives on the movement thread, a slice per

@@ -192,6 +192,11 @@ add_executable(fmslide_test tests/fmslide_test.cpp)
 # Build + run: cmake --build build --config Release --target routesim_test && build\Release\routesim_test.exe
 add_executable(routesim_test tests/routesim_test.cpp)
 
+# Gate test + fuzzer for the Oct-2026 ClipVelocity patch (sv_wallbug 0): SDK TryPlayerMove over a convex-brush
+# box-trace model, both clip builds side by side. `fuzz [N] [seed]` prints which geometry still zeroes a fall.
+# Build + run: cmake --build build --config Release --target wallbug_fuzz_test && build\Release\wallbug_fuzz_test.exe
+add_executable(wallbug_fuzz_test tests/wallbug_fuzz_test.cpp)
+
 # Gate test for fake movement seam gate (src/hacks/movement/fm_seam.h): box/wedge brushes, seam window.
 # Build + run: cmake --build build --config Release --target fmseam_test && build\Release\fmseam_test.exe
 add_executable(fmseam_test tests/fmseam_test.cpp)

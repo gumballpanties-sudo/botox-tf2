@@ -53,6 +53,7 @@ namespace
             case 19: font = g_fontCucumberTahoma14; break;
             case 20: font = g_fontHowewewareMinecraft14; break;
             case 21: font = g_fontGamesenseSfBold15; size = 13.f; break;
+            case 22: font = g_fontHeroinArialBd16; break;
             default: break;
             }
         }

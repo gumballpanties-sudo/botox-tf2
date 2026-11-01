@@ -51,6 +51,8 @@ ImFont* g_fontLumiRubik16 = nullptr, *g_fontLumiProggy13 = nullptr, *g_fontInbaT
 ImFont* g_fontDnaMontserrat15 = nullptr, *g_fontDnaPtRootBold15 = nullptr, *g_fontDnaClarityIcon50 = nullptr;
 ImFont* g_fontCucumberTahoma14 = nullptr, *g_fontCucumberVerdana14 = nullptr;
 ImFont* g_fontHowewewareMinecraft14 = nullptr, *g_fontGamesenseSfBold15 = nullptr;
+ImFont* g_fontHeroinArialBd16 = nullptr, *g_fontHeroinProggy13 = nullptr, *g_fontHeroinTahoma16 = nullptr;
+ImFont* g_fontHeroinTahomaBd14 = nullptr, *g_fontHeroinTahoma14 = nullptr;
 
 float g_accentColor[4] = { 160.f / 255.f, 170.f / 255.f, 220.f / 255.f, 1.f };   // matches render.cpp's old fixed kAccent
 float g_dpiScale       = 1.f;
@@ -688,6 +690,7 @@ bool g_fmAirStuckNearOnly = false;
 float g_fmAirStuckNearDist = 8.f;
 bool g_fmNoFall = false;     int g_fmNoFallKey = 0;     int g_fmNoFallMode = 1;
 bool g_fmWallbugFix = false; // local listen server: sv_wallbug 1 (Valve's Oct-2026 revert switch)
+bool g_wbProbe = true;       // any server: log every real tick the engine zeroed a fall (debug.log WBPROBE); log-only, on by default
 bool g_fmCrouchJump = false; int g_fmCrouchJumpKey = 0; int g_fmCrouchJumpMode = 1;
 bool g_fmRampBoost = false;  int g_fmRampBoostKey = 0;  int g_fmRampBoostMode = 1;
 float g_fmRampBoostMult = 1.5f;
