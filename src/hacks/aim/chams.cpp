@@ -37,7 +37,7 @@ extern float g_chamsSoundDuration;
 extern bool  g_chamsSoundFade;
 extern float g_chamsSoundMinVolume;
 extern float g_chamsSoundMaxDistance;
-extern float g_chamsTwoToneThreshold;    // botox m_chams_two_tone_threshold: gamma lighting level of the cut
+extern float g_chamsTwoToneThreshold;    // botox m_chams_two_tone_threshold: camera light, cos of facing angle
 extern float g_chamsTwoToneEdge;         // botox m_chams_two_tone_edge: cut softness
 extern char  g_chamsVisibleCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsOccludedCfg[ChamsLayers::kCfgLen];
@@ -356,10 +356,12 @@ namespace
 				const float dark[4]  = { d[0], d[1], d[2], d[3] * alphaScale };
 				const float alpha = light[3] > dark[3] ? light[3] : dark[3];
 				if (alpha <= 0.f) continue;
-				// own materials keep the model's normal maps + lighting constants bound; blend < 1 = engine draws translucent
+				// own materials keep the model's normal maps + lighting constants bound; blend < 1 = engine draws translucent,
+				// any colour under 255 counts (DIP blends per pixel with the picked alphas, blend value itself unused)
+				const bool bTranslucent = light[3] < 1.f || dark[3] < 1.f;
 				static const float kWhite[4] = { 1.f, 1.f, 1.f, 1.f };
 				ForceMaterial(nullptr);
-				SetModulation(kWhite, alpha);
+				SetModulation(kWhite, bTranslucent ? (alpha < 0.99f ? alpha : 0.99f) : 1.f);
 				TwoToneChams_Begin(light, dark, g_chamsTwoToneThreshold, g_chamsTwoToneEdge, ignorez);
 				ctx.Draw(pBones);
 				TwoToneChams_End();

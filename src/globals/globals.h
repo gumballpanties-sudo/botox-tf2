@@ -979,7 +979,7 @@ extern float g_chamsSoundDuration;
 extern bool  g_chamsSoundFade;
 extern float g_chamsSoundMinVolume;
 extern float g_chamsSoundMaxDistance;
-extern float g_chamsTwoToneThreshold;   // botox two tone: gamma lighting level of the light/dark cut
+extern float g_chamsTwoToneThreshold;   // botox two tone: camera light, cut = cos of facing angle
 extern float g_chamsTwoToneEdge;        // botox two tone: cut softness
 extern char  g_chamsVisibleCfg[160];
 extern char  g_chamsOccludedCfg[160];

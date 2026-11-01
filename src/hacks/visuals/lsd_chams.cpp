@@ -186,7 +186,7 @@ namespace
 	// ---- botox hacks/visuals/two_tone_chams.cpp ----
 	std::atomic<bool> s_ttArmed{ false };
 	float s_ttLight[4] = {}, s_ttDark[4] = {}, s_ttParams[2] = {};   // render thread only
-	bool  s_ttIgnorez = false;
+	bool  s_ttIgnorez = false, s_ttTranslucent = false;
 
 	// vs: plain, plain + tangent stream, compressed. ps: no normal map, normal map in s1, s3
 	IDirect3DVertexShader9* s_ttVs[3] = {};
@@ -314,43 +314,60 @@ namespace
 		const int vsIndex = compressed ? 2 : HasTangentStream(dev) ? 1 : 0;
 		const int psIndex = bump == 1 ? 1 : bump == 3 ? 2 : 0;
 
-		// i0.x = engine light count for this draw (common_vs_fxc.h:70 g_nLightCountRegister)
-		int lightLoop[4] = {};
-		dev->GetVertexShaderConstantI(0, lightLoop, 1);
-		const int lights = std::clamp(lightLoop[0], 0, 4);
-
-		DWORD alphaTest = FALSE;
-		dev->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
-
-		const float vsK[4] = { lights > 0 ? 1.f : 0.f, lights > 1 ? 1.f : 0.f, lights > 2 ? 1.f : 0.f, lights > 3 ? 1.f : 0.f };
-		const float psK[3][4] = { { s_ttLight[0], s_ttLight[1], s_ttLight[2], s_ttLight[3] },
-			{ s_ttDark[0], s_ttDark[1], s_ttDark[2], s_ttDark[3] },
-			{ s_ttParams[0], s_ttParams[1], alphaTest ? 1.f : 0.f, 0.f } };
-
-		DWORD oldSrgb = 0, oldZFunc = 0, oldZWrite = 0;
-		float oldVsK[4] = {}, oldPsK[3][4] = {};
-		static std::vector<Saved> savedVs, savedPs;   // render thread only
-		savedVs.clear(); savedPs.clear();
-
+		DWORD oldSrgb = 0, oldZFunc = 0, oldZWrite = 0, oldAlphaTest = 0, oldAlphaRef = 0, oldBlend = 0, oldSrc = 0, oldDest = 0, oldColorWrite = 0;
 		dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &oldSrgb);
 		dev->GetRenderState(D3DRS_ZFUNC, &oldZFunc);
 		dev->GetRenderState(D3DRS_ZWRITEENABLE, &oldZWrite);
-		dev->GetVertexShaderConstantF(240, oldVsK, 1);
+		dev->GetRenderState(D3DRS_ALPHATESTENABLE, &oldAlphaTest);
+		dev->GetRenderState(D3DRS_ALPHAREF, &oldAlphaRef);
+		dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &oldBlend);
+		dev->GetRenderState(D3DRS_SRCBLEND, &oldSrc);
+		dev->GetRenderState(D3DRS_DESTBLEND, &oldDest);
+		dev->GetRenderState(D3DRS_COLORWRITEENABLE, &oldColorWrite);
+
+		const float psK[3][4] = { { s_ttLight[0], s_ttLight[1], s_ttLight[2], s_ttLight[3] },
+			{ s_ttDark[0], s_ttDark[1], s_ttDark[2], s_ttDark[3] },
+			{ s_ttParams[0], s_ttParams[1], oldAlphaTest ? 1.f : 0.f, float(oldAlphaRef & 0xFF) / 255.f } };
+
+		float oldPsK[3][4] = {};
+		static std::vector<Saved> savedVs, savedPs;   // render thread only
+		savedVs.clear(); savedPs.clear();
+
 		dev->GetPixelShaderConstantF(30, oldPsK[0], 3);
 		SaveConsts(dev, true, s_ttVsDefs, savedVs);
 		SaveConsts(dev, false, s_ttPsDefs, savedPs);
 
-		// picked colours are display values: no linear -> srgb on write
+		// picked colours are display values: no linear -> srgb on write. alpha test = clip in our ps
 		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+		dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+
+		// prepass lays depth, colour pass then only hits each pixel's nearest surface (equal depth must pass)
 		if (s_ttIgnorez)
-		{
 			dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
-			dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
-		}
+		else if (s_ttTranslucent && (oldZFunc == D3DCMP_LESS || oldZFunc == D3DCMP_GREATER))
+			dev->SetRenderState(D3DRS_ZFUNC, oldZFunc == D3DCMP_LESS ? D3DCMP_LESSEQUAL : D3DCMP_GREATEREQUAL);
+
 		dev->SetVertexShader(s_ttVs[vsIndex]);
 		dev->SetPixelShader(s_ttPs[psIndex]);
-		dev->SetVertexShaderConstantF(240, vsK, 1);
 		dev->SetPixelShaderConstantF(30, psK[0], 3);
+
+		// translucent: own blend whatever the material asked (additive, opaque snapshot). not ignorez = depth only
+		// prepass first so inner parts (far arm, legs, weapon) never show through. ignorez can't: depth there is the world
+		if (s_ttTranslucent)
+		{
+			if (!s_ttIgnorez)
+			{
+				dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+				dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+				o_DIP(dev, type, base, minV, nV, start, prims);
+				dev->SetRenderState(D3DRS_COLORWRITEENABLE, oldColorWrite);
+			}
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+			dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+			dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+		}
+		if (s_ttIgnorez || s_ttTranslucent)
+			dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
 
 		const HRESULT hr = o_DIP(dev, type, base, minV, nV, start, prims);
 
@@ -358,7 +375,10 @@ namespace
 		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, oldSrgb);
 		dev->SetRenderState(D3DRS_ZFUNC, oldZFunc);
 		dev->SetRenderState(D3DRS_ZWRITEENABLE, oldZWrite);
-		dev->SetVertexShaderConstantF(240, oldVsK, 1);
+		dev->SetRenderState(D3DRS_ALPHATESTENABLE, oldAlphaTest);
+		dev->SetRenderState(D3DRS_ALPHABLENDENABLE, oldBlend);
+		dev->SetRenderState(D3DRS_SRCBLEND, oldSrc);
+		dev->SetRenderState(D3DRS_DESTBLEND, oldDest);
 		dev->SetPixelShaderConstantF(30, oldPsK[0], 3);
 		RestoreConsts(dev, true, savedVs);
 		RestoreConsts(dev, false, savedPs);
@@ -426,6 +446,7 @@ namespace
 		memcpy(s_ttDark, f->dark, sizeof(s_ttDark));
 		memcpy(s_ttParams, f->params, sizeof(s_ttParams));
 		s_ttIgnorez = f->ignorez;
+		s_ttTranslucent = f->light[3] < 1.f || f->dark[3] < 1.f;
 		s_ttArmed.store(true, std::memory_order_relaxed);
 	}
 	void __fastcall Fn_TtDisarm(void*) { s_ttArmed.store(false, std::memory_order_relaxed); }

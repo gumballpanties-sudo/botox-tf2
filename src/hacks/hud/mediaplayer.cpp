@@ -308,12 +308,31 @@ namespace
         return out;
     }
 
+    // steam overlay web browser = steamwebhelper ( CEF ): no SMTC session, and every window it has is hidden
+    // ( the overlay draws it inside the game ). page title = one of its hidden SDL_app windows
+    bool is_steam(const std::wstring& path) { return exe_stem(path) == L"steamwebhelper"; }
+
+    // "(2) Artist - Song - YouTube" -> "Artist - Song". "" = steam's own ui window ( main / menu / friends .. )
+    std::wstring steam_page_title(std::wstring text)
+    {
+        if (text == L"Menu" || text.starts_with(L"Steam")) return {};
+        if (text.size() > 2 && text[0] == L'(') {
+            std::size_t close = 1;
+            while (close < text.size() && std::iswdigit(text[close])) close++;
+            if (close > 1 && text.compare(close, 2, L") ") == 0) text.erase(0, close + 2);
+        }
+        for (const wchar_t* site : { L" - YouTube Music", L" - YouTube" })
+            if (text.ends_with(site)) { text.resize(text.size() - wcslen(site)); break; }
+        return text;
+    }
+
     std::wstring window_title(const std::wstring& path)
     {
         struct search_t {
             const std::wstring* m_path;
+            bool m_steam;
             std::wstring m_title;
-        } search{ &path, {} };
+        } search{ &path, is_steam(path), {} };
 
         EnumWindows(
             [](HWND window, LPARAM param) -> BOOL {
@@ -322,10 +341,28 @@ namespace
                 // own windows skipped before GetWindowText: same-process text is a SendMessage to the game thread
                 DWORD pid = 0;
                 GetWindowThreadProcessId(window, &pid);
-                if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) || pid == GetCurrentProcessId()) return TRUE;
+                if (pid == GetCurrentProcessId()) return TRUE;
+                if (!search.m_steam && (!IsWindowVisible(window) || GetWindow(window, GW_OWNER))) return TRUE;
 
                 wchar_t text[512]{};
                 if (!GetWindowTextW(window, text, 512) || process_path(pid) != *search.m_path) return TRUE;
+
+                if (search.m_steam) {
+                    wchar_t cls[64]{};
+                    if (!GetClassNameW(window, cls, 64) || wcscmp(cls, L"SDL_app") != 0) return TRUE;
+
+                    // ponytail: name filter is a guess at steam's window names, the log is what tunes it
+                    static std::vector<std::wstring> s_seen{};
+                    if (s_seen.size() < 64 && std::find(s_seen.begin(), s_seen.end(), text) == s_seen.end()) {
+                        s_seen.push_back(text);
+                        DebugLog("media: steamwebhelper window \"%S\" visible=%d", text, IsWindowVisible(window) ? 1 : 0);
+                    }
+
+                    auto page = steam_page_title(text);
+                    if (page.empty()) return TRUE;
+                    search.m_title = std::move(page);
+                    return FALSE;
+                }
 
                 search.m_title = text;
                 return FALSE;
@@ -385,13 +422,14 @@ namespace
                 return true;
             }
 
-            if (!window_title(app).empty()) titled.push_back(app);
+            if (!window_title(app).empty() || is_steam(app)) titled.push_back(app);
         }
 
         if (titled.empty()) return false;
 
         path   = titled.front();
         window = window_title(path);
+        if (window.empty()) window = L"Steam overlay";   // only steam gets here: playing, page title not found
         return true;
     }
 

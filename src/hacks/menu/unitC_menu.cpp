@@ -452,7 +452,7 @@ void UnitC_Menu_visuals_chams()
     }
 
     if (two_tone_used) {
-        ImGui::SliderFloat("two tone threshold", &g_chamsTwoToneThreshold, 0.f, 1.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderFloat("two tone threshold", &g_chamsTwoToneThreshold, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::SliderFloat("two tone edge", &g_chamsTwoToneEdge, 0.f, 0.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     }
 }
