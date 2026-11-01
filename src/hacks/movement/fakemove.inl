@@ -649,85 +649,6 @@ static void FM_PostSafe(CMoveData* mv, FmCtx& c)
     __try { FM_Post(mv, c); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// ---- wallbug probe (any server): log every real tick the engine zeroed a fall --------------
-// Client prediction runs the same patched ClipVelocity as the server (client.dll 0x2792e0 ==
-// server.dll 0x2eb340, Oct 30 2026; sv_wallbug is FCVAR_REPLICATED), so a catch logged here
-// catches on a Valve server too. tests/wallbug_fuzz_test.cpp says where to look; this is truth.
-// Signatures, out of one ProcessMovement that came in falling (vz < -20):
-//   ZERO   vz == -halfG, xy == 0: TryPlayerMove copied vec3_origin (allFraction 0 / d <= 0 /
-//          3-plane crease / stuck) and FinishGravity put back its half step
-//   VZKILL vz == -halfG, xy kept: vz projected away (2-plane crease; on sv_wallbug 1 a floor
-//          clip edgebug reads the same -- patched, that one ends at -halfG + 1/32)
-// A ride (vz stays pinned) logs once at the start and once at the end with its length.
-// Real cmds only: every sim (Pred_Simulate, aim engineprediction / movesim) clears
-// m_bFirstTimePredicted around its ProcessMovement call.
-static ConVar* FM_WallbugVar();
-static int   s_wbpRun = 0;       // ticks the current catch has held vz pinned
-static float s_wbpPin = 0.f;     // the pinned vz
-static Vec3  s_wbpOrg;           // where it began
-
-static void WB_Probe(const Vec3& org0, const Vec3& vel0, CMoveData* mv, bool ducked)
-{
-    const Vec3 v = mv->m_vecVelocity;
-    const Vec3 o = mv->m_vecAbsOrigin;
-    if (s_wbpRun > 0)
-    {
-        if (v.z == s_wbpPin && vel0.z == s_wbpPin) { ++s_wbpRun; return; }
-        DebugLog("WBPROBE end ticks=%d travel=%.2f", s_wbpRun, hypotf(o.x - s_wbpOrg.x, o.y - s_wbpOrg.y));
-        s_wbpRun = 0;
-    }
-    if (vel0.z > -20.f || v.z >= 0.f || v.z < -20.f) return;   // cheap reject before any cvar read
-    const float dt = g_globalVars ? g_globalVars->interval_per_tick : 0.015f;
-    const float halfG = 0.5f * CvarFloat("sv_gravity", 800.f) * dt;
-    if (fabsf(v.z + halfG) > 0.001f) return;
-
-    const float xy = hypotf(v.x, v.y);
-    Vec3 n;
-    short surf = 0;
-    const bool wall = FM_Wall(o, 8.f, n, &surf);
-    int wb = -1;
-    if (ConVar* cv = FM_WallbugVar()) wb = static_cast<int>(cv->GetFloat());
-    // what blocked it: the engine's own hull sweep over this tick's first bump (vz after
-    // StartGravity), world + props. Full float precision so tests/wallbug_fuzz_test.cpp replay
-    // can rebuild the tick exactly (3 decimals hid a 0-gap contact once).
-    // ponytail: hull from the duck BUTTON, not FL_DUCKING -- mid-duck ticks can pick the wrong one
-    GameTrace_t tr;
-    const Vec3 sweep(vel0.x, vel0.y, vel0.z - halfG);
-    FM_Trace(org0, org0 + sweep * dt, k_fmMins, ducked ? k_fmMaxs : k_fmStandMaxs, tr);
-    const bool world = tr.m_pEnt && tr.m_pEnt == GetClientEntity(0);
-    DebugLog("WBPROBE %s map=%s org=(%.9g %.9g %.9g) from=(%.9g %.9g %.9g) vin=(%.9g %.9g %.9g) xyout=%.2f "
-             "duck=%d wall=%d n=(%.3f %.3f %.3f) surf=%d sv_wallbug=%d | sweep frac=%.6f start=%d all=%d "
-             "hitn=(%.4f %.4f %.4f) contents=%x ent=%s",
-             xy < 0.01f ? "ZERO" : "VZKILL", EngineLevelName(), o.x, o.y, o.z, org0.x, org0.y, org0.z,
-             vel0.x, vel0.y, vel0.z, xy, ducked ? 1 : 0, wall ? 1 : 0, n.x, n.y, n.z, surf, wb,
-             tr.fraction, tr.startsolid ? 1 : 0, tr.allsolid ? 1 : 0, tr.plane.normal.x, tr.plane.normal.y,
-             tr.plane.normal.z, tr.contents, !tr.m_pEnt ? "none" : (world ? "world" : "other"));
-    s_wbpRun = 1;
-    s_wbpPin = v.z;
-    s_wbpOrg = o;
-}
-
-static bool WB_ProbeWant(void* player)
-{
-    // one state line per map, so a silent log can't mean "probe was off"
-    static char s_lastMap[64] = "";
-    const char* map = EngineLevelName();
-    if (strncmp(map, s_lastMap, sizeof(s_lastMap) - 1))
-    {
-        strncpy_s(s_lastMap, map, _TRUNCATE);
-        DebugLog("WBPROBE state=%s map=%s", g_wbProbe ? "on" : "off", map);
-    }
-    if (!g_wbProbe || g_eject || !g_prediction || !player) return false;
-    const int idx = GetLocalPlayerIndex();
-    if (idx <= 0 || player != GetClientEntity(idx)) return false;
-    return reinterpret_cast<unsigned char*>(g_prediction)[kPredOff_FirstTimePredicted] != 0;
-}
-
-static void WB_ProbeSafe(const Vec3& org0, const Vec3& vel0, CMoveData* mv, bool ducked)
-{
-    __try { WB_Probe(org0, vel0, mv, ducked); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-
 static void __fastcall h_ProcessMovementSv(void* thisptr, void* player, CMoveData* mv)
 {
     FmCtx c;
@@ -748,14 +669,8 @@ static void __fastcall h_ProcessMovementCl(void* thisptr, void* player, CMoveDat
 {
     FmCtx c;
     const bool on = FM_PreSafe(player, mv, false, c);
-    // our own fake moves pin vz on purpose: probe only vanilla ticks
-    const bool probe = !on && mv && WB_ProbeWant(player);
-    const Vec3 org0 = probe ? mv->m_vecAbsOrigin : Vec3();
-    const Vec3 vel0 = probe ? mv->m_vecVelocity : Vec3();
-    const bool ducked = probe && (mv->m_nButtons & IN_DUCK);
     if (!c.skip) o_ProcessMovementCl(thisptr, player, mv);
     if (on) FM_PostSafe(mv, c);
-    if (probe) WB_ProbeSafe(org0, vel0, mv, ducked);
 }
 
 // ---- demo playback: replay jump fx ----

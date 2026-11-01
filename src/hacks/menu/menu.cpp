@@ -1480,8 +1480,6 @@ static void Page_MovementMain()
             }, ImVec2(240.f, -1));
 
         ImGui::EndDisabled();
-        // not fake movement: works on any server (client prediction), so outside the master switch
-        ImGui::Checkbox("wallbug probe (log)", &g_wbProbe);
     }
     menu_group_end();
 
