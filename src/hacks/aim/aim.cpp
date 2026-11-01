@@ -36,7 +36,7 @@ void Aim_ChatPrint(const char* text)
 
 // The hooks the aim half installs. Every other MAKE_HOOK in hooks.cpp is compiled (so it
 // registers) but never initialised. Rules used to pick this list:
-//   - it feeds the aimbot (entity cache, backtrack records, bone/anim fidelity, prediction), or
+//   - it feeds the aimbot (entity cache, bone/anim fidelity, prediction), or
 //   - it is what makes silent/psilent aim actually silent (the cmd encode + input read path), or
 //   - it is the clean-POV-demo fix the user asked for (CPrediction::GetLocalViewAngles), and
 //   - it is NOT a target dih already hooks (CreateMove is the exception: it moved here whole,
@@ -73,7 +73,7 @@ static const std::vector<std::string> s_vHookWhitelist =
 	"RecvProxy_SimulationTime",
 	"CL_ProcessPacketEntities",
 
-	// bone + animation fidelity for hitbox aiming and backtrack records
+	// bone + animation fidelity for hitbox aiming
 	"CBaseAnimating_UpdateClientSideAnimation",
 	"CBaseAnimating_MaintainSequenceTransitions",
 	"CBaseAnimating_Interpolate",
@@ -102,9 +102,6 @@ static const std::vector<std::string> s_vHookWhitelist =
 	// eats the server's "playerperf" TextMsg reply no spread asks for -- without it the reply
 	// is never parsed (no spread cannot sync) and every one prints to the console.
 	"CHLClient_DispatchUserMessage",
-
-	// extended backtrack: fake latency rewinds the acked incoming sequence per send
-	"CNetChannel_SendDatagram",
 };
 
 bool Aim_Init()

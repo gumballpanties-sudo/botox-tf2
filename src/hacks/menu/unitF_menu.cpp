@@ -43,7 +43,7 @@ static void VarColor(ConfigVar<Color_t>& v, const char* label)
 	}
 }
 
-// botox tab_aimbot "configuration" group (backtrack / scope / per-weapon, each behind its cog).
+// botox tab_aimbot "configuration" group (scope / per-weapon, each behind its cog).
 // Groups only: Aim_RenderMenuTab owns the one column pair (a second pair lands off-screen).
 void UnitF_Menu_aimbot_config()
 {
@@ -51,17 +51,6 @@ void UnitF_Menu_aimbot_config()
 
 	if (menu_group_begin("configuration"))
 	{
-		VarCheckbox(Backtrack::Enabled, "backtrack");
-		if (Backtrack::Enabled.Value)
-			ImGui::OptionPopup("backtrack settings", [&]()
-			{
-				VarCheckbox(Backtrack::Extended, "extended (fake ping)##bt");
-				// 400 normal, 1200 extended: past ~200 only fake latency makes old records hittable
-				float f = Backtrack::MaxLatency.Value;
-				if (ImGui::SliderFloat("max latency##bt", &f, 0.f, Backtrack::Extended.Value ? 1200.f : 400.f, "%gms"))
-					Backtrack::MaxLatency.Value = Backtrack::MaxLatency.Map[DEFAULT_BIND] = f;
-			}, ImVec2(200.f, -1));
-
 		VarCheckbox(ScopeFOV::Enabled, "scope fov scale");
 		if (ScopeFOV::Enabled.Value)
 			ImGui::OptionPopup("scope fov settings", [&]()

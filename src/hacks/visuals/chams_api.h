@@ -1,7 +1,7 @@
 #pragma once
 // Plain-type bridge between dih's DrawModelExecute hook (visuals.cpp) and the chams/glow
-// implementation in aim/chams.cpp (which needs the aim SDK: IMaterial, KeyValues, CTFPlayer,
-// F::Backtrack). Same split as aim/esp.h: no aim or windows types cross this header.
+// implementation in aim/chams.cpp (which needs the aim SDK: IMaterial, KeyValues, CTFPlayer).
+// Same split as aim/esp.h: no aim or windows types cross this header.
 
 using ChamsDrawFn = void(__fastcall*)(void*, const void*, const void*, const void*);
 

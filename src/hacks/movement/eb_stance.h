@@ -114,6 +114,45 @@ inline bool MV_EbCheck(int mode, float vz0, float vz, float g, float s, bool was
     return vz0 < -15.f && vz > -2.f * s && vz < 2.f * s;
 }
 
+// ================= lip pick for to-edge (TF2, not botox) =====================================
+// One HULL trace straight down per lane (lanes = centre offsets across the path, `step` apart).
+// The hull sees a lip anywhere under its 48u footprint, so a rail thinner than the lane step still
+// shows up, and the support boundary IS where the hull edge leaves the lip: the lip-side lane is a
+// centre the hull overlaps by <= step (botox's point rays + 8u put the centre ON the lip line =
+// 24u overlap = a landing). Boundary = floor next to void, or floors more than a step apart.
+// Wall lanes (start solid) and lip faces under `standable` never count. Returns the lip-side lane
+// nearest the centre lane that `ok(lane)` accepts, -1 = none.
+enum { kMvLaneVoid = 0, kMvLaneFloor = 1, kMvLaneWall = 2 };
+struct MvEbLane { int kind; float z, nz; };
+
+template <class OkFn>
+inline int MV_EbPickLip(const MvEbLane* l, int n, float stepUp, float standable, OkFn ok)
+{
+    int best = -1, bestDist = 1 << 30;
+    for (int i = 0; i + 1 < n; i++)
+    {
+        const MvEbLane& a = l[i];
+        const MvEbLane& b = l[i + 1];
+        if (a.kind == kMvLaneWall || b.kind == kMvLaneWall) continue;
+        if (a.kind == kMvLaneVoid && b.kind == kMvLaneVoid) continue;
+        int lip;
+        if (a.kind != b.kind) lip = a.kind == kMvLaneFloor ? i : i + 1;
+        else if (fabsf(a.z - b.z) <= stepUp) continue;
+        else lip = a.z > b.z ? i : i + 1;
+        if (l[lip].nz < standable || !ok(lip)) continue;
+        const int d = lip > n / 2 ? lip - n / 2 : n / 2 - lip;
+        if (d < bestDist) { bestDist = d; best = lip; }
+    }
+    return best;
+}
+
+// near-edge gate: ground ahead dropped more than a step below the feet (or nothing in reach).
+// botox wanted > 52u of a 66u ray, which every crate / low ledge under 50u failed.
+inline bool MV_EbDropAhead(bool hit, float floorZ, float feetZ, float stepUp)
+{
+    return !hit || floorZ < feetZ - stepUp;
+}
+
 // ================= duck press window (botox edgebug.cpp:1063-1075) ===========================
 // centre = first contact tick of the variant's base run (or reach + 1 when it touched nothing,
 // approx = true). The window is walked BACKWARDS from `last`. twinRan = the ducked twin's base

@@ -256,7 +256,8 @@ static bool EbSurfaceUsable(void* pLocal, const Vec3& from, const Vec3& vel)
     return tr.fraction >= 1.f || tr.plane.normal.z >= k_ebStandable;
 }
 
-// lookahead is a DISTANCE (2-3 ticks of travel at 64): stepped in 64-tick units at any rate
+// lookahead is a DISTANCE (2-3 ticks of travel at 64): stepped in 64-tick units at any rate.
+// edge = floor ahead more than a step down (sv_stepsize 18), MV_EbDropAhead
 static bool EbIsNearEdge(void* pLocal)
 {
     const Vec3 origin = EntV3(pLocal, g_offOrigin);
@@ -271,7 +272,7 @@ static bool EbIsNearEdge(void* pLocal)
         const Vec3 p = origin + dir * (speed * (1.f / 64.f) * s);
         GameTrace_t tr{};
         TraceLine(Vec3(p.x, p.y, origin.z + 2.f), Vec3(p.x, p.y, origin.z - 64.f), MASK_PLAYERSOLID, &filter, &tr);
-        if (tr.fraction > 0.8f) return true;
+        if (MV_EbDropAhead(tr.fraction < 1.f, tr.endpos.z, origin.z, 18.f)) return true;
     }
     return false;
 }
@@ -355,8 +356,10 @@ static void EbApplyAutoStrafe(void* pLocal, UserCmd_t* c, bool duck, float sideS
 }
 
 // lip target, once per real tick (geometry is static during the sim): at the ballistic point near
-// first contact lay 9 lanes across the path (+-64u), floor-trace each, take the boundary nearest
-// the path (solid/void or a drop taller than a step), inside the cone and the lateral reach
+// first contact lay 33 lanes across the path (+-64u, 4u apart), HULL-trace each straight down,
+// take the lip-side lane nearest the path (MV_EbPickLip) inside the cone and the lateral reach.
+// Hull, not point rays: a lip thinner than the lane gap still shows, and the target centre leaves
+// the hull overlapping the lip by <= 4u (a bug) instead of sitting on the lip line (a landing).
 static bool EbFindEdgeTarget(void* pLocal, int reachTick, int windowTicks, float grav)
 {
     s_ebEdgeTargetValid = false;
@@ -370,39 +373,39 @@ static bool EbFindEdgeTarget(void* pLocal, int reachTick, int windowTicks, float
     Vec3 p = origin + vel * t;
     p.z = origin.z + vel.z * t - 0.5f * grav * t * t;
     const Vec3 right(vel.y / speed, -vel.x / speed, 0.f);
-    constexpr int k_lanes = 9;
-    constexpr float k_lane = 16.f, k_stepUp = 18.f;
-    float laneZ[k_lanes]; bool laneSolid[k_lanes];
+    constexpr int k_lanes = 33;
+    constexpr float k_lane = 4.f, k_stepUp = 18.f;
+    // start one tick of fall above p: reach is a chord estimate, p can already sit under the lip top
+    const float top = p.z + 16.f + std::max(0.f, -(vel.z - grav * t)) * ipt;
+    const Vec3 mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);
+    MvEbLane lanes[k_lanes];
     TraceFilterWorldProps filter; filter.Setup(pLocal);
     for (int i = 0; i < k_lanes; i++)
     {
         const Vec3 c = p + right * ((i - k_lanes / 2) * k_lane);
         GameTrace_t tr{};
-        TraceLine(Vec3(c.x, c.y, c.z + 16.f), Vec3(c.x, c.y, c.z - 128.f), MASK_PLAYERSOLID, &filter, &tr);
-        laneSolid[i] = tr.DidHit();
-        laneZ[i] = laneSolid[i] ? tr.endpos.z : -99999.f;
+        TraceHull(Vec3(c.x, c.y, top), Vec3(c.x, c.y, p.z - 128.f), mins, maxs, MASK_PLAYERSOLID, &filter, &tr);
+        lanes[i].kind = (tr.startsolid || tr.allsolid) ? kMvLaneWall : tr.fraction < 1.f ? kMvLaneFloor : kMvLaneVoid;
+        lanes[i].z = tr.endpos.z;
+        lanes[i].nz = tr.plane.normal.z;
     }
     const float cap = std::clamp(g_edgeBugStrafeAngleMax, 0.f, 180.f);
     const float n = (float)(probe + 1);
     const float maxLat = 30.f * ipt * n * (n + 1.f) * 0.5f + 16.f;
-    float bestOff = 0.f, bestDist = 99999.f;
-    for (int i = 0; i < k_lanes - 1; i++)
+    auto offOf = [&](int i) { return (i - k_lanes / 2) * k_lane; };
+    const int lip = MV_EbPickLip(lanes, k_lanes, k_stepUp, k_ebStandable, [&](int i)
     {
-        const bool a = laneSolid[i], b = laneSolid[i + 1];
-        if (a == b && (!a || fabsf(laneZ[i] - laneZ[i + 1]) < k_stepUp)) continue;
-        const float mid = (i - k_lanes / 2) * k_lane + k_lane * 0.5f;
-        const float airSign = a == b ? (laneZ[i] < laneZ[i + 1] ? -1.f : 1.f) : (a ? 1.f : -1.f);
-        const float off = mid + airSign * 8.f;   // half a hull onto the drop side
-        if (fabsf(off) > maxLat) continue;
+        const float off = offOf(i);
+        if (fabsf(off) > maxLat) return false;
         if (cap < 180.f && s_ebCourseValid)
         {
             const Vec3 q = p + right * off;
-            if (fabsf(NormalizeAngle(RAD2DEGF(atan2f(q.y - origin.y, q.x - origin.x)) - s_ebCourseYaw)) > cap) continue;
+            if (fabsf(NormalizeAngle(RAD2DEGF(atan2f(q.y - origin.y, q.x - origin.x)) - s_ebCourseYaw)) > cap) return false;
         }
-        if (fabsf(off) < bestDist) { bestDist = fabsf(off); bestOff = off; }
-    }
-    if (bestDist > 90.f) return false;
-    s_ebEdgeTarget = p + right * bestOff;
+        return true;
+    });
+    if (lip < 0) return false;
+    s_ebEdgeTarget = p + right * offOf(lip);
     s_ebEdgeTargetValid = true;
     return true;
 }

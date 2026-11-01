@@ -2192,7 +2192,10 @@ static void Tab_Skins()
                           :                                       we.redir;
         const bool canFest = Skin_DefHasFestive(wornDef);
         if (!canFest) ImGui::BeginDisabled();
-        if (ImGui::Checkbox("festivized", &cfg.festivized)) g_skinNeedsUpdate = true;
+        // On = attr 2053 + one attachment rebuild, next frame (skins.cpp RefreshAttachmentModels).
+        // Off still needs the full update: the attribute can't be taken back off the list.
+        if (ImGui::Checkbox("festivized", &cfg.festivized))
+            (cfg.festivized ? g_skinFestRefresh : g_skinNeedsUpdate) = true;
         if (!canFest) ImGui::EndDisabled();
         if (!canFest && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             MenuTooltip(wornDef == we.redir

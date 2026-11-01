@@ -143,7 +143,8 @@ static DWORD s_endSceneTid = 0;   // thread our EndScene draw runs on
 // seconds.
 static bool FxWantDepthPass()
 {
-    return g_aoEnable || g_dofEnable || g_fbEnable || g_reflEnable || g_emphasizeEnable || g_showDepthEnable;
+    return g_aoEnable || g_dofEnable || g_fbEnable || g_reflEnable || g_emphasizeEnable || g_showDepthEnable ||
+           ScreenFxPasses_WarpWanted();
 }
 
 bool ScreenFx_View(FxViewSetup& out)
@@ -1038,6 +1039,7 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
     const bool wantProbe = g_fxDepthProbe;
     const bool wantRefl  = g_reflEnable;                          // unit D3
     const bool wantDv    = g_emphasizeEnable || g_showDepthEnable; // botox depth_view
+    const bool wantWarp  = ScreenFxPasses_WarpWanted();            // depth distort + depth channel shift
     const bool wantPass  = FxWantDepthPass();
 
     if (!dev || (!wantPass && !wantProbe)) return;
@@ -1169,6 +1171,8 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
                 // decides what is sharp, the shutter decides how far it smeared while open.
                 // The gun is not in this frame yet -- ScreenFx_ViewmodelFrame owns that half.
                 if (wantFb)  FrameBlend_Draw(dev, rt, desc, ScreenFx_DepthTexture(), view, false);
+                // distort last: ao/dof/blur above were computed on the undistorted depth
+                if (wantWarp) ScreenFxPasses_Warp(dev, rt, desc, ScreenFx_DepthTexture(), view);
             } else {
                 static bool logged = false;
                 if (!logged) {
@@ -1482,6 +1486,7 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
     if (!g_eject && setup) {
         s_setupTid = tid;
         FxReadViewSetup(setup);
+        ScreenFxPasses_WarpTick();
     }
 
     // Player glow (aim/chams.cpp): Amalgam runs CGlow::RenderMain here, before the original --

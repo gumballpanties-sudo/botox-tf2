@@ -328,6 +328,55 @@ extern bool  g_debandEnable;
 extern float g_debandAmount;
 extern bool  g_channelShiftEnable;
 extern float g_channelShiftAmount;
+extern bool  g_channelShiftDepth;      // shift moves to the depth distort pass, scaled by its own depth window
+extern int   g_channelShiftDepthMode;  // 0 background, 1 foreground, 2 both sides
+extern float g_channelShiftDepthDist;
+extern float g_channelShiftDepthRange;
+extern float g_channelShiftDepthRamp;
+// depth distort (reshade Warp-FX on depth, screenfx_passes.cpp ScreenFxPasses_Warp)
+extern bool  g_warpEnable;
+extern int   g_warpEffect;          // 0 bulge/pinch .. 9 radial slit scan (shader EFFECT = +1)
+extern int   g_warpAnimate;
+extern float g_warpAnimSpeed;
+extern float g_warpCenter[2];
+extern bool  g_warpUseOffset;
+extern float g_warpOffset[2];
+extern float g_warpRadius;
+extern float g_warpTension;
+extern float g_warpMagnitude;
+extern float g_warpAngle;
+extern bool  g_warpInverse;
+extern float g_warpInnerRadius;
+extern int   g_warpSplices;
+extern float g_warpAmplitude;
+extern float g_warpPeriod;
+extern float g_warpPhase;
+extern int   g_warpWaveType;
+extern float g_warpWaveAngle;
+extern float g_warpWavePeriod;
+extern float g_warpWaveAmplitude;
+extern float g_warpDrunkStrength[2];
+extern float g_warpDrunkSpeed[2];
+extern float g_warpDrunkAngle;
+extern float g_warpDrunkAngleSpeed;
+extern float g_warpPlanetRot[3];
+extern float g_warpPlanetScale;
+extern float g_warpPlanetOffset[2];
+extern float g_warpPlanetSeam;
+extern float g_warpSlitPos;
+extern float g_warpSlitSpeed;
+extern int   g_warpSlitDir;
+extern float g_warpBorderColor[4];
+extern float g_warpAspect;
+extern float g_warpAspectAngle;
+extern int   g_warpBlend;
+extern float g_warpOpacity;
+extern int   g_warpDepthMode;       // 0 background, 1 foreground, 2 both sides
+extern float g_warpDepthDist;
+extern float g_warpDepthRange;
+extern float g_warpDepthRamp;
+extern bool  g_warpDepthProtect;
+extern bool  g_warpFade;
 extern bool  g_emphasizeEnable;
 extern float g_emphasizeAmount;
 extern bool  g_emphasizeSpherical;
@@ -521,6 +570,7 @@ extern bool  g_equipRegionUnlock;
 // "Bat" also covers the Batsaber you are holding.
 extern bool g_enableSkins;
 extern bool g_skinNeedsUpdate;      // menu edited something -> re-resolve models + full update
+extern bool g_skinFestRefresh;      // festivizer switched on -> rebuild held weapon's lights, no full update
 extern std::unordered_map<int, SkinCfg> g_skinCfgs;
 
 void Skins_Install();               // FrameStageNotify + SetSequence hooks (thread.cpp)
@@ -931,17 +981,12 @@ extern float g_glowAlpha;          // 0..1, multiplies every glow pass's alpha
 // Layer lists = config strings (src/hacks/visuals/chams_layers.h, 160 = ChamsLayers::kCfgLen).
 extern bool  g_chamsLocalEnable;
 extern bool  g_chamsRagdolls;
-extern bool  g_chamsBacktrackXqz;
-extern int   g_chamsBacktrackType;      // 0 oldest record, 1 all records, 2 aimbot target record
-extern int   g_chamsBacktrackMaxGhosts;
-extern bool  g_chamsBacktrackGradient;
 extern float g_chamsSoundDuration;
 extern bool  g_chamsSoundFade;
 extern float g_chamsSoundMinVolume;
 extern float g_chamsSoundMaxDistance;
 extern char  g_chamsVisibleCfg[160];
 extern char  g_chamsOccludedCfg[160];
-extern char  g_chamsBacktrackCfg[160];
 extern char  g_chamsSoundCfg[160];
 extern char  g_chamsTeamVisibleCfg[160];
 extern char  g_chamsTeamOccludedCfg[160];

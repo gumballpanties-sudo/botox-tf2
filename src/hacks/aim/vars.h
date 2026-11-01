@@ -454,14 +454,6 @@ namespace Vars
 			// leak an old value into whatever takes the slot.
 		SUBNAMESPACE_END(Melee);
 
-		// Lag-comp backtrack (gap.md Unit F) -- aim at a target's recent bone pose instead of
-		// its live one, inside the server's own unlag window. See aim/backtrack.h.
-		SUBNAMESPACE_BEGIN(Backtrack, Aimbot)
-			CVar(Enabled, "Backtrack", false);
-			CVar(MaxLatency, "Max latency", 200.f, SLIDER_CLAMP | SLIDER_PRECISION, 0.f, 1200.f, 10.f, "%gms");
-			CVar(Extended, "Extended", false);   // fake latency (backtrack.cpp AdjustPing), window up to 1200ms
-		SUBNAMESPACE_END(Backtrack);
-
 		// Sniper scope FOV scale (gap.md Unit F) -- TF2's scope zoom is one fixed FOV per
 		// zoom level; this scales it client-side. See CHLClient_CreateMove (hooks.cpp).
 		SUBNAMESPACE_BEGIN(ScopeFOV, Aimbot)
@@ -499,11 +491,6 @@ namespace Vars
 		CVar(AvoidRandomCrits, "Avoid random crits", false);
 		CVar(AlwaysMeleeCrit, "Always melee crit", false);
 	NAMESPACE_END(CritHack);
-
-	NAMESPACE_BEGIN(Backtrack)
-
-		CVar(Offset, "Offset", 0, NOSAVE | DEBUGVAR, -1, 1);
-	NAMESPACE_END(Backtrack);
 
 	NAMESPACE_BEGIN(Doubletap)
 		CVar(Doubletap, "Doubletap", false);

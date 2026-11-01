@@ -1,6 +1,6 @@
 #pragma once
 
-// Unit F (gap.md "Aim extras"): backtrack, scope FOV scale, per-weapon aim tuning, grenade
+// Unit F (gap.md "Aim extras"): scope FOV scale, per-weapon aim tuning, grenade
 // lob assist. One function, plain ImGui widgets -- menu.cpp's tab bodies are being rebuilt
 // elsewhere, so this never touches one; it draws its own rows with the same shared helpers
 // aim.cpp's own tab already uses (MenuSection/MenuBindKey, src/hacks/menu/menu.h).

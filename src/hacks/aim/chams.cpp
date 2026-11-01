@@ -6,15 +6,14 @@
 // IMaterialSystem::CreateMaterial, colour through IVRenderView modulation/blend + $envmaptint/
 // $phongtint, override + colour state saved before and restored after every model).
 //
-// Lives in the aim tree because it needs the aim SDK (IMaterial, KeyValues, CTFPlayer,
-// F::Backtrack); dih's DrawModelExecute hook (visuals.cpp) reaches it through chams_api.h.
+// Lives in the aim tree because it needs the aim SDK (IMaterial, KeyValues, CTFPlayer);
+// dih's DrawModelExecute hook (visuals.cpp) reaches it through chams_api.h.
 //
 // Material refcount (the "botox_glow/glow has bad reference count 0" console spam): the old
 // code FindMaterial'd its materials without IncrementReferenceCount and then DecRef'd them on
 // every level change. Here every material we hold gets exactly one IncrementReferenceCount
 // when created/found and exactly one DecrementReferenceCount when released.
 #include "sdk.h"
-#include "backtrack.h"
 #include "../visuals/chams_api.h"
 #include "../visuals/chams_layers.h"
 #include "../esp/esp_fx.h"   // EspFx_NowMs: one clock for the sound stamp (game thread) and the draw
@@ -31,17 +30,12 @@ extern bool  g_chamsEnable;              // botox "enable enemy chams"
 extern bool  g_chamsTeam;                // teammates (TF2 extra, same visible/occluded lists)
 extern bool  g_chamsLocalEnable;         // botox "enable local chams"
 extern bool  g_chamsRagdolls;
-extern bool  g_chamsBacktrackXqz;
-extern int   g_chamsBacktrackType;       // 0 oldest record, 1 all records, 2 aimbot target record
-extern int   g_chamsBacktrackMaxGhosts;
-extern bool  g_chamsBacktrackGradient;
 extern float g_chamsSoundDuration;
 extern bool  g_chamsSoundFade;
 extern float g_chamsSoundMinVolume;
 extern float g_chamsSoundMaxDistance;
 extern char  g_chamsVisibleCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsOccludedCfg[ChamsLayers::kCfgLen];
-extern char  g_chamsBacktrackCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsSoundCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsTeamVisibleCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsTeamOccludedCfg[ChamsLayers::kCfgLen];
@@ -323,7 +317,7 @@ namespace
 			bGold ? m.pPhongTint->SetVecValue(c[0] * kGoldPhong[0], c[1] * kGoldPhong[1], c[2] * kGoldPhong[2]) : m.pPhongTint->SetVecValue(c[0], c[1], c[2]);
 	}
 
-	// one model draw through the original DrawModelExecute, optionally on other bones (backtrack)
+	// one model draw through the original DrawModelExecute, optionally on other bones
 	struct DrawCtx
 	{
 		ChamsDrawFn fn; void* rcx; const void* pState; const void* pInfo; const void* pBones;
@@ -380,7 +374,7 @@ namespace
 			return list;
 		}
 	};
-	CfgList s_visible{ g_chamsVisibleCfg }, s_occluded{ g_chamsOccludedCfg }, s_backtrack{ g_chamsBacktrackCfg },
+	CfgList s_visible{ g_chamsVisibleCfg }, s_occluded{ g_chamsOccludedCfg },
 	        s_sound{ g_chamsSoundCfg }, s_teamVisible{ g_chamsTeamVisibleCfg }, s_teamOccluded{ g_chamsTeamOccludedCfg },
 	        s_weapon{ g_chamsWeaponCfg }, s_arms{ g_chamsArmsCfg }, s_sleeve{ g_chamsSleeveCfg };
 
@@ -398,47 +392,6 @@ namespace
 			if ((vSound - vLocal).Length() > g_chamsSoundMaxDistance) return 0.f;
 		}
 		return ChamsLayers::SoundAlpha((EspFx_NowMs() - s_soundMs[entIdx]) / 1000.f, g_chamsSoundDuration, g_chamsSoundFade);
-	}
-
-	// ---- backtrack ghosts (botox draw_model_execute.cpp backtrack switch) ----
-	TickRecord s_records[24];
-
-	void DrawBacktrack(CTFPlayer* pPlayer, int entIdx, const ChamsLayers::List& l, const DrawCtx& ctx)
-	{
-		const int n = F::Backtrack.GetRecords(pPlayer, s_records, int(sizeof(s_records) / sizeof(s_records[0])));   // newest first
-		if (n <= 0) return;
-
-		const Vec3 vLive = pPlayer->m_vecOrigin();
-		// Amalgam RenderBacktrack: a ghost standing on the live model fades out (1u..24u -> 0..1)
-		auto Fade = [&](const TickRecord& r) { return std::clamp(((r.m_vOrigin - vLive).Length() - 1.f) / 23.f, 0.f, 1.f); };
-		auto DrawRecord = [&](TickRecord& r, float flAlpha) { if (flAlpha > 0.f) DrawLayers(l, g_chamsBacktrackXqz, flAlpha, ctx, r.m_aBones); };
-
-		switch (g_chamsBacktrackType)
-		{
-		case 0:
-			DrawRecord(s_records[n - 1], Fade(s_records[n - 1]));
-			break;
-		case 1:
-		{
-			// botox: ghost cap thins, never shortens -- newest + oldest always, rest evenly spaced,
-			// drawn oldest first so newer ghosts sit on top
-			const int iMax = std::clamp(g_chamsBacktrackMaxGhosts, 2, 64);
-			const int iDrawn = n < iMax ? n : iMax;
-			for (int pick = iDrawn - 1; pick >= 0; --pick)
-			{
-				const int i = iDrawn > 1 ? int(float(pick) * float(n - 1) / float(iDrawn - 1) + 0.5f) : 0;
-				const float flTick = g_chamsBacktrackGradient && n > 1 ? 1.f - float(i) / float(n - 1) : 1.f;
-				DrawRecord(s_records[i], Fade(s_records[i]) * flTick);
-			}
-			break;
-		}
-		case 2:
-			// botox draws the record the aimbot picked; this aimbot does not keep the picked record,
-			// so it is the oldest in-window one, shown only while this player is the live aim target
-			if (G::AimTarget.m_iEntIndex == entIdx && I::GlobalVars->tickcount - G::AimTarget.m_iTickCount <= G::AimTarget.m_iDuration)
-				DrawRecord(s_records[n - 1], Fade(s_records[n - 1]));
-			break;
-		}
 	}
 
 	// ---- player glow colour helpers (botox "player glow" popup) ----
@@ -550,7 +503,7 @@ void Chams_OnSound(int entindex, float volume, const float* origin)
 bool Chams_AnyActive()
 {
 	if (g_glowEnable) return true;
-	if (g_chamsEnable && (s_visible.Get().used || s_occluded.Get().used || s_backtrack.Get().used || s_sound.Get().used)) return true;
+	if (g_chamsEnable && (s_visible.Get().used || s_occluded.Get().used || s_sound.Get().used)) return true;
 	if (g_chamsTeam && (s_teamVisible.Get().used || s_teamOccluded.Get().used)) return true;
 	if (g_chamsLocalEnable && (s_weapon.Get().used || s_arms.Get().used || s_sleeve.Get().used)) return true;
 	return false;
@@ -643,17 +596,15 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 	const ChamsLayers::List& lVisible  = bEnemy ? s_visible.Get()  : s_teamVisible.Get();
 	const ChamsLayers::List& lOccluded = bEnemy ? s_occluded.Get() : s_teamOccluded.Get();
 	const bool bLivePlayer = pPlayer && !bAttachment;
-	const bool bBacktrack = bChams && bEnemy && bLivePlayer && s_backtrack.Get().used;
 	const float flSound = bChams && bEnemy && bLivePlayer && s_sound.Get().used ? SoundAlphaFor(entIdx, pLocal->m_vecOrigin()) : 0.f;
 	const bool bDrawVisible = bChams && lVisible.used;
 	const bool bDrawOccluded = bChams && lOccluded.used;
 
-	if (!bDrawVisible && !bDrawOccluded && !bBacktrack && flSound <= 0.f)
+	if (!bDrawVisible && !bDrawOccluded && flSound <= 0.f)
 		return false;
 
-	// botox order: sound, backtrack, occluded (all ignorez first), then the model itself
+	// botox order: sound, occluded (all ignorez first), then the model itself
 	if (flSound > 0.f)  DrawLayers(s_sound.Get(), true, flSound, ctx);
-	if (bBacktrack)     DrawBacktrack(pPlayer, entIdx, s_backtrack.Get(), ctx);
 	if (bDrawOccluded)  DrawLayers(lOccluded, true, 1.f, ctx);
 
 	bool bDrewModel = false;

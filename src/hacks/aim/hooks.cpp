@@ -12,7 +12,6 @@
 #include "nospread_hitscan.h"
 #include "movesim.h"
 #include "esp.h"
-#include "backtrack.h"
 #include "grenade_lob.h"
 #include "scope_fov.h"
 
@@ -282,8 +281,6 @@ MAKE_HOOK(CBaseEntity_SetAbsVelocity, S::CBaseEntity_SetAbsVelocity(), void,
 	}
 
 	H::Entities.SetAvgVelocity(pPlayer->entindex(), tAxisInfo.Get(bGrounded));
-	F::Backtrack.Store(pPlayer);    // snapshots bones/origin off pPlayer's pose right now -- not
-	                                // tNewRecord's shifted (+height) origin, see backtrack.cpp
 	CALL_ORIGINAL(rcx, (tNewRecord.m_vecOrigin - tOldRecord.m_vecOrigin) / flDeltaTime);
 }
 
@@ -1090,24 +1087,6 @@ MAKE_HOOK(DataTable_Warning, S::DataTable_Warning(), void,
 	const char* pInMessage, ...)
 {
 	// dont send datatable warnings
-}
-
-// ================ CNetChannel_SendDatagram.cpp ================
-// Amalgam sig, verified unique in the x64 engine.dll (rva 0x1d29f0). Extended backtrack's fake
-// latency: rewind m_nInSequenceNr for this send only (see CBacktrack::AdjustPing). A non-null
-// datagram is a special send (voice/file), passed through untouched like Amalgam does.
-MAKE_SIGNATURE(CNetChannel_SendDatagram, "engine.dll", "40 55 57 41 56 48 8D AC 24", 0x0);
-
-MAKE_HOOK(CNetChannel_SendDatagram, S::CNetChannel_SendDatagram(), int,
-	void* pNetChan, void* datagram)
-{
-	if (G::Unload || datagram || !pNetChan)
-		return CALL_ORIGINAL(pNetChan, datagram);
-
-	F::Backtrack.AdjustPing(pNetChan);
-	const int iReturn = CALL_ORIGINAL(pNetChan, datagram);
-	F::Backtrack.RestorePing(pNetChan);
-	return iReturn;
 }
 
 // ================ IEngineVGui_Paint.cpp ================

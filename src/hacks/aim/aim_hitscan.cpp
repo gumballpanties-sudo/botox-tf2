@@ -4,7 +4,6 @@
 #include "ticks.h"
 #include "movesim.h"
 #include "weapon_tuning.h"
-#include "backtrack.h"
 
 std::vector<Target_t> CAimbotHitscan::GetTargets(CTFPlayer* pLocal, CTFWeaponBase* pWeapon)
 {
@@ -254,16 +253,8 @@ int CAimbotHitscan::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWeaponBase* 
 	if (!tTarget.m_pEntity->SetupBones(g_tLiveRecord.m_aBones, MAXSTUDIOBONES, BONE_USED_BY_HITBOX, tTarget.m_pEntity->m_flSimulationTime()))
 		return false;
 
-	// stack array, not std::vector: fixed, known at compile time, no heap allocation per target
-	// per command. Slot 0 is always the live record (the old single-record behaviour); slots
-	// 1-8 are backtrack history (TickRecord re-add, see aim_record.h's note -- WITH a record
-	// store now, via backtrack.h), newest first, left null and skipped when backtrack is off or
-	// has nothing for this target.
-	static TickRecord s_aBacktrackRecords[8];
-	TickRecord* vRecords[9] = { &g_tLiveRecord };
-	if (int iBT = F::Backtrack.GetRecords(tTarget.m_pEntity->As<CTFPlayer>(), s_aBacktrackRecords, 8))
-		for (int i = 0; i < iBT; i++)
-			vRecords[1 + i] = &s_aBacktrackRecords[i];
+	// live record only (backtrack removed)
+	TickRecord* vRecords[1] = { &g_tLiveRecord };
 
 	bool bPeekCheck = false;
 	if (Vars::Aimbot::Hitscan::PeekAmount.Value && pWeapon->GetWeaponSpread())
@@ -288,9 +279,6 @@ int CAimbotHitscan::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWeaponBase* 
 	int iReturn = false;
 	for (auto pRecord : vRecords)
 	{
-		if (!pRecord)
-			continue;   // unfilled backtrack slot
-
 		bool bRunPeekCheck = bPeekCheck;
 
 		if (pWeapon->GetWeaponID() == TF_WEAPON_LASER_POINTER)
@@ -452,8 +440,6 @@ int CAimbotHitscan::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWeaponBase* 
 							tTarget.m_pRecord = pRecord;
 							tTarget.m_vPos = vOrigin;
 							tTarget.m_nAimedHitbox = nHitbox;
-							tTarget.m_bBacktrack = pRecord != &g_tLiveRecord;    // only a REAL
-							// backtrack pick, not the live record re-flagged (matches aim_melee.cpp:826)
 							return true;
 						}
 						else if (bChanged && SDK::VisPos(pLocal, tTarget.m_pEntity, m_vEyePos, vOrigin))
@@ -792,14 +778,6 @@ void CAimbotHitscan::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pC
 
 		if (ShouldFire(pLocal, pWeapon, pCmd, tTarget))
 		{
-			// Only on the tick the shot actually fires: this cmd is the lag-comp input for it,
-			// so back-date tick_count so player_lagcompensation.cpp:402's targettick (cmd->
-			// tick_count - TIME_TO_TICKS(lerp)) lands on the record we aimed at, not the live
-			// one. GetRecords already only returns records inside the server's own 0.2s
-			// window (BacktrackCorrect, backtrack.cpp), so no second check is needed here.
-			if (tTarget.m_bBacktrack && tTarget.m_pRecord)
-				pCmd->tick_count = TIME_TO_TICKS(tTarget.m_pRecord->m_flSimTime + BacktrackLerp());
-
 			switch (nWeaponID)
 			{
 			case TF_WEAPON_MEDIGUN:

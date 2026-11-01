@@ -152,7 +152,10 @@ void UnitC_Menu_visuals_esp()
                 ImGui::ColorRow("invisible##player skeleton invisible color", g_espSkeletonInvisibleColor, kPickerAlpha);
             } else
                 ImGui::ColorRow("skeleton color##player skeleton color", g_espSkeletonColor, kPickerAlpha);
-            ImGui::Combo("skeleton type##player skeleton", &g_espSkeletonType, "normal\0lag compensated\0smooth\0");
+            // cfg keeps 0 normal / 2 smooth (1 was lag compensated, gone with backtrack)
+            int iSkel = g_espSkeletonType == 2 ? 1 : 0;
+            if (ImGui::Combo("skeleton type##player skeleton", &iSkel, "normal\0smooth\0"))
+                g_espSkeletonType = iSkel ? 2 : 0;
             ImGui::SliderFloat("thickness##player skeleton", &g_espSkeletonThickness, 0.5f, 5.f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
         }, ImVec2(200.f, -1));
 
@@ -215,7 +218,6 @@ void UnitC_Menu_visuals_esp()
 
     ImGui::BeginDisabled(!players);
 
-    ImGui::Checkbox("lag compensated trail", &g_espBacktrackTrail);
     ImGui::Checkbox("player avatar", &g_espAvatar);
     if (g_espAvatar)
         ImGui::OptionPopup("avatar settings##player avatar settings", [&]() {
@@ -379,8 +381,6 @@ void UnitC_Menu_visuals_chams()
 
     ImGui::Checkbox("ragdolls##chams ragdolls", &g_chamsRagdolls);
 
-    ChamsDropdown("backtrack material", g_chamsBacktrackCfg);
-
     ChamsDropdown("sound material", g_chamsSoundCfg);
 
     if (ChamsHasLayers(g_chamsSoundCfg)) {
@@ -390,14 +390,6 @@ void UnitC_Menu_visuals_chams()
         ImGui::SliderFloat("sound min volume##sound esp chams", &g_chamsSoundMinVolume, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::SliderFloat("sound max distance##sound esp chams", &g_chamsSoundMaxDistance, 0.f, 6000.f, "%.0f u", ImGuiSliderFlags_AlwaysClamp);
     }
-
-    ImGui::Checkbox("backtrack xqz", &g_chamsBacktrackXqz);
-    ImGui::Combo("backtrack type", &g_chamsBacktrackType, "oldest record\0all records\0aimbot target record\0");
-
-    if (g_chamsBacktrackType == 1)
-        ImGui::SliderInt("backtrack max ghosts", &g_chamsBacktrackMaxGhosts, 2, 64);
-
-    ImGui::Checkbox("backtrack tick gradient", &g_chamsBacktrackGradient);
 
     ImGui::EndDisabled();
 

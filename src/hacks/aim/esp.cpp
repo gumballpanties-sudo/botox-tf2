@@ -1,5 +1,4 @@
 #include "esp.h"
-#include "backtrack.h"
 #include "../esp/esp_math.h"
 #include "../esp/esp_fx.h"
 #include "../esp/esp_queue.h"
@@ -521,7 +520,6 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 	const float flYaw = DEG2RAD(vView.y);
 	const Vec3 vLocalOrigin = pLocal->GetAbsOrigin(), vEye = pLocal->GetEyePosition();
 	const float h = FontH();
-	static TickRecord s_aRecords[24];
 
 	for (auto pEntity : H::Entities.GetGroup(EntityEnum::PlayerAll))
 	{
@@ -654,21 +652,17 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 		if (g_espHealthBar)
 			PartHealthBar(p, factor, hp, g_espBox, g_espHealthText && g_espHealthTextStyle == 1);
 
-		// ---- bones: skeleton, hitboxes, trail, head avatar ----
-		const bool bWantBones = g_espSkeleton || g_espHitboxes && g_espHitboxesMode == 0 || g_espBacktrackTrail || sid && g_espAvatarPosition == 3;
+		// ---- bones: skeleton, hitboxes, head avatar ----
+		const bool bWantBones = g_espSkeleton || g_espHitboxes && g_espHitboxesMode == 0 || sid && g_espAvatarPosition == 3;
 		const auto pModel = bWantBones ? pPlayer->GetModel() : nullptr;
 		const auto pHdr = pModel ? I::ModelInfoClient->GetStudiomodel(pModel) : nullptr;
 		matrix3x4 aBones[MAXSTUDIOBONES];
 		if (pHdr && pPlayer->SetupBones(aBones, MAXSTUDIOBONES, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime))
 		{
-			const int nRecords = g_espSkeleton && g_espSkeletonType == 1 || g_espBacktrackTrail
-				? F::Backtrack.GetRecords(pPlayer, s_aRecords, int(sizeof(s_aRecords) / sizeof(s_aRecords[0]))) : 0;
-
 			if (g_espSkeleton)   // :1409-1511
 			{
 				const uint32_t col = EspCol(g_espSkeletonVisColors ? (visible() ? g_espSkeletonVisibleColor : g_espSkeletonInvisibleColor) : g_espSkeletonColor, a);
-				// lag compensated = the oldest record still inside the window (records come newest first)
-				const matrix3x4* m = g_espSkeletonType == 1 && nRecords > 0 ? s_aRecords[nRecords - 1].m_aBones : aBones;
+				const matrix3x4* m = aBones;
 				const int nBones = std::min(pHdr->numbones, (int)MAXSTUDIOBONES);
 				std::vector<SkelEdge> edges;
 				for (int i = 0; i < nBones; i++)
@@ -699,17 +693,6 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 				PushHitboxes(boxes, EspCol(g_espHitboxColor, a), g_espHitboxesThickness);
 			}
 
-
-			if (g_espBacktrackTrail)   // :1517-1539, head of every record
-				if (auto pSet = pHdr->pHitboxSet(0))
-					if (auto pBox = pSet->numhitboxes > 0 ? pSet->pHitbox(0) : nullptr)
-						for (int r = 0; r < nRecords; r++)
-						{
-							Vec3 w, s;
-							Math::VectorTransform((pBox->bbmin + pBox->bbmax) * 0.5f, s_aRecords[r].m_aBones[pBox->bone], w);
-							if (SDK::W2S(w, s))
-								EspQ::Rect(s.x, s.y, s.x + 1, s.y + 1, EspColRGBA(1.f, 1.f, 1.f, a), 0, true, 0.f, 4.f, 0);
-						}
 
 			auto pHeadSet = pHdr->pHitboxSet(0);
 			auto pHead = pHeadSet && pHeadSet->numhitboxes > 0 ? pHeadSet->pHitbox(0) : nullptr;   // TF2 hitbox 0 = head

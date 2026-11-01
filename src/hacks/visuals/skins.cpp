@@ -11,6 +11,7 @@
 // ==== state =====================================================================================
 bool g_enableSkins     = false;
 bool g_skinNeedsUpdate = false;
+bool g_skinFestRefresh = false;
 std::unordered_map<int, SkinCfg> g_skinCfgs;
 // True once Skins_Install has pre-created every key and the FSN hook can read the map from the
 // engine thread. No key may be ADDED after that -- an insert can rehash, and a rehash frees the
@@ -1751,6 +1752,9 @@ static void __fastcall h_FrameStageNotify(int stage)
         s_updPending = false;
         TriggerForceFullUpdate("skin changed");
     }
+    // Festivizer switched on: Skin_Apply writes 2053 below, then the held weapon's lights get
+    // rebuilt by the refresh at the bottom -- same frame, no full update, no age gate.
+    if (g_skinFestRefresh) { g_skinFestRefresh = false; s_festRefreshedWpn = nullptr; }
 
     if (!g_enableSkins && !skinDisabling) return;
 

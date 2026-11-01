@@ -70,7 +70,122 @@ void UnitD_Menu_visuals_screen()
     if (g_channelShiftEnable)
         ImGui::OptionPopup("channel shift settings", [&]() {
             ImGui::SliderFloat("amount##chshift", &g_channelShiftAmount, 0.f, 10.f, "%.1f");
+            ImGui::Checkbox("depth based##chshift", &g_channelShiftDepth);
+            if (g_channelShiftDepth) {
+                ImGui::Combo("depth side##chshift", &g_channelShiftDepthMode, "background\0" "foreground\0" "both sides\0");
+                ImGui::SliderFloat("distance##chshift", &g_channelShiftDepthDist, 0.f, 4000.f, "%.0f u");
+                ImGui::SliderFloat("range##chshift", &g_channelShiftDepthRange, 0.f, 2000.f, "%.0f u");
+                ImGui::SliderFloat("ramp##chshift", &g_channelShiftDepthRamp, 1.f, 4000.f, "%.0f u");
+            }
         }, ImVec2(210.f, -1));
+
+    ImGui::Checkbox("depth distort", &g_warpEnable);
+    if (g_warpEnable)
+        ImGui::OptionPopup("depth distort settings", [&]() {
+            ImGui::Combo("effect##warp", &g_warpEffect,
+                         "bulge / pinch\0" "swirl\0" "spliced radials\0" "zigzag\0" "ripple\0" "wave\0" "drunk\0"
+                         "tiny planet\0" "slit scan\0" "radial slit scan\0");
+            const int e = g_warpEffect;
+            const bool radial = e <= 4;
+
+            static const char* k_anim[] = { "no\0" "yes\0", "no\0" "amplitude\0" "phase\0", "no\0" "amplitude\0" "phase\0" "angle\0" };
+            const int animKind = (e == 3 || e == 4) ? 1 : (e == 5 ? 2 : 0);
+            if (e != 6 && e != 7) {
+                g_warpAnimate = std::clamp(g_warpAnimate, 0, animKind + 1);
+                ImGui::Combo("animate##warp", &g_warpAnimate, k_anim[animKind]);
+                if (g_warpAnimate)
+                    ImGui::SliderFloat("animation speed##warp", &g_warpAnimSpeed, 0.05f, 10.f, "%.2f");
+            }
+
+            ImGui::Label("properties");
+            switch (e) {
+            case 0:
+                ImGui::SliderFloat("magnitude##warp", &g_warpMagnitude, -1.f, 1.f, "%.2f");
+                break;
+            case 1:
+            case 2:
+                ImGui::SliderFloat("angle##warp", &g_warpAngle, -1800.f, 1800.f, "%.0f deg");
+                ImGui::SliderFloat("inner radius##warp", &g_warpInnerRadius, 0.f, 1.f, "%.3f");
+                if (e == 1) ImGui::Checkbox("inverse angle##warp", &g_warpInverse);
+                else        ImGui::SliderInt("splices##warp", &g_warpSplices, 1, 50);
+                break;
+            case 3:
+            case 4:
+                ImGui::SliderFloat("angle##warp", &g_warpAngle, -999.f, 999.f, "%.0f");
+                ImGui::SliderFloat("period##warp", &g_warpPeriod, 0.1f, 10.f, "%.2f");
+                ImGui::SliderFloat("amplitude##warp", &g_warpAmplitude, -10.f, 10.f, "%.2f");
+                ImGui::SliderFloat("phase##warp", &g_warpPhase, -5.f, 5.f, "%.2f");
+                break;
+            case 5:
+                ImGui::Combo("wave type##warp", &g_warpWaveType, "x/x\0" "x/y\0");
+                ImGui::SliderFloat("angle##warp", &g_warpWaveAngle, -360.f, 360.f, "%.0f deg");
+                ImGui::SliderFloat("period##warp", &g_warpWavePeriod, 0.1f, 10.f, "%.2f");
+                ImGui::SliderFloat("amplitude##warp", &g_warpWaveAmplitude, -1.f, 1.f, "%.3f");
+                ImGui::SliderFloat("phase##warp", &g_warpPhase, -5.f, 5.f, "%.2f");
+                break;
+            case 6:
+                ImGui::SliderFloat("strength x##warp", &g_warpDrunkStrength[0], 0.f, 100.f, "%.1f");
+                ImGui::SliderFloat("strength y##warp", &g_warpDrunkStrength[1], 0.f, 100.f, "%.1f");
+                ImGui::SliderFloat("speed##warp", &g_warpDrunkSpeed[0], 0.f, 10.f, "%.1f");
+                ImGui::SliderFloat("bending angle##warp", &g_warpDrunkAngle, -1800.f, 1800.f, "%.0f deg");
+                ImGui::SliderFloat("bending speed##warp", &g_warpDrunkAngleSpeed, 0.f, 10.f, "%.1f");
+                break;
+            case 7:
+                ImGui::SliderFloat("scale##warp", &g_warpPlanetScale, 0.f, 10.f, "%.2f");
+                ImGui::SliderFloat("rotation x##warp", &g_warpPlanetRot[0], 0.f, 1.f, "%.3f");
+                ImGui::SliderFloat("rotation y##warp", &g_warpPlanetRot[1], 0.f, 1.f, "%.3f");
+                ImGui::SliderFloat("rotation z##warp", &g_warpPlanetRot[2], 0.f, 360.f, "%.1f deg");
+                ImGui::SliderFloat("offset x##warp", &g_warpPlanetOffset[0], -0.5f, 0.5f, "%.3f");
+                ImGui::SliderFloat("offset y##warp", &g_warpPlanetOffset[1], -0.5f, 0.5f, "%.3f");
+                ImGui::SliderFloat("seam blending##warp", &g_warpPlanetSeam, 0.5f, 1.f, "%.3f");
+                break;
+            case 8:
+                ImGui::Combo("direction##warp", &g_warpSlitDir, "left\0" "right\0" "up\0" "down\0");
+                if (!g_warpAnimate) ImGui::SliderFloat("position##warp", &g_warpSlitPos, 0.f, 1.f, "%.3f");
+                ImGui::SliderFloat("scan speed##warp", &g_warpSlitSpeed, 0.f, 3.f, "%.2f");
+                break;
+            case 9:
+                if (!g_warpAnimate) ImGui::SliderFloat("position##warp", &g_warpSlitPos, 0.f, 1.f, "%.3f");
+                ImGui::ColorRow("border color##warp", g_warpBorderColor);
+                break;
+            }
+
+            if (radial || e == 9) {
+                ImGui::SliderFloat("center x##warp", &g_warpCenter[0], 0.f, 1.f, "%.3f");
+                ImGui::SliderFloat("center y##warp", &g_warpCenter[1], 0.f, 1.f, "%.3f");
+            }
+            if (radial) {
+                ImGui::SliderFloat("radius##warp", &g_warpRadius, 0.f, 1.f, "%.3f");
+                ImGui::SliderFloat("tension##warp", &g_warpTension, 0.f, 10.f, "%.3f");
+                ImGui::SliderFloat("aspect ratio##warp", &g_warpAspect, -100.f, 100.f, "%.1f");
+                ImGui::SliderFloat("aspect angle##warp", &g_warpAspectAngle, -180.f, 180.f, "%.1f deg");
+                ImGui::Checkbox("use offset coordinates##warp", &g_warpUseOffset);
+                if (g_warpUseOffset) {
+                    ImGui::SliderFloat("offset x##warp", &g_warpOffset[0], 0.f, 1.f, "%.3f");
+                    ImGui::SliderFloat("offset y##warp", &g_warpOffset[1], 0.f, 1.f, "%.3f");
+                }
+            }
+
+            ImGui::Label("blending");
+            ImGui::Combo("blending mode##warp", &g_warpBlend,
+                         "normal\0" "darken\0" "  multiply\0" "  color burn\0" "  linear burn\0" "lighten\0" "  screen\0"
+                         "  color dodge\0" "  linear dodge\0" "  addition\0" "  glow\0" "overlay\0" "  soft light\0"
+                         "  hard light\0" "  vivid light\0" "  linear light\0" "  pin light\0" "  hard mix\0" "difference\0"
+                         "  exclusion\0" "subtract\0" "  divide\0" "  divide (alternative)\0" "  divide (photoshop)\0"
+                         "  reflect\0" "  grain extract\0" "  grain merge\0" "hue\0" "  saturation\0" "  color\0"
+                         "  luminosity\0");
+            ImGui::SliderFloat("opacity##warp", &g_warpOpacity, 0.f, 1.f, "%.2f");
+
+            ImGui::Label("depth");
+            ImGui::Combo("depth side##warp", &g_warpDepthMode, "background\0" "foreground\0" "both sides\0");
+            ImGui::SliderFloat("distance##warp", &g_warpDepthDist, 0.f, 4000.f, "%.0f u");
+            ImGui::SliderFloat("range##warp", &g_warpDepthRange, 0.f, 2000.f, "%.0f u");
+            ImGui::SliderFloat("ramp##warp", &g_warpDepthRamp, 1.f, 4000.f, "%.0f u");
+            if (e <= 7) {
+                ImGui::Checkbox("fade transition##warp", &g_warpFade);
+                ImGui::Checkbox("protect edges##warp", &g_warpDepthProtect);
+            }
+        }, ImVec2(230.f, -1));
 
     // emphasize + show depth: botox menu_tab_visuals.cpp 1395-1460, 1:1 (depth_view.cpp knobs)
     constexpr ImGuiColorEditFlags k_noAlpha = ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB |

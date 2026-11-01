@@ -77,7 +77,7 @@ extern bool  g_espSkeletonVisColors;
 extern float g_espSkeletonVisibleColor[4];
 extern float g_espSkeletonInvisibleColor[4];
 extern float g_espSkeletonColor[4];
-extern int   g_espSkeletonType;        // 0 normal, 1 lag compensated, 2 smooth
+extern int   g_espSkeletonType;        // 0 normal, 2 smooth (1 was lag compensated, removed with backtrack)
 extern float g_espSkeletonThickness;
 
 extern bool  g_espHitboxes;
@@ -86,7 +86,6 @@ extern float g_espHitboxColor[4];
 extern float g_espHitboxesThickness;
 extern float g_espHitboxesDuration;
 
-extern bool  g_espBacktrackTrail;
 extern bool  g_espAvatar;
 extern int   g_espAvatarPosition;      // 0 next to name, 1 above box, 2 below box, 3 cover head
 extern float g_espAvatarSize;
