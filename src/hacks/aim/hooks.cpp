@@ -14,6 +14,7 @@
 #include "esp.h"
 #include "grenade_lob.h"
 #include "scope_fov.h"
+#include "hud_aim.h"   // unit hud: botox hud group data, collected in IEngineVGui_Paint
 
 // ================ CBaseAnimating_Interpolate.cpp ================
 MAKE_SIGNATURE(CBaseAnimating_Interpolate, "client.dll", "48 8B C4 48 89 70 ? F3 0F 11 48", 0x0);
@@ -1110,6 +1111,8 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 			F::CritHack.Draw(pLocal);
 			F::Ticks.Draw(pLocal);
 			F::Esp.Draw(pLocal);   // Unit C: player/world ESP, piggybacks this hook, no new install
+			HudAim_Collect(pLocal);   // unit hud: snapshot for the ImGui hud overlays (hud/hud_snap.h)
+			void WmAim_Tick(CTFPlayer*); WmAim_Tick(pLocal);   // unit wm: dna watermark "spotted" (wm_aim.cpp)
 		}
 		H::Draw.End();
 	}

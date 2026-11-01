@@ -1,119 +1,195 @@
-// Screen-space reflections, single pass. Reconstructs view-space position + normal off the
-// same depth source every other screenfx pass shares (ScreenFx_DepthTexture) -- no new
-// resolve, no new hook. SOURCE OF RECORD for fx_refl.h.
+// Screen-space reflections, botox reflections.cpp 1:1: five ps_3_0 passes (normals, smooth x/y,
+// trace with cubemap fallback, filter, composite). SOURCE OF RECORD for fx_refl.h.
 //
-// Rebuild after ANY edit here:
-//   fxc /nologo /T ps_3_0 /E main /Fh src/hacks/screen/shaders/fx_refl.h /Vn k_fxReflBytes src/hacks/screen/shaders/fx_refl.hlsl
+// Rebuild after ANY edit here (from the project root):
+//   bash src/hacks/screen/shaders/fx_refl_build.sh
 //
-// Output is (reflectedColor, alpha); the caller composites with SRCALPHA/INVSRCALPHA so a
-// miss (alpha 0) leaves the backbuffer untouched -- same blend shape as botox's own SSR
-// composite pass (reflections.cpp), just folded into one pass instead of five.
-//
-// ponytail: one pass, fixed step count, no normal-smoothing pass, no half-res render scale,
-// no cubemap-miss fallback (botox's reflections.cpp has all four, ported from a reshade
-// qUINT_ssr base). Upgrade path if a bare miss needs to stay lit: sample a baked env_cubemap
-// the way that file does when `hit` is false below.
-//
-//   c0 = zNear, zFar, tan(fovX/2), tan(fovY/2)        -- the view_pos/linear_z convention
-//        fx_ao_prepare.hlsl already uses, so AO and SSR agree on what a depth texel means.
-//   c1 = 1/width, 1/height, intensity [0..1], viewmodel raw-depth cutoff (0.1)
-//   c2 = max view-space ray distance (units), surface distance cutoff (botox "distance",
-//        reshade-linear 0..1), unused, unused
-//
-// Weighting is botox's trace pass with angle falloff 0 (its default) and no cubemap:
-//   a = intensity * border fade, out = (ssr * a, a * (1 - lin / distance)), SRCALPHA blend.
-// The old schlick^5 * intensity weight was ~0.015 on a floor seen 30 degrees down: invisible.
+// botox compiles k_common + one pass body at runtime; we ship one bytecode blob per PASS.
+// Drawn through screenfx.cpp's vs_3_0 quad. Constants exactly as botox's, plus c7:
+//   c0 = 2 tan(fovx/2), 2 tan(fovy/2), 1/trace w, 1/trace h
+//   c1 = distance, intensity, angle falloff, blur
+//   c2 = blur / smooth axis (1/w, 0) or (0, 1/h)
+//   c3 = view right (w = have a cubemap), c4 = view down (w = crossfade), c5 = view forward
+//   c6 = march: steps per run, growth per step, refines (qUINT 16 / 1.6 / 3 at "high")
+//   c7 = zNear, zFar of this frame (TF2 only, see lin())
+// s0 depth (point), s1 normals (point), s2 frame copy, s3 reflection, s4/s5 cubemaps (linear)
 
-#define REFL_STEPS 24
-#define REFL_REFINE 4
-
-sampler2D sScene : register(s0);   // StretchRect copy of the backbuffer -- see fx_ao_prepare's
-sampler2D sDepth : register(s1);   // note on why a render target cannot sample itself
+sampler2D s_depth : register(s0);
+sampler2D s_normal : register(s1);
+sampler2D s_frame : register(s2);
+sampler2D s_reflection : register(s3);
+samplerCUBE s_cube0 : register(s4);
+samplerCUBE s_cube1 : register(s5);
 float4 c0 : register(c0);
 float4 c1 : register(c1);
 float4 c2 : register(c2);
+float4 c3 : register(c3);
+float4 c4 : register(c4);
+float4 c5 : register(c5);
+float4 c6 : register(c6);
+float4 c7 : register(c7);
 
-float linear_z(float d) { return (c0.x * c0.y) / (c0.y - d * (c0.y - c0.x)); }
-float3 view_pos(float2 uv, float z) { return float3((uv.x * 2.0 - 1.0) * c0.z, (1.0 - uv.y * 2.0) * c0.w, 1.0) * z; }
-float raw_depth(float2 uv) { return tex2Dlod(sDepth, float4(uv, 0, 0)).r; }
-float3 at(float2 uv) { return view_pos(uv, linear_z(raw_depth(uv))); }
-
-// the screen uv a view-space point projects to, under the same tanX/tanY as view_pos above
-float2 project(float3 p)
+// botox lin() is reshade's (far plane 1000) of CS:GO raw depth. TF2 raw depth moves with each
+// map's zFar, so it is first re-projected through TF2's DEFAULT projection (VIEW_NEARZ 7,
+// 16384*sqrt3 = 28377.9) -- the same remap fx_depthview.hlsl uses. The sky (raw 1) stays far.
+float lin(float raw)
 {
-    float2 ndc = float2(p.x / (p.z * c0.z), p.y / (p.z * c0.w));
-    return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (raw >= 0.9999) return 1.0;
+    float z = c7.x * c7.y / (c7.y - raw * (c7.y - c7.x));
+    float r = saturate(28377.9 * (z - 7.0) / (z * 28370.9));
+    return r / (1000.0 - r * 999.0);
+}
+float depth_at(float2 uv) { return lin(tex2Dlod(s_depth, float4(uv, 0, 0)).r); }
+float3 view_pos(float2 uv, float l) { return float3((uv - 0.5) * c0.xy, 1.0) * l * 1000.0; }
+float3 at(float2 uv) { return view_pos(uv, depth_at(uv)); }
+float4 blur(float2 uv, float4 ck, float4 cm)
+{
+    if (c1.w <= 0.0) return ck;
+    float kk = -2.0 / (c1.w * c1.w + 1e-3);
+    float4 s = 0.0;
+    float sw = 1e-3;
+    float ext = floor(c1.w);
+    [loop] for (float j = -ext; j <= ext; j++) {
+        float2 t = uv + c2.xy * (2.0 * j - 0.5);
+        float4 tk = tex2Dlod(s_reflection, float4(t, 0, 0));
+        float4 tm = tex2Dlod(s_normal, float4(t, 0, 0));
+        float dw = saturate(1.0 - abs(tm.w - cm.w) * 50.0);
+        float nw = saturate((dot(tm.xyz, cm.xyz) - 0.8660254) * (1.0 / (1.0 - 0.8660254 + 1e-3)));
+        float w = dw * nw * exp(j * j * kk) * tk.w;
+        s += tk * w;
+        sw += w;
+    }
+    s /= sw;
+    return lerp(ck, s, saturate(sw * 2.0));
 }
 
+#if PASS == 0   // normals
 float4 main(float2 uv : TEXCOORD0) : COLOR0
 {
-    float rawD = raw_depth(uv);
-    // sky (far plane) and the gun's own depth slice (raw < vmCutoff) never reflect.
-    if (rawD >= 0.9999 || rawD < c1.w) return float4(0, 0, 0, 0);
-    // botox lin() (reshade, far plane 1000) -- through TF2's DEFAULT projection (7, 28377.9),
-    // not raw depth: raw moves with each map's zFar and the "distance" cutoff moved with it.
-    // Same remap as fx_depthview.hlsl lin().
-    float z = linear_z(rawD);
-    float r = saturate(28377.9 * (z - 7.0) / (z * 28370.9));
-    float lin = r / (1000.0 - r * 999.0);
-    if (lin >= c2.y) return float4(0, 0, 0, 0);
-
-    float3 p = view_pos(uv, z);
-
-    // normal off four neighbours, same "nearer step wins" rule as fx_ao_prepare -- the
-    // neighbour across a silhouette would otherwise bend the normal toward whatever is behind it.
-    float3 xr = at(uv + float2(c1.x, 0)) - p;
-    float3 xl = p - at(uv - float2(c1.x, 0));
-    float3 yd = at(uv + float2(0, c1.y)) - p;
-    float3 yu = p - at(uv - float2(0, c1.y));
-    float3 dx = (abs(xr.z) < abs(xl.z)) ? xr : xl;
-    float3 dy = (abs(yd.z) < abs(yu.z)) ? yd : yu;
-    float3 n = normalize(cross(dy, dx));
-    n *= (dot(n, p) > 0.0) ? -1.0 : 1.0;
-
-    float3 viewDir = normalize(p);
-    float3 rdir = reflect(viewDir, n);
-    if (rdir.z <= 0.0) return float4(0, 0, 0, 0);   // points back at the eye, never resolves
-
-    float maxDist = max(c2.x, 32.0);
-    float stepLen = maxDist / REFL_STEPS;
-    float3 pos = p;
-    bool hit = false;
-    float2 hitUv = uv;
-
-    [loop]
-    for (int i = 0; i < REFL_STEPS; ++i)
-    {
-        pos += rdir * stepLen;
-        // maxDist is the ray's LENGTH (the loop spends it), not a depth: testing pos.z against
-        // it killed every ray from a surface farther than 300..3000u on its first step.
-        if (pos.z <= c0.x || pos.z >= c0.y) break;
-
-        float2 suv = project(pos);
-        if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) break;
-
-        float sceneZ = linear_z(raw_depth(suv));
-        float diff = pos.z - sceneZ;
-        if (diff > 0.0 && diff < stepLen * 2.0)
-        {
-            float3 lo = pos - rdir * stepLen, hi = pos;
-            [loop]
-            for (int j = 0; j < REFL_REFINE; ++j)
-            {
-                float3 mid = (lo + hi) * 0.5;
-                float mz = linear_z(raw_depth(project(mid)));
-                if (mid.z - mz > 0.0) hi = mid; else lo = mid;
-            }
-            hitUv = project(hi);
-            hit = true;
-            break;
-        }
-    }
-
-    if (!hit) return float4(0, 0, 0, 0);
-
-    // botox: hits in the outer 1/8 of the screen fade out instead of cutting hard
-    float2 border = min(hitUv, 1.0 - hitUv);
-    float a = saturate(c1.z) * saturate(min(border.x, border.y) * 8.0);
-    return float4(tex2Dlod(sScene, float4(hitUv, 0, 0)).rgb * a, a * saturate(1.0 - lin / c2.y));
+    float raw = tex2Dlod(s_depth, float4(uv, 0, 0)).r;
+    float l = lin(raw);
+    if (raw < 0.1) return float4(0, 0, 1, -1);   // the gun's own depth slice
+    if (l >= c1.x) return float4(0, 0, 1, l);
+    float3 p = view_pos(uv, l);
+    float3 x1 = at(uv + float2(c0.z, 0)) - p;
+    float3 x2 = p - at(uv - float2(c0.z, 0));
+    float3 y1 = at(uv + float2(0, c0.w)) - p;
+    float3 y2 = p - at(uv - float2(0, c0.w));
+    x1 = (abs(x1.z) > abs(x2.z)) ? x2 : x1;
+    y1 = (abs(y1.z) > abs(y2.z)) ? y2 : y1;
+    return float4(normalize(cross(y1, x1)), l);
 }
+#elif PASS == 1   // smooth (run twice, c2 = x then y)
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    float4 c = tex2Dlod(s_normal, float4(uv, 0, 0));
+    if (c.w < 0.0 || c.w >= c1.x) return c;
+    float3 ns = c.xyz;
+    float ws = 1.0;
+    float tol = 1.0 / (c.w * 0.03 + 1e-6);
+    [unroll] for (int j = 1; j <= 6; j++) {
+        float2 off = c2.xy * (j * 1.2);
+        float g = exp(-j * j * 0.15);
+        float4 a = tex2Dlod(s_normal, float4(uv + off, 0, 0));
+        float4 b = tex2Dlod(s_normal, float4(uv - off, 0, 0));
+        float wa = g * saturate(1.0 - abs(a.w - c.w) * tol) * saturate(dot(a.xyz, c.xyz) * 4.0 - 2.8);
+        float wb = g * saturate(1.0 - abs(b.w - c.w) * tol) * saturate(dot(b.xyz, c.xyz) * 4.0 - 2.8);
+        ns += a.xyz * wa + b.xyz * wb;
+        ws += wa + wb;
+    }
+    return float4(normalize(ns / ws), c.w);
+}
+#elif PASS == 2   // trace
+float bayer(float2 v)
+{
+    float2 a = fmod(floor(v * 0.25), 2.0);
+    float2 b = fmod(floor(v * 0.5), 2.0);
+    float2 c = fmod(floor(v), 2.0);
+    float3 x = float3(a.x, b.x, c.x) * 2.0;
+    float3 r = lerp(x, 3.0 - x, float3(a.y, b.y, c.y)) / 3.0;
+    return dot(r, float3(4.0, 16.0, 64.0)) / 84.0;
+}
+float4 main(float2 uv : TEXCOORD0, float2 vpos : VPOS) : COLOR0
+{
+    float4 nd = tex2Dlod(s_normal, float4(uv, 0, 0));
+    if (nd.w < 0.0 || nd.w >= c1.x) return 0.0;
+    float jitter = bayer(vpos) - 0.5;
+    float3 e = normalize(view_pos(uv, nd.w));
+    float3 d = reflect(e, nd.xyz);
+    float st = (0.2 + 0.0125 * jitter) * sqrt(nd.w) / (1e-3 + saturate(1.0 - dot(d, e)));
+    float3 rp = view_pos(uv, nd.w) + d * st;
+    float2 t = uv;
+    // c6 x steps per run, y growth per step, z refines. 16 / 1.6 / 3 = qUINT
+    float j = 0.0;
+    float k = 0.0;
+    [loop] for (int it = 0; it < 80; it++) {
+        if (j >= c6.x) break;
+        j++;
+        t = rp.xy / (rp.z * c0.xy) + 0.5;
+        float ez = depth_at(t) * 1000.0 - rp.z;
+        if (ez < 0.0 && ez > -2.5 * st) {
+            j = 0.0;
+            if (k < c6.z) {
+                st /= c6.y;
+                rp -= d * st;
+                st *= c6.y / 16.0;
+            } else {
+                j += c6.x;
+            }
+            k++;
+        }
+        rp += d * st;
+        st *= c6.y;
+        float2 edge = saturate(t - t * t);
+        if (edge.x <= 0.0 || edge.y <= 0.0) j += c6.x;
+    }
+    float nv = saturate(1.0 + dot(e, nd.xyz));
+    // schlick (exponent 5) is ~0.04 looking straight down: c1.z = falloff, 0 = same strength at every angle
+    float schlick = lerp(0.04, 1.0, pow(nv, 5.0));
+    // hits in the outer 1/8 of the screen fade out instead of cutting hard
+    float2 border = min(t, 1.0 - t);
+    float hit = k > 0 ? saturate(min(border.x, border.y) * 8.0) : 0.0;
+    float3 ssr = tex2Dlod(s_frame, float4(t, 0, 0)).rgb;
+    float3 col;
+    float a;
+    if (c3.w > 0.5) {
+        // map cubemap under the screen trace: misses, off screen and behind the camera still reflect
+        float3 w = d.x * c3.xyz + d.y * c4.xyz + d.z * c5.xyz;
+        float3 cube = lerp(texCUBElod(s_cube1, float4(w, 0)).rgb, texCUBElod(s_cube0, float4(w, 0)).rgb, c4.w);
+        col = lerp(cube, ssr, hit);
+        a = saturate(c1.y * lerp(1.0, schlick * nv, c1.z));
+    } else {
+        col = ssr;
+        a = saturate(c1.y * lerp(1.0, schlick * saturate(dot(e, d)) * nv, c1.z)) * hit;
+    }
+    // distance fade on alpha only: the texture then has no hard cutoff for the edge aa
+    return float4(col * a, a * saturate(1.0 - nd.w / c1.x));
+}
+#elif PASS == 3   // filter (vertical)
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    float4 ck = tex2Dlod(s_reflection, float4(uv, 0, 0));
+    float4 cm = tex2Dlod(s_normal, float4(uv, 0, 0));
+    if (cm.w < 0.0 || cm.w >= c1.x) return ck;
+    return blur(uv, ck, cm);
+}
+#else   // composite (horizontal blur + edge aa), blended over the frame
+float m(float4 v) { return dot(v, float4(0.299, 0.587, 0.114, 0.5)); }
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    float4 ck = tex2Dlod(s_reflection, float4(uv, 0, 0));
+    float4 cm = tex2Dlod(s_normal, float4(uv, 0, 0));
+    float4 r = ck;
+    if (cm.w >= 0.0 && cm.w < c1.x) r = blur(uv, ck, cm);
+    float2 h = c0.zw * 0.5;
+    float4 a = tex2Dlod(s_reflection, float4(uv + float2(-h.x, -h.y), 0, 0));
+    float4 b = tex2Dlod(s_reflection, float4(uv + float2(h.x, -h.y), 0, 0));
+    float4 c = tex2Dlod(s_reflection, float4(uv + float2(-h.x, h.y), 0, 0));
+    float4 d = tex2Dlod(s_reflection, float4(uv + float2(h.x, h.y), 0, 0));
+    float ma = m(a), mb = m(b), mc = m(c), md = m(d);
+    float hi = max(max(ma, mb), max(mc, md));
+    float lo = min(min(ma, mb), min(mc, md));
+    float e = saturate((hi - lo) / (hi + 0.05) * 2.0 - 0.5);
+    return lerp(r, (a + b + c + d) * 0.25, e);
+}
+#endif

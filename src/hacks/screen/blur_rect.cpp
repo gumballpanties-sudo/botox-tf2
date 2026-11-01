@@ -5,7 +5,7 @@
 // ==== per-frame job queue ========================================================
 // Fixed array, not a vector: AddCallback keeps the pointer until the draw list is replayed
 // later this same frame, and a vector could reallocate and move it out from under that.
-struct BlurJob { ImVec2 min, max; float strength; float rounding; };
+struct BlurJob { ImVec2 min, max; float strength; float rounding; float alpha = 1.f; };
 static constexpr int kMaxJobsPerFrame = 16;   // ponytail: fixed cap, bump if a menu ever blurs more rects in one frame
 static BlurJob s_jobs[kMaxJobsPerFrame];
 static int     s_jobCount = 0;
@@ -170,7 +170,7 @@ static void BlurQuadAbs(BlurVert (&q)[4], float x0, float y0, float x1, float y1
     q[3] = { x1 - 0.5f, y1 - 0.5f, 0.f, 1.f, 1.f, 1.f };
 }
 
-static void BlurRectDraw(IDirect3DDevice9* dev, ImVec2 mn, ImVec2 mx, float strength)
+static void BlurRectDraw(IDirect3DDevice9* dev, ImVec2 mn, ImVec2 mx, float strength, float alpha = 1.f)
 {
     const int rw = (int)(mx.x - mn.x), rh = (int)(mx.y - mn.y);
     if (rw < 2 || rh < 2) return;
@@ -241,8 +241,30 @@ static void BlurRectDraw(IDirect3DDevice9* dev, ImVec2 mn, ImVec2 mx, float stre
         {
             dev->SetRenderTarget(0, rtSaved);
             dev->SetViewport(&st.vp);
-            dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);   // straight replace, not bloom's additive
-            dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, qAbs, sizeof(BlurVert));
+            if (alpha >= 0.999f)
+            {
+                dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);   // straight replace, not bloom's additive
+                dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, qAbs, sizeof(BlurVert));
+            }
+            else
+            {
+                // BlurRectFade (unit game): botox screen_blur tint alpha = crossfade over the
+                // sharp frame through the blend factor. SRCBLEND/ALPHABLEND go back in BlurRestore.
+                DWORD dst = 0, op = 0, factor = 0;
+                dev->GetRenderState(D3DRS_DESTBLEND, &dst);
+                dev->GetRenderState(D3DRS_BLENDOP, &op);
+                dev->GetRenderState(D3DRS_BLENDFACTOR, &factor);
+                const DWORD a = (DWORD)((alpha < 0.f ? 0.f : alpha) * 255.f + 0.5f);
+                dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+                dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_BLENDFACTOR);
+                dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVBLENDFACTOR);
+                dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+                dev->SetRenderState(D3DRS_BLENDFACTOR, D3DCOLOR_ARGB(a, a, a, a));
+                dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, qAbs, sizeof(BlurVert));
+                dev->SetRenderState(D3DRS_DESTBLEND, dst);
+                dev->SetRenderState(D3DRS_BLENDOP, op);
+                dev->SetRenderState(D3DRS_BLENDFACTOR, factor);
+            }
         }
     }
 
@@ -253,7 +275,15 @@ static void BlurRectDraw(IDirect3DDevice9* dev, ImVec2 mn, ImVec2 mx, float stre
 static void BlurRectCallback(const ImDrawList*, const ImDrawCmd* cmd)
 {
     const BlurJob* j = static_cast<const BlurJob*>(cmd->UserCallbackData);
-    if (j && g_d3dDev) BlurRectDraw(g_d3dDev, j->min, j->max, j->strength);
+    if (j && g_d3dDev) BlurRectDraw(g_d3dDev, j->min, j->max, j->strength, j->alpha);
+}
+
+void BlurRectFade(ImDrawList* dl, ImVec2 min, ImVec2 max, float strength, float alpha)
+{
+    if (!dl || alpha <= 0.f || s_jobCount >= kMaxJobsPerFrame) return;
+    BlurJob& j = s_jobs[s_jobCount++];
+    j.min = min; j.max = max; j.strength = strength; j.rounding = 0.f; j.alpha = alpha;
+    dl->AddCallback(&BlurRectCallback, &j);
 }
 
 void BlurRect(ImDrawList* dl, ImVec2 min, ImVec2 max, float strength, float rounding)

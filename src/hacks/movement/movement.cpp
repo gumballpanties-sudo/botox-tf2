@@ -13,6 +13,7 @@
 #include "movement_tricks2_pure.h" // Unit A3 port: pure decisions (bounce tangent/tung band/eb style), gate-tested
 #include "movement_edge_pure.h" // Unit A2 port: pure decisions (edge skip duck gate, blockbot wish/sign), gate-tested
 #include "detections.h"   // botox chat detections, fed the cmd start state at the publish point
+#include "../hud/points.h" // g_esFired: edge skip's lip landing, the keybind indicator particle count
 #include <mutex>
 #include <atomic>
 #include <thread>
@@ -1737,6 +1738,7 @@ static bool MV_PinOnProp(const Vec3& origin, const Vec3& mins, const Vec3& maxs,
 }
 
 // ---- Pixel surf: botox pixel_surf( ) 1:1 (pixelsurf.inl) ----
+static bool AutoBounceOwnsCmd();   // autobounce.inl (included later): botox m_auto_bounce_data.m_owns_cmd
 #include "pixelsurf.inl"
 
 // The player hull is an AABB, so only a face square to +-X or +-Y meets it FLAT. On anything
@@ -2345,6 +2347,10 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
 // demo view/jumpstats). After everything else -- it only reads helpers already defined above.
 #include "movement_ex.inl"
 
+// auto bounce = botox auto_bounce.cpp. After airstuck.inl (AsClock, AsSetOrigin), before
+// movement_tricks2.inl (bounce assist yields to s_ab.ownsCmd)
+#include "autobounce.inl"
+
 // Unit A3 port: tung/bounce/pf modes/eb presets/ps fix. After movement_ex.inl (needs
 // edgebug.inl's s_eb* statics and this file's own s_*Hit flags, all already defined above).
 #include "movement_tricks2.inl"
@@ -2457,6 +2463,9 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
                                       || On(g_textureBug, g_textureBugKey, g_textureBugMode)
                                       || On(g_wallClimb, g_wallClimbKey, g_wallClimbMode)
                                       || On(g_airStuck, g_airStuckKey, g_airStuckMode)
+                                      // auto bounce / bounce assist run in the probe block: no prediction = never called
+                                      || On(g_autoBounce, g_autoBounceKey, g_autoBounceMode)
+                                      || On(g_bounceAssist, g_bounceAssistKey, g_bounceAssistMode)
                                       || On(g_psAssist, g_psAssistKey, g_psAssistMode))));
     const bool needPred = needPredMove
                        || (probesOK && (
@@ -2533,7 +2542,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             // ceiling twin (shares the TB key, and TB->HS is a deliberate transition), not a rival
             AirStuckTick(pLocal, pCmd);
             WallClimb(pLocal, pCmd);
-            AutoBounce(pLocal, pCmd);   // Unit A3: yields to every s_*Hit flag above
+            AutoBounce(pLocal, pCmd);   // botox auto_bounce: yields to every s_*Hit flag above
+            BounceAssist(pLocal, pCmd); // Unit A3 wall redirect: yields to auto bounce too
             // botox on_create_move_post:1267 -- pixel_surf is the last mover: it yields to this
             // cmd's AS / TB / WC flags (not last tick's) and its hold re-proves the final move
             PixelSurf(pLocal, pCmd);
@@ -2552,6 +2562,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s_asHolding = false;
         s_shouldPixelSurf = false;
         s_psShouldSurf = s_psShouldUnduck = false;
+        s_ab.ownsCmd = false;   // botox movement.cpp:1260: stale true on a skipped tick
         // PixelFinder is the only owner of its key edge, and it did not run this cmd. Left alone,
         // s_psFinderHeld stays stuck true for good: needPred never drops, and the NEXT real press
         // reads as "already held" so no column is ever anchored again
@@ -2647,7 +2658,24 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s.mjOn     = On(g_miniJump, g_miniJumpKey, g_miniJumpMode);
         s.mjHit    = s_miniHit;   // the takeoff duck actually went out (not refused/stripped)
         s.jbOn     = On(g_jumpbug, g_jumpbugKey, g_jumpbugMode);
-        s.jbHit    = s_jumpbugHit;
+        // botox m_can_jb: lit for 0.2 s after the jb, so a one-tick hit survives the frame sampling
+        static unsigned long long s_jbHitMs = 0;
+        if (s_jumpbugHit) s_jbHitMs = s.ms;
+        s.jbHit    = s_jbHitMs && s.ms - s_jbHitMs < 200;
+        s.ebPred   = s_ebDetected && s_ebCurrentTick < s_ebLockTicks;
+        s.dhOn     = On(g_delayHop, g_delayHopKey, g_delayHopMode);
+        s.acOn     = On(g_autoCrouch, g_autoCrouchKey, g_autoCrouchMode);
+        s.abOn     = On(g_autoBounce, g_autoBounceKey, g_autoBounceMode);
+        s.tungOn   = On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);
+        s.hswOn    = On(g_hsw, g_hswKey, g_hswMode);
+        s.bastOn   = On(g_bounceAssist, g_bounceAssistKey, g_bounceAssistMode);
+        // one-tick catch jump, held 0.2 s like jb (botox HITGODA2 stays up while the assist owns the hop)
+        static unsigned long long s_bastHitMs = 0;
+        if (s_bounceAssistHit) s_bastHitMs = s.ms;
+        s_bounceAssistHit = false;
+        s.bastHit  = s_bastHitMs && s.ms - s_bastHitMs < 200;
+        s.esOn     = On(g_edgeSkip, g_edgeSkipKey, g_edgeSkipMode);
+        s.esHit    = s_esActive;
         s.buttons  = pCmd->buttons;
         s.mouseDx  = pCmd->mousedx;
         s.mouseDy  = pCmd->mousedy;

@@ -365,6 +365,10 @@ struct FlipCoreIn {
     bool cfgGuard;       // the config.cfg writer hook is in
     bool onGameThread;
     bool gameThreadGone;  // off the game thread, and it has not ticked for a second (eject fallback)
+    // botox "gun other side" (m_flip_world_mirror_hand): the string is left at the player's own hand
+    // (the server spawns from it, the mirror carries the projectiles across) and only the client int
+    // is poked to the other hand, so the unmirrored gun draws on that same far side.
+    bool gunOtherSide = false;
 };
 
 inline bool FlipHolding(const FlipCore& c)
@@ -404,7 +408,8 @@ inline bool FlipCoreTick(FlipCore& c, Env& env, const FlipCoreIn& in)
                 if (demo) recorded = env.RecordedHand();
             }
             int target = -1;
-            const bool want = FlipHandTarget(mirroring, in.cfgGuard, hltv, demo, recorded, target);
+            const bool want = FlipHandTarget(mirroring, in.cfgGuard, hltv, demo, recorded, target) && !in.gunOtherSide;
+            const bool pokeOther = want || (mirroring && in.gunOtherSide);   // int to the other hand of the string
             int pref = c.vmPref;
             const int cur = env.Hand();
             const int value = FlipVmStep(want, cur, target, pref);
@@ -422,10 +427,10 @@ inline bool FlipCoreTick(FlipCore& c, Env& env, const FlipCoreIn& in)
             }
             // Every tick, not once: a class cfg's `cl_flipviewmodels x` rewrites the int too. Only an int
             // this copy poked is ever put back, so the other DLL's tick never undoes the owner's poke.
-            if (want || c.clientPoked) {
-                const int poke = FlipClientHand(want, str, env.ClientHand());
+            if (pokeOther || c.clientPoked) {
+                const int poke = FlipClientHand(pokeOther, str, env.ClientHand());
                 if (poke >= 0) env.SetClientHand(poke);
-                c.clientPoked = want;
+                c.clientPoked = pokeOther;
             }
         } else if (c.vmPref >= 0 && !c.cfgSaved) {
             env.SaveOwnHandForConfig(c.vmPref);

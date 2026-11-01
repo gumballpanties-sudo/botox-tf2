@@ -5,6 +5,7 @@
 #include "../esp/esp_vars.h"
 #include "../visuals/chams_layers.h"   // ChamsLayers::SoundAlpha = botox n_sound_esp::alpha
 #include "../hud/avatar_pure.h"        // n_avatar::FriendIdToSteam64 -- plain arithmetic, no Steam/d3d9 types
+#include "../menu/cfg/u_esp.h"         // 11-01 vars: edicts group (primitives only)
 #include <cfloat>
 #include <cstdio>
 
@@ -16,8 +17,7 @@ bool Chams_SoundStamp(int entindex, float& ms, float* origin);   // aim/chams.cp
 //   - bones: TF2 skeletons have non-hitbox bones between hitbox ones, so an edge runs to the
 //     nearest hitbox ANCESTOR (botox: direct parent; CS:GO's breast-bone fixups are CS bone ids)
 //   - hitboxes are boxes in TF2, not capsules: drawn as their 12 edges
-//   - weapon name: TF2 weapon-type table (no localized hud name to read); weapon icon: no TF2
-//     icon font, row not ported
+//   - weapon name: TF2 weapon-type table (no localized hud name to read); no weapon icons
 //   - flags: the TF2 condition set (EspFlagNames), same plain / alert colouring
 //   - frustum test: SDK::IsOnScreen (botox: engine cull_box)
 //   - no team avatars for bots (TF2 has no T/CT portrait textures); bots draw no avatar
@@ -434,6 +434,42 @@ namespace
 		const uint32_t alpha = (uint32_t)(((col >> 24) & 0xffu) * 0.45f);
 		EspQ::Poly(pts, 4, (col & 0x00ffffffu) | (alpha << 24), true, col, 1.5f);
 		EspQ::Line(a.p[2].x, a.p[2].y, a.p[0].x, a.p[0].y, col, 1.5f);
+	}
+}
+
+namespace
+{
+	// "models/weapons/c_models/c_scattergun/c_scattergun.mdl" -> "scattergun"
+	std::string ModelStem(CBaseEntity* pEnt)
+	{
+		const auto pModel = pEnt ? pEnt->GetModel() : nullptr;
+		const char* n = pModel ? I::ModelInfoClient->GetModelName(pModel) : nullptr;
+		if (!n) return {};
+		const char* slash = strrchr(n, '/');
+		std::string s = slash ? slash + 1 : n;
+		if (s.size() > 4 && s.compare(s.size() - 4, 4, ".mdl") == 0) s.resize(s.size() - 4);
+		if (s.size() > 2 && (s[0] == 'c' || s[0] == 'w') && s[1] == '_') s.erase(0, 2);
+		return s;
+	}
+
+	// botox impl_t::rect / corner_rect for the edicts boxes (1 px, botox draws them unscaled)
+	void EdictBox(const SBox& b, uint32_t col, uint32_t outline, bool corner, bool drawOutline)
+	{
+		if (!corner)
+			EspQ::Rect((float)b.l, (float)b.t, (float)b.r, (float)b.b, col, outline, false, 0.f, 1.f,
+				drawOutline ? uint8_t(ESPF_OUT_INNER | ESPF_OUT_OUTER) : uint8_t(0));
+		else
+		{
+			if (drawOutline) EspQ::CornerRect((float)b.l, (float)b.t, (float)b.r, (float)b.b, outline, 2.f, 0.f);
+			EspQ::CornerRect((float)b.l, (float)b.t, (float)b.r, (float)b.b, col, 1.f, 0.f);
+		}
+	}
+
+	// "rocketlauncher" -> "rocketlauncher", underscores read as spaces (botox: lower-case hud name)
+	std::string StemName(std::string s)
+	{
+		for (char& c : s) if (c == '_') c = ' ';
+		return s;
 	}
 }
 
@@ -866,37 +902,217 @@ static void Line3D(const Vec3& a, const Vec3& b, Color_t c)
 		H::Draw.Line((int)sa.x, (int)sa.y, (int)sb.x, (int)sb.y, c);
 }
 
-static void WorldBoxName(CBaseEntity* pEntity, const char* sName, Color_t tColor)
-{
-	SBox b;
-	if (!ScreenBox(pEntity->GetAbsOrigin(), pEntity->m_vecMins(), pEntity->m_vecMaxs(), b) || b.w <= 0 || b.h <= 0)
-		return;
-	H::Draw.LineCornerRectOutline(b.l, b.t, b.w, b.h, tColor);
-	H::Draw.StringOutlined(H::Fonts.GetFont(FONT_INDICATORS), b.l + b.w / 2, b.t - 2, tColor, { 0, 0, 0, tColor.a }, ALIGN_BOTTOM, sName);
-}
-
-// Ammo packs / dropped weapons are not grouped by CEntities (helpers.cpp Store), so this walks
-// the entity list itself; projectiles ride the WorldProjectile group.
+// botox edicts dropped_weapons(): box (plain with inner+outer outline, or corner with a 2 px
+// outline under it), name above the box. Fades out from 600 to 850 units like
+// botox. TF2: CTFDroppedWeapon; name from the world model (no localized hud name here).
+// Ammo packs (TF2 extra) take the same box settings, "ammo" in their own colour.
 void CEsp::DrawWorld(CTFPlayer* pLocal)
 {
-	if (g_espAmmoPacks || g_espDroppedWeapons)
+	if (!g_esxDropped && !g_esxAmmo)
+		return;
+	const Vec3 vLocal = pLocal->GetAbsOrigin();
+	const float h = FontH();
+	const int iHighest = I::ClientEntityList->GetHighestEntityIndex();
+	for (int i = 1; i <= iHighest; i++)
 	{
-		const int iHighest = I::ClientEntityList->GetHighestEntityIndex();
-		for (int i = 1; i <= iHighest; i++)
+		auto pClient = I::ClientEntityList->GetClientEntity(i);
+		auto pEnt = pClient ? pClient->As<CBaseEntity>() : nullptr;
+		if (!pEnt || pEnt->IsDormant())
+			continue;
+		const ETFClassID id = pEnt->GetClassID();
+		const bool bWeapon = id == ETFClassID::CTFDroppedWeapon && g_esxDropped;
+		const bool bAmmo = id == ETFClassID::CTFAmmoPack && g_esxAmmo;
+		if (!bWeapon && !bAmmo)
+			continue;
+		SBox b;
+		if (!ScreenBox(pEnt->GetAbsOrigin(), pEnt->m_vecMins(), pEnt->m_vecMaxs(), b) || b.w <= 0 || b.h <= 0)
+			continue;
+		const float fade = std::clamp((vLocal.DistTo(pEnt->GetAbsOrigin()) - 600.f) / 250.f, 0.f, 1.f);
+		const float a = 1.f - fade;
+		if (a <= 0.f)
+			continue;
+
+		if (g_esxDroppedBox)
+			EdictBox(b, EspCol(g_esxDroppedBoxColor, a), EspCol(g_esxDroppedBoxOutlineColor, a), g_esxDroppedBoxCorner, g_esxDroppedBoxOutline);
+
+		const float cx = b.l + b.w * 0.5f;
+		const float top = (float)b.t - 3.f;
+		if (bAmmo)
 		{
-			auto pClient = I::ClientEntityList->GetClientEntity(i);
-			auto pBase = pClient ? pClient->As<CBaseEntity>() : nullptr;
-			if (!pBase || pBase->IsDormant()) continue;
-			const bool bAmmo = pBase->GetClassID() == ETFClassID::CTFAmmoPack;
-			const bool bDropped = pBase->GetClassID() == ETFClassID::CTFDroppedWeapon;
-			if (bAmmo && g_espAmmoPacks || bDropped && g_espDroppedWeapons)
-				WorldBoxName(pBase, bAmmo ? "Ammo" : "Weapon", ToColor(g_espItemColor));
+			EspQ::Text(cx, top - h, "ammo", EspCol(g_esxAmmoColor, a), Black(g_esxAmmoColor[3] * a), 0.5f);
+			continue;
+		}
+		const std::string stem = ModelStem(pEnt);
+		if (g_esxDroppedName && !stem.empty())
+		{
+			const float na = std::max(g_esxDroppedNameColor[3] - fade, 0.f);   // botox: name alpha = colour alpha - fade
+			const float c[4] = { g_esxDroppedNameColor[0], g_esxDroppedNameColor[1], g_esxDroppedNameColor[2], na };
+			EspQ::Text(cx, top - h, StemName(stem).c_str(), EspCol(c), Black(na), 0.5f);
 		}
 	}
-	if (g_espProjectiles)
-		for (auto pEntity : H::Entities.GetGroup(EntityEnum::WorldProjectile))
-			if (!pEntity->IsDormant())
-				WorldBoxName(pEntity, "Projectile", ToColor(g_espProjColor));
+}
+
+// botox edicts projectiles(): every live projectile, name 15 px above its origin.
+// TF2 projectile set (H::Entities WorldProjectile), names by class.
+void CEsp::DrawThrown(CTFPlayer* pLocal)
+{
+	if (!g_esxThrown || !g_esxThrownName)
+		return;
+	const uint32_t nameCol = EspCol(g_esxThrownNameColor), black = Black(1.f);
+	for (auto pEntity : H::Entities.GetGroup(EntityEnum::WorldProjectile))
+	{
+		if (!pEntity || pEntity->IsDormant() || pEntity == pLocal)
+			continue;
+		const char* name = "projectile";
+		switch (pEntity->GetClassID())
+		{
+		case ETFClassID::CTFProjectile_Rocket:            name = "rocket"; break;
+		case ETFClassID::CTFProjectile_SentryRocket:      name = "sentry rocket"; break;
+		case ETFClassID::CTFGrenadePipebombProjectile:
+			switch (pEntity->As<CTFGrenadePipebombProjectile>()->m_iType())   // tf_weapon_grenade_pipebomb.h TF_GL_MODE_*
+			{
+			case 1: case 2: name = "sticky"; break;
+			case 3:         name = "cannonball"; break;
+			default:        name = "pipe"; break;
+			}
+			break;
+		case ETFClassID::CTFProjectile_Arrow:             name = "arrow"; break;
+		case ETFClassID::CTFProjectile_HealingBolt:       name = "bolt"; break;
+		case ETFClassID::CTFProjectile_Flare:             name = "flare"; break;
+		case ETFClassID::CTFProjectile_Jar:               name = "jarate"; break;
+		case ETFClassID::CTFProjectile_JarMilk:           name = "mad milk"; break;
+		case ETFClassID::CTFProjectile_JarGas:            name = "gas passer"; break;
+		case ETFClassID::CTFStunBall:                     name = "baseball"; break;
+		case ETFClassID::CTFBall_Ornament:                name = "ornament"; break;
+		case ETFClassID::CTFProjectile_Cleaver:           name = "cleaver"; break;
+		case ETFClassID::CTFProjectile_EnergyBall:        name = "energy ball"; break;
+		case ETFClassID::CTFProjectile_EnergyRing:        name = "energy ring"; break;
+		case ETFClassID::CTFProjectile_BallOfFire:        name = "fireball"; break;
+		case ETFClassID::CTFProjectile_MechanicalArmOrb:  name = "orb"; break;
+		case ETFClassID::CTFProjectile_GrapplingHook:     name = "grappling hook"; break;
+		case ETFClassID::CTFProjectile_SpellFireball:     name = "spell"; break;
+		case ETFClassID::CTFProjectile_SpellMeteorShower: name = "spell"; break;
+		case ETFClassID::CTFProjectile_SpellBats:         name = "spell"; break;
+		case ETFClassID::CTFProjectile_SpellLightningOrb: name = "spell"; break;
+		case ETFClassID::CTFProjectile_SpellMirv:         name = "spell"; break;
+		default: break;
+		}
+		Vec3 s;
+		if (!SDK::W2S(pEntity->GetAbsOrigin(), s))
+			continue;
+		EspQ::Text(s.x, s.y - 15.f, name, nameCol, black, 0.5f);
+	}
+}
+
+// botox grenade_path: the local player's throw, simulated tick by tick with traces; bounce
+// squares, a detonation dot and the effect radius ring. TF2: the held projectile weapon's shot
+// (Amalgam CVisuals::ProjectileTrace: F::ProjSim + per-tick TraceHull). Pipes and the loose
+// cannon bounce (botox clip_velocity, elasticity 0.45) until the 2 s fuse
+// (tf_weapon_grenade_pipebomb.cpp:400 TF_WEAPON_GRENADE_DETONATE_TIME); everything else ends at
+// its first hit. Radius = Amalgam's splash radii through mult_explosion_radius.
+void CEsp::DrawGrenadePath(CTFPlayer* pLocal)
+{
+	if (!g_esxGrenadePath || !pLocal->IsAlive() || pLocal->IsAGhost())
+		return;
+	auto pWeapon = pLocal->m_hActiveWeapon()->As<CTFWeaponBase>();
+	if (!pWeapon)
+		return;
+	const int iWeapon = pWeapon->GetWeaponID();
+	if (iWeapon == TF_WEAPON_FLAMETHROWER)
+		return;
+	ProjectileInfo tInfo;
+	if (!F::ProjSim.GetInfo(pLocal, pWeapon, I::EngineClient->GetViewAngles(), tInfo, ProjSimEnum::Trace | ProjSimEnum::InitCheck | ProjSimEnum::Quick)
+		|| !F::ProjSim.Initialize(tInfo))
+		return;
+
+	CGameTrace trace = {};
+	CTraceFilterCollideable filter = {};
+	filter.pSkip = pLocal;
+	int nMask = MASK_SOLID;
+	F::ProjSim.SetupTrace(filter, nMask, pWeapon, 0, true);
+
+	const bool bBounces = iWeapon == TF_WEAPON_GRENADELAUNCHER || iWeapon == TF_WEAPON_CANNON;
+	struct Pt { Vec3 v; bool bounce; };
+	std::vector<Pt> pts{ { F::ProjSim.GetOrigin(), false } };
+	bool bDetonated = false;
+	Vec3 vDetonate;
+	const int nTicks = TIME_TO_TICKS(std::min(tInfo.m_flLifetime, bBounces ? 2.f : 10.f));
+	for (int n = 1; n <= nTicks; n++)
+	{
+		const Vec3 vOld = F::ProjSim.GetOrigin();
+		F::ProjSim.RunTick(tInfo, false);
+		const Vec3 vNew = F::ProjSim.GetOrigin();
+		SDK::TraceHull(vOld, vNew, tInfo.m_vHull * -1.f, tInfo.m_vHull, nMask, &filter, &trace);
+		F::ProjSim.SetupTrace(filter, nMask, pWeapon, n, true);
+		if (!trace.DidHit())
+		{
+			pts.push_back({ vNew, false });
+			continue;
+		}
+		const bool bWorld = !trace.m_pEnt || trace.m_pEnt->entindex() == 0;
+		if (!bBounces || !bWorld || trace.startsolid)
+		{
+			pts.push_back({ trace.endpos, false });
+			bDetonated = true; vDetonate = trace.endpos;
+			break;
+		}
+		// botox clip_velocity * elasticity, then restart the physics object just off the surface
+		Vec3 vVel = F::ProjSim.GetVelocity();
+		const Vec3 nrm = trace.plane.normal;
+		vVel = (vVel - nrm * (vVel.Dot(nrm) * 2.f)) * 0.45f;
+		pts.push_back({ trace.endpos, true });
+		if (!F::ProjSim.m_pObj)
+			break;
+		const Vec3 vZero = {};
+		F::ProjSim.m_pObj->SetPosition(trace.endpos + nrm, Vec3(), true);
+		F::ProjSim.m_pObj->SetVelocity(&vVel, &vZero);
+	}
+	if (!bDetonated && bBounces && pts.size() > 1)   // fuse ran out mid-flight / on the ground
+		bDetonated = true, vDetonate = pts.back().v;
+	if (pts.size() < 2)
+		return;
+
+	const uint32_t lineCol = EspCol(g_esxGrenadePathColor), bounceCol = EspCol(g_esxGrenadePathBounceColor),
+		detCol = EspCol(g_esxGrenadePathDetonateColor);
+	const float thick = g_esxGrenadePathThickness;
+	Lines path;
+	for (const Pt& p : pts)
+		path.Add(p.v);
+	path.Push(lineCol, thick);
+	for (const Pt& p : pts)   // botox: bounce squares over the line
+	{
+		Vec3 s;
+		if (p.bounce && SDK::W2S(p.v, s))
+			EspQ::Rect(s.x - 2.f, s.y - 2.f, s.x + 2.f, s.y + 2.f, bounceCol, 0, true, 0.f, 1.f, 0);
+	}
+	if (!bDetonated)
+		return;
+	Vec3 s;
+	if (SDK::W2S(vDetonate, s))
+		EspQ::Circle(s.x, s.y, 3.f, detCol, -1.f);
+	if (!g_esxGrenadePathRadius)
+		return;
+	float flRadius = 0.f;
+	switch (iWeapon)
+	{
+	case TF_WEAPON_ROCKETLAUNCHER: case TF_WEAPON_ROCKETLAUNCHER_DIRECTHIT: case TF_WEAPON_PARTICLE_CANNON:
+	case TF_WEAPON_PIPEBOMBLAUNCHER: case TF_WEAPON_GRENADELAUNCHER: case TF_WEAPON_CANNON:
+		flRadius = 146.f; break;
+	case TF_WEAPON_FLAREGUN: case TF_WEAPON_FLAREGUN_REVENGE:
+		if (pWeapon->As<CTFFlareGun>()->GetFlareGunType() == FLAREGUN_SCORCHSHOT) flRadius = 110.f;
+		break;
+	default: break;
+	}
+	if (flRadius <= 0.f)
+		return;
+	flRadius = SDK::AttribHookValue(flRadius, "mult_explosion_radius", pWeapon);
+	Lines ring;
+	for (int i = 0; i <= 32; i++)
+	{
+		const float r = 6.2831853f * i / 32.f;
+		ring.Add({ vDetonate.x + cosf(r) * flRadius, vDetonate.y + sinf(r) * flRadius, vDetonate.z });
+	}
+	ring.Push(detCol, thick);
 }
 
 // Projectile path draw: F::ProjSim (aim/projsim.h), the same physics the projectile aimbot aims with.
@@ -975,8 +1191,9 @@ void CEsp::Draw(CTFPlayer* pLocal)
 			DebugLog("esp: queued %d players this frame (%d cmds)", m_nDrawn, int(g_espQBuild.cmds.size()));
 		}
 
-		if (g_espWorldEnable)
-			DrawWorld(pLocal);
+		DrawWorld(pLocal);
+		DrawThrown(pLocal);
+		DrawGrenadePath(pLocal);
 		DrawProjectilePaths(pLocal);
 		DrawSoundPings();
 	}

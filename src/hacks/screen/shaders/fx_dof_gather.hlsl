@@ -14,9 +14,11 @@
 //   c0 = zNear, zFar, focal distance, 1/blur ramp
 //   c1 = half the sharp band, max blur radius in pixels, 1/width, 1/height
 //   c3 = bokeh highlight boost, bokeh threshold, edge softness, 1/near ramp
+//   c4 = tap ceiling (quality: 16/32/64/128), show depth, its white point (units), -
 //   c5 = near bleed chain on, taps per pixel of radius, -, -
 
-#define TAPS 64
+// the loop's hard bound; c4.x is the ceiling the "quality" combo picks under it
+#define TAPS 128
 
 // The golden angle, and the SAME angle as a rotation. Advancing the tap direction by one
 // complex multiply is what the loop does instead of sincos per tap: on ps_3_0 sincos is a
@@ -25,10 +27,14 @@
 static const float2 k_rot = float2(-0.73736888, 0.67549029);   // cos/sin of 2.39996323
 
 sampler2D sPrepared : register(s0);
+sampler2D sDepth    : register(s1);   // read by the "show depth" view only
 float4 c0 : register(c0);
 float4 c1 : register(c1);
 float4 c3 : register(c3);
+float4 c4 : register(c4);
 float4 c5 : register(c5);
+
+float linear_z(float d) { return (c0.x * c0.y) / (c0.y - d * (c0.y - c0.x)); }
 
 // The frame arrives already tonemapped, so a bright pixel is worth barely more than a grey
 // one and averaging 40 of them gives grey mush. These two undo / redo a reinhard curve
@@ -42,6 +48,10 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float4 mid    = tex2Dlod(sPrepared, float4(uv, 0, 0));
     float3 centre = mid.rgb;
     float  cs     = mid.a * 2.0 - 1.0;
+
+    // botox "show depth": linear depth, white at c4.z units. tex2Dlod, so legal in the branch.
+    if (c4.y > 0.5)
+        return float4(saturate(linear_z(tex2Dlod(sDepth, float4(uv, 0, 0)).r) / c4.z).xxx, mid.a);
 
     // THE NEAR PLANE IS NOT THIS PASS'S when the bleed chain is on: a foreground blurred here
     // can only ever fill its own silhouette, because the sharp pixels beside it gather
@@ -67,7 +77,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     // radius means a 20px blur costs fifty fetches on every blurred pixel of the frame, and
     // the smoothing pass that runs after this exists precisely to close the gaps a sparser
     // spiral leaves -- so the taps were being paid for twice.
-    float n    = clamp(ceil(radius * c5.y), 8.0, (float)TAPS);
+    float n    = clamp(ceil(radius * c5.y), 8.0, min(c4.x, (float)TAPS));
     float invN = rcp(n);
 
     // The whole disc is rotated by a per-pixel angle (interleaved gradient noise). Without

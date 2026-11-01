@@ -16,7 +16,9 @@ private:
 	void DrawSoundArrows(CTFPlayer* pLocal);   // botox sound_arrows
 	void DrawDamageNumbers();                  // botox damage_numbers
 	void DrawHitHitboxes();                    // botox hit_hitboxes
-	void DrawWorld(CTFPlayer* pLocal);
+	void DrawWorld(CTFPlayer* pLocal);           // botox edicts: dropped weapons (+ TF2 ammo packs)
+	void DrawThrown(CTFPlayer* pLocal);          // botox edicts projectiles(): thrown objects name / icon
+	void DrawGrenadePath(CTFPlayer* pLocal);     // botox grenade_path: your projectile weapon's trajectory
 	void DrawProjectilePaths(CTFPlayer* pLocal);
 	void DrawSoundPings();
 

@@ -7,8 +7,9 @@
 #include "../hacks/hud/avatar_cache.h"   // unit E5: steam avatar textures
 #include "../hacks/hud/gif_tex.h"        // unit E5: embedded gif cache
 #include "../hacks/screen/blur_rect.h"      // unit E5: panel background blur
-#include "../hacks/hud/movind.h"
+#include "../hacks/hud/indicators.h"   // botox indicators.cpp: velocity, graph, keybinds, keystrokes
 #include "../hacks/hud/crosshair.h"
+#include "../hacks/hud/hud_extra.h"   // unit hud: fov circle, net graph, their fonts
 #include "../hacks/menu/menu.h"
 #include "../hacks/movement/movement.h"
 #include "../hacks/network/netregion.h"
@@ -17,8 +18,6 @@
 #include "../hacks/screen/colorcorrect.h"
 #include "../hacks/screen/bloom.h"
 #include "../hacks/screen/screenfx.h"
-#include "../hacks/hud/velgraph.h"      // unit B
-#include "../hacks/hud/keystroke.h"     // unit B
 #include "../hacks/movement/detections.h"    // unit B
 #include "../hacks/movement/recorder.h"      // unit B
 #include "../hacks/movement/ps_lines.h"      // unit B (vars only, draw loop appended into RenderPsOverlay below)
@@ -29,6 +28,7 @@
 #include "../hacks/hud/points.h"
 #include "../hacks/hud/spectator_list.h"
 #include "../hacks/esp/esp_queue.h"  // botox m_draw_data: esp recorded on the game thread, replayed in RenderEspQueue
+#include "../hacks/visuals/player_stencil.h"  // PlayerStencil_ReleaseTargets in h_Reset
 #include "../hacks/menu/debugmenu.h"
 #include "../hacks/menu/fonts.h"          // fonts tab: indicator face picked at runtime
 #include "../dependencies/imgui/freetype/imgui_freetype.h"
@@ -44,6 +44,8 @@
 #include "../dependencies/fonts/inter_medium.h"
 #include "../dependencies/fonts/sf_ui_display_semibold.h"
 #include "../dependencies/fonts/montserrat_regular.h"
+#include "../dependencies/fonts/montserrat_medium_italic.h"   // unit misc: points big font
+#include "../hacks/misc/misc_overlays.h"                      // unit misc: healthshot / low fps / logs / console color
 #include "../dependencies/fonts/sunflower_medium.h"
 #include "../dependencies/fonts/droid_sans_bold.h"
 #include "../dependencies/fonts/nunito_medium.h"
@@ -52,6 +54,7 @@
 #include "../dependencies/fonts/dna_clarity_icon.h"
 #include "../dependencies/fonts/minecraft_ttf.h"
 #include <timeapi.h>
+#include "../hacks/screen/aspect_stretch.h"   // unit screen: AspectStretch_Run (aspect ratio overlay stretch)
 #pragma comment(lib, "winmm.lib")
 
 // ==== PS finder/assist world overlay ==============================================
@@ -573,6 +576,79 @@ static void RenderEdgeBugOverlay()
     {
         dl->AddQuadFilled(s[0], s[1], s[2], s[3], IM_COL32(0, 0, 0, 90));
         dl->AddQuad(s[0], s[1], s[2], s[3], IM_COL32(235, 235, 235, 255), 1.f);
+    }
+}
+
+// ==== auto bounce overlay (botox auto_bounce_render) =============================================
+// The armed plan's verified flight from your body to the contact, a ring lying on the face it drops
+// onto, and an arrow = last flight segment clipped onto the face (ClipVelocity). Draws the movement
+// thread's copy only -- botox's paint-thread snap trace is skipped, land is already the hull's feet
+// on the face (ponytail: no render-thread trace; add one if the ring floats on bevels).
+static void RenderAutoBounceOverlay()
+{
+    if (!g_autoBounce || !g_abViz) return;
+    if (!g_engine || !IsInGame()) return;
+
+    static AbDrawData d;
+    AB_GetDrawData(d);
+    if (!d.active || d.path.size() < 2) return;
+
+    const float(*m)[4] = PsW2SMatrix();
+    if (!m) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    auto W2S = [&](const Vec3& v, ImVec2& out) -> bool
+    {
+        const float w = m[3][0] * v.x + m[3][1] * v.y + m[3][2] * v.z + m[3][3];
+        if (w <= 0.001f) return false;
+        const float inv = 1.f / w;
+        out.x = W * 0.5f + (m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z + m[0][3]) * inv * W * 0.5f;
+        out.y = H * 0.5f - (m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z + m[1][3]) * inv * H * 0.5f;
+        return true;
+    };
+    const ImU32 col  = ImGui::ColorConvertFloat4ToU32(ImVec4(g_abVizColor[0], g_abVizColor[1], g_abVizColor[2], g_abVizColor[3]));
+    const ImU32 fill = ImGui::ColorConvertFloat4ToU32(ImVec4(g_abVizColor[0], g_abVizColor[1], g_abVizColor[2], g_abVizColor[3] * 0.25f));
+    auto line = [&](const Vec3& a, const Vec3& b) {
+        ImVec2 sa, sb;
+        if (W2S(a, sa) && W2S(b, sb)) dl->AddLine(sa, sb, col, 1.5f);
+    };
+
+    for (size_t i = 0; i + 1 < d.path.size(); ++i) line(d.path[i], d.path[i + 1]);
+
+    Vec3 n = d.normal;
+    const float nl = n.Length();
+    n = nl > 0.5f ? n * (1.f / nl) : Vec3(0.f, 0.f, 1.f);
+    const Vec3 centre = d.land + n * 0.5f;
+    const auto cross = [](const Vec3& a, const Vec3& b) { return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x); };
+    const Vec3 upRef = fabsf(n.z) < 0.99f ? Vec3(0.f, 0.f, 1.f) : Vec3(1.f, 0.f, 0.f);
+    Vec3 u = cross(n, upRef); u.Normalize();
+    const Vec3 v = cross(n, u);
+
+    constexpr int kPts = 24;
+    constexpr float kRad = 16.f;
+    Vec3 ring[kPts];
+    ImVec2 sp[kPts];
+    bool onScreen = true;
+    for (int i = 0; i < kPts; ++i) {
+        const float a = 6.28318530718f * (float)i / (float)kPts;
+        ring[i] = centre + u * (cosf(a) * kRad) + v * (sinf(a) * kRad);
+        onScreen = W2S(ring[i], sp[i]) && onScreen;
+    }
+    // one convex poly, never a centre fan (imgui AA spokes). skipped when a vertex is off screen
+    if (onScreen) dl->AddConvexPolyFilled(sp, kPts, fill);
+    for (int i = 0; i < kPts; ++i) line(ring[i], ring[(i + 1) % kPts]);
+
+    const Vec3 in = d.path[d.path.size() - 1] - d.path[d.path.size() - 2];
+    Vec3 dir = in - n * in.Dot(n);
+    if (dir.Length() > 0.01f) {
+        dir.Normalize();
+        const Vec3 side = cross(n, dir);
+        const Vec3 tip  = centre + dir * (kRad + 12.f);
+        line(centre + dir * kRad, tip);
+        line(tip, tip - dir * 6.f + side * 4.f);
+        line(tip, tip - dir * 6.f - side * 4.f);
     }
 }
 
@@ -1105,15 +1181,55 @@ static void RenderSubset(ImDrawList** lists, int count, float fade = 1.f)
 // is a bitmap stretch, and that stretch is the blur. A face rasterized at 30px is sharp.
 static float s_miFontPx = 0.f;
 
-// fonts tab (fonts.h): base size from the indicator font page, times the indicator scale.
-static float MiFontPx() { return FontIndPx(g_fontIndSize, g_miScale); }
+// fonts tab (fonts.h): the base face at the indicator font page size (botox custom_font_name_indicator)
+static float MiFontPx() { return FontIndPx(g_fontIndSize, 1.f); }
+
+// botox indicator_font_set_t: the base face re-baked at every indicator's scale != 1 (velocity,
+// keybinds, keystrokes; botox's 4th is stamina), so a 2x label is a 2x raster, not a stretch.
+// IndicatorFont hands out the baked one while it matches, else the base face scaled.
+struct IndScaleSet { int count = 0; float scales[3] = {}; bool operator==(const IndScaleSet&) const = default; };
+static IndScaleSet s_indBuilt;
+static ImFont*     s_indFonts[3] = {};
+static FontSettle  s_indScaleSettle;
+
+static IndScaleSet WantedIndScales()
+{
+    IndScaleSet r;
+    for (float scale : { g_viScale, g_kiScale, g_kpScale })
+    {
+        scale = std::clamp(scale, kIndScaleMin, kIndScaleMax);
+        if (std::fabs(scale - 1.f) < 0.001f || std::find(r.scales, r.scales + r.count, scale) != r.scales + r.count) continue;
+        r.scales[r.count++] = scale;
+    }
+    return r;
+}
+
+static uint32_t IndScaleSig(const IndScaleSet& s)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < s.count; ++i)
+    {
+        uint32_t v; memcpy(&v, &s.scales[i], 4);
+        for (int b = 0; b < 4; ++b) { h ^= (v >> (b * 8)) & 0xFF; h *= 16777619u; }
+    }
+    return h ? h : 1u;
+}
+
+ImFont* IndicatorFont(float scale, float& fs)
+{
+    ImFont* const base = g_fontMi;
+    const float s = std::clamp(scale, kIndScaleMin, kIndScaleMax);
+    fs = base ? base->FontSize * s : 0.f;
+    for (int i = 0; i < s_indBuilt.count; ++i)
+        if (s_indBuilt.scales[i] == s && s_indFonts[i]) return s_indFonts[i];
+    return base;
+}
 
 // Indicator font picked in the fonts tab. One unloadable face fails the WHOLE freetype atlas
 // build (ImFontAtlasBuildWithFreeTypeEx returns false on the first bad face -> no texture, no
 // menu), so a custom face is test-built alone first; anything that fails or has no Latin
-// glyphs falls back to the stock tahomabd. Returns the path to add, "" for the stock face.
+// glyphs falls back to the stock verdanab. Returns the path to add, "" for the stock face.
 static uint32_t s_indApplied = 0;   // Fonts_IndSig() of what the atlas holds
-static int s_indBuiltSize = kFontIndDefSize;
 static FontSettle s_indSettle;
 // One unloadable face fails the whole atlas, so a picked one is built alone first.
 static bool TestBuildFont(const std::string& path, float px, int builderFlags)
@@ -1134,11 +1250,11 @@ static std::string ValidIndicatorFont(float px, int builderFlags)
     const std::string path = Fonts_FindPath(g_fontIndName);
     if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
-        DebugLog("fonts: indicator font '%s' not found (%s) -- stock tahomabd", g_fontIndName, path.c_str());
+        DebugLog("fonts: indicator font '%s' not found (%s) -- stock verdanab", g_fontIndName, path.c_str());
         return "";
     }
     if (TestBuildFont(path, px, builderFlags)) return path;
-    DebugLog("fonts: indicator font '%s' failed to build -- stock tahomabd", path.c_str());
+    DebugLog("fonts: indicator font '%s' failed to build -- stock verdanab", path.c_str());
     return "";
 }
 
@@ -1208,19 +1324,23 @@ static void BuildFontAtlas()
 
     s_miFontPx = MiFontPx();
     s_indApplied = Fonts_IndSig();
-    s_indBuiltSize = g_fontIndSize;
     {
         const std::string custom = ValidIndicatorFont(s_miFontPx, g_fontIndFlags & 0xFF);
+        // botox font_name_indicator_29: verdana bold, freetype default flags
+        ImFontConfig indCfg;
+        indCfg.FontBuilderFlags = custom.empty() ? 0 : (g_fontIndFlags & 0xFF);   // FontFlagBit i == builder flag 1 << i
+        const std::string path = custom.empty() ? std::string("C:\\Windows\\Fonts\\verdanab.ttf") : custom;
+        g_fontMi = io.Fonts->AddFontFromFileTTF(path.c_str(), s_miFontPx, &indCfg, io.Fonts->GetGlyphRangesDefault());
         if (!custom.empty())
-        {
-            ImFontConfig indCfg;
-            indCfg.FontBuilderFlags = g_fontIndFlags & 0xFF;   // FontFlagBit i == builder flag 1 << i
-            g_fontMi = io.Fonts->AddFontFromFileTTF(custom.c_str(), s_miFontPx, &indCfg, io.Fonts->GetGlyphRangesDefault());
             DebugLog("fonts: indicator font %s %.0fpx flags 0x%x", custom.c_str(), s_miFontPx, g_fontIndFlags & 0xFF);
-        }
-        else
-            g_fontMi = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\tahomabd.ttf", s_miFontPx, &cfg,
-                io.Fonts->GetGlyphRangesDefault());
+
+        s_indBuilt = WantedIndScales();
+        s_indScaleSettle.seen = IndScaleSig(s_indBuilt);
+        for (int i = 0; i < 3; ++i) s_indFonts[i] = nullptr;
+        if (g_fontMi)
+            for (int i = 0; i < s_indBuilt.count; ++i)
+                s_indFonts[i] = io.Fonts->AddFontFromFileTTF(path.c_str(), std::clamp(s_miFontPx * s_indBuilt.scales[i], 1.f, 128.f),
+                                                             &indCfg, io.Fonts->GetGlyphRangesDefault());
     }
     if (!g_fontMi) g_fontMi = g_fontBold;
 
@@ -1275,6 +1395,7 @@ static void BuildFontAtlas()
 
     g_fontCumhacck35    = sys("verdanab.ttf", 35.f, mono);                   orElse(g_fontCumhacck35, g_fontBold);
     g_fontAirplaneTitle = donor(montserrat_regular, sizeof(montserrat_regular), 10.f, 0); orElse(g_fontAirplaneTitle, g_fontBold);
+    g_fontPoints18 = donor(montserrat_medium_italic, sizeof(montserrat_medium_italic), 18.f, ImGuiFreeTypeBuilderFlags_Bitmap); orElse(g_fontPoints18, g_fontBold);   // unit misc
     g_fontAirplaneRows  = sys("tahomabd.ttf", 11.f, flagged(ImGuiFreeTypeBuilderFlags_MonoHinting)); orElse(g_fontAirplaneRows, g_fontBold);
 
     g_fontClarityIcon  = donor(clarity_icon_font, sizeof(clarity_icon_font), 50.f, ImGuiFreeTypeBuilderFlags_NoHinting);
@@ -1343,6 +1464,8 @@ static void BuildFontAtlas()
     // botox render.cpp: font_name_icon_13, compressed icon font, 0xe005..0xf8ff
     static const ImWchar kIconRanges[] = { 0xe005, 0xf8ff, 0 };
     g_fontIcon13 = io.Fonts->AddFontFromMemoryCompressedTTF(icon_font_compressed_data, icon_font_compressed_size, 13.f, nullptr, kIconRanges);
+
+    HudFonts_Build();   // unit hud: net graph face
 
     io.Fonts->Build();
 }
@@ -1494,6 +1617,8 @@ static void RenderEspQueue()
 // vgui pass normally, h_EndScene when vgui never painted (loading screens, minimised).
 // Everything is built in ONE frame even though the two halves render at different times --
 // splitting the BUILD is what broke input the last time.
+void RenderWorldFx3();   // unit world (visuals/world_fx3.cpp): bullet impact boxes + world hit markers
+
 static void BuildImGuiFrame()
 {
     if (s_frameBuilt) return;
@@ -1502,17 +1627,17 @@ static void BuildImGuiFrame()
     const bool psWinOpen = s_psPointWin >= 0 || Recorder_EditorOpen();   // recorder clip editor = same input handoff
     const bool menuUp    = g_showMenu || psWinOpen;
 
-    // Scale slider moved -> re-rasterize the indicator face at the new px. HERE and nowhere
+    // An indicator scale slider settled -> re-bake its face at the new px (botox
+    // update_indicator_fonts; until then IndicatorFont scales the base face). HERE and nowhere
     // else: the atlas is between frames (last frame's draw data is already presented, and
     // NewFrame below re-points g.Font / the shared draw data at the new atlas), and both
     // callers of this function are on the render thread.
     // Same safe point for the fonts tab's indicator face (debounced: a size drag or a click
     // through the font list rebuilds once it settles, not every frame).
-    // Scale is checked against the size the atlas was BUILT with, so only the debounce
-    // reacts to the size slider.
-    if (FontIndPx(s_indBuiltSize, g_miScale) != s_miFontPx ||
+    if (s_indScaleSettle.Due(IndScaleSig(WantedIndScales()), IndScaleSig(s_indBuilt), GetTickCount64()) ||
         s_indSettle.Due(Fonts_IndSig(), s_indApplied, GetTickCount64()) ||
-        s_espSettle.Due(Fonts_EspSig(), s_espImApplied, GetTickCount64()))
+        s_espSettle.Due(Fonts_EspSig(), s_espImApplied, GetTickCount64()) ||
+        HudFonts_Due())   // unit hud: fonts tab > net graph
     {
         BuildFontAtlas();
         ImGui_ImplDX9_InvalidateDeviceObjects();   // NewFrame re-uploads the atlas texture
@@ -1526,28 +1651,33 @@ static void BuildImGuiFrame()
     ImGui::GetIO().MouseDrawCursor = menuUp;
 
     RenderEspQueue();     // botox: esp under every other overlay (background list, first in)
+    RenderWorldFx3();     // unit world: background list too, under the HUD overlays
+    RenderMenuBlur();     // menu bg blur: blurs game + esp + world fx above, every HUD panel below stays sharp
     RenderBootScreen();   // foreground draw list draws last regardless of call order: always on top
     RenderPsOverlay();
     RenderRouteOverlay();
     RenderEdgeBugOverlay();
-    RenderWatermark();
-    RenderMediaPlayer();         // after the watermark: it stacks under the box that just drew
-    RenderVelocityIndicator();   // coldtires order: velocity, then keybinds
-    RenderMoveIndicators();
-    RenderVelocityGraph();       // unit B
-    RenderKeystrokeIndicator();  // unit B
+    RenderAutoBounceOverlay();
+    // unit screen: AspectStretch_Run = botox aspect ratio "stretch cheat overlays" / "stretch
+    // crosshair" (screen-space panels only; draws straight through while those are off)
+    AspectStretch_Run(RenderWatermark, AsPanel);
+    AspectStretch_Run(RenderMediaPlayer, AsPanel);         // after the watermark: it stacks under the box that just drew
+    AspectStretch_Run(RenderIndicators, AsPanel);   // botox order: velocity, graph, keybinds, particles, keystrokes
     Recorder_Render();           // unit B: path, route starts, timer, clipper box, clip editor
-    RenderCrosshair();
-    RenderSpectatorList();       // unit E: misc HUD
-    RenderHitMarker();
+    RenderHudExtras();           // unit hud: aimbot fov circle + custom net graph
+    AspectStretch_Run(RenderCrosshair, AsCrosshair);
+    AspectStretch_Run(RenderSpectatorList, AsPanel);       // unit E: misc HUD
+    AspectStretch_Run(RenderHitMarker, AsPanel);
     RenderKillEffects();
-    RenderPoints();
+    AspectStretch_Run(RenderPoints, AsPanel);
+    RenderMiscOverlays();        // unit misc: healthshot effect, low fps warning, displayed logs
     RenderDebugMenu();
     RenderPsPointWindow();
     RenderMenu();   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
 
     ImGui::EndFrame();
     ImGui::Render();
+    BootScreen_FadeOthers(ImGui::GetDrawData());   // unit game: overlay fades in after the boot splash
     SplitDrawData();
 }
 
@@ -1643,10 +1773,15 @@ static bool OvQueue()
     return ScreenFx_QueueFunctor(&f);
 }
 
+bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel);   // unit world: remove hud elements (world_fx3.cpp)
+
 void h_PaintTraverse(void* panels, VPANEL_t vpanel, bool forceRepaint, bool allowForce)
 {
+    if (WorldFx3_SkipPanel(panels, vpanel)) return;   // a removed HUD panel: it and its children unpainted
     ScopeCsgo_PrePaintTraverse(panels, vpanel);   // csgo scope: just before the HUD root, under the HUD
+    const bool consoleTint = ConsoleTint_Begin(panels, vpanel);   // unit misc: botox console color
     o_PaintTraverse(panels, vpanel, forceRepaint, allowForce);
+    if (consoleTint) ConsoleTint_End();
 
     // s_vguiDrew is NOT tested here any more: it is the render thread's, and under multicore
     // the main thread would read the previous frame's true and skip queueing this one
@@ -1784,7 +1919,7 @@ static void Render_RebindDevice(IDirect3DDevice9* dev)
     ScreenFx_Destroy();
     ScreenFxPasses_Destroy();
     MediaPlayer_ReleaseTexture();   // DEFAULT pool, and it belongs to the device being dropped
-    MoveInd_ReleaseTextures();      // mitosis morph texture, same story
+    Indicators_ReleaseTextures();      // mitosis morph texture, same story
     ImGui_ImplDX9_Shutdown();
     ImGui_ImplDX9_Init(dev);
     s_imguiDev = dev;
@@ -1979,9 +2114,11 @@ HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     ScreenFx_Destroy();                // INTZ + probe targets, all DEFAULT-pool: a live one fails the Reset
     ScreenFxPasses_Destroy();          // unit D: one shader + one DEFAULT-pool scene copy
     MediaPlayer_ReleaseTexture();      // cover art is DEFAULT-pool too; the decoded pixels rebuild it
-    MoveInd_ReleaseTextures();         // mitosis morph texture; rebuilt on the next split
+    Indicators_ReleaseTextures();         // mitosis morph texture; rebuilt on the next split
     Avatar_ReleaseAll();               // unit E5: avatar textures are DEFAULT-pool too
+    PlayerStencil_ReleaseTargets();    // esp unit: player stencil mask/blur targets, DEFAULT-pool
     GifTex_ReleaseAll();               // unit E5: gif frame texture, GDI+ bitmap survives the reset
+    SpectatorList_ReleaseTextures();   // spec unit: eyes style row textures, DEFAULT-pool
     BlurRect_Destroy();                // unit E5: blur scratch targets + shader
     if (g_imguiInit) ImGui_ImplDX9_InvalidateDeviceObjects();
     // The split arrays point at draw lists from the frame being dropped -- a Present that

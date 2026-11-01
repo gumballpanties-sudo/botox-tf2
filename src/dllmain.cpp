@@ -86,11 +86,11 @@ float g_hmSize          = 10.f;   // botox m_hit_marker_size default
 
 bool  g_dpEnable        = false;
 int   g_dpStyle         = 0;
-float g_dpColor[4]      = { 0.9f, 0.1f, 0.1f, 1.f };
+float g_dpColor[4]      = { 140.f / 255.f, 200.f / 255.f, 1.f, 1.f };   // botox m_death_particles_* defaults
 bool  g_dpMulticolor    = false;
-int   g_dpAmount        = 10;
+int   g_dpAmount        = 8;
 float g_dpSize          = 1.f;
-float g_dpLifetime      = 2.f;
+float g_dpLifetime      = 3.f;
 int   g_dpSoulStyle     = 0;
 int   g_dpMcMode        = 0;
 float g_dpMcXpTime      = 10.f;
@@ -105,9 +105,9 @@ float g_specOffX        = 0.f;   // drag offset on top of g_specPos (menu open, 
 float g_specOffY        = 0.f;
 bool  g_specShowTarget    = true;
 bool  g_specDelusionalLeft = false;
-int   g_specListWidth     = 150;
-float g_specColorOne[4]   = { 0.40f, 0.95f, 0.55f, 1.f };   // local-watcher rows (botox accent-ish)
-float g_specColorTwo[4]   = { 0.86f, 0.86f, 0.90f, 1.f };   // everyone else
+int   g_specListWidth     = 230;                          // botox m_spectators_list_width (slider 195..500)
+float g_specColorOne[4]   = { 1.f, 1.f, 1.f, 1.f };       // botox text_color_one: rows watching the local player
+float g_specColorTwo[4]   = { 1.f, 1.f, 1.f, 1.f };       // botox text_color_two: everyone else
 
 int   g_wmStyle         = 0;
 
@@ -119,28 +119,6 @@ char  g_discordImageKey[128] = "";
 
 bool  g_debugMenuEnable = false;
 float g_consoleColor[4] = { 0.f, 1.f, 1.f, 1.f };   // matches the hardcoded cyan it replaces
-
-bool  g_miEnable       = false;
-bool  g_miHorizontal   = false;
-bool  g_miMitosis      = false;
-int   g_miShowMask     = 0x7FF;   // all 11 slots on (MI_COUNT bits)
-// position/colours = botox m_key_indicators_position (100) / m_key_color (white) /
-// m_key_color_success (green) defaults
-float g_miOffsetY      = 100.f;   // px up from the bottom edge
-float g_miScale        = 1.f;
-float g_miIdleColor[4]   = { 1.f, 1.f, 1.f, 1.f };
-float g_miActiveColor[4] = { 0.f, 1.f, 0.f, 1.f };
-// velocity indicator -- coldtires m_velocity_indicator_* defaults
-bool  g_viEnable      = false;
-bool  g_viPreSpeed    = false;
-bool  g_viFadeAlpha   = false;
-bool  g_viCustomColor = false;
-float g_viOffsetY     = 125.f;
-float g_viColor1[4] = { 1.f, 1.f, 1.f, 1.f };
-float g_viColor2[4] = { 1.f, 1.f, 1.f, 1.f };
-float g_viColor3[4] = { 255/255.f, 199/255.f,  89/255.f, 1.f };   // same speed
-float g_viColor4[4] = { 255/255.f, 119/255.f, 119/255.f, 1.f };   // losing speed
-float g_viColor5[4] = {  30/255.f, 255/255.f, 109/255.f, 1.f };   // gaining speed
 
 // -- Viewmodel ---------------------------------------------------------------------
 bool  g_vmSwayEnable   = false;
@@ -355,7 +333,7 @@ float g_showDepthMultiplier  = 1.f;
 bool  g_fullbrightEnable    = false;
 bool  g_disableInterpEnable = false;
 bool  g_aspectRatioEnable   = false;
-float g_aspectRatioValue    = 1.3333f;   // 4:3
+float g_aspectRatioValue    = 1.777778f; // botox m_aspect_ratio (16:9)
 bool  g_worldFovEnable      = false;
 float g_worldFovAmount      = 90.f;
 bool  g_thirdPersonEnable   = false;
@@ -363,8 +341,8 @@ float g_thirdPersonDistance = 100.f;
 
 // -- Unit D3: reflections + minecraft sky/clouds -----------------------------------------
 bool  g_reflEnable    = false;
-float g_reflIntensity = 0.5f;
-float g_reflDistance  = 0.5f;
+float g_reflIntensity = 1.f;    // botox m_reflections_intensity
+float g_reflDistance  = 0.8f;   // botox m_reflections_distance
 bool  g_mcWorldEnable = false;
 // -- Unit D2: world fx 2 (hacks/visuals/world_fx2.cpp) ----------------------------------------
 bool  g_removeVisualRecoilEnable = false;
@@ -666,6 +644,15 @@ bool g_jumpstats = false;
 bool g_tungSurf = false;   int g_tungSurfKey = 0;   int g_tungSurfMode = 1;
 float g_tungMaxNz = 0.25f;
 bool g_autoBounce = false; int g_autoBounceKey = 0; int g_autoBounceMode = 1;
+// auto bounce = botox auto_bounce.cpp (autobounce.inl), defaults = botox variables.h:1250-1257
+int   g_abMode = 0;           // 0 drop in / 1 keep speed / 2 stop
+float g_abMinGain = 0.f;
+float g_abReach = 128.f;
+bool  g_abJump = true;
+bool  g_abCrouch = false;
+bool  g_abAlign = false;
+bool  g_abViz = false;
+float g_abVizColor[4] = { 120 / 255.f, 200 / 255.f, 1.f, 1.f };
 bool g_bounceAssist = false; int g_bounceAssistKey = 0; int g_bounceAssistMode = 1;
 float g_bounceReach = 48.f;
 float g_bounceMinSpeed = 150.f;
@@ -914,6 +901,8 @@ float g_chamsSoundDuration = 1.f;
 bool  g_chamsSoundFade = true;
 float g_chamsSoundMinVolume = 0.f;
 float g_chamsSoundMaxDistance = 0.f;
+float g_chamsTwoToneThreshold = 0.5f;   // botox variables.h:604
+float g_chamsTwoToneEdge = 0.f;         // botox variables.h:605
 char  g_chamsVisibleCfg[160] = "";
 char  g_chamsOccludedCfg[160] = "";
 char  g_chamsSoundCfg[160] = "";

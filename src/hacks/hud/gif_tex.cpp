@@ -1,16 +1,27 @@
 #include "gif_tex.h"
 #include "gif_frame.h"
+#include "wm_pure.h"   // n_wm::UrlDirect / Fnv1a
 #include <gdiplus.h>
+#include <urlmon.h>
+#include <commdlg.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <string>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <mutex>
+#include <thread>
+#include <atomic>
 
 // GDI+ decode, same approach as botox's spectator_list.cpp (kamibebra_gif_data.h):
 // Bitmap::FromStream on an in-memory copy, SelectActiveFrame to walk the GIF's own frame
 // dimension, PropertyTagFrameDelay (centiseconds, *10 for ms) for timing.
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "urlmon.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 struct GifTex
 {
@@ -133,6 +144,138 @@ ImTextureID GifTex_Frame(GifTex* gif, double timeSec)
     }
 
     return (ImTextureID)gif->texture;
+}
+
+bool GifTex_Size(GifTex* gif, float& w, float& h)
+{
+    if (!gif || gif->failed || !gif->bitmap) return false;
+    w = (float)gif->bitmap->GetWidth();
+    h = (float)gif->bitmap->GetHeight();
+    return w > 0.f && h > 0.f;
+}
+
+// ==== file / url images (botox spectator_list.cpp url_image_direct / url_image_path) ====
+static std::mutex s_urlMutex;
+static std::unordered_set<std::string> s_urlStarted;
+
+// local path as is; http(s) -> C:\botox-tf2\images\<hash> once downloaded, "" until then
+static std::string UrlPath(const std::string& setting)
+{
+    if (setting.rfind("http://", 0) != 0 && setting.rfind("https://", 0) != 0) return setting;
+
+    const std::string url = n_wm::UrlDirect(setting);
+    char local[64];
+    snprintf(local, sizeof(local), "C:\\botox-tf2\\images\\%08x", n_wm::Fnv1a(url));
+    const DWORD attr = GetFileAttributesA(local);
+    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) return local;
+
+    std::lock_guard<std::mutex> lock(s_urlMutex);
+    if (s_urlStarted.insert(url).second)
+    {
+        // soft eject keeps the dll mapped (thread.cpp), so a download still running then is harmless
+        std::thread([url, path = std::string(local)] {
+            CreateDirectoryA("C:\\botox-tf2", nullptr);
+            CreateDirectoryA("C:\\botox-tf2\\images", nullptr);
+            const std::string part = path + ".part";   // never decode a half-written file
+            const HRESULT hr = URLDownloadToFileA(nullptr, url.c_str(), part.c_str(), 0, nullptr);
+            if (SUCCEEDED(hr) && MoveFileExA(part.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+                DebugLog("gif_tex: downloaded %s", url.c_str());
+            else { DeleteFileA(part.c_str()); DebugLog("gif_tex: download failed 0x%08X %s", (unsigned)hr, url.c_str()); }
+        }).detach();
+    }
+    return {};
+}
+
+GifTex* GifTex_GetFile(const char* setting)
+{
+    if (!setting || !*setting) return nullptr;
+
+    static std::string lastSetting;
+    static GifTex* lastGif = nullptr;
+    if (lastGif && lastSetting == setting) return lastGif;
+
+    const std::string path = UrlPath(setting);
+    if (path.empty()) return nullptr;   // download pending
+
+    // already decoded (or failed) under this path: reuse, never re-read the file
+    if (auto it = s_cache.find(path); it != s_cache.end()) { lastSetting = setting; return lastGif = &it->second; }
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return nullptr;          // not there (yet): retry next frame, nothing cached
+    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (bytes.empty()) return nullptr;
+
+    lastSetting = setting;
+    return lastGif = GifTex_Get(path.c_str(), bytes.data(), bytes.size());
+}
+
+// ==== browse button (botox image_path_input pick_thread, no upload) ====
+static std::mutex  s_pickMutex;
+static std::string s_pickResult;
+static ImGuiID     s_pickId = 0;
+static bool        s_pickDone = false;
+static std::atomic<bool> s_pickAlive{ false };
+
+static unsigned long __stdcall PickThread(void*)
+{
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    char path[MAX_PATH] = {};
+    OPENFILENAMEA dlg = {};
+    dlg.lStructSize = sizeof(dlg);
+    dlg.lpstrFilter = "images\0*.png;*.jpg;*.jpeg;*.gif;*.bmp\0all files\0*.*\0";
+    dlg.lpstrFile   = path;
+    dlg.nMaxFile    = MAX_PATH;
+    dlg.lpstrTitle  = "pick image";
+    dlg.Flags       = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    const bool picked = GetOpenFileNameA(&dlg) && !g_eject.load();
+    {
+        std::lock_guard<std::mutex> lock(s_pickMutex);
+        s_pickResult = picked ? path : "";
+        s_pickDone = true;
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+    s_pickAlive = false;
+    return 0;
+}
+
+void GifTex_PathInput(const char* label, const char* hint, char* buf, size_t bufSize)
+{
+    const ImGuiID id = ImGui::GetID(label);
+    {
+        std::lock_guard<std::mutex> lock(s_pickMutex);
+        if (s_pickDone && s_pickId == id)
+        {
+            if (!s_pickResult.empty()) strncpy_s(buf, bufSize, s_pickResult.c_str(), _TRUNCATE);
+            s_pickDone = false;
+            s_pickId = 0;
+        }
+    }
+
+    ImGui::InputTextWithHint(label, hint, buf, bufSize);
+
+    const bool busy = s_pickAlive.load();
+    ImGui::BeginDisabled(busy);
+    char button[128];
+    snprintf(button, sizeof(button), "browse##pick %s", label);
+    if (ImGui::Button(button, ImVec2(-1.f, 15.f)) && !busy)
+    {
+        {
+            std::lock_guard<std::mutex> lock(s_pickMutex);
+            s_pickId = id;
+            s_pickDone = false;
+            s_pickResult.clear();
+        }
+        s_pickAlive = true;
+        if (HANDLE h = CreateThread(nullptr, 0, PickThread, nullptr, 0, nullptr)) CloseHandle(h);
+        else s_pickAlive = false;
+    }
+    ImGui::EndDisabled();
+
+    if (busy)
+    {
+        std::lock_guard<std::mutex> lock(s_pickMutex);
+        if (s_pickId == id) ImGui::Label("%s", "picking...");
+    }
 }
 
 void GifTex_ReleaseAll()

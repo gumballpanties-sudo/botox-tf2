@@ -103,6 +103,35 @@ namespace
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
+    // botox effects(): client.dll IEffects001 (sdk EffectsClient.cpp:74). Vtable: IPredictionSystem's
+    // virtual dtor 0, Beam 1, Smoke 2, Sparks 3, Dust 4, MuzzleFlash 5, MetalSparks 6, EnergySplash 7
+    // (sdk game/shared/IEffects.h) -- the same slots botox calls on CS:GO.
+    void* Effects()
+    {
+        static void* fx = GetInterface("client.dll", "IEffects001");
+        static bool logged = false;
+        if (!logged) { logged = true; DebugLog("KFX: IEffects001 %p (sparks / energy splash)", fx); }
+        return fx;
+    }
+
+    void FxSparks(const Vec3& at)
+    {
+        void* fx = Effects();
+        if (!fx) return;
+        using Sparks_t = void(__fastcall*)(void*, const Vec3&, int, int, const Vec3*);
+        __try { ((Sparks_t)(*(void***)fx)[3])(fx, at, 8, 8, nullptr); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    void FxEnergySplash(const Vec3& at, const Vec3& dir)
+    {
+        void* fx = Effects();
+        if (!fx) return;
+        using Splash_t = void(__fastcall*)(void*, const Vec3&, const Vec3&, bool);
+        __try { ((Splash_t)(*(void***)fx)[7])(fx, at, dir, true); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
     // botox try_names(): first precached system in the list wins
     template <size_t N>
     bool TryNames(const char* const (&names)[N], const Vec3& origin, const Vec3& angles)
@@ -114,22 +143,33 @@ namespace
 }
 
 // ==== custom (non-engine) style pool, defined in killeffects_world.cpp ============
-void KfxPush_Soul(const Vec3& origin);
-void KfxPush_Smoke(const Vec3& origin);
-void KfxPush_Balls(const Vec3& origin);
-void KfxPush_Mc(const Vec3& origin, const Vec3& obbMins, const Vec3& obbMaxs);
+// all take the victim's feet (abs origin), as botox's spawn_* read victim->get_abs_origin()
+void KfxPush_Soul(const Vec3& feet);
+void KfxPush_Smoke(const Vec3& feet);
+void KfxPush_Balls(const Vec3& feet);
+void KfxPush_Mc(const Vec3& feet, const Vec3& obbMins, const Vec3& obbMaxs);
 
 void KillEffects_OnDeath(int victimIdx, int attackerIdx, bool localDied)
 {
     if (!g_dpEnable || localDied) return;   // botox: never on the local player's own death
     if (victimIdx < 1) return;
 
+    // botox: `if ( !victim || victim->is_dormant( ) ) return;` -- dormant (out of PVS) = stale
+    // m_vecNetworkOrigin, effect spawned at junk spot. entlist slot 0 GetClientNetworkable,
+    // networkable slot 8 IsDormant (sdk icliententitylist.h / iclientnetworkable.h).
+    void* pNet = g_entityList ? VCall<void*>(g_entityList, 0, victimIdx) : nullptr;
+    bool dormant = true;
+    __try { dormant = !pNet || VCall<bool>(pNet, 8); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { dormant = true; }
+    if (dormant) return;
+
     void* pVictim = GetClientEntity(victimIdx);
     if (!pVictim || g_offOrigin <= 0) return;
 
-    Vec3 at{};
-    __try { at = EntV3(pVictim, g_offOrigin); }
+    Vec3 feet{};
+    __try { feet = EntV3(pVictim, g_offOrigin); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    Vec3 at = feet;
     at.z += 40.f;
     const Vec3 up(0.f, 0.f, 0.f);
 
@@ -138,11 +178,11 @@ void KillEffects_OnDeath(int victimIdx, int attackerIdx, bool localDied)
 
     switch (style)
     {
-    case 3: KfxPush_Smoke(at); return;
-    case 5: KfxPush_Soul(at);  return;
-    case 8: KfxPush_Mc(at, Vec3(-16.f, -16.f, 0.f), Vec3(16.f, 16.f, 72.f)); return;
+    case 3: KfxPush_Smoke(feet); return;
+    case 5: KfxPush_Soul(feet);  return;
+    case 8: KfxPush_Mc(feet, Vec3(-24.f, -24.f, 0.f), Vec3(24.f, 24.f, 82.f)); return;   // TF2 player hull (VEC_HULL_MIN/MAX)
     case 6:
-        if (attackerIdx == localIdx) KfxPush_Balls(at);   // botox: attacker-is-local gate
+        if (attackerIdx == localIdx) KfxPush_Balls(feet);   // botox: attacker-is-local gate
         return;
     default: break;   // 0 blood, 1 sparks(->blood), 2 confetti, 4 explosion, 7 melt(->blood)
     }
@@ -157,7 +197,10 @@ void KillEffects_OnDeath(int victimIdx, int attackerIdx, bool localDied)
     bool done = false;
     if (style == 2)      done = TryNames(k_confetti, at, up);
     else if (style == 4) done = TryNames(k_explosion, at, up);
-    // style 1 (sparks) and 7 (melt) have no ported engine analog -- blood, and blood is
-    // also the fallback when this map precached none of the picked style's systems
-    if (!done) TryNames(k_blood, at, bloodAng);
+    else if (style != 1) done = TryNames(k_blood, at, bloodAng);   // 0 blood, 7 melt (not ported -> blood)
+    if (done) return;
+
+    // botox: sparks = IEffects::Sparks( at, 8, 8 ), a pick this map never precached = EnergySplash
+    if (style == 1) FxSparks(at);
+    else FxEnergySplash(at, Vec3(0.f, 0.f, 1.f));
 }

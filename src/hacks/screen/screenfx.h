@@ -38,6 +38,14 @@ void* ScreenFx_FindClientMode();
 // the pre-translucent frame copy is taken. Pass it vt[57].
 void ScreenFx_InstallRenderStateHook(void* setRenderStateSlot);
 
+// IDirect3DDevice9::SetDepthStencilSurface 39 / GetDepthStencilSurface 40 -- the "universal
+// depth" z swap (botox depth_source route_live). Pass vt[39], vt[40].
+void ScreenFx_InstallDepthStencilHooks(void* setSlot, void* getSlot);
+
+// The "depth: %s %s" readout under the dof / true motion blur popups.
+const char* ScreenFx_RouteName();
+const char* ScreenFx_VerifyName();
+
 // The frame as it stood before any particle drew, or null if the beacon above never fired
 // this frame (dx level too low for the engine's depth copy, or a driver that does not take
 // the RESZ route). Sampled by the depth of field's prepare pass to tell painted-by-a-
@@ -62,6 +70,7 @@ bool ScreenFx_FlushRenderContext();
 // queue has not proved itself; put back the moment either stops being true.
 void ScreenFx_Tick();
 void ScreenFx_RestoreQueueMode();   // eject
+bool ScreenFx_QueueForced();        // true while the tick above holds mat_queue_mode at 0
 
 // The depth texture a pass samples, or null when no route produced one this frame.
 IDirect3DTexture9* ScreenFx_DepthTexture();
@@ -104,7 +113,7 @@ struct Vec3;   // hacks/movement/movement.h
 
 // Main thread, from the game's own post-processing slot: traces for the focus and smooths
 // it. The draw half only ever reads the number this leaves behind.
-void Dof_UpdateFocus(const Vec3& origin, const Vec3& angles);
+void Dof_UpdateFocus(const Vec3& origin, const Vec3& angles, float fov, float aspect);   // fov horizontal, aspect w/h -- the focus point x/y ray
 
 // viewmodelPass: the second run, from ViewDrawFade. Only pixels the engine drew into the
 // viewmodel's 0..0.1 depth slice get a circle of confusion; everything else comes through

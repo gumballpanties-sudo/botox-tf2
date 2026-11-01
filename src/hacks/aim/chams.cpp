@@ -16,6 +16,9 @@
 #include "sdk.h"
 #include "../visuals/chams_api.h"
 #include "../visuals/chams_layers.h"
+#include "../visuals/lsd_chams.h"   // LsdChams_Begin/End: the "lsd" layer
+#include "../visuals/player_stencil.h"   // botox player stencil / internal glow / full-res glow (d3d9 pass)
+#include "../menu/cfg/u_esp.h"            // g_esx* stencil + inner glow vars (primitives only)
 #include "../esp/esp_fx.h"   // EspFx_NowMs: one clock for the sound stamp (game thread) and the draw
 #include <cmath>
 
@@ -34,6 +37,8 @@ extern float g_chamsSoundDuration;
 extern bool  g_chamsSoundFade;
 extern float g_chamsSoundMinVolume;
 extern float g_chamsSoundMaxDistance;
+extern float g_chamsTwoToneThreshold;    // botox m_chams_two_tone_threshold: gamma lighting level of the cut
+extern float g_chamsTwoToneEdge;         // botox m_chams_two_tone_edge: cut softness
 extern char  g_chamsVisibleCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsOccludedCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsSoundCfg[ChamsLayers::kCfgLen];
@@ -43,6 +48,7 @@ extern char  g_chamsWeaponCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsArmsCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsSleeveCfg[ChamsLayers::kCfgLen];
 
+extern bool  g_espEnable;                // botox m_players: stencil / inner / full-res glow need it
 extern bool  g_glowEnable;               // botox "player glow"
 extern float g_glowVisColor[4];
 extern float g_glowInvisColor[4];
@@ -265,6 +271,9 @@ namespace
 				"\t\"$phongexponent\" \"200\"\n\t\"$phongboost\" \"10\"\n\t\"$phongfresnelranges\" \"[.2 .5 1]\"\n"
 				"\t\"$phongtint\" \"[1 1 1]\"\n\t\"$phongdisablehalflambert\" \"1\"\n");
 			break;
+		case Lsd:   // botox case 11 carrier: flat white, the DIP detour swaps in the lsd shaders (visuals/lsd_chams.cpp)
+			MakeVariants(Lsd, "lsd", "UnlitGeneric", "\t\"$basetexture\" \"vgui/white\"\n");
+			break;
 		default:
 			break;
 		}
@@ -287,7 +296,7 @@ namespace
 			{
 				int n = 0;
 				for (auto& v : s_mats) for (auto& m : v) n += m.pMat != nullptr;
-				DebugLog("chams: materials built (%d/%d variants)", n, 2 * (ChamsLayers::Count - 1));
+				DebugLog("chams: materials built (%d/%d variants)", n, 2 * (ChamsLayers::Count - 2));   // original + two tone have none
 				s_loggedBuilt = true;
 			}
 		}
@@ -340,6 +349,23 @@ namespace
 				if (c[3] * alphaScale > 0.f) { ctx.Draw(pBones); bDrew = true; }
 				continue;
 			}
+			if (index == ChamsLayers::TwoTone)
+			{
+				const float* d = l.darks[i];
+				const float light[4] = { c[0], c[1], c[2], c[3] * alphaScale };
+				const float dark[4]  = { d[0], d[1], d[2], d[3] * alphaScale };
+				const float alpha = light[3] > dark[3] ? light[3] : dark[3];
+				if (alpha <= 0.f) continue;
+				// own materials keep the model's normal maps + lighting constants bound; blend < 1 = engine draws translucent
+				static const float kWhite[4] = { 1.f, 1.f, 1.f, 1.f };
+				ForceMaterial(nullptr);
+				SetModulation(kWhite, alpha);
+				TwoToneChams_Begin(light, dark, g_chamsTwoToneThreshold, g_chamsTwoToneEdge, ignorez);
+				ctx.Draw(pBones);
+				TwoToneChams_End();
+				bDrew = true;
+				continue;
+			}
 			IMaterial* pMat = GetMat(index, ignorez);
 			if (!pMat) continue;
 			Mat& m = s_mats[index][ignorez ? 1 : 0];
@@ -351,7 +377,14 @@ namespace
 				pMat->SetMaterialVarFlag(MATERIAL_VAR_NOFOG, ignorez);
 			}
 			ForceMaterial(pMat);
-			ctx.Draw(pBones);
+			if (index == ChamsLayers::Lsd)
+			{
+				LsdChams_Begin(I::GlobalVars ? I::GlobalVars->realtime : 0.f, c[3] * alphaScale);
+				ctx.Draw(pBones);
+				LsdChams_End();
+			}
+			else
+				ctx.Draw(pBones);
 			bDrew = true;
 		}
 		ForceMaterial(nullptr);
@@ -643,7 +676,10 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 // Begin/EndRenderTargetAllocation 82/83, CreateNamedRenderTargetTextureEx 85. ITexture IncRef 10, DecRef 11.
 // Menu mapping (botox popup): stencil 1 + blur 1 by default; "normal blending" makes thickness the
 // blur amount (2..30 px -> 0.2..3); legacy "outline" = stencil 2, no blur; wave/pulse as before;
-// gradient has no equivalent here and is ignored.
+// gradient has no equivalent here. With the players esp on and legacy off, botox's own full-res
+// glow (visuals/player_stencil.cpp, gradient / screen wave / normal blending thickness) takes over
+// once it has drawn, and this halo is only the fallback (botox glow_effect_spectator). The same
+// stencil pass also marks visible pixels 2 for the player stencil / internal glow mask.
 namespace
 {
 	constexpr int kRcSetRT = 6, kRcGetRT = 7, kRcClearBuffers = 12, kRcClearColor4ub = 73, kRcDrawSSRect = 103;
@@ -717,7 +753,9 @@ namespace
 	}
 
 	// no C++ unwinding inside: __try (C2712)
-	__declspec(noinline) void GlowPasses_SEH(void* rc, int w, int h, int iStencil, float flBlur)
+	// bHalo = the material system glow (pass 2 + blur + halo); pVisMat = also mark the pixels the
+	// player is visible on with stencil 2 (z-tested, invisible draw) for player_stencil.cpp's mask
+	__declspec(noinline) void GlowPasses_SEH(void* rc, int w, int h, int iStencil, float flBlur, bool bHalo, IMaterial* pVisMat)
 	{
 		__try
 		{
@@ -734,6 +772,23 @@ namespace
 			I::RenderView->SetColorModulation(aWhite);
 			GlowStencil(rc, true, kStencilAlways, 1, 0x0, 0xFF, kOpKeep, kOpReplace, kOpReplace);
 			GlowDrawAll(false);
+			if (pVisMat)
+			{
+				// botox mask: red = stencil 2..127 (visible), green = 1 (occluded). Depth-tested: only
+				// the pixels nothing covers pass, and those become 2
+				ForceMaterial(pVisMat);
+				GlowStencil(rc, true, kStencilAlways, 2, 0x0, 0xFF, kOpKeep, kOpKeep, kOpReplace);
+				GlowDrawAll(false);
+				ForceMaterial(s_glowMatColor);
+			}
+			if (!bHalo)
+			{
+				VCallAt<void>(rc, kRcStencilEnable, false);
+				I::RenderView->SetColorModulation(aColor);
+				I::RenderView->SetBlend(flBlend);
+				ForceMaterial(pOrigMat, iOrigType);
+				return;
+			}
 
 			// SetupMid: coloured models into rb1
 			VCallAt<void>(rc, kRcStencilEnable, false);
@@ -801,6 +856,111 @@ namespace
 	}
 }
 
+namespace
+{
+	void Rgba(float out[4], const float* c) { for (int k = 0; k < 4; k++) out[k] = c[k]; }
+
+	// botox player_stencil after_glow(): settings off the menu vars, capsules off the hitboxes
+	void StencilSubmit(bool bOutline, bool bInner, bool bGlow)
+	{
+		static PlayerStencilSettings st;   // ~19 KB: not on the stack
+		st.outline = bOutline; st.glow = bGlow; st.inner = bInner;
+		Rgba(st.innerVisible, g_esxInnerGlowVisColor);
+		Rgba(st.innerInvisible, g_esxInnerGlowInvisColor);
+		st.innerReach[0] = std::clamp(g_esxInnerGlowIntensity, 0.25f, 4.f);
+		st.innerReach[2] = std::clamp(g_esxInnerGlowSize, 2.f, 30.f);
+		st.innerBones = bInner && g_esxInnerGlowBones;
+		st.nCapsules = 0;
+		if (st.innerBones)
+		{
+			// TF2 hitboxes are boxes: segment down the long axis, radius = mean of the two short half-extents
+			const VMatrix& m = I::EngineClient->WorldToScreenMatrix();
+			const float focal = sqrtf(m[1][0] * m[1][0] + m[1][1] * m[1][1] + m[1][2] * m[1][2]);
+			const float width = std::clamp(g_esxInnerGlowBoneWidth, 10.f, 150.f) / 100.f;
+			auto project = [&](const Vec3& p, float ndc[2], float& w) {
+				w = m[3][0] * p.x + m[3][1] * p.y + m[3][2] * p.z + m[3][3];
+				if (w < 1.f) return false;
+				ndc[0] = (m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3]) / w;
+				ndc[1] = (m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3]) / w;
+				return true;
+			};
+			matrix3x4 aBones[MAXSTUDIOBONES];
+			for (auto& it : s_glowItems)
+			{
+				if (!it.pEnt->IsPlayer()) continue;   // hats / weapon ride their owner's capsules
+				auto pPlayer = it.pEnt->As<CTFPlayer>();
+				const auto pModel = pPlayer->GetModel();
+				const auto pHdr = pModel ? I::ModelInfoClient->GetStudiomodel(pModel) : nullptr;
+				auto pSet = pHdr ? pHdr->pHitboxSet(0) : nullptr;
+				if (!pSet || !pPlayer->SetupBones(aBones, MAXSTUDIOBONES, BONE_USED_BY_HITBOX, I::GlobalVars->curtime))
+					continue;
+				for (int i = 0; i < pSet->numhitboxes && st.nCapsules < PlayerStencilSettings::kMaxCapsules; i++)
+				{
+					auto pBox = pSet->pHitbox(i);
+					if (!pBox || pBox->bone < 0 || pBox->bone >= MAXSTUDIOBONES) continue;
+					const Vec3 c = (pBox->bbmin + pBox->bbmax) * 0.5f, e = (pBox->bbmax - pBox->bbmin) * 0.5f;
+					const int ax = e.x >= e.y && e.x >= e.z ? 0 : e.y >= e.z ? 1 : 2;
+					const float ext[3] = { e.x, e.y, e.z };
+					const float radius = (ext[(ax + 1) % 3] + ext[(ax + 2) % 3]) * 0.5f;
+					if (radius <= 0.f) continue;
+					Vec3 a = c, b = c;
+					(&a.x)[ax] -= std::max(ext[ax] - radius, 0.f);   // capsule ends: the box minus its rounded caps
+					(&b.x)[ax] += std::max(ext[ax] - radius, 0.f);
+					Vec3 wa, wb;
+					Math::VectorTransform(a, aBones[pBox->bone], wa);
+					Math::VectorTransform(b, aBones[pBox->bone], wb);
+					PlayerStencilCapsule& cap = st.capsules[st.nCapsules];
+					float fa = 0.f, fb = 0.f;
+					if (!project(wa, cap.a, fa) || !project(wb, cap.b, fb)) continue;
+					cap.sigma[0] = radius * width * focal / fa;
+					cap.sigma[1] = radius * width * focal / fb;
+					st.nCapsules++;
+				}
+			}
+		}
+
+		Rgba(st.visible, g_esxStencilVisColor);
+		Rgba(st.invisible, g_esxStencilInvisColor);
+		st.thickness = std::clamp(g_esxStencilThickness, 0.5f, 8.f);
+
+		const bool gradient = g_glowGradient;
+		Rgba(st.glowVisible, g_glowVisColor);
+		Rgba(st.glowInvisible, g_glowInvisColor);
+		Rgba(st.glowVisibleOuter, gradient ? g_glowVisOuterColor : g_glowVisColor);
+		Rgba(st.glowInvisibleOuter, gradient ? g_glowInvisOuterColor : g_glowInvisColor);
+		const float start = 1.f - std::clamp(g_glowGradientInner, 0.f, 100.f) / 100.f;
+		st.gradient[0] = start;
+		st.gradient[1] = 1.f / std::max(1.f - start, 1e-3f);
+		const bool additive = !g_glowNormalBlend;
+		st.gradient[2] = additive ? 15.f /*k_engine_glow_radius*/ : std::clamp(g_glowThickness, 2.f, 30.f);
+		st.gradient[3] = additive ? 1.f : 0.f;
+
+		// real time keeps moving in pause; phases kept in 0..1 so float precision never runs out
+		const float now = I::GlobalVars ? I::GlobalVars->realtime : 0.f;
+		st.wave[0] = st.wave[1] = st.wave[2] = st.wave[3] = 0.f;
+		if (g_glowWave)
+		{
+			const float phase = fmodf(now * g_glowWaveSpeed, 1.f);
+			st.wave[0] = 1.f;
+			st.wave[1] = phase < 0.f ? phase + 1.f : phase;
+			st.wave[2] = 1.f / std::clamp(g_glowWaveSize, 0.05f, 4.f);
+			st.wave[3] = std::clamp(g_glowWaveStrength, 0.f, 1.f);
+			Rgba(st.waveColor, g_glowWaveColor);
+		}
+		if (g_glowPulse)
+		{
+			const float floor_ = std::clamp(g_glowPulseMin, 0.f, 100.f) / 100.f;
+			const float wave = 0.5f + 0.5f * sinf(6.2831853f * fmodf(now * g_glowPulseSpeed, 1.f));
+			const float scale = floor_ + (1.f - floor_) * wave;
+			for (float* c : { st.glowVisible, st.glowInvisible, st.glowVisibleOuter, st.glowInvisibleOuter })
+				c[3] *= scale;
+			if (!additive)
+				st.gradient[2] = std::max(2.f, st.gradient[2] * (0.6f + 0.4f * scale));
+		}
+		PlayerStencil_Submit(st);
+	}
+}
+
 ForcedMaterialOverride_t o_ForcedMaterialOverride = nullptr;
 
 void __fastcall h_ForcedMaterialOverride(void* rcx, void* pMat, int iType)
@@ -862,7 +1022,11 @@ void Glow_LevelInit()
 // the 3D scene is done, viewmodel and HUD are not drawn yet.
 void Glow_Render()
 {
-	if (!g_glowEnable)
+	// botox player_stencil enabled() / inner_enabled() / glow_wanted(): all need the players esp on
+	const bool bLive = g_espEnable && !PlayerStencil_Failed();
+	const bool bOutline = bLive && g_esxStencil, bInner = bLive && g_esxInnerGlow;
+	const bool bFullGlow = bLive && g_glowEnable && !g_glowLegacy;
+	if (!g_glowEnable && !bOutline && !bInner)
 		return;
 	if (!s_glowReady)
 	{
@@ -934,7 +1098,12 @@ void Glow_Render()
 	if (g_glowLegacy) { if (g_glowLegacyStyle == 2) { iStencil = 2; flBlur = 0.f; } }
 	else if (g_glowNormalBlend) flBlur = std::clamp(g_glowThickness / 10.f, 0.2f, 3.f);
 
-	GlowPasses_SEH(rc, w, h, iStencil, flBlur);
+	// botox glow_effect_spectator: the engine halo is the fallback once our full-res glow is live
+	const bool bMask = bOutline || bInner || bFullGlow;
+	const bool bHalo = g_glowEnable && !(bFullGlow && PlayerStencil_GlowLive());
+	GlowPasses_SEH(rc, w, h, iStencil, flBlur, bHalo, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr);
+	if (bMask)
+		StencilSubmit(bOutline, bInner, bFullGlow);
 
 	if (!s_glowLoggedDraw)
 	{

@@ -193,12 +193,15 @@ struct DofFocusFilter
     }
 };
 
-// CONTENTS_SOLID | CONTENTS_MOVEABLE | CONTENTS_MONSTER | CONTENTS_HITBOX. Deliberately not
-// a shot mask: window, grate and debris are left out so a pane of glass cannot steal the
-// focus from what is behind it.
+// "see through glass" on: CONTENTS_SOLID | CONTENTS_MOVEABLE | CONTENTS_MONSTER |
+// CONTENTS_HITBOX -- window, grate and debris left out so a pane of glass cannot steal the
+// focus from what is behind it. Off (botox default): MASK_SHOT_HULL | CONTENTS_HITBOX, i.e.
+// the same plus CONTENTS_WINDOW 0x2, CONTENTS_GRATE 0x8, CONTENTS_DEBRIS 0x4000000
+// (public/bspflags.h). botox depth_of_field.cpp:399.
 inline constexpr unsigned k_dofFocusMask = 0x1 | 0x4000 | 0x2000000 | 0x40000000;
+inline constexpr unsigned k_dofFocusMaskGlass = k_dofFocusMask | 0x2 | 0x8 | 0x4000000;
 
-static void DofTraceLine(const Vec3& start, const Vec3& end, void* filter, GameTrace_t* tr)
+static void DofTraceLine(const Vec3& start, const Vec3& end, void* filter, GameTrace_t* tr, unsigned mask)
 {
     tr->fraction = 1.f;
     tr->endpos   = end;
@@ -209,7 +212,7 @@ static void DofTraceLine(const Vec3& start, const Vec3& end, void* filter, GameT
     using TraceRay_t = void(__fastcall*)(void*, const Ray_mv&, unsigned, void*, GameTrace_t*);
     __try {
         void** vt = *(void***)s_engineTrace;
-        ((TraceRay_t)vt[kTrace_TraceRay])(s_engineTrace, ray, k_dofFocusMask, filter, tr);
+        ((TraceRay_t)vt[kTrace_TraceRay])(s_engineTrace, ray, mask, filter, tr);
     } __except(EXCEPTION_EXECUTE_HANDLER) { tr->fraction = 1.f; tr->endpos = end; }
 }
 
@@ -231,7 +234,7 @@ static void DofAngleVectors(const Vec3& ang, Vec3& fwd, Vec3& right, Vec3& up)
 
 // Main thread, from the game's own post-processing slot: the view setup is alive here and
 // the entity list belongs to this thread. The draw only ever sees the number that comes out.
-void Dof_UpdateFocus(const Vec3& origin, const Vec3& angles)
+void Dof_UpdateFocus(const Vec3& origin, const Vec3& angles, float fov, float aspect)
 {
     if (!g_dofEnable) return;
 
@@ -248,9 +251,24 @@ void Dof_UpdateFocus(const Vec3& origin, const Vec3& angles)
         const int idx = GetLocalPlayerIndex();
         if (idx > 0) local = GetClientEntity(idx);
 
+        // focus point x/y (botox depth_of_field.cpp:374): the ray through that point of the
+        // screen. The setup's fov is horizontal, so the vertical half angle comes off the aspect.
+        Vec3 dir = fwd;
+        const float px = (g_dofFocusX < 0.f) ? 0.f : (g_dofFocusX > 1.f ? 1.f : g_dofFocusX);
+        const float py = (g_dofFocusY < 0.f) ? 0.f : (g_dofFocusY > 1.f ? 1.f : g_dofFocusY);
+        if (px != 0.5f || py != 0.5f) {
+            const float f    = (fov < 1.f) ? 1.f : (fov > 170.f ? 170.f : fov);
+            const float tanX = tanf(f * 0.5f * 3.14159265f / 180.f);
+            const float tanY = tanX / ((aspect > 0.01f) ? aspect : 0.01f);
+            dir = fwd + right * ((px - 0.5f) * 2.f * tanX) + up * ((0.5f - py) * 2.f * tanY);
+            const float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+            if (len > 1e-4f) dir = dir * (1.f / len);
+        }
+
         DofFocusFilter filter; filter.Setup(local);
         GameTrace_t tr{};
-        DofTraceLine(origin, origin + fwd * 8192.f, &filter, &tr);
+        DofTraceLine(origin, origin + dir * 8192.f, &filter, &tr,
+                     g_dofSeeThrough ? k_dofFocusMask : k_dofFocusMaskGlass);
 
         // What the blur compares against is view-space DEPTH, not distance: project the hit
         // onto the forward axis, or an off-centre hit would read further away than it is.
@@ -368,8 +386,13 @@ void Dof_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     // THE GUN IS A FOREGROUND OBJECT AND NOTHING ELSE. Its whole pass is the near plane, so
     // the bleed chain is not optional there -- without it the blur stops dead at the gun's
     // silhouette and the edge comes out sharper than anything around it.
-    const bool wantNear   = (g_dofNearBlur || viewmodelPass) && s_cocSurf && s_cocTmpSurf;
-    const bool wantSmooth = g_dofSmooth;
+    // botox debug views: "show depth" replaces the gather's output with linear depth (no near,
+    // no smooth -- data, not a picture), "show near bleed" the near pass's with the coc field.
+    const bool debugDepth = g_dofDebugDepth && !viewmodelPass;
+    const bool debugNear  = g_dofDebugNear && g_dofNearBlur && !debugDepth && !viewmodelPass;
+
+    const bool wantNear   = (g_dofNearBlur || viewmodelPass) && !debugDepth && s_cocSurf && s_cocTmpSurf;
+    const bool wantSmooth = g_dofSmooth && !debugDepth && !debugNear;
 
     IDirect3DPixelShader9* cocShader    = wantNear   ? DofShaderFor(dev, DOF_COC)    : nullptr;
     IDirect3DPixelShader9* nearShader   = wantNear   ? DofShaderFor(dev, DOF_NEAR)   : nullptr;
@@ -516,6 +539,16 @@ void Dof_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     // THE GATHER, reading only the prepared texture. With the bleed on it is the FAR plane's
     // pass alone and lands in the blur target for the near pass to sit on top of.
     const bool gatherToFrame = !nearOn && !smoothShader;
+
+    // c4, read by the gather and the near pass only (coc / smooth rewrite it for their own
+    // draws, and neither runs between here and the near pass): the tap ceiling off "quality"
+    // (botox: 16 << tier), show depth + its white point, show near bleed.
+    {
+        const int   q    = (g_dofQuality < 0) ? 0 : (g_dofQuality > 3 ? 3 : g_dofQuality);
+        const float white = (g_dofDebugWhite < 1.f) ? 1.f : g_dofDebugWhite;
+        const float c4[4] = { (float)(16 << q), debugDepth ? 1.f : 0.f, white, debugNear ? 1.f : 0.f };
+        dev->SetPixelShaderConstantF(4, c4, 1);
+    }
 
     dev->SetRenderTarget(0, gatherToFrame ? target : s_blurSurf);
     dev->SetViewport(&fullVp);

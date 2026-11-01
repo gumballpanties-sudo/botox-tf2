@@ -1,6 +1,8 @@
 #include "detections.h"
 #include "detections_core.h"
 #include "../aim/aim.h"
+#include "../hud/points.h"            // botox points_on_trick
+#include "../misc/misc_overlays.h"    // botox on_healthshot
 #include <cstdio>
 
 // botox push_notice detection_html: accent label, " | event" in #bebebe
@@ -47,14 +49,28 @@ void Detections_Tick(const DetTick& t)
     st.landedWalk = t.onGround && t.walk;
     st.vz = t.vz; st.speed = t.speed; st.tick = t.tick;
     const float g = t.gravity * 0.5f * t.interval;
+    // botox run_detections prev_ok / prev_vz, read before DetEbStep rolls them (points: jb / head)
+    const bool prevOk = eb.prevAir && eb.prevTick == t.tick - 1;
+    const float prevVz = eb.prevVz;
     if (DetEbStep(eb, st, g, t.tb, t.ps))
     {
         ++chain;
         if (!g_detectionStackEb) PrintEb(chain);
+        Healthshot_Trigger(1);                 // unit misc: botox on_healthshot( 1 ) + points_on_trick
+        Points_OnTrick(PTS_EDGE_BUG);
     }
 
-    if (DetFresh(t.tb, tbOff)) Print(DET_TB, "texturebugged");
-    if (DetFresh(t.as, asOff)) Print(DET_AS, "airstucked");
-    if (DetFresh(t.ps && !t.as && !t.tb, psOff)) Print(DET_PS, "pixelsurfed");
-    if (DetFresh(t.wc, wcOff)) Print(DET_WC, "wallclimbed");
+    // unit misc: botox detect() -- fresh = the trick (points + print), still held = its ride bonus
+    const auto det = [](bool now, int& off, int trick) {
+        if (DetFresh(now, off)) { Points_OnTrick(trick); return true; }
+        if (now) Points_OnTrick(trick + (PTS_PIXEL_SURF_RIDE - PTS_PIXEL_SURF));
+        return false;
+    };
+    if (det(t.tb, tbOff, PTS_TEXTURE_BUG)) Print(DET_TB, "texturebugged");
+    if (det(t.as, asOff, PTS_AIR_STUCK)) Print(DET_AS, "airstucked");
+    if (det(t.ps && !t.as && !t.tb, psOff, PTS_PIXEL_SURF)) { Print(DET_PS, "pixelsurfed"); Healthshot_Trigger(2); }
+    if (DetFresh(t.wc, wcOff)) { Print(DET_WC, "wallclimbed"); Points_OnTrick(PTS_WALL_CLIMB); }
+    // botox jump bug / head ceiling points (fireman needs a ladder, TF2 has none)
+    if (prevOk && prevVz < 0.f && st.air && t.vz > 250.f) Points_OnTrick(PTS_JUMP_BUG);
+    if (prevOk && prevVz > g * 2.f + 1.f && st.air && fabsf(t.vz + g) < 1.f) Points_OnTrick(PTS_HEAD_CEILING);
 }

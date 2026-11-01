@@ -19,9 +19,10 @@
 //   c1 = half the sharp band, max blur radius in pixels, 1/width, 1/height
 //   c2 = viewmodel cutoff (RAW depth), -, VIEWMODEL PASS, -
 //   c3 = bokeh highlight boost, bokeh threshold, -, -
+//   c4 = tap ceiling (quality), -, -, show near bleed
 //   c5 = -, taps per pixel of radius, -, -
 
-#define TAPS 64
+#define TAPS 128
 
 // same trick as the far gather: one sincos, then walk the spiral by complex multiply
 #define GOLDEN_HALF 1.19998162
@@ -33,6 +34,7 @@ sampler2D sCoc   : register(s2);
 float4 c1 : register(c1);
 float4 c2 : register(c2);
 float4 c3 : register(c3);
+float4 c4 : register(c4);
 float4 c5 : register(c5);
 
 float3 unpack_hdr(float3 c) { return c * rcp(1.2 - saturate(c)); }
@@ -50,6 +52,10 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     // coc holds it up instead. It is a BOOST, not a coverage -- it saturates well outside the
     // silhouette and the fade is the tail of the wide field.
     float alpha = saturate(1.4 * ((nb > 0.1) ? ((own > 0.0) ? 2.0 : 1.0) * nb : max(nb, own)));
+
+    // botox "show near bleed": the field, its alpha, the max blur (botox k_near_body, c5.y there)
+    if (c4.w > 0.5)
+        return float4(nb, alpha, saturate(c1.y * 0.0166667), 1.0);
 
     // A held-sharp viewmodel is IN FRONT of every near plane thing in the world, so nothing
     // is allowed to bleed over it -- its own DepthRange (raw < 0.1) is the test, same as the
@@ -74,7 +80,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     // The disc is the field's, with a one pixel floor: out in the tail the field is small but
     // the alpha there is not, and an early out would cut the fade off again.
     float radius = max(nb * c1.y, 1.0);
-    float n      = clamp(ceil(radius * c5.y), 8.0, (float)TAPS);
+    float n      = clamp(ceil(radius * c5.y), 8.0, min(c4.x, (float)TAPS));
     float invN   = rcp(n);
 
     float2 px  = uv / c1.zw;

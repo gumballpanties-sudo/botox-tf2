@@ -28,6 +28,10 @@ void WorldFx2_InstallHooks();
 // DLL, not a hardcoded offset).
 void WorldFx2_Tick();
 
+// Main thread, once a frame (world_fx.cpp h_OverrideView): sun angle -- env_sun direction +
+// shadow_control direction/distance (OnDataChanged has to run where the shadow manager lives).
+void WorldFx2_Frame();
+
 // Pure, engine-free: classifies FindMaterial's own pTextureGroup string (engine-assigned,
 // public/texture_group_names.h -- not a name-pattern guess). 0 = neither, 1 = world
 // textures, 2 = model (prop) textures. Header-only so tests/worldfx2_test.cpp can check it

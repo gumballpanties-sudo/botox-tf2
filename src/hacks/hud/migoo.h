@@ -1,46 +1,19 @@
 #pragma once
 #include <math.h>
+#include <string>
 #include <vector>
 #include <algorithm>
 #include "../../dependencies/imgui/imgui.h"
+#include "../../dependencies/imgui/imgui_internal.h"
 #include "miwarp.h"
 
-// The mitosis look for the keybind tags: a new tag DIVIDES off the tag next to it like a drop of
-// liquid splitting in two.
-//   1. the daughter is born as an exact copy of the parent's letters sitting on it (one tag) and
-//      shoots out of it fast (ease-out), so the two overlap for a couple of frames only
-//   2. its letters morph from the parent's into its own from the first frame, by signed distance
-//      interpolation (strokes grow and shrink instead of cross-fading)
-//   3. once they come apart the gap is bridged by a strand of the font's OWN stroke -- its stem
-//      thickness, measured off the atlas, on the x-height midline -- flared into both tags with a
-//      smooth-union fillet, so it reads as the letters' ink stretched between them (a flat bar
-//      as tall as the letters read as an arrow in game; the letters' extruded edge silhouette
-//      read as a slab)
-//   4. the daughter pulls a little past its slot, the strand thins from the middle out (the
-//      distance field is eroded), snaps, and the two halves taper back into the letters while
-//      the daughter springs back to its slot
-//   5. squash & stretch (miwarp.h) leans the two halves into each other all the way through
-// A tag with nothing to divide off (a lone tag, or two born side by side) pops in from half size
-// (PopAt) -- scaled on its distance field, so it stays sharp at every size
-// (scaling the text quads was a bilinear stretch of the atlas: blurry).
-// Fading out runs every step backwards: two tags flowing into one.
-//
-// No alpha anywhere but the 1px edge antialiasing. Shapes are rasterized SS x supersampled so the
-// fields have sub-pixel outlines, and box-filtered back down. A settled tag comes out as the atlas
-// text itself at the same sub-pixel spot, so handing over to the text pass does not show.
-// Gate test: tests/migoo_test.cpp (synthetic shapes + the real tahoma atlas, frames dumped).
 namespace mig
 {
-constexpr float kFar = 1e9f;   // "no shape anywhere near", pre-transform
-constexpr float kOut = 1e4f;   // a sample outside a field's rect: nowhere near its shape
+constexpr float kFar = 1e9f;
+constexpr float kOut = 1e4f;
 
 inline float Sat(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
 
-// Chamfer distance transform (1 / sqrt2 weights), two sweeps, in pixels, over d already SEEDED
-// (each pixel's own distance, kFar = unknown). Exact EDT is not worth it here: the worst case
-// error is ~8% on long diagonals, and the morph only ever reads distances a stroke width or two
-// from an outline, where that is a fraction of a supersampled pixel. `s`, if given, is carried
-// along: every pixel ends up with the value of the seed its distance came from.
 inline void Chamfer(float* d, int w, int h, float* s = nullptr)
 {
     constexpr float kOrtho = 1.f, kDiag = 1.41421356f;
@@ -72,19 +45,6 @@ inline void Chamfer(float* d, int w, int h, float* s = nullptr)
         }
 }
 
-// Distance to the nearest inside pixel (>= 128). A partly covered pixel starts at 0.5 rather than 0.
-inline void DistTransform(const unsigned char* cov, int w, int h, float* d)
-{
-    for (int i = 0, n = w * h; i < n; ++i)
-        d[i] = cov[i] >= 128 ? 0.f : (cov[i] > 0 ? 0.5f : kFar);
-    Chamfer(d, w, h);
-}
-
-// Bilinear tap into the atlas, clamped to a texel rect: BlitLabel passes the glyph's own rect
-// plus the one-texel padding ring the atlas packs round it (zeros, TexGlyphPadding 1) -- what the
-// GPU's bilinear reads at a quad's edge, so a glyph's outer ink column fades as its quad slides
-// off a pixel centre. Clamped to the glyph rect itself, that column read solid right up to the
-// quad edge and every glyph edge snapped to the ss grid. Past the ring lies the next glyph.
 inline float AtlasTap(const unsigned char* tex, int tw, float u, float v,
                       float cu0, float cu1, float cv0, float cv1)
 {
@@ -101,25 +61,22 @@ inline float AtlasTap(const unsigned char* tex, int tw, float u, float v,
     return a * (1.f - fv) + b * fv;
 }
 
-// One label's coverage into a buffer whose (0,0) sits at `org` (same units as pos).
-// org is integer-aligned by the caller, so the subpixel part of the tag's position is resolved
-// HERE, the way the GPU resolves the text pass (mig::SubPixelText): each glyph quad padded half a
-// texel into the atlas's zero ring, so the bilinear falls to 0 exactly where the quad ends.
-// Unpadded, a tight bitmap's ink column was cut off at the quad edge and the pixel beside it
-// flipped between nothing and half ink as the quad slid across its centre.
 inline bool BlitLabel(unsigned char* cov, int bw, int bh, ImVec2 org, ImFont* font, float fs,
                       const char* text, ImVec2 pos)
 {
     ImFontAtlas* atlas = font->ContainerAtlas;
     const unsigned char* tex = atlas ? atlas->TexPixelsAlpha8 : nullptr;
-    if (!tex) return false;   // atlas CPU copy dropped: no morph this frame, plain text instead
+    if (!tex) return false;
     const int   tw = atlas->TexWidth, th = atlas->TexHeight;
     const float scale = fs / font->FontSize;
 
     float pen = pos.x;
-    for (const char* s = text; *s; ++s)
+    for (const char* s = text; *s; )
     {
-        const ImFontGlyph* g = font->FindGlyph((ImWchar)(unsigned char)*s);
+        unsigned int c = (unsigned char)*s;
+        if (c < 0x80) ++s;
+        else { s += ImTextCharFromUtf8(&c, s, nullptr); if (c == 0) break; }
+        const ImFontGlyph* g = font->FindGlyph((ImWchar)c);
         if (!g) continue;
         const float x0 = pen + g->X0 * scale - org.x,   x1 = pen + g->X1 * scale - org.x;
         const float y0 = pos.y + g->Y0 * scale - org.y, y1 = pos.y + g->Y1 * scale - org.y;
@@ -128,11 +85,9 @@ inline bool BlitLabel(unsigned char* cov, int bw, int bh, ImVec2 org, ImFont* fo
 
         const float u0 = g->U0 * tw, u1 = g->U1 * tw;
         const float v0 = g->V0 * th, v1 = g->V1 * th;
-        // texels per px, and the quad padded half a texel all round
         const float ku = (u1 - u0) / (x1 - x0), kv = (v1 - v0) / (y1 - y0);
         const float qx0 = x0 - 0.5f / ku, qx1 = x1 + 0.5f / ku;
         const float qy0 = y0 - 0.5f / kv, qy1 = y1 + 0.5f / kv;
-        // the padding ring's texels, kept inside the atlas
         const float cu0 = fmaxf(u0 - 1.f, 0.f), cu1 = fminf(u1, tw - 1.f);
         const float cv0 = fmaxf(v0 - 1.f, 0.f), cv1 = fminf(v1, th - 1.f);
         int px0 = (int)floorf(qx0), px1 = (int)ceilf(qx1);
@@ -159,25 +114,6 @@ inline bool BlitLabel(unsigned char* cov, int bw, int bh, ImVec2 org, ImFont* fo
     return true;
 }
 
-// Signed distance to a coverage shape, negative inside, in pixels, zero line on the 50% contour,
-// plus the edge's SLOPE (coverage per pixel across it) for every pixel.
-// Seeds: each pixel with a 4-neighbour across 50% -- the contour runs between them, where the
-// coverage, linear from centre to centre (the atlas is bilinear-upsampled), crosses 0.5. Its
-// distance is that crossing's (both axes' crossings: the line through them), outside pixels +,
-// inside -; the chamfer carries it out, the slope riding along. So:
-//   * the zero line keeps the SUB-pixel place the coverage says, and the whole field moves with
-//     it: a tag gliding 0.1 px moves its edges 0.1 px, near and far. Thresholded to a hard
-//     shape first (the old way), every edge snapped to the pixel grid: at ss 3 a slowing tag
-//     walked in 1/3 px steps with stalls -- "choppy" in game
-//   * a pixel starting to touch the contour starts at the distance its neighbour already gave
-//     it (the crossing sits on that neighbour then: 1 px), so nothing jumps when the set of
-//     edge pixels changes. Seeded from its coverage alone (0.5 - c), a soft edge -- light hinting
-//     leaves vertical ones two texels wide -- dropped a step whenever a pixel entered its ramp,
-//     and the morph's blended letters and the strand's ends jittered with it
-//   * 0.5 - distance * slope is the pixel's own coverage again (slope = |0.5 - c| / distance at a
-//     seed, carried out along a ramp): Compose draws the letters' own antialiasing back, however
-//     soft or hard each edge is
-// dOut/dIn/sOut/sIn = w*h floats scratch.
 inline void SignedDist(const unsigned char* cov, int w, int h, float* dOut, float* dIn,
                        float* sOut, float* sIn, float* sdf, float* slope)
 {
@@ -190,7 +126,6 @@ inline void SignedDist(const unsigned char* cov, int w, int h, float* dOut, floa
             const int   i  = y * w + x;
             const float c  = C(i);
             const bool  in = cov[i] >= 128;
-            // nearest 50% crossing toward each neighbour across it, per axis (px), and its slope
             float t[2] = { kFar, kFar }, g[2] = { 0.f, 0.f };
             const auto cross = [&](int j, int axis)
             {
@@ -221,9 +156,6 @@ inline void SignedDist(const unsigned char* cov, int w, int h, float* dOut, floa
         const bool in = cov[i] >= 128;
         sdf[i]   = in ? -dIn[i] : dOut[i];
         slope[i] = in ? sIn[i] : sOut[i];
-        // every pixel of a ramp its own slope, so 0.5 - distance * slope is its coverage exactly
-        // (the one carried from the seed is a straight-line guess past a bilinear kink). Beside
-        // the contour, where both are ~0, the carried one stays
         const float c = C(i);
         if (cov[i] > 0 && cov[i] < 255 && fabsf(0.5f - c) > 0.02f && fabsf(sdf[i]) > 1e-3f)
             slope[i] = fabsf(0.5f - c) / fabsf(sdf[i]);
@@ -236,8 +168,6 @@ inline float Smooth(float e0, float e1, float x)
     return t * t * (3.f - 2.f * t);
 }
 
-// Polynomial smooth min (iq): min(a,b) with the corner rounded over radius r. r = 0 is min.
-// Used ONLY where the bridge meets the letters -- the fillet that makes it read as liquid.
 inline float SMin(float a, float b, float r)
 {
     if (r <= 0.f) return a < b ? a : b;
@@ -245,27 +175,16 @@ inline float SMin(float a, float b, float r)
     return b + (a - b) * h - r * h * (1.f - h);
 }
 
-// Split timeline, t = the daughter's raw fade (0 = one tag, 1 = two settled tags).
-constexpr float kSnap = 0.55f;   // the bridge's neck lets go here
-constexpr float kPull = 1.12f;   // how far past its slot the daughter pulls before the snap
-// daughter's centre: 0 = on the parent, 1 = in its own slot. Shoots out (ease-out cubic: fast
-// start, so the overlapping copies are a frame or two, not a smear) to kPull, the strands
-// stretching, and after the snap springs back to its slot
+constexpr float kSnap = 0.55f;
+constexpr float kPull = 1.12f;
 inline float SlideAt(float t)
 {
     if (t <= kSnap) { const float x = 1.f - Sat(t / kSnap); return kPull * (1.f - x * x * x); }
     return 1.f + (kPull - 1.f) * (1.f - Smooth(kSnap, 0.85f, t));
 }
-// the strands thinning: 0 = the letters' own thickness, 1 = eroded through at the middle
 inline float DepthAt(float t) { return Smooth(0.2f, kSnap, t); }
-// after the snap: how much of each stub has pulled back into its letters (1 = gone)
 inline float CutAt(float t) { return Smooth(kSnap, 0.75f, t); }
-// daughter's letters: turning from the parent's into its own from the first frame (0 at t = 0,
-// so frame one is still an exact copy), done before the snap
 inline float MorphAt(float t) { return Smooth(0.f, 0.5f, t); }
-// Soft ease-out-back: ~3% overshoot, then settle. The textbook constant (1.70158) overshoots
-// 10%, which read as too springy in game. Slots opening (movind.cpp) and a lone tag popping in
-// both run on it.
 constexpr float kBack = 0.9f;
 inline float EaseOut(float x)
 {
@@ -273,40 +192,25 @@ inline float EaseOut(float x)
     return 1.f + (kBack + 1.f) * p * p * p + kBack * p * p;
 }
 
-// Frame-rate independent exponential follow: cur moves 1 - e^(-rate dt) of the way to want.
-// movind.cpp's layout slots ride on it, so the row GLIDES (time constant 1/rate) however fast a
-// bind fades -- tied straight to the fade, a new bind shoved the others over in ~6 frames.
-// No overshoot, never passes want, and lands EXACTLY on it once within 1e-4 -- a slot stuck a
-// hair short would leave a resting tag a fraction of a pixel off the grid, i.e. soft.
-constexpr float kSlotRate = 20.f;   // ~0.15 s to settle (12 read as slow in game)
+constexpr float kSlotRate = 20.f;
 inline float Follow(float cur, float want, float dt, float rate)
 {
     const float r = cur + (want - cur) * (1.f - expf(-rate * (dt > 0.f ? dt : 0.f)));
     return fabsf(want - r) < 1e-4f ? want : r;
 }
 
-// The glyph quads AddText appended since vtx0, made to glide:
-//   * ImFont::RenderText floors the pen to whole pixels (imgui_draw.cpp:3565): they go back by
-//     the fraction of `pos` it dropped. Without it a text tag froze while its slot glided the
-//     last pixel, then jumped 1 px the frame Follow landed (0.24 s after every split)
-//   * each quad is padded half a texel into the atlas's zero padding ring (pos and uv alike, so
-//     the mapping is unchanged). A tight bitmap has ink in its border texels, so the quad edge
-//     cut it off and the pixel beside it flipped between nothing and half ink as the edge slid
-//     across its centre. Padded, the dx9 backend's LINEAR filter fades it to 0 at the edge.
-// At rest on a whole pixel nothing shows: the fraction is 0 and the padding samples zeros, the
-// crisp 1:1 blit. BlitLabel rasterizes the same padded quads for the mitosis picture.
 inline void SubPixelText(ImDrawList* dl, int vtx0, ImVec2 pos, const ImFont* font)
 {
     const float fx = pos.x - floorf(pos.x), fy = pos.y - floorf(pos.y);
     const ImFontAtlas* at = font->ContainerAtlas;
-    const float hu = 0.5f / at->TexWidth, hv = 0.5f / at->TexHeight;   // half a texel, uv
-    ImDrawVert* v   = dl->VtxBuffer.Data + vtx0;   // Data read AFTER AddText: it may have grown
+    const float hu = 0.5f / at->TexWidth, hv = 0.5f / at->TexHeight;
+    ImDrawVert* v   = dl->VtxBuffer.Data + vtx0;
     ImDrawVert* end = dl->VtxBuffer.Data + dl->VtxBuffer.Size;
-    for (; v + 3 < end; v += 4)   // RenderText: 4 vertices a glyph, corners 0 and 2 opposite
+    for (; v + 3 < end; v += 4)
     {
         const float cx = (v[0].pos.x + v[2].pos.x) * 0.5f, cy = (v[0].pos.y + v[2].pos.y) * 0.5f;
         const float du = fabsf(v[2].uv.x - v[0].uv.x), dv = fabsf(v[2].uv.y - v[0].uv.y);
-        const float hx = du > 0.f ? hu * fabsf(v[2].pos.x - v[0].pos.x) / du : 0.f;   // half a texel, px
+        const float hx = du > 0.f ? hu * fabsf(v[2].pos.x - v[0].pos.x) / du : 0.f;
         const float hy = dv > 0.f ? hv * fabsf(v[2].pos.y - v[0].pos.y) / dv : 0.f;
         for (int k = 0; k < 4; ++k)
         {
@@ -317,14 +221,6 @@ inline void SubPixelText(ImDrawList* dl, int vtx0, ImVec2 pos, const ImFont* fon
     }
 }
 
-// The bind fade, one frame, mitosis mode (movind.cpp). In: linear -- the split's timeline
-// (SlideAt, EaseOut slots) is shaped on it. Out: the same timeline runs backwards, and every
-// ease-out in it played backwards on a linear fade is an ease-IN: the row sat still for 60% of the
-// fade, then the daughter slammed into its parent and the slot shut in the last frames (peak
-// 4 px/frame at 97% of the fade -- "the labels snap back into place"). So out runs on
-// s = (1 - tau)^2: sqrt(s) falls linearly (exact at any dt), the same 1 / speed seconds, the
-// reconnect comes sooner and the merge lands at zero speed. Only the clock differs, so no frame
-// shows a shape the way in does not.
 inline float FadeStep(float s, bool on, float dt, float speed)
 {
     if (!(dt > 0.f)) return s;
@@ -333,16 +229,20 @@ inline float FadeStep(float s, bool on, float dt, float speed)
     return r > 0.f ? r * r : 0.f;
 }
 
-// A lone tag's pop-in scale: half size -> full, ease-out cubic, no overshoot. From nothing with an
-// overshoot read as too much scale in game.
+constexpr float kSplitEm = 1.5f, kSplitMaxSlow = 2.f;
+inline float SplitSpeed(float base, float w, float fs)
+{
+    const float r = fs > 0.f ? w / (fs * kSplitEm) : 1.f;
+    const float k = r > 1.f ? sqrtf(r) : 1.f;
+    return base / (k < kSplitMaxSlow ? k : kSplitMaxSlow);
+}
+
 inline float PopAt(float t)
 {
     const float x = 1.f - Sat(t);
     return 0.5f + 0.5f * (1.f - x * x * x);
 }
 
-// Which tag a splitting tag divides off: its clearly older neighbour (higher fade), the older of
-// two if both are. -1 = no neighbour to come from (a lone tag, or two born side by side): it pops.
 inline int PickParent(const float* raw, int n, int i)
 {
     int   best = -1;
@@ -352,11 +252,8 @@ inline int PickParent(const float* raw, int n, int i)
     return best;
 }
 
-// A signed distance field over one sub-rect of the box, supersampled px, and its edge slope
-// (SignedDist; null = a hard edge, 1). kOut outside it.
-struct Field { int x0 = 0, y0 = 0, w = 0, h = 0; const float* d = nullptr; const float* s = nullptr; };
+struct Field { float x0 = 0.f, y0 = 0.f; int w = 0, h = 0; const float* d = nullptr; const float* s = nullptr; };
 
-// Bilinear sample at a continuous box position (pixel centres at +0.5); the slope too if asked.
 inline float Sample(const Field& f, float x, float y, float* slope = nullptr)
 {
     if (slope) *slope = 1.f;
@@ -378,22 +275,19 @@ inline float Sample(const Field& f, float x, float y, float* slope = nullptr)
     return at(f.d);
 }
 
-// One tag in the composed picture.
 struct Comp
 {
-    Field self;                  // its own letters, where it is drawn
-    Field from;                  // parent >= 0: the PARENT's letters at this tag's spot
-    int   parent = -2;           // -2 settled, -1 popping in, >= 0 dividing off comps[parent]
-    float m = 1.f;               // MorphAt
+    Field self;
+    Field from;
+    int   parent = -2;
+    float m = 1.f;
     float col[3] = { 1.f, 1.f, 1.f };
-    // squash & stretch (miwarp.h) or the pop-in: the letters scaled by (sx, sy) about (px, py),
-    // box ss px. Done on the SAMPLE position, so the edge stays a 1 ss px ramp at any scale
     float px = 0.f, py = 0.f, sx = 1.f, sy = 1.f;
+    // where its fields answer at all, box ss px (warped). Outside it reads kOut: never the
+    // nearest shape, so Compose leaves it out of that pixel -- a 16 tag stack stays ~2 tags a pixel
+    float rx0 = -1e9f, ry0 = -1e9f, rx1 = 1e9f, ry1 = 1e9f;
 };
 
-// Signed distance to one tag's letters as drawn this frame: the squash & stretch undone on the
-// sample position, then its own letters (settled) or the morph from where it started. `slope`,
-// if asked: the edge's, the morph blending it like the distance.
 inline float CompDist(const Comp& c, float x, float y, float* slope = nullptr)
 {
     const float qx = c.px + (x - c.px) / c.sx, qy = c.py + (y - c.py) / c.sy;
@@ -407,32 +301,21 @@ inline float CompDist(const Comp& c, float x, float y, float* slope = nullptr)
         s = s0 + (s - s0) * c.m;
     }
     if (slope) *slope = s;
-    // back to SCREEN distance: a field read at 2.5x is 2.5x too flat, and its edge ramp would
-    // smear over 2.5x the pixels -- the blur. The tighter axis keeps the edge sharp both ways
     return d * fminf(c.sx, c.sy);
 }
 
-// The liquid strand between a dividing pair, box ss px. u runs along the split axis, v across.
 struct Bridge
 {
-    float eP = 0.f, eC = 0.f;        // along u: the parent's and the daughter's facing edges
-    float side = 1.f;                // +1: the daughter is toward +u
-    float cv = 0.f;                  // across: the line the strand runs along
-    float hs = 0.f;                  // half the font's stem thickness (0 = no strand: still touching)
-    float depth = 0.f;               // DepthAt
-    float cut = 0.f;                 // CutAt
-    float r = 0.f;                   // fillet into the letters
-    int   parent = -1, child = -1;   // for the colour; -1 = a bare strand
+    float eP = 0.f, eC = 0.f;
+    float side = 1.f;
+    float cv = 0.f;
+    float hs = 0.f;
+    float depth = 0.f;
+    float cut = 0.f;
+    float r = 0.f;
+    int   parent = -1, child = -1;
 };
 
-// Signed distance to the strand. w = 0 at the parent's edge, 1 at the daughter's; x = 0 at either
-// edge, 1 at the middle. k = depth * x^2 thins it from the middle out: half thickness
-// hs * (1 - k) - 0.35 hs k, zero at k ~ 0.74, so the strand parts just BEFORE depth 1 and the
-// snap has a visible gap even at 14px (a zero-width pinch left a grey sub-pixel hairline). After the snap the same k measured on halves `cut` of the way shorter: the tapered
-// ends pull back into the letters. k is continuous across the snap.
-// kOut past either end: the ends sit half a stem inside the letters (Render), so the fillet along
-// the strand's sides already closes the notch beside it. A distance to the end cap there instead
-// let the fillet (0.18 fs) wrap round into the letter and fill the counter of an 'a' solid.
 inline float BridgeDist(const Bridge& br, float u, float v, float* kOut_ = nullptr)
 {
     const float span = (br.eC - br.eP) * br.side;
@@ -443,7 +326,7 @@ inline float BridgeDist(const Bridge& br, float u, float v, float* kOut_ = nullp
     float k;
     if (br.cut > 0.f)
     {
-        if (x >= 1.f - br.cut) return kOut;   // pulled back past here
+        if (x >= 1.f - br.cut) return kOut;
         const float xs = x / (1.f - br.cut);
         k = xs * xs;
     }
@@ -457,21 +340,42 @@ struct Scene
 {
     const Comp*   comps = nullptr;   int nc = 0;
     const Bridge* bridges = nullptr; int nb = 0;
-    bool axisX = true;               // split axis: x for a horizontal row, y for the vertical stack
-    int  w = 0, h = 0, ss = 1;       // supersampled box size (multiples of ss), and the factor
+    bool axisX = true;
+    int  w = 0, h = 0, ss = 1;
+    const float* cull = nullptr;     int ncull = 0;
 };
 
-// out = (w/ss)*(h/ss) A8R8G8B8, solid colour per owner, alpha = edge coverage only.
 inline void Compose(const Scene& s, unsigned int* out)
 {
     constexpr int kMax = 16;
     const int nc = s.nc < kMax ? s.nc : kMax;
     const int ss = s.ss, ow = s.w / ss, oh = s.h / ss;
     const float inv = 1.f / (float)(ss * ss);
+    int all[kMax], use[kMax];
+    for (int k = 0; k < nc; ++k) all[k] = k;
     for (int oy = 0; oy < oh; ++oy)
         for (int ox = 0; ox < ow; ++ox)
         {
-            // box filter the ss x ss block: coverage and colour, premultiplied
+            const int* idx = all;
+            int        ni  = nc;
+            if (s.cull)
+            {
+                const float bx0 = (float)(ox * ss), bx1 = bx0 + ss, by0 = (float)(oy * ss), by1 = by0 + ss;
+                bool nearby = false;   // not "near": windef.h #defines it (botox includes this before windows.h)
+                for (int k = 0; k < s.ncull && !nearby; ++k)
+                {
+                    const float* b = s.cull + 4 * k;
+                    nearby = b[0] < bx1 && b[2] > bx0 && b[1] < by1 && b[3] > by0;
+                }
+                if (!nearby) { out[oy * ow + ox] = 0; continue; }
+                ni = 0;
+                for (int k = 0; k < nc; ++k)
+                {
+                    const Comp& c = s.comps[k];
+                    if (c.rx0 < bx1 && c.rx1 > bx0 && c.ry0 < by1 && c.ry1 > by0) use[ni++] = k;
+                }
+                idx = use;
+            }
             float a = 0.f, r = 0.f, g = 0.f, b = 0.f;
             for (int sy = 0; sy < ss; ++sy)
                 for (int sx = 0; sx < ss; ++sx)
@@ -479,16 +383,12 @@ inline void Compose(const Scene& s, unsigned int* out)
                     const float x = (float)(ox * ss + sx) + 0.5f, y = (float)(oy * ss + sy) + 0.5f;
                     const float u = s.axisX ? x : y, v = s.axisX ? y : x;
 
-                    // the edge's slope, coverage per ss px: the letters' own (SignedDist), so a
-                    // settled tag comes out as its atlas antialiasing, soft edges soft and hard
-                    // ones hard. The strand keeps its crisp 1 ss px edge -- given the letters'
-                    // it left a grey smear where the neck snaps. The fillet between them blends
-                    // the two by SMin's own weight, so no edge jumps from one to the other
                     float best = kOut, slope = 1.f;
                     int   own  = 0;
-                    for (int k = 0; k < nc; ++k)
+                    for (int j = 0; j < ni; ++j)
                     {
                         float sk;
+                        const int   k = idx[j];
                         const float d = CompDist(s.comps[k], x, y, &sk);
                         if (d < best) { best = d; own = k; slope = sk; }
                     }
@@ -498,11 +398,8 @@ inline void Compose(const Scene& s, unsigned int* out)
                         float k = 0.f;
                         const float   db = BridgeDist(br, u, v, &k);
                         if (db >= kOut) continue;
-                        // the bridge takes the colour of the half it is on
                         if (db < best && br.child >= 0 && br.child < nc && br.parent >= 0 && br.parent < nc)
                             own = (u - 0.5f * (br.eP + br.eC)) * br.side >= 0.f ? br.child : br.parent;
-                        // the flare fades with the pinch: where the strand is thin, a full-size
-                        // fillet against the letters a few px away would fill the snap back in
                         const float fr = br.r * (1.f - k);
                         const float wl = fr > 0.f ? Sat(0.5f + 0.5f * (db - best) / fr) : (best < db ? 1.f : 0.f);
                         slope = 1.f + (slope - 1.f) * wl;
@@ -524,60 +421,125 @@ inline void Compose(const Scene& s, unsigned int* out)
         }
 }
 
-// ---------------------------------------------------------------------------------------------
-// The whole frame, as movind.cpp draws it and migoo_test checks it.
 constexpr int kMaxTags = 16;
 
-// One tag taking part in a split. pos / size = its settled layout slot (screen px, the spot
-// AddText would draw it at); parent as in Comp, indexing this same array.
-struct Tag { const char* text; ImVec2 pos, size; float col[3]; float raw; int parent; };
+struct Tag { const char* text; ImVec2 pos, size; float col[3]; float raw; int parent; ImFont* font = nullptr; float fs = 0.f; };
 
-// Buffers kept between frames, so a split allocates on its first frame only.
+struct CachedField
+{
+    std::string   text;
+    const ImFont* font = nullptr;   const void* pixels = nullptr;   const void* glyphs = nullptr;
+    int tw = 0, th = 0;
+    float fs = 0.f, hw = 0.f, pad = 0.f;   int ss = 0;
+    int   w = 0, h = 0;             float cx = 0.f, cy = 0.f;
+    int   i0 = 0, i1 = -1, j0 = 0, j1 = -1;
+    float smin = 1.f;
+    std::vector<float> d, s;
+    unsigned stamp = 0;
+};
+constexpr int kFieldCache = 12;
+
 struct Work
 {
     std::vector<unsigned char> cov;
-    std::vector<float>         pool, dOut, dIn, sOut, sIn;
-    std::vector<unsigned int>  px;       // the result: w*h A8R8G8B8
+    std::vector<float>         dOut, dIn, sOut, sIn;
+    std::vector<unsigned int>  px;
+    std::vector<CachedField>   cache;
+    unsigned clock = 0;
+    // the gate's references, each must match the default to the bit: cull false = Compose every
+    // pixel, reuse false = every field built fresh (no cache lookup: a key missing a field shows)
+    bool     cull  = true;
+    bool     reuse = true;
     Comp   comps[kMaxTags];
     Bridge bridges[kMaxTags];
 };
 
-// Rasterizes the splitting tags into wk.px. Out: the box's integer screen origin and size.
-// false = nothing drawable (no atlas pixels, box too big) -- draw the tags as plain text.
+inline const CachedField* GetField(Work& wk, unsigned frame0, ImFont* font, float fs, int ss, float pad,
+                                   const char* text, float textW, float hw)
+{
+    const ImFontAtlas* at = font->ContainerAtlas;
+    const void* pixels = at ? at->TexPixelsAlpha8 : nullptr;
+    const void* glyphs = font->Glyphs.Data;
+    const int   tw = at ? at->TexWidth : 0, th = at ? at->TexHeight : 0;
+    const unsigned now = ++wk.clock;
+    for (CachedField& c : wk.cache)
+        if (wk.reuse && c.font == font && c.pixels == pixels && c.glyphs == glyphs && c.tw == tw && c.th == th && c.fs == fs &&
+            c.ss == ss && c.hw == hw && c.pad == pad && c.text == text)
+        { c.stamp = now; return &c; }
+
+    CachedField* c = nullptr;
+    for (CachedField& e : wk.cache)
+        if (e.stamp <= frame0 && (!c || e.stamp < c->stamp)) c = &e;
+    if (!c || (int)wk.cache.size() < kFieldCache) c = &wk.cache.emplace_back();
+
+    const float f = (float)ss;
+    c->text = text; c->font = font; c->pixels = pixels; c->glyphs = glyphs; c->tw = tw; c->th = th;
+    c->fs = fs; c->hw = hw; c->pad = pad; c->ss = ss; c->stamp = now;
+    c->cx = (hw + pad) * f;  c->cy = (fs * 0.5f + pad) * f;
+    c->w  = (int)ceilf(2.f * c->cx); c->h = (int)ceilf(2.f * c->cy);
+    const size_t a = (size_t)c->w * c->h;
+    wk.cov.assign(a, 0);
+    wk.dOut.resize(a); wk.dIn.resize(a); wk.sOut.resize(a); wk.sIn.resize(a);
+    if (!BlitLabel(wk.cov.data(), c->w, c->h, ImVec2(0.f, 0.f), font, fs * f, text,
+                   ImVec2(c->cx - textW * f * 0.5f, c->cy - fs * f * 0.5f)))
+    { c->font = nullptr; return nullptr; }
+    c->d.resize(a); c->s.resize(a);
+    SignedDist(wk.cov.data(), c->w, c->h, wk.dOut.data(), wk.dIn.data(), wk.sOut.data(), wk.sIn.data(),
+               c->d.data(), c->s.data());
+
+    c->i0 = c->w; c->i1 = -1; c->j0 = c->h; c->j1 = -1; c->smin = 1.f;
+    for (int y = 0; y < c->h; ++y)
+        for (int x = 0; x < c->w; ++x)
+        {
+            const size_t k = (size_t)y * c->w + x;
+            if (c->s[k] < c->smin) c->smin = c->s[k];
+            if (c->d[k] * c->s[k] >= 1.f) continue;
+            if (x < c->i0) c->i0 = x; if (x > c->i1) c->i1 = x;
+            if (y < c->j0) c->j0 = y; if (y > c->j1) c->j1 = y;
+        }
+    if (c->smin < 1e-3f) c->smin = 1e-3f;
+    return c;
+}
+
 inline bool Render(const Tag* tags, int n, ImFont* font, float fs, bool axisX, Work& wk,
                    int& ox, int& oy, int& w, int& h)
 {
     if (n <= 0 || n > kMaxTags) return false;
-    // supersampling: less at big sizes, where the glyphs already have the pixels
-    const int   ss  = fs < 20.f ? 3 : 2;
+    const auto fontOf = [&](int i) { return tags[i].font ? tags[i].font : font; };
+    const auto fsOf   = [&](int i) { return tags[i].fs > 0.f ? tags[i].fs : fs; };
+    float fsMax = fs;
+    for (int i = 0; i < n; ++i) fsMax = fmaxf(fsMax, fsOf(i));
+
+    const int   ss  = fsMax < 20.f ? 3 : 2;
     const float f   = (float)ss;
-    const float pad = ceilf(fs * 0.16f + 3.f);
+    const float pad = ceilf(fsMax * 0.16f + 3.f);
 
-    // the x-height band, from the tag's top: the body of lowercase letters, where the strand
-    // runs and what it meets in the vertical stack
-    float xTop = fs * 0.35f, xBot = fs * 0.8f;
-    if (const ImFontGlyph* gx = font->FindGlyph((ImWchar)'x'))
+    float xTop[kMaxTags], xBot[kMaxTags], stem[kMaxTags];
+    for (int i = 0; i < n; ++i)
     {
-        const float sc = fs / font->FontSize;
-        if (gx->Y1 > gx->Y0) { xTop = gx->Y0 * sc; xBot = gx->Y1 * sc; }
+        ImFont* const fo = fontOf(i);
+        const float   s  = fsOf(i);
+        xTop[i] = s * 0.35f; xBot[i] = s * 0.8f;
+        if (const ImFontGlyph* gx = fo->FindGlyph((ImWchar)'x'))
+        {
+            const float sc = s / fo->FontSize;
+            if (gx->Y1 > gx->Y0) { xTop[i] = gx->Y0 * sc; xBot[i] = gx->Y1 * sc; }
+        }
+        stem[i] = s * 0.16f;
+        if (const ImFontGlyph* gl = fo->FindGlyph((ImWchar)'l'))
+            if (ImFontAtlas* at = fo->ContainerAtlas)
+                if (at->TexPixelsAlpha8 && gl->X1 > gl->X0)
+                {
+                    const int row = (int)(((gl->V0 + gl->V1) * 0.5f) * at->TexHeight);
+                    const int c0  = (int)(gl->U0 * at->TexWidth), c1 = (int)(gl->U1 * at->TexWidth);
+                    float ink = 0.f;
+                    for (int c = c0; c < c1; ++c) ink += at->TexPixelsAlpha8[row * at->TexWidth + c] / 255.f;
+                    if (ink > 0.5f) stem[i] = ink * (s / fo->FontSize);
+                }
     }
-    // the font's stem, off the atlas: the ink across the middle row of 'l'. The strand is exactly
-    // this thick, so it is the same weight as every stroke next to it
-    float stem = fs * 0.16f;
-    if (const ImFontGlyph* gl = font->FindGlyph((ImWchar)'l'))
-        if (ImFontAtlas* at = font->ContainerAtlas)
-            if (at->TexPixelsAlpha8 && gl->X1 > gl->X0)
-            {
-                const int row = (int)(((gl->V0 + gl->V1) * 0.5f) * at->TexHeight);
-                const int c0  = (int)(gl->U0 * at->TexWidth), c1 = (int)(gl->U1 * at->TexWidth);
-                float ink = 0.f;
-                for (int c = c0; c < c1; ++c) ink += at->TexPixelsAlpha8[row * at->TexWidth + c] / 255.f;
-                if (ink > 0.5f) stem = ink * (fs / font->FontSize);
-            }
 
-    // where each tag's letters are this frame: a daughter slides out of its parent's centre
     const auto slot = [&](int i)
-    { return ImVec2(tags[i].pos.x + tags[i].size.x * 0.5f, tags[i].pos.y + fs * 0.5f); };
+    { return ImVec2(tags[i].pos.x + tags[i].size.x * 0.5f, tags[i].pos.y + fsOf(i) * 0.5f); };
     ImVec2 ctr[kMaxTags];
     for (int i = 0; i < n; ++i)
     {
@@ -589,67 +551,40 @@ inline bool Render(const Tag* tags, int n, ImFont* font, float fs, bool axisX, W
         ctr[i] = ImVec2(cp.x + (ctr[i].x - cp.x) * k, cp.y + (ctr[i].y - cp.y) * k);
     }
 
-    // each tag's field rect (screen px): its letters, and the parent's letters it starts as.
-    // The pop's 3% overshoot stays inside the pad
-    float rx0[kMaxTags], ry0[kMaxTags], rx1[kMaxTags], ry1[kMaxTags];
+    float hws[kMaxTags];
     float bx0 = 1e9f, by0 = 1e9f, bx1 = -1e9f, by1 = -1e9f;
     for (int i = 0; i < n; ++i)
     {
         const int p = tags[i].parent;
         float hw = tags[i].size.x * 0.5f;
         if (p >= 0) hw = fmaxf(hw, tags[p].size.x * 0.5f);
-        rx0[i] = ctr[i].x - hw - pad;        rx1[i] = ctr[i].x + hw + pad;
-        ry0[i] = ctr[i].y - fs * 0.5f - pad; ry1[i] = ctr[i].y + fs * 0.5f + pad;
-        bx0 = fminf(bx0, rx0[i]); by0 = fminf(by0, ry0[i]);
-        bx1 = fmaxf(bx1, rx1[i]); by1 = fmaxf(by1, ry1[i]);
+        hws[i] = hw;
+        bx0 = fminf(bx0, ctr[i].x - hw - pad);        bx1 = fmaxf(bx1, ctr[i].x + hw + pad);
+        by0 = fminf(by0, ctr[i].y - fsOf(i) * 0.5f - pad); by1 = fmaxf(by1, ctr[i].y + fsOf(i) * 0.5f + pad);
     }
     ox = (int)floorf(bx0); oy = (int)floorf(by0);
     w  = (int)ceilf(bx1) - ox; h = (int)ceilf(by1) - oy;
     if (w < 2 || h < 2 || w > 1024 || h > 1024) return false;
 
-    // rects in box ss px, and the pool they all live in
-    int X0[kMaxTags], Y0[kMaxTags], RW[kMaxTags], RH[kMaxTags];
-    size_t total = 0, most = 0;
-    for (int i = 0; i < n; ++i)
+    if (wk.cache.capacity() < 2 * kMaxTags) wk.cache.reserve(2 * kMaxTags);
+    const unsigned frame0 = wk.clock;
+    const auto field = [&](Field& F, int i, int j) -> const CachedField*
     {
-        X0[i] = (int)floorf((rx0[i] - ox) * f); Y0[i] = (int)floorf((ry0[i] - oy) * f);
-        RW[i] = (int)ceilf((rx1[i] - ox) * f) - X0[i];
-        RH[i] = (int)ceilf((ry1[i] - oy) * f) - Y0[i];
-        const size_t a = (size_t)RW[i] * RH[i];
-        total += 2 * a * (tags[i].parent >= 0 ? 2 : 1);   // distances + slopes, per field
-        if (a > most) most = a;
-    }
-    wk.pool.resize(total); wk.cov.resize(most);
-    wk.dOut.resize(most);  wk.dIn.resize(most); wk.sOut.resize(most); wk.sIn.resize(most);
-
-    float* dst = wk.pool.data();
-    const auto field = [&](Field& F, int i, const char* text, float textW) -> bool
-    {
-        const size_t a = (size_t)RW[i] * RH[i];
-        std::fill(wk.cov.begin(), wk.cov.begin() + a, (unsigned char)0);
-        const ImVec2 at((ctr[i].x - textW * 0.5f) * f, (ctr[i].y - fs * 0.5f) * f);
-        if (!BlitLabel(wk.cov.data(), RW[i], RH[i], ImVec2(ox * f + X0[i], oy * f + Y0[i]),
-                       font, fs * f, text, at))
-            return false;
-        SignedDist(wk.cov.data(), RW[i], RH[i], wk.dOut.data(), wk.dIn.data(),
-                   wk.sOut.data(), wk.sIn.data(), dst, dst + a);
-        F.x0 = X0[i]; F.y0 = Y0[i]; F.w = RW[i]; F.h = RH[i]; F.d = dst; F.s = dst + a;
-        dst += 2 * a;
-        return true;
+        const CachedField* c = GetField(wk, frame0, fontOf(j), fsOf(j), ss, pad, tags[j].text, tags[j].size.x, hws[i]);
+        if (!c) return nullptr;
+        F.x0 = (ctr[i].x - ox) * f - c->cx; F.y0 = (ctr[i].y - oy) * f - c->cy;
+        F.w = c->w; F.h = c->h; F.d = c->d.data(); F.s = c->s.data();
+        return c;
     };
+    const CachedField* cSelf[kMaxTags] = {};
+    const CachedField* cFrom[kMaxTags] = {};
 
-    // a tag's letters along the split axis, screen px: its width across a row, its x-height
-    // band up a stack (ascenders and descenders poke past it; the bridge meets the body)
     const auto extent = [&](int i, float halfW, float& lo, float& hi)
     {
         if (axisX) { lo = ctr[i].x - halfW; hi = ctr[i].x + halfW; }
-        else       { const float top = ctr[i].y - fs * 0.5f; lo = top + xTop; hi = top + xBot; }
+        else       { const float top = ctr[i].y - fsOf(i) * 0.5f; lo = top + xTop[i]; hi = top + xBot[i]; }
     };
 
-    // squash & stretch (miwarp.h), from where the halves are THIS frame: each half of a dividing
-    // pair leans toward the other along the axis about its own outer edge, thinning across.
-    // wPiv / wSa along the axis, screen px; across it the scale is 1 / wSa about the centre.
-    // A parent with daughters on both sides takes the last one's -- one pivot per tag
     float wPiv[kMaxTags], wSa[kMaxTags];
     for (int i = 0; i < n; ++i) { wPiv[i] = axisX ? ctr[i].x : ctr[i].y; wSa[i] = 1.f; }
     for (int i = 0; i < n; ++i)
@@ -658,8 +593,8 @@ inline bool Render(const Tag* tags, int n, ImFont* font, float fs, bool axisX, W
         if (p < 0) continue;
         const float uP = axisX ? ctr[p].x : ctr[p].y, uC = axisX ? ctr[i].x : ctr[i].y;
         const float m  = MorphAt(tags[i].raw);
-        const float eC = axisX ? (tags[p].size.x + (tags[i].size.x - tags[p].size.x) * m) * 0.5f : fs * 0.5f;
-        const float eP = axisX ? tags[p].size.x * 0.5f : fs * 0.5f;
+        const float eC = axisX ? (tags[p].size.x + (tags[i].size.x - tags[p].size.x) * m) * 0.5f : fsOf(i) * 0.5f;
+        const float eP = axisX ? tags[p].size.x * 0.5f : fsOf(p) * 0.5f;
         const miw::Warp wc = miw::SplitWarp(uC, eC, uP, tags[i].raw);
         const miw::Warp wp = miw::SplitWarp(uP, eP, uC, tags[i].raw);
         wPiv[i] = wc.piv; wSa[i] = wc.sa;
@@ -674,27 +609,24 @@ inline bool Render(const Tag* tags, int n, ImFont* font, float fs, bool axisX, W
         c = Comp{};
         c.parent = t.parent;
         for (int k = 0; k < 3; ++k) c.col[k] = t.col[k];
-        if (!field(c.self, i, t.text, t.size.x)) return false;
+        if (!(cSelf[i] = field(c.self, i, i))) return false;
         if (axisX) { c.px = (wPiv[i] - ox) * f; c.sx = wSa[i]; c.py = (ctr[i].y - oy) * f; c.sy = 1.f / wSa[i]; }
         else       { c.py = (wPiv[i] - oy) * f; c.sy = wSa[i]; c.px = (ctr[i].x - ox) * f; c.sx = 1.f / wSa[i]; }
 
         if (t.parent >= 0)
         {
             const Tag& p = tags[t.parent];
-            if (!field(c.from, i, p.text, p.size.x)) return false;
+            if (!(cFrom[i] = field(c.from, i, t.parent))) return false;
             c.m = MorphAt(t.raw);
-            // the daughter's colour turns with its letters: the parent's while it is a copy
             for (int k = 0; k < 3; ++k) c.col[k] = p.col[k] + (t.col[k] - p.col[k]) * c.m;
         }
         else if (t.parent == -1)
         {
-            // pop in about its own centre
             c.px = (ctr[i].x - ox) * f; c.py = (ctr[i].y - oy) * f;
             c.sx = c.sy = PopAt(t.raw);
         }
     }
 
-    // the strands, now that every half's field exists
     int nb = 0;
     for (int i = 0; i < n; ++i)
     {
@@ -705,31 +637,26 @@ inline bool Render(const Tag* tags, int n, ImFont* font, float fs, bool axisX, W
         const float uP   = axisX ? ctr[t.parent].x : ctr[t.parent].y;
         const float uC   = axisX ? ctr[i].x : ctr[i].y;
         const float side = uC >= uP ? 1.f : -1.f;
+        const int   q    = t.parent;
+        const float fsB  = fminf(fsOf(q), fsOf(i));
         float pLo, pHi, cLo, cHi;
         extent(t.parent, p.size.x * 0.5f, pLo, pHi);
         extent(i, (p.size.x + (t.size.x - p.size.x) * m) * 0.5f, cLo, cHi);
-        // the facing edges of the (leaning) text boxes, screen px
         const float o   = axisX ? ox : oy;
         const float bP  = warpU(t.parent, side > 0.f ? pHi : pLo);
         const float bC  = warpU(i, side > 0.f ? cLo : cHi);
-        const float cv  = axisX ? (ctr[t.parent].y - fs * 0.5f + (xTop + xBot) * 0.5f - oy) * f
-                                : (ctr[t.parent].x - ox) * f;
-        // where each half's INK meets the strand's line, box ss px: marched along the line from
-        // its box edge into the tag (dir) to the first inked sample. The box is the advance width
-        // -- side bearings, round letters (the 'a' of "air") and overhangs (the arm of a 't') sit
-        // well inside or past it: a strand ended at the box hung short of the letter with its
-        // notch open beside it, and gated on the boxes it stayed away while the ink on its line
-        // was already pixels apart. Starts a little out in the gap, for ink poking past the box.
-        // Nothing on the line within reach (a gap between letters up a stack): the box edge.
-        // The hit is the zero crossing between the last two samples, not the sample: whole steps
-        // walked the strand's ends (and its neck, measured on them) in 1 ss px jumps while the
-        // daughter's letters morphed. Bisected before it is read off a straight line: the field
-        // bends between samples (bilinear kinks, the morph's blend), and a line through the two
-        // samples alone blipped the end ~0.1 px
+        float cy = ctr[q].y - fsOf(q) * 0.5f + (xTop[q] + xBot[q]) * 0.5f;
+        if (fsOf(q) != fsOf(i) || fontOf(q) != fontOf(i))
+        {
+            const float topP = ctr[q].y - fsOf(q) * 0.5f, topC = ctr[i].y - fsOf(i) * 0.5f;
+            const float lo = fmaxf(topP + xTop[q], topC + xTop[i]), hi = fminf(topP + xBot[q], topC + xBot[i]);
+            cy = lo < hi ? (lo + hi) * 0.5f : (cy + topC + (xTop[i] + xBot[i]) * 0.5f) * 0.5f;
+        }
+        const float cv  = axisX ? (cy - oy) * f : (ctr[t.parent].x - ox) * f;
         const auto ink = [&](int ci, float edge, float dir, float reach, bool& hit) -> float
         {
             const float from = (edge - o) * f;
-            const float back = fminf(fmaxf((bC - bP) * side, 0.f) * 0.5f, fs * 0.1f) * f;
+            const float back = fminf(fmaxf((bC - bP) * side, 0.f) * 0.5f, fsB * 0.1f) * f;
             const auto  at   = [&](float u) { return CompDist(wk.comps[ci], axisX ? u : cv, axisX ? cv : u); };
             float prev = kOut;
             for (float s = -back; s <= reach * f; s += 1.f)
@@ -753,15 +680,13 @@ inline bool Render(const Tag* tags, int n, ImFont* font, float fs, bool axisX, W
             hit = false;
             return from;
         };
-        const float reachP = axisX ? p.size.x * 0.5f : xBot - xTop;
-        const float reachC = axisX ? (p.size.x + (t.size.x - p.size.x) * m) * 0.5f : xBot - xTop;
+        const float reachP = axisX ? p.size.x * 0.5f : xBot[q] - xTop[q];
+        const float reachC = axisX ? (p.size.x + (t.size.x - p.size.x) * m) * 0.5f : xBot[i] - xTop[i];
         bool hitP, hitC;
         const float iP  = ink(t.parent, bP, -side, reachP, hitP);
         const float iC  = ink(i, bC, side, reachC, hitC);
-        const float gap = (iC - iP) * side / f;   // screen px of bare line between the halves
-        // the ends reach into the letters so the strand starts under the fillet: to the middle of
-        // the stroke it met, or the old fixed tuck past a box edge
-        const float tP  = hitP ? stem * 0.5f : fs * 0.08f, tC = hitC ? stem * 0.5f : fs * 0.08f;
+        const float gap = (iC - iP) * side / f;
+        const float tP  = hitP ? stem[q] * 0.5f : fsOf(q) * 0.08f, tC = hitC ? stem[i] * 0.5f : fsOf(i) * 0.08f;
 
         Bridge& br = wk.bridges[nb++];
         br = Bridge{};
@@ -769,12 +694,50 @@ inline bool Render(const Tag* tags, int n, ImFont* font, float fs, bool axisX, W
         br.eC = iC + side * tC * f;
         br.side = side;
         br.cv = cv;
-        // grows to full weight over the first sliver of gap, so coming apart is not a pop
-        br.hs     = gap > 0.f ? stem * 0.5f * Smooth(0.f, fs * 0.05f, gap) * f : 0.f;
+        br.hs     = gap > 0.f ? fminf(stem[q], stem[i]) * 0.5f * Smooth(0.f, fsB * 0.05f, gap) * f : 0.f;
         br.depth  = DepthAt(t.raw);
         br.cut    = CutAt(t.raw);
-        br.r      = fs * 0.18f * f;   // the liquid flare where the strand meets the letters
+        br.r      = fsB * 0.18f * f;
         br.parent = t.parent; br.child = i;
+    }
+
+    float cull[4 * 2 * kMaxTags];
+    int   nCull = 0;
+    float smin = 1.f, rmax = 0.f;
+    for (int i = 0; i < n; ++i)
+    {
+        Comp& c = wk.comps[i];
+        float qx0 = 1e9f, qy0 = 1e9f, qx1 = -1e9f, qy1 = -1e9f;
+        float fx0 = 1e9f, fy0 = 1e9f, fx1 = -1e9f, fy1 = -1e9f;
+        const auto take = [&](const CachedField* cf, const Field& F)
+        {
+            if (!cf) return;
+            smin = fminf(smin, cf->smin);
+            fx0 = fminf(fx0, F.x0); fx1 = fmaxf(fx1, F.x0 + F.w);
+            fy0 = fminf(fy0, F.y0); fy1 = fmaxf(fy1, F.y0 + F.h);
+            if (cf->i1 < cf->i0) return;
+            qx0 = fminf(qx0, F.x0 + cf->i0 - 0.5f); qx1 = fmaxf(qx1, F.x0 + cf->i1 + 1.5f);
+            qy0 = fminf(qy0, F.y0 + cf->j0 - 0.5f); qy1 = fmaxf(qy1, F.y0 + cf->j1 + 1.5f);
+        };
+        take(cSelf[i], c.self);
+        if (c.parent >= 0) take(cFrom[i], c.from);
+        c.rx0 = c.px + (fx0 - c.px) * c.sx; c.rx1 = c.px + (fx1 - c.px) * c.sx;
+        c.ry0 = c.py + (fy0 - c.py) * c.sy; c.ry1 = c.py + (fy1 - c.py) * c.sy;
+        if (qx1 < qx0) continue;
+        float* b = cull + 4 * nCull++;
+        b[0] = c.px + (qx0 - c.px) * c.sx; b[2] = c.px + (qx1 - c.px) * c.sx;
+        b[1] = c.py + (qy0 - c.py) * c.sy; b[3] = c.py + (qy1 - c.py) * c.sy;
+    }
+    for (int k = 0; k < nb; ++k) rmax = fmaxf(rmax, wk.bridges[k].r);
+    const float M = 0.5f / smin + rmax * 0.25f;
+    for (int k = 0; k < nb; ++k)
+    {
+        const Bridge& br = wk.bridges[k];
+        if (br.hs <= 0.f || br.cut >= 1.f || (br.eC - br.eP) * br.side <= 0.f) continue;
+        const float u0 = fminf(br.eP, br.eC), u1 = fmaxf(br.eP, br.eC), half = br.hs + br.r + M;
+        float* b = cull + 4 * nCull++;
+        if (axisX) { b[0] = u0; b[2] = u1; b[1] = br.cv - half; b[3] = br.cv + half; }
+        else       { b[1] = u0; b[3] = u1; b[0] = br.cv - half; b[2] = br.cv + half; }
     }
 
     Scene s;
@@ -782,6 +745,7 @@ inline bool Render(const Tag* tags, int n, ImFont* font, float fs, bool axisX, W
     s.bridges = wk.bridges; s.nb = nb;
     s.axisX = axisX;
     s.w = w * ss; s.h = h * ss; s.ss = ss;
+    if (wk.cull) { s.cull = cull; s.ncull = nCull; }
     wk.px.resize((size_t)w * h);
     Compose(s, wk.px.data());
     return true;

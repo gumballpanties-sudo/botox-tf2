@@ -1,15 +1,10 @@
 #pragma once
 #include "../../globals/globals.h"
 
-// Unit D port: sharpen / film grain / vignette(+invert) / invert filter / posterize / deband /
-// channel shift.
-//
-// All of these are "one more pass appended to the already-shared DoPostScreenSpaceEffects
-// pipeline" per docs/port/gap.md Unit D -- no new hook. They run where bloom and colour
-// correction already run (render.cpp's three call sites), same lifecycle shape as bloom.cpp:
-// ScreenFxPasses_Frame draws at most once per frame (first caller whose render target is the
-// backbuffer), ScreenFxPasses_NewFrame clears that latch, ScreenFxPasses_Destroy drops the
-// DEFAULT-pool scene copies + shaders on device loss.
+// The simple passes (sharpen / film grain / vignette / invert / posterize / deband / channel
+// shift) live in colorcorrect.cpp now -- botox draws them inside its colour correction shader.
+// ScreenFxPasses_Frame / _NewFrame are no-ops kept for render.cpp's call sites; _Destroy drops
+// the depth view + depth distort device objects below.
 
 bool ScreenFxPasses_Frame(IDirect3DDevice9* dev, bool forceBackbuffer = false);
 void ScreenFxPasses_NewFrame();

@@ -32,6 +32,7 @@
 //   c2 = tap cap, max streak, tile size, frame noise
 //   c6 = width, height, 1/width, 1/height
 //   c8 = depth scale, the gun's fence, player count, gun run
+//   c14 = blur gamma, 1 / gamma, -, -   (botox "blur gamma", f0e average_bright; 2 = c*c / sqrt)
 
 sampler2D sColor : register(s0);
 sampler2D sInfo  : register(s1);
@@ -40,9 +41,10 @@ sampler2D sTile  : register(s2);
 float4 c2 : register(c2);
 float4 c6 : register(c6);
 float4 c8 : register(c8);
+float4 c14 : register(c14);
 
-float3 in_color(float3 c)  { c = saturate(c); c *= c; return c / (1.5 - max(c.r, max(c.g, c.b))); }
-float3 out_color(float3 c) { return sqrt(saturate((1.5 * c) / (1.0 + max(c.r, max(c.g, c.b))))); }
+float3 in_color(float3 c)  { c = pow(saturate(c), c14.x); return c / (1.5 - max(c.r, max(c.g, c.b))); }
+float3 out_color(float3 c) { return pow(saturate((1.5 * c) / (1.0 + max(c.r, max(c.g, c.b)))), c14.y); }
 
 // interleaved gradient noise, animated on the frame: the taps land between each other every frame
 float ign(float2 p)

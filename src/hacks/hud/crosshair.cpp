@@ -2,6 +2,9 @@
 #include "ch_blend_modes.h"
 #include "../screen/shaders/fx_chblend_vs.h"   // k_fxChBlendVsBytes -- fx_chblend_build.sh
 #include "../screen/shaders/fx_chblend_ps.h"   // k_fxChBlendPs[]    -- one ps_3_0 per blend mode
+#include "hud_snap.h"   // unit hud: sniper crosshair gate from the game thread
+#include "hud_math.h"
+#include <algorithm>
 #include <vector>
 
 #define SCSGO_COND_OFF g_offCond
@@ -1460,6 +1463,121 @@ static void RenderCsgoClassic(int style)
     if (bAdditive) dl->AddCallback(ChCsEnd, nullptr);
 }
 
+// ==== botox sniper crosshair (indicators.cpp sniper_crosshair_*) =====================
+// CS:GO draws no crosshair on an unscoped sniper; botox paints one. TF2 does draw its own,
+// so while this one is up the game's is held off like for the other two (RenderCrosshair).
+// Gate (sniper rifle, not zoomed) comes from the game thread: hud_snap.h.
+static void SniperRect(ImDrawList* dl, float x1, float y1, float x2, float y2, ImU32 col)
+{
+    if (x2 <= x1 || y2 <= y1) return;
+    dl->AddRectFilled(ImVec2(x1, y1), ImVec2(x2, y2), col);
+}
+
+static ImU32 SniperCol(const float c[4], float alphaMul = 1.f)
+{
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3] * alphaMul));
+}
+
+static void SniperClarity(ImDrawList* dl, float cx, float cy, bool outline)
+{
+    const float x = floorf(cx), y = floorf(cy);
+    if (outline)
+    {
+        SniperRect(dl, x - 3.f, y - 3.f, x + 3.f, y + 3.f, SniperCol(g_hudSniperChOutlineColor, 0.15f));
+        SniperRect(dl, x - 2.f, y - 2.f, x + 2.f, y + 2.f, SniperCol(g_hudSniperChOutlineColor));
+    }
+    SniperRect(dl, x - 1.f, y - 1.f, x + 1.f, y + 1.f, SniperCol(g_hudSniperChColor));
+}
+
+static void SniperRing(ImDrawList* dl, float x1, float y1, float x2, float y2, ImU32 col, bool corners)
+{
+    if (corners) { SniperRect(dl, x1 - 1.f, y1 - 1.f, x2 + 1.f, y2 + 1.f, col); return; }
+    SniperRect(dl, x1, y1 - 1.f, x2, y1, col);
+    SniperRect(dl, x1, y2, x2, y2 + 1.f, col);
+    SniperRect(dl, x1 - 1.f, y1, x1, y2, col);
+    SniperRect(dl, x2, y1, x2 + 1.f, y2, col);
+}
+
+static void SniperInterwebz(ImDrawList* dl, float cx, float cy)
+{
+    // band = lo..lo+t, lo = centre - floor(t/2): even t on the pixel edge, odd t on the centre pixel
+    const float length = floorf(7.f * g_hudSniperChIwSize + 0.5f);
+    const float gap = (float)g_hudSniperChIwGap;
+    const float t = (float)(g_hudSniperChIwThick < 1 ? 1 : g_hudSniperChIwThick);
+    const float loX = hudm::IwLo(cx, g_hudSniperChIwThick), hiX = loX + t;
+    const float loY = hudm::IwLo(cy, g_hudSniperChIwThick), hiY = loY + t;
+    const ImU32 col = SniperCol(g_hudSniperChColor), out = SniperCol(g_hudSniperChOutlineColor);
+
+    // gap is measured from the core box edge, so raising thickness never eats it
+    const ChArm arms[4] = {
+        { loX - gap - length, loY, loX - gap, hiY },
+        { hiX + gap, loY, hiX + gap + length, hiY },
+        { loX, loY - gap - length, hiX, loY - gap },
+        { loX, hiY + gap, hiX, hiY + gap + length },
+    };
+    for (const ChArm& a : arms) SniperRing(dl, a.x1, a.y1, a.x2, a.y2, out, g_hudSniperChIwArmCorners);
+    for (const ChArm& a : arms) SniperRect(dl, a.x1, a.y1, a.x2, a.y2, col);
+    SniperRing(dl, loX, loY, hiX, hiY, out, g_hudSniperChIwDotCorners);
+    SniperRect(dl, loX, loY, hiX, hiY, SniperCol(g_hudSniperChDotColor));
+}
+
+static void SniperCustomRect(ImDrawList* dl, int x0, int y0, int x1, int y1, ImU32 col, bool outline, float oth, ImU32 ocol)
+{
+    if (outline)
+        SniperRect(dl, (float)(int)(x0 - oth), (float)(int)(y0 - oth), (float)(int)(x1 + oth), (float)(int)(y1 + oth), ocol);
+    SniperRect(dl, (float)x0, (float)y0, (float)x1, (float)y1, col);
+}
+
+// cl_crosshairstyle 4 math (botox sniper_crosshair_custom): never expands
+static void SniperCustom(ImDrawList* dl, const ImVec2& ds)
+{
+    const float yres = ds.y / 480.f;
+    auto round = [](float v) { return (int)floorf(v + 0.5f); };
+    float outCol[4] = { g_hudSniperChOutlineColor[0], g_hudSniperChOutlineColor[1], g_hudSniperChOutlineColor[2], g_hudSniperChColor[3] };
+    const ImU32 col = SniperCol(g_hudSniperChColor), ocol = SniperCol(outCol);
+    const bool outline = g_hudSniperChOutline;
+    const float oth = std::clamp(g_hudSniperChOutlineThick, 0.1f, 3.f);
+
+    const int distance = (int)(4.f + g_hudSniperChGap);
+    const int barSize = round(g_hudSniperChSize * yres);
+    int barThick = round(g_hudSniperChThick * yres);
+    if (barThick < 1) barThick = 1;
+    const int cx = (int)ds.x / 2, cy = (int)ds.y / 2;
+
+    const int innerLeft = cx - distance - barThick / 2, innerRight = innerLeft + 2 * distance + barThick;
+    int y0 = cy - barThick / 2, y1 = y0 + barThick;
+    SniperCustomRect(dl, innerLeft - barSize, y0, innerLeft, y1, col, outline, oth, ocol);
+    SniperCustomRect(dl, innerRight, y0, innerRight + barSize, y1, col, outline, oth, ocol);
+
+    const int innerTop = cy - distance - barThick / 2, innerBottom = innerTop + 2 * distance + barThick;
+    int x0 = cx - barThick / 2, x1 = x0 + barThick;
+    if (!g_hudSniperChT) SniperCustomRect(dl, x0, innerTop - barSize, x1, innerTop, col, outline, oth, ocol);
+    SniperCustomRect(dl, x0, innerBottom, x1, innerBottom + barSize, col, outline, oth, ocol);
+
+    if (g_hudSniperChDot) SniperCustomRect(dl, x0, y0, x1, y1, col, outline, oth, ocol);
+}
+
+static bool SniperCrosshairWanted()
+{
+    if (!g_hudSniperCh) return false;
+    HudSnap s;
+    return HudSnap_Read(s, GetTickCount64()) && s.alive && s.sniperUnscoped;
+}
+
+static void RenderSniperCrosshair()
+{
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    const float cx = ds.x * 0.5f, cy = ds.y * 0.5f;
+    switch (g_hudSniperChStyle)
+    {
+    case 1:  SniperClarity(dl, cx, cy, true); break;    // kamidere
+    case 2:  SniperInterwebz(dl, cx, cy); break;
+    case 3:  SniperCustom(dl, ds); break;
+    default: SniperClarity(dl, cx, cy, false); break;   // clarity
+    }
+}
+
 // TF2's own crosshair: hold it off while either of ours is drawing, put the
 // player's value back the moment we stop. SOLE writer of this convar -- visuals.cpp
 // used to force it too, which fought this pin and stomped the player's own setting.
@@ -1496,10 +1614,12 @@ void RenderCrosshair()
     // csgo scope (painted by the HUD, scope_csgo.inl): while it draws, no crosshair of ours
     // and none of the game's
     const bool scoped = ScopeCsgo_Active();
-    const bool wanted = (g_chEnable || g_chCsgoEnable || scoped) && !g_eject;
+    const bool sniper = SniperCrosshairWanted();
+    const bool wanted = (g_chEnable || g_chCsgoEnable || sniper || scoped) && !g_eject;
     ChSuppressGameCrosshair(wanted && inGame);
 
     if (!wanted || !inGame || scoped || !IsLocalPlayerAlive()) return;
+    if (sniper) RenderSniperCrosshair();
     if (g_chEnable) RenderCustomCrosshair();
     if (g_chCsgoEnable)
     {

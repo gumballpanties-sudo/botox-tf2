@@ -3,6 +3,7 @@
 #include "../../globals/globals.h"
 #include "../visuals/chams_layers.h"   // botox chams layer lists (config strings)
 #include <cstdio>
+#include <initializer_list>
 
 // botox menu_internal.h color_picker_alpha_flags / color_picker_no_alpha_flags
 static constexpr ImGuiColorEditFlags kPickerAlpha = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
@@ -13,9 +14,9 @@ static constexpr ImGuiColorEditFlags kPickerNoAlpha = ImGuiColorEditFlags_NoOpti
     ImGuiColorEditFlags_NoBorder;
 
 // Called inside menu.cpp's "players" group (Page_VisualsEsp). botox menu_tab_visuals.cpp case 0
-// "players" group, verbatim order / labels / ranges. TF2 rows that differ: flags list (TF2
-// conditions), no weapon icon row (no TF2 icon font), no player stencil / internal glow rows
-// (botox screen passes, not ported).
+// "players" group, verbatim order / labels / ranges / popup widths. TF2 rows that differ: flags
+// list (TF2 conditions); no weapon icon; skeleton has no "lag
+// compensated" (backtrack removed). Player stencil / internal glow = aim/player_stencil.cpp.
 void UnitC_Menu_visuals_esp()
 {
     const bool players = g_espEnable;
@@ -34,7 +35,7 @@ void UnitC_Menu_visuals_esp()
                 ImGui::SliderFloat("min volume##sound esp players", &g_chamsSoundMinVolume, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SliderFloat("sound max distance##sound esp players", &g_chamsSoundMaxDistance, 0.f, 6000.f, "%.0f u", ImGuiSliderFlags_AlwaysClamp);
             }
-        }, ImVec2(210.f, -1));
+        }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("bounding box##player", &g_espBox);
         if (g_espBox)
@@ -57,7 +58,7 @@ void UnitC_Menu_visuals_esp()
                     if (!g_espBoxCorner && !g_espBox3d)
                         ImGui::Combo("outline side##player box outline side", &g_espBoxOutlineSide, "inside\0outside\0both\0");
                 }
-            }, ImVec2(200.f, -1));
+            }, ImVec2(220.f, -1));
 
         /* own row: fill without a frame is a valid look, box toggle must not gate it */
         ImGui::Checkbox("box fill##player", &g_espBoxFill);
@@ -67,7 +68,7 @@ void UnitC_Menu_visuals_esp()
                 ImGui::Checkbox("gradient##player box fill", &g_espBoxFillGradient);
                 if (g_espBoxFillGradient)
                     ImGui::ColorRow("bottom color##player box fill bottom color", g_espBoxFillBottomColor, kPickerAlpha);
-            }, ImVec2(200.f, -1));
+            }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("name##player", &g_espName);
         if (g_espName)
@@ -79,7 +80,7 @@ void UnitC_Menu_visuals_esp()
                     ImGui::ColorRow("invisible##player name invisible color", g_espNameInvisibleColor, kPickerAlpha);
                 } else
                     ImGui::ColorRow("name color##player name color", g_espNameColor, kPickerAlpha);
-            }, ImVec2(200.f, -1));
+            }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("health bar##player", &g_espHealthBar);
         if (g_espHealthBar)
@@ -101,7 +102,7 @@ void UnitC_Menu_visuals_esp()
                         ImGui::ColorRow("bottom color##health bar bottom color", g_espHealthBarBottomColor, kPickerAlpha);
                 }
                 ImGui::ColorRow("background color##health bar background color", g_espHealthBarBgColor, kPickerAlpha);
-            }, ImVec2(200.f, -1));
+            }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("health number##player", &g_espHealthText);
         if (g_espHealthText)
@@ -111,7 +112,7 @@ void UnitC_Menu_visuals_esp()
                 ImGui::Checkbox("custom health number color", &g_espHealthTextCustomColor);
                 if (g_espHealthTextCustomColor)
                     ImGui::ColorRow("number color##player health number color", g_espHealthTextColor, kPickerAlpha);
-            }, ImVec2(200.f, -1));
+            }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("weapon name##player", &g_espWeaponName);
         if (g_espWeaponName) {
@@ -130,7 +131,7 @@ void UnitC_Menu_visuals_esp()
             ImGui::OptionPopup("distance settings##player distance settings", [&]() {
                 ImGui::Combo("unit##player distance", &g_espDistanceUnit, "meters\0units\0feet\0");
                 ImGui::ColorRow("distance color##player distance color", g_espDistanceColor, kPickerAlpha);
-            }, ImVec2(200.f, -1));
+            }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("flags##player", &g_espFlags);
         if (g_espFlags)
@@ -138,7 +139,7 @@ void UnitC_Menu_visuals_esp()
                 ImGui::MultiCombo("flags##player flag list", &g_espFlagList, EspFlagNames(), EF_COUNT);
                 ImGui::ColorRow("flag color##player flag color", g_espFlagsColor, kPickerAlpha);
                 ImGui::ColorRow("alert color##player flag alert color", g_espFlagsAlertColor, kPickerAlpha);
-            }, ImVec2(210.f, -1));
+            }, ImVec2(220.f, -1));
     }
 
     ImGui::BeginDisabled(!players);
@@ -157,7 +158,7 @@ void UnitC_Menu_visuals_esp()
             if (ImGui::Combo("skeleton type##player skeleton", &iSkel, "normal\0smooth\0"))
                 g_espSkeletonType = iSkel ? 2 : 0;
             ImGui::SliderFloat("thickness##player skeleton", &g_espSkeletonThickness, 0.5f, 5.f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
-        }, ImVec2(200.f, -1));
+        }, ImVec2(220.f, -1));
 
     ImGui::Checkbox("show hitboxes", &g_espHitboxes);
     if (g_espHitboxes)
@@ -167,7 +168,7 @@ void UnitC_Menu_visuals_esp()
             ImGui::SliderFloat("thickness##player hitboxes", &g_espHitboxesThickness, 0.5f, 5.f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
             if (g_espHitboxesMode == 1)
                 ImGui::SliderFloat("duration##player hitboxes", &g_espHitboxesDuration, 0.1f, 10.f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
-        }, ImVec2(200.f, -1));
+        }, ImVec2(220.f, -1));
 
     // botox menu_tab_visuals.cpp "player glow" row + popup, verbatim order/labels/ranges.
     // What each option drives in TF2: aim/chams.cpp GlowPass banner.
@@ -212,7 +213,28 @@ void UnitC_Menu_visuals_esp()
             ImGui::Checkbox("gradient##player glow", &g_glowGradient);
             if (gradient)
                 ImGui::SliderFloat("inner size##player glow gradient", &g_glowGradientInner, 0.f, 100.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
-        }, ImVec2(200.f, -1));
+        }, ImVec2(220.f, -1));
+
+    ImGui::Checkbox("player stencil", &g_esxStencil);
+    if (g_esxStencil)
+        ImGui::OptionPopup("player stencil settings", [&]() {
+            ImGui::ColorRow("player visible##player stencil vis color", g_esxStencilVisColor, kPickerAlpha);
+            ImGui::ColorRow("player invisible##player stencil invis color", g_esxStencilInvisColor, kPickerAlpha);
+            ImGui::SliderFloat("thickness##player stencil", &g_esxStencilThickness, 0.5f, 8.f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
+        }, ImVec2(220.f, -1));
+
+    ImGui::Checkbox("internal player glow", &g_esxInnerGlow);
+    if (g_esxInnerGlow)
+        ImGui::OptionPopup("internal player glow settings", [&]() {
+            ImGui::ColorRow("player visible##inner glow vis color", g_esxInnerGlowVisColor, kPickerAlpha);
+            ImGui::ColorRow("player invisible##inner glow invis color", g_esxInnerGlowInvisColor, kPickerAlpha);
+            ImGui::Checkbox("follow bones##inner glow", &g_esxInnerGlowBones);
+            if (g_esxInnerGlowBones)
+                ImGui::SliderFloat("width##inner glow", &g_esxInnerGlowBoneWidth, 10.f, 150.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
+            else
+                ImGui::SliderFloat("size##inner glow", &g_esxInnerGlowSize, 2.f, 30.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderFloat("intensity##inner glow", &g_esxInnerGlowIntensity, 0.25f, 4.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+        }, ImVec2(220.f, -1));
 
     ImGui::EndDisabled();
 
@@ -226,7 +248,7 @@ void UnitC_Menu_visuals_esp()
                 ImGui::SliderFloat("head scale##player avatar", &g_espAvatarHeadScale, 0.25f, 3.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
             else
                 ImGui::SliderFloat("avatar size##player avatar", &g_espAvatarSize, 6.f, 40.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
-        }, ImVec2(200.f, -1));
+        }, ImVec2(220.f, -1));
 
     ImGui::Checkbox("damage numbers", &g_espDamageNumbers);
     if (g_espDamageNumbers)
@@ -235,7 +257,7 @@ void UnitC_Menu_visuals_esp()
             ImGui::SliderFloat("duration", &g_espDmgDuration, 0.2f, 5.f, "%.1f s");
             ImGui::SliderFloat("rise speed", &g_espDmgSpeed, 0.f, 100.f, "%.0f u/s");
             ImGui::Checkbox("stack fast hits", &g_espDmgStack);
-        }, ImVec2(200.f, -1));
+        }, ImVec2(220.f, -1));
 
     ImGui::Checkbox("out of fov arrows", &g_espOofArrows);
     if (g_espOofArrows)
@@ -259,7 +281,7 @@ void UnitC_Menu_visuals_esp()
             if (g_espOofType != 1)
                 ImGui::Checkbox("player avatars", &g_espOofAvatar);
             ImGui::Checkbox("follow aspect ratio", &g_espOofAspect);
-        }, ImVec2(200.f, -1));
+        }, ImVec2(220.f, -1));
 
     // TF2 extra (not in botox): an expanding ring where a sound was made
     ImGui::Checkbox("sound pings", &g_espSoundPings);
@@ -293,7 +315,7 @@ static void BuildingRows(const char* label, const char* id, bool* on, float* col
         snprintf(l, sizeof(l), "flags##%s", id);         ImGui::Checkbox(l, flags);
         snprintf(l, sizeof(l), "distance##%s", id);      ImGui::Checkbox(l, dist);
         if (ownOnly) { snprintf(l, sizeof(l), "only my buildings##%s", id); ImGui::Checkbox(l, ownOnly); }
-    }, ImVec2(200.f, -1));
+    }, ImVec2(220.f, -1));
 }
 
 // Called inside menu.cpp's "buildings" group (Page_VisualsEsp, under "players").
@@ -343,8 +365,17 @@ static void ChamsDropdown(const char* label, char* cfg)
             ImGui::SameLine();
             char color_id[96] = {};
             std::snprintf(color_id, sizeof(color_id), "##chams color%s%s", label, kNames[material]);
-            if (ImGui::ColorRow(color_id, l.colors[slot], kPickerAlpha))
+            // two tone: lit side swatch left (slot 1), shadow side right (slot 0)
+            const bool two_tone = material == TwoTone;
+            if (ImGui::ColorRow(color_id, l.colors[slot], kPickerAlpha, two_tone ? 1 : 0))
                 changed = true;
+            if (two_tone) {
+                ImGui::SameLine();
+                char dark_id[96] = {};
+                std::snprintf(dark_id, sizeof(dark_id), "##chams dark color%s%s", label, kNames[material]);
+                if (ImGui::ColorRow(dark_id, l.darks[slot], kPickerAlpha, 0))
+                    changed = true;
+            }
             ImGui::SetCursorPos(next_position);
         }
 
@@ -411,24 +442,79 @@ void UnitC_Menu_visuals_chams()
     ChamsDropdown("sleeve material", g_chamsSleeveCfg);
 
     ImGui::EndDisabled();
+
+    bool two_tone_used = false;
+    for (const char* cfg : { g_chamsVisibleCfg, g_chamsOccludedCfg, g_chamsSoundCfg, g_chamsTeamVisibleCfg, g_chamsTeamOccludedCfg,
+                             g_chamsWeaponCfg, g_chamsArmsCfg, g_chamsSleeveCfg }) {
+        ChamsLayers::List l;
+        ChamsLayers::Parse(cfg, l);
+        two_tone_used |= ChamsLayers::IndexOf(l, ChamsLayers::TwoTone) >= 0;
+    }
+
+    if (two_tone_used) {
+        ImGui::SliderFloat("two tone threshold", &g_chamsTwoToneThreshold, 0.f, 1.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderFloat("two tone edge", &g_chamsTwoToneEdge, 0.f, 0.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    }
 }
 
-// Called inside menu.cpp's "edicts" group (Page_VisualsWorld, col1). World-entity esp:
-// TF2 has no dropped-weapon/bomb/grenade-path analogues botox's edicts group has, so this
-// keeps the ammo/projectile rows that exist here instead (buildings: esp page, own group).
+// Called inside menu.cpp's "edicts" group (Page_VisualsEsp, under "players"). botox
+// menu_tab_visuals.cpp "edicts" group, verbatim order / labels / popups. TF2 mapping (aim/esp.cpp):
+// dropped weapons = CTFDroppedWeapon, thrown projectiles = every live projectile (rockets, pipes,
+// stickies, arrows, flares, jars...), grenade path = your own projectile weapon's trajectory
+// (botox: the held grenade's). Skipped: planted bomb / bomb timer bar (no bomb in TF2).
+// TF2 extras after botox's rows: ammo packs, in-flight projectile paths, buildings.
 void UnitC_Menu_visuals_world()
 {
-    ImGui::Checkbox("world entities", &g_espWorldEnable);
-    if (g_espWorldEnable)
-        ImGui::OptionPopup("world entities settings", [&]() {
-            ImGui::Checkbox("ammo packs", &g_espAmmoPacks);
-            ImGui::Checkbox("dropped weapons", &g_espDroppedWeapons);
-            if (g_espAmmoPacks || g_espDroppedWeapons) ImGui::ColorRow("item color##edicts", g_espItemColor, kPickerAlpha);
-            ImGui::Checkbox("projectiles", &g_espProjectiles);
-            if (g_espProjectiles) ImGui::ColorRow("projectile color##edicts", g_espProjColor, kPickerAlpha);
-        }, ImVec2(200.f, -1));
+    ImGui::Checkbox("dropped weapons", &g_esxDropped);
+    if (g_esxDropped)
+        ImGui::OptionPopup("dropped weapons settings", [&]() {
+            ImGui::Checkbox("bounding box##dropped weapons", &g_esxDroppedBox);
+            if (g_esxDroppedBox) {
+                ImGui::ColorRow("box color##dropped weapons bounding box color", g_esxDroppedBoxColor, kPickerAlpha);
+                ImGui::Checkbox("corner bounding box##dropped weapons", &g_esxDroppedBoxCorner);
+                ImGui::Checkbox("bounding box outline##dropped weapons", &g_esxDroppedBoxOutline);
+                if (g_esxDroppedBoxOutline)
+                    ImGui::ColorRow("outline color##dropped weapons bounding box outline color", g_esxDroppedBoxOutlineColor, kPickerAlpha);
+            }
+            ImGui::Checkbox("name##dropped weapons", &g_esxDroppedName);
+            if (g_esxDroppedName) {
+                ImGui::SameLine();
+                ImGui::ColorRow("##dropped weapons name color", g_esxDroppedNameColor, kPickerAlpha);
+            }
+        }, ImVec2(220.f, -1));
+
+    ImGui::Checkbox("thrown projectiles", &g_esxThrown);
+    if (g_esxThrown)
+        ImGui::OptionPopup("thrown projectiles settings", [&]() {
+            ImGui::Checkbox("thrown objects name", &g_esxThrownName);
+            if (g_esxThrownName) {
+                ImGui::SameLine();
+                ImGui::ColorRow("##thrown objects name color", g_esxThrownNameColor, kPickerAlpha);
+            }
+        }, ImVec2(220.f, -1));
+
+    ImGui::Checkbox("grenade path", &g_esxGrenadePath);
+    if (g_esxGrenadePath)
+        ImGui::OptionPopup("grenade path settings", [&]() {
+            ImGui::ColorRow("path##grenade path color", g_esxGrenadePathColor, kPickerAlpha);
+            ImGui::ColorRow("bounce##grenade path bounce color", g_esxGrenadePathBounceColor, kPickerAlpha);
+            ImGui::ColorRow("detonation##grenade path detonate color", g_esxGrenadePathDetonateColor, kPickerAlpha);
+            ImGui::Checkbox("effect radius##grenade path", &g_esxGrenadePathRadius);
+            ImGui::SliderFloat("thickness##grenade path", &g_esxGrenadePathThickness, 1.f, 5.f, "%.1f px");
+        }, ImVec2(220.f, -1));
+
+    // ---- TF2 extras ----
+    ImGui::Checkbox("ammo packs", &g_esxAmmo);
+    if (g_esxAmmo) {
+        ImGui::SameLine();
+        ImGui::ColorRow("##ammo packs color", g_esxAmmoColor, kPickerAlpha);
+    }
 
     ImGui::Checkbox("projectile path", &g_espProjPath);
-    if (g_espProjPath)
-        ImGui::ColorRow("path color##edicts", g_espProjPathColor);
+    if (g_espProjPath) {
+        ImGui::SameLine();
+        ImGui::ColorRow("##projectile path color", g_espProjPathColor, kPickerAlpha);
+    }
+
+    UnitC_Menu_visuals_buildings();
 }

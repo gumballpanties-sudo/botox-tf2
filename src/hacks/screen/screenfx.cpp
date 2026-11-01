@@ -52,6 +52,26 @@ static bool s_nvapiOk      = false;
 static void* s_nvRegTex    = nullptr;             // registering the same resource twice is an error
 static bool s_capsLogged   = false;
 
+// ---- route 3, "universal depth" (botox depth_source.cpp route_live, "z swap") -------------
+// No driver copy at all: our INTZ IS the game's z buffer. SetDepthStencilSurface (slot 39) maps
+// the engine's own depth surface to ours, GetDepthStencilSurface (slot 40) maps it back so the
+// engine never caches our pointer (a map load re-reads it without a Reset). INTZ cannot be
+// multisampled, so msaa off only. Forced by the switch, or the fallback when neither driver
+// route exists on a non-amd card (amd: the gun sinks into walls through an INTZ z test).
+enum FxRoute { FX_ROUTE_NONE = 0, FX_ROUTE_RESZ, FX_ROUTE_NVAPI, FX_ROUTE_LIVE };
+static const char* k_fxRouteNames[] = { "none", "resz", "nvapi", "z swap" };
+static int  s_route        = FX_ROUTE_NONE;
+static bool s_amd          = false;
+static bool s_live         = false;               // the swap is in force on the device
+static bool s_liveForced   = false;               // g_fxUniversalDepth when the source was built
+static IDirect3DSurface9* s_ownSurf   = nullptr;  // s_ownDepth level 0, the stand-in z buffer
+static IDirect3DSurface9* s_autoDepth = nullptr;  // the engine's own z buffer it stands in for
+
+using SetDS_t = HRESULT(__stdcall*)(IDirect3DDevice9*, IDirect3DSurface9*);
+using GetDS_t = HRESULT(__stdcall*)(IDirect3DDevice9*, IDirect3DSurface9**);
+static SetDS_t o_SetDepthStencil = nullptr;
+static GetDS_t o_GetDepthStencil = nullptr;
+
 static int  s_frame        = 0;                   // bumped in h_Present
 static int  s_resolvedFrm  = -1;                  // one resolve per frame, whoever asks first
 static int  s_bbScene      = 0;                   // backbuffer scenes seen so far this frame
@@ -165,7 +185,30 @@ bool ScreenFx_View(FxViewSetup& out)
 
 IDirect3DTexture9* ScreenFx_DepthTexture()
 {
-    return (s_ownDepth && (s_reszOk || s_nvapiOk)) ? s_ownDepth : nullptr;
+    if (!s_ownDepth) return nullptr;
+    // z swap: only once the swap is live -- before that the INTZ holds nothing
+    if (s_route == FX_ROUTE_LIVE) return s_live ? s_ownDepth : nullptr;
+    return (s_route != FX_ROUTE_NONE) ? s_ownDepth : nullptr;
+}
+
+const char* ScreenFx_RouteName()
+{
+    return k_fxRouteNames[(s_route >= 0 && s_route <= FX_ROUTE_LIVE) ? s_route : 0];
+}
+
+// botox verify_name, off our probe's verdict at the post slot (the draw point that counts)
+const char* ScreenFx_VerifyName()
+{
+    if (s_route == FX_ROUTE_NONE) {
+        if (!s_texW) return "";   // never built: no depth pass has run yet
+        return s_amd ? "amd: turn msaa on" : "msaa on + no driver route";
+    }
+    if (s_route == FX_ROUTE_LIVE && !s_live) return "checking";
+    switch (s_health[1].health) {
+        case FxHealth::Live: return "ok";
+        case FxHealth::Dead: return "dead";
+        default:             return "checking";
+    }
 }
 
 // THIS FRAME'S copy or nothing. A stale one is worse than none: the camera has moved, so
@@ -200,6 +243,23 @@ void ScreenFx_NewFrame()
     // A probe frame owes ONE line per backbuffer scene, so the flag dies with the frame and
     // not with the first readback.
     s_probePending = false;
+
+    // z swap, between frames (h_Present, the render thread). Nothing reads the depth any more,
+    // or the switch went off: hand the engine its own z buffer back -- Destroy does the swap
+    // back. Otherwise go live: from here the hook maps every bind of the engine's z to ours.
+    if (s_route == FX_ROUTE_LIVE && g_d3dDev) {
+        if (g_eject || !(FxWantDepthPass() || g_fxDepthProbe) || g_fxUniversalDepth != s_liveForced) {
+            ScreenFx_Destroy();
+        } else if (!s_live && s_ownSurf && s_autoDepth && o_GetDepthStencil) {
+            s_live = true;
+            IDirect3DSurface9* bound = nullptr;
+            if (SUCCEEDED(o_GetDepthStencil(g_d3dDev, &bound)) && bound) {
+                if (bound == s_autoDepth) g_d3dDev->SetDepthStencilSurface(s_ownSurf);
+                bound->Release();
+            }
+            DebugLog("^FX: z swap live -- own INTZ is the z buffer from this frame");
+        }
+    }
 }
 
 // ==== nvapi =========================================================================
@@ -341,6 +401,25 @@ void ScreenFx_Destroy()
     if (s_probeSurf) { s_probeSurf->Release(); s_probeSurf = nullptr; }
     if (s_probeTex)  { s_probeTex->Release();  s_probeTex  = nullptr; }
     if (s_probePs)   { s_probePs->Release();   s_probePs   = nullptr; }
+
+    // z swap: the engine's z buffer goes back on the device FIRST -- a bound INTZ is a live
+    // DEFAULT-pool reference and the Reset after this would fail on it. Off the render thread
+    // (eject, poll thread) the hooks are already disabled and the engine's next bind of its own
+    // surface goes straight through, so the device is not touched from there.
+    s_live = false;
+    if (s_ownSurf) {
+        const bool renderThread = !g_eject || GetCurrentThreadId() == Render_PresentTid();
+        IDirect3DSurface9* bound = nullptr;
+        if (renderThread && g_d3dDev && o_GetDepthStencil &&
+            SUCCEEDED(o_GetDepthStencil(g_d3dDev, &bound)) && bound) {
+            if (bound == s_ownSurf && s_autoDepth) g_d3dDev->SetDepthStencilSurface(s_autoDepth);
+            bound->Release();
+        }
+        s_ownSurf->Release(); s_ownSurf = nullptr;
+    }
+    if (s_autoDepth) { s_autoDepth->Release(); s_autoDepth = nullptr; }
+    s_route = FX_ROUTE_NONE;
+
     if (s_ownDepth)  { s_ownDepth->Release();  s_ownDepth  = nullptr; }
 
     s_texW = s_texH = 0;
@@ -362,8 +441,9 @@ static bool FxEnsure(IDirect3DDevice9* dev, const D3DSURFACE_DESC& desc)
     if (!dev) return false;
     // Built already: the answer is whether a route came out of it, not whether the texture
     // exists -- an INTZ nothing can resolve into is not a depth source.
-    if (s_ownDepth && s_texW == (int)desc.Width && s_texH == (int)desc.Height)
-        return s_reszOk || s_nvapiOk;
+    if (s_ownDepth && s_texW == (int)desc.Width && s_texH == (int)desc.Height &&
+        s_liveForced == g_fxUniversalDepth)
+        return s_route != FX_ROUTE_NONE;
 
     // A new frame size means a device reset or a video setting change, and a route that was
     // dead before it is worth trying again -- so the give-up count starts over here.
@@ -382,11 +462,13 @@ static bool FxEnsure(IDirect3DDevice9* dev, const D3DSURFACE_DESC& desc)
                                         D3DRTYPE_TEXTURE, k_fmtINTZ));
         s_reszOk = resz && intz;
 
-        if (!s_capsLogged) {
-            s_capsLogged = true;
-            D3DADAPTER_IDENTIFIER9 id{};
-            if (SUCCEEDED(d3d->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &id)))
+        D3DADAPTER_IDENTIFIER9 id{};
+        if (SUCCEEDED(d3d->GetAdapterIdentifier(D3DADAPTER_DEFAULT, 0, &id))) {
+            s_amd = (id.VendorId == 0x1002);
+            if (!s_capsLogged) {
+                s_capsLogged = true;
                 DebugLog("screenfx: adapter %s vendor 0x%04x", id.Description, (unsigned)id.VendorId);
+            }
         }
         DebugLog("screenfx: resz=%d intz=%d", (int)resz, (int)intz);
         d3d->Release();
@@ -407,12 +489,41 @@ static bool FxEnsure(IDirect3DDevice9* dev, const D3DSURFACE_DESC& desc)
 
     s_texW = (int)desc.Width;
     s_texH = (int)desc.Height;
+    s_liveForced = g_fxUniversalDepth;
 
-    if (!s_reszOk && !s_nvapiOk) {
-        DebugLog("screenfx: neither RESZ nor NvAPI -- depth resolve impossible on this card");
+    s_route = s_reszOk ? FX_ROUTE_RESZ : (s_nvapiOk ? FX_ROUTE_NVAPI : FX_ROUTE_NONE);
+
+    // botox ensure(): forced, or no driver route on a non-amd card
+    if ((s_liveForced || (s_route == FX_ROUTE_NONE && !s_amd)) && o_SetDepthStencil && o_GetDepthStencil)
+    {
+        IDirect3DSurface9* bound = nullptr;
+        D3DSURFACE_DESC bd{};
+        if (SUCCEEDED(o_GetDepthStencil(dev, &bound)) && bound && SUCCEEDED(bound->GetDesc(&bd)) &&
+            bd.MultiSampleType == D3DMULTISAMPLE_NONE && bd.Format != k_fmtINTZ &&
+            bd.Width == desc.Width && bd.Height == desc.Height &&
+            SUCCEEDED(s_ownDepth->GetSurfaceLevel(0, &s_ownSurf)) && s_ownSurf)
+        {
+            s_autoDepth = bound;   // keeps the ref
+            bound = nullptr;
+            s_route = FX_ROUTE_LIVE;
+            DebugLog("^FX: z swap picked (forced=%d) -- own INTZ becomes the z buffer next frame",
+                     (int)s_liveForced);
+        }
+        else
+        {
+            DebugLog("^FX: z swap skipped -- z buffer %s (msaa %u fmt %u %ux%u), universal depth needs msaa off",
+                     bound ? "unusable" : "not bound", (unsigned)bd.MultiSampleType, (unsigned)bd.Format,
+                     (unsigned)bd.Width, (unsigned)bd.Height);
+        }
+        if (bound) bound->Release();
+    }
+
+    if (s_route == FX_ROUTE_NONE) {
+        DebugLog("screenfx: neither RESZ nor NvAPI -- depth resolve impossible on this card%s",
+                 s_amd ? " (amd: turn msaa on)" : "");
         return false;
     }
-    DebugLog("screenfx: depth source up %dx%d route=%s", s_texW, s_texH, s_reszOk ? "resz" : "nvapi");
+    DebugLog("screenfx: depth source up %dx%d route=%s", s_texW, s_texH, k_fxRouteNames[s_route]);
     return true;
 }
 
@@ -818,6 +929,45 @@ void ScreenFx_InstallRenderStateHook(void* setRenderStateSlot)
         DebugLog("screenfx: SetRenderState MH_CreateHook FAILED -- particles stay inside the blur");
 }
 
+// ---- z swap hooks: IDirect3DDevice9 slots 39 / 40 (d3d9.h, EndScene 42 / SetRenderState 57
+// as the anchors; botox hooks.cpp:248 hooks 39 too). One compare each when the swap is off.
+static HRESULT __stdcall h_SetDepthStencilSurface(IDirect3DDevice9* dev, IDirect3DSurface9* surf)
+{
+    if (s_live && surf && surf == s_autoDepth) surf = s_ownSurf;
+    return o_SetDepthStencil(dev, surf);
+}
+
+static HRESULT __stdcall h_GetDepthStencilSurface(IDirect3DDevice9* dev, IDirect3DSurface9** out)
+{
+    const HRESULT hr = o_GetDepthStencil(dev, out);
+    // the engine (and every save/restore of ours) only ever sees its own z buffer
+    if (SUCCEEDED(hr) && out && *out && s_ownSurf && *out == s_ownSurf && s_autoDepth) {
+        (*out)->Release();
+        s_autoDepth->AddRef();
+        *out = s_autoDepth;
+    }
+    return hr;
+}
+
+void ScreenFx_InstallDepthStencilHooks(void* setSlot, void* getSlot)
+{
+    if (o_SetDepthStencil || !setSlot || !getSlot) return;
+    if (MH_CreateHook(setSlot, (LPVOID)&h_SetDepthStencilSurface, (LPVOID*)&o_SetDepthStencil) != MH_OK) {
+        o_SetDepthStencil = nullptr;
+        DebugLog("screenfx: SetDepthStencilSurface MH_CreateHook FAILED -- no universal depth");
+        return;
+    }
+    if (MH_CreateHook(getSlot, (LPVOID)&h_GetDepthStencilSurface, (LPVOID*)&o_GetDepthStencil) != MH_OK) {
+        // without the reverse map the engine could cache our INTZ: no z swap at all
+        MH_RemoveHook(setSlot);
+        o_SetDepthStencil = nullptr;
+        o_GetDepthStencil = nullptr;
+        DebugLog("screenfx: GetDepthStencilSurface MH_CreateHook FAILED -- no universal depth");
+        return;
+    }
+    DebugLog("screenfx: depth stencil hooks installed (slots 39/40) -- universal depth available");
+}
+
 // ==== the probe =====================================================================
 // A 64x36 grid of depth taps, rendered with the probe shader, pulled back to system
 // memory and read. This is the one honest test that the resolve worked: an INTZ texture
@@ -1135,15 +1285,16 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
         return;
     }
 
-    if (FxEnsure(dev, desc))
+    if (FxEnsure(dev, desc) && ScreenFx_DepthTexture())   // z swap: nothing until it is live
     {
         s_resolvedFrm = s_frame;
 
-        {
+        // z swap: nothing to resolve, the INTZ is the z buffer itself
+        if (s_route != FX_ROUTE_LIVE) {
             FxSavedState st{};
             FxSave(dev, st);
-            if (s_reszOk) FxResolveResz(dev);
-            else          FxResolveNvapi(dev, depthSurf);
+            if (s_route == FX_ROUTE_RESZ) FxResolveResz(dev);
+            else                          FxResolveNvapi(dev, depthSurf);
             FxRestore(dev, st);
         }
 
@@ -1227,18 +1378,20 @@ void ScreenFx_ViewmodelFrame(IDirect3DDevice9* dev)
     IDirect3DSurface9* depthSurf = nullptr;
     if (FAILED(dev->GetDepthStencilSurface(&depthSurf)) || !depthSurf) { if (rt) rt->Release(); return; }
 
-    if (FxEnsure(dev, desc))
+    if (FxEnsure(dev, desc) && ScreenFx_DepthTexture())   // z swap: nothing until it is live
     {
         s_vmFrame = s_frame;
 
         // ALWAYS RESOLVED HERE, and this is the point of the whole pass: the copy the first
         // pass worked off was taken before DrawViewModels, so the gun is not in it. This one
         // is taken after, and it is the only depth that knows where the gun is.
-        FxSavedState st{};
-        FxSave(dev, st);
-        if (s_reszOk) FxResolveResz(dev);
-        else          FxResolveNvapi(dev, depthSurf);
-        FxRestore(dev, st);
+        if (s_route != FX_ROUTE_LIVE) {
+            FxSavedState st{};
+            FxSave(dev, st);
+            if (s_route == FX_ROUTE_RESZ) FxResolveResz(dev);
+            else                          FxResolveNvapi(dev, depthSurf);
+            FxRestore(dev, st);
+        }
 
         FxViewSetup view{};
         if (ScreenFx_View(view)) {
@@ -1328,8 +1481,61 @@ static void FxEngineExec(const char* cmd)
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// ==== motion blur: the engine's own =================================================
+// botox "motion blur" re-implements Source's DoImageSpaceMotionBlur because csgo cut it. TF2
+// still runs it (viewrender.cpp:2146 -> viewpostprocess.cpp:2702) off these cvars, read with
+// GetInt/GetFloat every frame, so a raw write is enough -- no change callback involved. Roll
+// intensity has no cvar in TF2 (commented out at viewpostprocess.cpp:2698, hardcoded 0.3; the
+// string is not in tf/bin/x64/client.dll). Saved on the first apply, handed back on off / eject.
+struct FxMbCvar { const char* name; CachedCVar cc; float saved; bool have; };
+static FxMbCvar s_mbCvars[] = {
+    { "mat_motion_blur_enabled" },           { "mat_motion_blur_forward_enabled" },
+    { "mat_motion_blur_strength" },          { "mat_motion_blur_rotation_intensity" },
+    { "mat_motion_blur_falling_intensity" }, { "mat_motion_blur_falling_min" },
+    { "mat_motion_blur_falling_max" },
+};
+static bool s_mbApplied = false;
+
+static void FxMotionBlurRestore(const char* why)
+{
+    if (!s_mbApplied) return;
+    s_mbApplied = false;
+    for (FxMbCvar& c : s_mbCvars) {
+        if (!c.have) continue;
+        c.have = false;
+        if (ConVar* cv = c.cc.Get(c.name)) cv->ForceFloat(c.saved);
+    }
+    DebugLog("screenfx: motion blur cvars put back (%s)", why);
+}
+
+static void FxMotionBlurTick()
+{
+    if (!g_mbEnable || g_eject) { FxMotionBlurRestore("off"); return; }
+
+    // the engine divides by (max - min): equal ends are a division by zero
+    const float fmin = g_mbFallMin;
+    const float fmax = (g_mbFallMax > fmin + 0.01f) ? g_mbFallMax : fmin + 0.01f;
+    const float want[] = { 1.f, g_mbForward ? 1.f : 0.f, g_mbStrength, g_mbRotation, g_mbFalling, fmin, fmax };
+
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); ++i) {
+        FxMbCvar& c = s_mbCvars[i];
+        ConVar* cv = c.cc.Get(c.name);
+        if (!cv) continue;
+        if (!c.have) { c.have = true; c.saved = cv->GetFloat(); }
+        // re-asserted: a config exec or the video menu puts mat_motion_blur_enabled back
+        if (cv->GetFloat() != want[i]) cv->ForceFloat(want[i]);
+    }
+    if (!s_mbApplied) {
+        s_mbApplied = true;
+        DebugLog("screenfx: motion blur on -- mat_motion_blur_* strength %.2f rotation %.2f falling %.2f (%.1f..%.1f) forward %d",
+                 g_mbStrength, g_mbRotation, g_mbFalling, fmin, fmax, (int)g_mbForward);
+    }
+}
+
 void ScreenFx_Tick()
 {
+    FxMotionBlurTick();
+
     static CachedCVar cc_queue;
     ConVar* cv = cc_queue.Get("mat_queue_mode");
     if (!cv) return;
@@ -1369,6 +1575,7 @@ void ScreenFx_Tick()
 
 void ScreenFx_RestoreQueueMode()
 {
+    FxMotionBlurRestore("eject");
     if (!s_queueForced) return;
     s_queueForced = false;
     char cmd[64];
@@ -1376,6 +1583,8 @@ void ScreenFx_RestoreQueueMode()
     FxEngineExec(cmd);
     DebugLog("screenfx: eject -- mat_queue_mode put back to %d", s_queueOriginal);
 }
+
+bool ScreenFx_QueueForced() { return s_queueForced; }   // unit game: misc performance "multicore rendering" yields to it
 
 // ==== IClientMode::DoPostScreenSpaceEffects =========================================
 // The game's own screen-space slot: the 3D scene and the engine's post are done, the HUD
@@ -1462,7 +1671,7 @@ static void FxReadViewSetup(const void* setup)
 
     // The focus trace belongs on THIS thread: it walks the engine's collision world, and the
     // draw half runs on the render thread a frame later where none of that is safe to touch.
-    Dof_UpdateFocus(origin, angles);
+    Dof_UpdateFocus(origin, angles, fov, (h > 0) ? (float)w / (float)h : 1.f);
 
     // Same story, and the entity list is the same reason: the camera history, the reprojection
     // built off it and the players' boxes all belong to this thread.
@@ -1473,6 +1682,9 @@ static void FxReadViewSetup(const void* setup)
     // unit D3: the sky/clouds pass's world-space cloud drift -- same thread, same reason
     // (g_globalVars->curtime and the player's own origin are main-thread only).
     MCWorld_UpdateView(fbOrigin);
+
+    // unit screen: reflections' nearest env_cubemap pick + file loads (botox pick_cubemap, main thread)
+    Reflections_UpdateView(fbOrigin, fbAngles);
 }
 
 static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* setup)

@@ -5,6 +5,7 @@
 #include "core.h"
 #include "aimbot.h"
 #include "menu.h"
+#include "hud_aim.h"   // unit hud: HudAim_Restore on unload
 
 #include "../../dependencies/imgui/imgui.h"
 
@@ -147,6 +148,7 @@ void Aim_Unload()
 		return;
 
 	G::Unload = true;
+	HudAim_Restore();   // unit hud: net_graphtext back to the player's value
 	U::Hooks.Unload();
 	H::Events.Unload();
 	H::ConVars.Restore();

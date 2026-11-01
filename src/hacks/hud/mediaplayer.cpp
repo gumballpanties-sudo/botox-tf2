@@ -15,10 +15,16 @@
 //
 // ONE CHANGE: art. botox hands the encoded bytes to D3DXCreateTextureFromFileInMemory; this dll
 // links d3d9 only, so the same bytes go through winrt BitmapDecoder -> BGRA8 here and the render
-// thread does CreateTexture + LockRect. Lyrics + visualizer are not ported (panel has neither).
+// thread does CreateTexture + LockRect.
+// Waveform = botox visualizer_thread 1:1 (WASAPI process loopback of the media app's tree, else
+// everything but this game's tree -> audio_bands.h FFT). Lyrics = botox lyrics_thread 1:1 (lrclib
+// synced lyrics over WinHTTP); the json read is mp_lyrics.h (no json lib here). Both are gate
+// tested by tests/mpaudio_test.cpp. In game control = botox media_player_binds.
 #pragma comment(lib, "windowsapp")
 #pragma comment(lib, "ole32")
 #pragma comment(lib, "shell32")
+#pragma comment(lib, "winhttp")
+#pragma comment(lib, "mmdevapi")
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -29,13 +35,25 @@
 #include <audiopolicy.h>
 #include <endpointvolume.h>
 #include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <audioclientactivationparams.h>
+#include <appmodel.h>
+#include <propsys.h>
+#include <shellapi.h>
+#include <tlhelp32.h>
+#include <winhttp.h>
+
+#include "audio_bands.h"   // botox globals/media_player/audio_bands.h, verbatim
+#include "mp_lyrics.h"     // lrclib json read + LRC parse + row window (gate tested)
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cwctype>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace wf  = winrt::Windows::Foundation;
@@ -81,6 +99,21 @@ static int s_thumbWait = 0;
 static IDirect3DTexture9* s_tex = nullptr;
 
 static HANDLE s_thread = nullptr;
+
+// botox m_bands / m_bands_mutex: visualizer thread writes, render thread copies
+static std::mutex s_bandsMtx;
+static float s_bands[n_audio_bands::k_bands]{};
+static HANDLE s_visThread = nullptr;
+
+// botox m_lyrics / m_lyrics_generation: lyrics thread writes, render thread copies on a new generation
+static std::mutex s_lyricsMtx;
+static std::vector<mpl::Line> s_lyrics;
+static int s_lyricsGen = 0;
+static std::string s_lyricsKey;     // lyrics thread only
+static HANDLE s_lyricsThread = nullptr;
+// the lrclib request in flight: eject closes it so a 10 s receive timeout cannot outlive the dll
+static std::mutex s_httpMtx;
+static HINTERNET s_httpReq = nullptr;
 
 // ==== poll thread ===============================================================================
 static std::string ToUtf8(std::wstring_view text)
@@ -695,6 +728,425 @@ static bool RunCommand(const Manager& manager)
     return true;
 }
 
+// ==== visualizer thread: botox media_player.cpp visualizer_thread + loopback_t, 1:1 ===========
+namespace
+{
+    struct activate_handler_t : IActivateAudioInterfaceCompletionHandler, IAgileObject {
+        std::atomic<ULONG> m_refs{ 1 };
+        HANDLE m_done          = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        IAudioClient* m_client = nullptr;
+
+        virtual ~activate_handler_t()
+        {
+            safe_release(m_client);
+            if (m_done) CloseHandle(m_done);
+        }
+
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override
+        {
+            if (riid == __uuidof(IUnknown) || riid == __uuidof(IActivateAudioInterfaceCompletionHandler))
+                *out = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+            else if (riid == __uuidof(IAgileObject))
+                *out = static_cast<IAgileObject*>(this);
+            else { *out = nullptr; return E_NOINTERFACE; }
+            AddRef();
+            return S_OK;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return ++m_refs; }
+        ULONG STDMETHODCALLTYPE Release() override
+        {
+            const ULONG refs = --m_refs;
+            if (refs == 0) delete this;
+            return refs;
+        }
+        HRESULT STDMETHODCALLTYPE ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation) override
+        {
+            HRESULT result  = E_FAIL;
+            IUnknown* added = nullptr;
+            if (SUCCEEDED(operation->GetActivateResult(&result, &added)) && SUCCEEDED(result) && added)
+                added->QueryInterface(__uuidof(IAudioClient), reinterpret_cast<void**>(&m_client));
+            safe_release(added);
+            SetEvent(m_done);
+            return S_OK;
+        }
+    };
+
+    std::wstring window_aumid(HWND window)
+    {
+        static constexpr PROPERTYKEY k_aumid{ { 0x9F4C2855, 0x9F79, 0x4B39, { 0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3 } }, 5 };   // PKEY_AppUserModel_ID
+        IPropertyStore* store = nullptr;
+        if (FAILED(SHGetPropertyStoreForWindow(window, IID_PPV_ARGS(&store))) || !store) return {};
+        std::wstring out{};
+        PROPVARIANT value{};
+        if (SUCCEEDED(store->GetValue(k_aumid, &value)) && value.vt == VT_LPWSTR && value.pwszVal) out = value.pwszVal;
+        PropVariantClear(&value);
+        store->Release();
+        return out;
+    }
+
+    /* GSMTC names the app by AppUserModelId, process loopback wants a pid. match exe name ( "Chrome", "MSEdge", "Spotify.exe" ),
+       packaged id ( "Pkg_hash!App" ), or a window's taskbar id ( firefox hash ). then climb same-exe parents to the root,
+       its tree holds the browser's audio child. 0 = no match */
+    DWORD media_pid(const std::wstring& aumid)
+    {
+        if (aumid.empty()) return 0;
+
+        struct proc_t { DWORD m_parent; std::wstring m_exe; };
+        std::unordered_map<DWORD, proc_t> procs{};
+
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return 0;
+        PROCESSENTRY32W entry{ sizeof(entry) };
+        for (BOOL ok = Process32FirstW(snapshot, &entry); ok; ok = Process32NextW(snapshot, &entry))
+            procs[entry.th32ProcessID] = { entry.th32ParentProcessID, exe_stem(entry.szExeFile) };
+        CloseHandle(snapshot);
+
+        const DWORD self = GetCurrentProcessId();
+
+        // bounded: a dead parent's pid can be reused
+        const auto root = [&](DWORD pid) {
+            for (int depth = 0; pid && depth < 16; depth++) {
+                const auto child  = procs.find(pid);
+                const auto parent = child != procs.end() ? procs.find(child->second.m_parent) : procs.end();
+                if (parent == procs.end() || parent->first == pid || parent->first == self || parent->second.m_exe != child->second.m_exe) break;
+                pid = parent->first;
+            }
+            return pid;
+        };
+
+        const std::wstring want = lower(aumid);
+        const std::wstring stem = exe_stem(aumid);
+
+        // many chrome.exe: the root most of them hang off is the browser, stable across checks so the stream doesn't flap
+        std::unordered_map<DWORD, int> roots{};
+        for (const auto& [pid, proc] : procs)
+            if (pid && pid != self && proc.m_exe == stem) roots[root(pid)]++;
+
+        DWORD found = 0;
+        int best = 0;
+        for (const auto& [pid, count] : roots)
+            if (count > best || (count == best && pid < found)) { found = pid; best = count; }
+        if (found) return found;
+
+        if (want.find(L'!') != std::wstring::npos) {
+            for (const auto& [pid, proc] : procs) {
+                if (!pid || pid == self) continue;
+                const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                if (!process) continue;
+                wchar_t id[APPLICATION_USER_MODEL_ID_MAX_LENGTH]{};
+                UINT32 size = APPLICATION_USER_MODEL_ID_MAX_LENGTH;
+                const bool match = GetApplicationUserModelId(process, &size, id) == ERROR_SUCCESS && lower(id) == want;
+                CloseHandle(process);
+                if (match) { found = pid; break; }
+            }
+        }
+
+        if (!found) {
+            struct search_t { const std::wstring* m_want; DWORD m_pid; } search{ &want, 0 };
+            EnumWindows(
+                [](HWND window, LPARAM param) -> BOOL {
+                    auto& search = *reinterpret_cast<search_t*>(param);
+                    // own windows skipped: a property query on this process's window is a SendMessage to the game thread
+                    DWORD pid = 0;
+                    GetWindowThreadProcessId(window, &pid);
+                    if (pid == GetCurrentProcessId() || !IsWindowVisible(window) || lower(window_aumid(window)) != *search.m_want) return TRUE;
+                    search.m_pid = pid;
+                    return FALSE;
+                },
+                reinterpret_cast<LPARAM>(&search));
+            found = search.m_pid == self ? 0 : search.m_pid;
+        }
+
+        return root(found);
+    }
+
+    /* process loopback ( win10 20348+ / win11 ): only the media app's process tree, or ( app not found ) everything but this game's tree.
+       the virtual device has no mix format: ask for 48k stereo pcm16 and let AUTOCONVERTPCM resample */
+    struct loopback_t {
+        IMMDeviceEnumerator* m_enumerator = nullptr;
+        IAudioClient* m_client            = nullptr;
+        IAudioCaptureClient* m_capture    = nullptr;
+        HANDLE m_event                    = nullptr;   // EVENTCALLBACK wants one, the thread still polls
+        WAVEFORMATEX m_format{ WAVE_FORMAT_PCM, 2, 48000, 48000 * 4, 4, 16, 0 };
+        std::wstring m_device_id{};
+        std::wstring m_source{};
+        DWORD m_target = 0;   // 0 = exclude this game
+
+        void close()
+        {
+            if (m_client) m_client->Stop();
+            safe_release(m_capture);
+            safe_release(m_client);
+            if (m_event) { CloseHandle(m_event); m_event = nullptr; }
+            m_device_id.clear();
+            m_source.clear();
+            m_target = 0;
+        }
+
+        std::wstring default_id()
+        {
+            IMMDevice* device = nullptr;
+            if (!m_enumerator || FAILED(m_enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) || !device) return {};
+            std::wstring out{};
+            LPWSTR id = nullptr;
+            if (SUCCEEDED(device->GetId(&id)) && id) { out = id; CoTaskMemFree(id); }
+            device->Release();
+            return out;
+        }
+
+        bool open(const std::wstring& source, const DWORD target)
+        {
+            close();
+            if (!m_enumerator && FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                                         reinterpret_cast<void**>(&m_enumerator))))
+                return false;
+
+            // remembered only to reopen when the default output / media app switches ( thread checks every 2 s )
+            m_device_id = default_id();
+            m_source    = source;
+            m_target    = target;
+
+            AUDIOCLIENT_ACTIVATION_PARAMS params{};
+            params.ActivationType                            = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+            params.ProcessLoopbackParams.TargetProcessId     = target ? target : GetCurrentProcessId();
+            params.ProcessLoopbackParams.ProcessLoopbackMode = target ? PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE : PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
+
+            PROPVARIANT activation{};
+            activation.vt             = VT_BLOB;
+            activation.blob.cbSize    = sizeof(params);
+            activation.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
+
+            auto* handler = new activate_handler_t{};
+            IActivateAudioInterfaceAsyncOperation* pending = nullptr;
+            if (handler->m_done &&
+                SUCCEEDED(ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient), &activation, handler, &pending)) &&
+                WaitForSingleObject(handler->m_done, 5000) == WAIT_OBJECT_0) {
+                m_client = handler->m_client;
+                handler->m_client = nullptr;
+            }
+            safe_release(pending);
+            handler->Release();
+
+            m_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+            constexpr DWORD k_flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
+            if (!m_client || !m_event ||
+                FAILED(m_client->Initialize(AUDCLNT_SHAREMODE_SHARED, k_flags, 2000000, 0, &m_format, nullptr)) ||
+                FAILED(m_client->SetEventHandle(m_event)) ||
+                FAILED(m_client->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(&m_capture))) ||
+                FAILED(m_client->Start())) {
+                close();
+                return false;
+            }
+            return true;
+        }
+
+        static float sample(const BYTE* frame)
+        {
+            const auto* pcm = reinterpret_cast<const short*>(frame);
+            return ((float)pcm[0] + (float)pcm[1]) / 65536.f;
+        }
+    };
+
+    std::wstring shown_source()   // botox get_source_app
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        return s_source;
+    }
+
+    // botox main.cpp visualizer_thread's `wanted`
+    bool visualizer_wanted() { return g_mpEnable && g_mpVisualizer && !g_mpSimple; }
+}
+
+static DWORD WINAPI VisualizerThread(LPVOID)
+{
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    using steady = std::chrono::steady_clock;
+    constexpr std::size_t k_size = n_audio_bands::k_fft_size;
+
+    const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+
+    loopback_t loopback{};
+    static std::array<float, k_size> ring{}, ordered{};   // 16 KB, off the thread's stack
+    std::size_t write = 0;
+    float fresh[n_audio_bands::k_bands]{};
+    float levels[n_audio_bands::k_bands]{};
+    bool logged = false;
+
+    auto last_step = steady::now(), last_audio = steady::now(), last_device = steady::now();
+
+    const auto publish = [&]() {
+        std::lock_guard<std::mutex> lock(s_bandsMtx);
+        std::copy(std::begin(levels), std::end(levels), std::begin(s_bands));
+    };
+
+    while (!g_eject) {
+        const std::wstring source = shown_source();
+
+        if (!visualizer_wanted() || source.empty()) {
+            loopback.close();
+            std::fill(std::begin(levels), std::end(levels), 0.f);
+            publish();
+            Sleep(100);
+            last_step = steady::now();
+            continue;
+        }
+
+        if (!loopback.m_client) {
+            const DWORD pid = media_pid(source);
+            if (!loopback.open(source, pid)) {
+                if (!logged) { DebugLog("media: waveform loopback open failed (needs win10 20348+ / win11)"); logged = true; }
+                Sleep(1000);
+                continue;
+            }
+            DebugLog("media: waveform loopback open, target pid %lu (%s)", pid, pid ? "app tree" : "all but the game");
+            last_device = steady::now();
+        }
+
+        const auto now = steady::now();
+
+        if (source != loopback.m_source) { loopback.close(); continue; }
+
+        if (now - last_device > std::chrono::seconds(2)) {
+            last_device = now;
+            if (loopback.default_id() != loopback.m_device_id || media_pid(source) != loopback.m_target) { loopback.close(); continue; }
+        }
+
+        UINT32 packet = 0;
+        HRESULT result = loopback.m_capture->GetNextPacketSize(&packet);
+        while (SUCCEEDED(result) && packet > 0) {
+            BYTE* data = nullptr;
+            UINT32 count = 0;
+            DWORD flags = 0;
+            result = loopback.m_capture->GetBuffer(&data, &count, &flags, nullptr, nullptr);
+            if (FAILED(result)) break;
+
+            const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || !data;
+            for (UINT32 frame = 0; frame < count; frame++) {
+                ring[write] = silent ? 0.f : loopback_t::sample(data + frame * loopback.m_format.nBlockAlign);
+                write = (write + 1) % k_size;
+            }
+            loopback.m_capture->ReleaseBuffer(count);
+            last_audio = now;
+            result = loopback.m_capture->GetNextPacketSize(&packet);
+        }
+
+        if (FAILED(result)) { loopback.close(); Sleep(250); continue; }
+
+        if (now - last_audio > std::chrono::milliseconds(100)) ring.fill(0.f);
+
+        for (std::size_t i = 0; i < k_size; i++) ordered[i] = ring[(write + i) % k_size];
+        n_audio_bands::compute(ordered.data(), (float)loopback.m_format.nSamplesPerSec, fresh);
+
+        const float dt = std::chrono::duration<float>(now - last_step).count();
+        last_step = now;
+        for (std::size_t band = 0; band < n_audio_bands::k_bands; band++)
+            levels[band] = (std::max)(fresh[band], levels[band] - 2.5f * dt);
+
+        publish();
+        Sleep(15);
+    }
+
+    loopback.close();
+    safe_release(loopback.m_enumerator);
+    if (com) CoUninitialize();
+    return 0;
+}
+
+// ==== lyrics thread: botox lrclib_get / fetch_lyrics / update_lyrics + main.cpp lyrics_thread ====
+// own thread: the fetch blocks up to its http timeouts on every track change, on the media thread
+// that froze title, art and every control (botox's note)
+static std::string LrclibGet(const std::wstring& path)
+{
+    std::string out{};
+    HINTERNET session = WinHttpOpen(L"botox", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return out;
+    WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
+
+    HINTERNET connection = WinHttpConnect(session, L"lrclib.net", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                        WINHTTP_FLAG_SECURE)
+                                   : nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_httpMtx);
+        if (g_eject && request) { WinHttpCloseHandle(request); request = nullptr; }
+        s_httpReq = request;
+    }
+
+    if (request && WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(request, nullptr)) {
+        DWORD status = 0, status_size = sizeof(status);
+        if (WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
+                                WINHTTP_NO_HEADER_INDEX) &&
+            status == 200) {
+            char buffer[8192]{};
+            DWORD read = 0;
+            while (WinHttpReadData(request, buffer, sizeof(buffer), &read) && read && out.size() < 1024u * 1024u) out.append(buffer, read);
+        }
+    }
+
+    {
+        // eject may have closed it already (MediaPlayer_Shutdown): never twice
+        std::lock_guard<std::mutex> lock(s_httpMtx);
+        if (s_httpReq == request && request) WinHttpCloseHandle(request);
+        s_httpReq = nullptr;
+    }
+    if (connection) WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    return out;
+}
+
+static std::vector<mpl::Line> FetchLyrics(const std::string& title, const std::string& artist, long long totalMs)
+{
+    const std::wstring base = L"/api/get?artist_name=" + mpl::UrlEncode(artist) + L"&track_name=" + mpl::UrlEncode(title);
+    std::string body{};
+    if (totalMs > 0) body = LrclibGet(base + L"&duration=" + std::to_wstring((totalMs + 500) / 1000));
+    if (body.empty() && !g_eject) body = LrclibGet(base);
+
+    std::string synced;
+    if (!mpl::JsonStringField(body, "syncedLyrics", synced)) return {};
+    return mpl::ParseLrc(synced);
+}
+
+static void UpdateLyrics(bool wanted)
+{
+    std::string title{}, artist{};
+    long long totalMs = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        title = s_title; artist = s_artist; totalMs = s_totalMs;
+    }
+
+    // no timeline = position unknown, synced lines would be wrong
+    const std::string key = wanted && s_has.load() && !title.empty() && totalMs > 0 ? title + '\n' + artist : std::string{};
+    if (key == s_lyricsKey) return;
+    s_lyricsKey = key;
+
+    {
+        std::lock_guard<std::mutex> lock(s_lyricsMtx);
+        s_lyrics.clear();
+        ++s_lyricsGen;
+    }
+    if (key.empty()) return;
+
+    auto lines = FetchLyrics(title, artist, totalMs);
+    DebugLog("media: lyrics %zu synced lines", lines.size());
+
+    std::lock_guard<std::mutex> lock(s_lyricsMtx);
+    s_lyrics = std::move(lines);
+    ++s_lyricsGen;
+}
+
+static DWORD WINAPI LyricsThread(LPVOID)
+{
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    while (!g_eject) {
+        UpdateLyrics(g_mpEnable && g_mpLyrics);
+        Sleep(250);
+    }
+    return 0;
+}
+
 // botox main.cpp media_player_thread
 static DWORD WINAPI MediaThread(LPVOID)
 {
@@ -731,17 +1183,25 @@ static DWORD WINAPI MediaThread(LPVOID)
 void MediaPlayer_Start()
 {
     if (s_thread) return;
-    s_thread = CreateThread(nullptr, 0, MediaThread, nullptr, 0, nullptr);
+    s_thread       = CreateThread(nullptr, 0, MediaThread, nullptr, 0, nullptr);
+    s_visThread    = CreateThread(nullptr, 0, VisualizerThread, nullptr, 0, nullptr);
+    s_lyricsThread = CreateThread(nullptr, 0, LyricsThread, nullptr, 0, nullptr);
 }
 
 void MediaPlayer_Shutdown()
 {
-    if (s_thread) {
-        // The loop tests g_eject at most 250ms apart, but a winrt call already in flight can
-        // hold it longer -- 3s, then the handle goes and the thread dies with the process.
-        WaitForSingleObject(s_thread, 3000);
-        CloseHandle(s_thread);
-        s_thread = nullptr;
+    // a lyrics request in flight: closing it fails its receive now instead of after 10 s
+    {
+        std::lock_guard<std::mutex> lock(s_httpMtx);
+        if (s_httpReq) { WinHttpCloseHandle(s_httpReq); s_httpReq = nullptr; }
+    }
+    // The loops test g_eject at most 250ms apart, but a winrt / WASAPI activation already in
+    // flight can hold one longer -- the loopback activation waits 5 s at most.
+    for (HANDLE* t : { &s_thread, &s_visThread, &s_lyricsThread }) {
+        if (!*t) continue;
+        WaitForSingleObject(*t, t == &s_visThread ? 6000 : 3000);
+        CloseHandle(*t);
+        *t = nullptr;
     }
     MediaPlayer_ReleaseTexture();
 }
@@ -862,9 +1322,41 @@ static void StyleFonts(int style, ImFont*& title, ImFont*& artist, float& size)
     }
 }
 
+// botox media_player_binds: fires on press. A tap shorter than one frame only shows in the
+// key's "pressed since last ask" bit, which stands in for botox's release counter.
+static void MediaBinds()
+{
+    struct Bind { int key; bool fired; };
+    static Bind binds[3]{};
+    const int keys[3] = { g_mpPrevKey, g_mpToggleKey, g_mpNextKey };
+    static constexpr int cmds[3] = { 1, 2, 3 };   // botox e_command: previous, toggle, next
+
+    // botox keys_blocked: menu open, or the game is not the focused window; the console being up
+    // too (IVEngineClient::Con_IsVisible, slot 11 -- GetPlayerInfo 8 / GetLocalPlayer 12 bracket it)
+    // asked only when a bind fires: the engine getter stays off the render thread's hot path
+    const auto blocked = []() { return g_showMenu || (g_hwnd && GetForegroundWindow() != g_hwnd) || (g_engine && VCall<bool>(g_engine, 11)); };
+
+    for (int i = 0; i < 3; i++) {
+        Bind& bind = binds[i];
+        const int key = keys[i];
+        // media keys already reach the player through windows, firing too would skip twice
+        if (!g_mpIngameControl || key <= 0 || key > 255 || (key >= VK_MEDIA_NEXT_TRACK && key <= VK_MEDIA_PLAY_PAUSE)) { bind.key = 0; continue; }
+
+        const SHORT state = GetAsyncKeyState(key);
+        const bool down = (state & 0x8000) != 0, tapped = (state & 1) != 0;
+        if (bind.key != key) { bind = { key, down }; continue; }
+
+        const bool fire = !bind.fired && (down || tapped);
+        bind.fired = down;
+        if (fire && !blocked()) s_pendingCmd = cmds[i];
+    }
+}
+
 void RenderMediaPlayer()
 {
-    if (!g_mpEnable || !s_has.load()) return;
+    if (!g_mpEnable) return;
+    MediaBinds();
+    if (!s_has.load()) return;
 
     ImGuiIO& io = ImGui::GetIO();
     if (io.DisplaySize.x <= 0.f || io.DisplaySize.y <= 0.f) return;
@@ -915,6 +1407,63 @@ void RenderMediaPlayer()
     };
 
     constexpr float artSize = 30.f, barHeight = 1.f, rowGap = 4.f;
+
+    // botox draw_lyrics: `rows` lines centred on the one playing, the rest fading out by distance,
+    // scrolled + resized with a 10/s ease, in its own frame when the player has one
+    const auto drawLyrics = [&](ImDrawList* list, float edge, float playerW, bool boxed, int effect) {
+        static std::vector<mpl::Line> lines{};
+        static int generation = -1;
+        static float scroll = 0.f, boxW = 0.f;
+
+        int fresh;
+        {
+            std::lock_guard<std::mutex> lock(s_lyricsMtx);
+            if (generation != s_lyricsGen) lines = s_lyrics;
+            fresh = s_lyricsGen;
+        }
+        const bool snap = fresh != generation;
+        generation = fresh;
+        if (!g_mpLyrics || lines.empty()) return;
+
+        const double now = position_ms() + g_mpLyricsOffset;
+        const int rows = std::clamp(g_mpLyricsRows, 1, 9);
+        int active, first, shown;
+        mpl::Window(lines, now, rows, active, first, shown);
+        const int count = (int)lines.size();
+
+        const float pad  = boxed ? 10.f : 0.f;
+        const float step = artistPx + rowGap;
+        const float fadeStep = 0.55f / (float)(std::max)(1, rows / 2);
+        const auto textAt = [&](int k) { return TruncateUtf8(lines[k].text, 96); };
+
+        float targetW = playerW;
+        for (int k = first; k < first + shown; k++)
+            targetW = (std::max)(targetW, artistFont->CalcTextSizeA(artistPx, FLT_MAX, 0.f, textAt(k).c_str()).x + pad * 2.f);
+
+        const float ease = 1.f - expf(-io.DeltaTime * 10.f);
+        scroll = snap ? (float)first : scroll + ((float)first - scroll) * ease;
+        boxW   = snap || boxW <= 0.f ? targetW : boxW + (targetW - boxW) * ease;
+
+        const float boxH = pad * 2.f + (float)shown * artistPx + (float)(shown - 1) * rowGap;
+        const float top  = fromBottom ? edge - boxH : edge;
+        const ImVec2 mn(leftOf(boxW), top), mx(mn.x + boxW, top + boxH);
+        if (boxed) Watermark_MediaFrame(list, mn, mx, frameStyle);
+
+        list->PushClipRect(mn, mx, true);
+        for (int k = (std::max)(0, first - 1); k <= (std::min)(count - 1, first + shown); k++) {
+            const std::string text = textAt(k);
+            if (text.empty()) continue;
+            const float row  = (float)k - scroll;
+            const float rim  = std::clamp((std::min)(row + 1.f, (float)shown - row), 0.f, 1.f);
+            const float fade = (std::max)(0.f, 1.f - (float)std::abs(k - active) * fadeStep) * rim;
+            const ImU32 alpha = (ImU32)((float)((look.title >> IM_COL32_A_SHIFT) & 0xFF) * fade);
+            if (!alpha) continue;
+            const float textW = artistFont->CalcTextSizeA(artistPx, FLT_MAX, 0.f, text.c_str()).x;
+            const float textX = align == 0 ? mn.x + pad : align == 1 ? floorf((mn.x + mx.x - textW) * 0.5f) : mx.x - pad - textW;
+            put(list, effect, artistFont, artistPx, ImVec2(textX, mn.y + pad + row * step), (look.title & ~IM_COL32_A_MASK) | (alpha << IM_COL32_A_SHIFT), text);
+        }
+        list->PopClipRect();
+    };
 
     // prev / play-pause / next while the menu is open. drawn last: the hit test needs the whole
     // block's bounds
@@ -971,6 +1520,7 @@ void RenderMediaPlayer()
         const float lineY = fromBottom ? anchorY - lineSize.y : anchorY;
         const float lineX = floorf(leftOf(totalW));
         put(dl, bareFx, artistFont, artistPx, ImVec2(lineX, lineY), look.title, line);
+        drawLyrics(dl, fromBottom ? lineY - rowGap : lineY + lineSize.y + rowGap, totalW, false, bareFx);
         if (buttons) drawButtons(dl, lineX + lineSize.x + cellGap * 2.f, floorf(lineY + lineSize.y * 0.5f), bareFx);
         return;
     }
@@ -981,6 +1531,8 @@ void RenderMediaPlayer()
     const float padding  = background ? 10.f : 0.f;
     const float minWidth = background ? 140.f : 0.f;
     const bool progressBar = g_mpProgressBar;
+    const bool visualizer  = g_mpVisualizer;
+    const float visualH    = std::clamp(g_mpVisHeight, 4.f, 64.f);
     const bool art = g_mpCoverArt && s_tex;
     const float artGap = (std::max)(padding, 6.f);
     const float artOffsetX = art ? artSize + artGap : 0.f;
@@ -995,12 +1547,66 @@ void RenderMediaPlayer()
     const float controlW  = buttonsW + timeW + (buttons && timeW > 0.f ? 8.f : 0.f);
 
     const float width  = (std::max)({ textColW + artOffsetX + padding * 2.f, controlW + padding * 2.f, minWidth });
-    const float height = padding + contentH + (progressBar ? rowGap + barHeight : 0.f) + (controlRow ? rowGap + controlH : 0.f) + padding;
+    const float height = padding + contentH + (progressBar || visualizer ? rowGap + barHeight : 0.f) + (controlRow ? rowGap + controlH : 0.f) + padding;
 
     const float posX = floorf(leftOf(width));
     const float posY = fromBottom ? anchorY - height : anchorY;
 
     if (background) Watermark_MediaFrame(dl, ImVec2(posX, posY), ImVec2(posX + width, posY + height), frameStyle);
+
+    // botox waveform: 64 bands as bars (bar width + 1 px gap) or a catmull-rom curve ("smooth"),
+    // standing on the progress bar line, behind the art + text; accent (or custom) at alpha 185
+    if (visualizer) {
+        float bands[n_audio_bands::k_bands]{};
+        {
+            std::lock_guard<std::mutex> lock(s_bandsMtx);
+            std::copy(std::begin(s_bands), std::end(s_bands), bands);
+        }
+        const ImU32 rgb   = g_mpVisCustomColor ? (ImU32)ImColor(g_mpVisColor[0], g_mpVisColor[1], g_mpVisColor[2], g_mpVisColor[3]) : accent;
+        const ImU32 color = (rgb & ~IM_COL32_A_MASK) | (185u << IM_COL32_A_SHIFT);
+
+        const bool smooth  = g_mpVisSmooth;
+        const float left   = posX + padding;
+        const float right  = posX + width - padding;
+        const float floorY = posY + padding + contentH + rowGap;
+        const float gap    = 1.f;
+        const float barW   = (float)std::clamp(g_mpVisBarWidth, 1, 12);
+        const int bars     = smooth ? (int)n_audio_bands::k_bands : (std::max)(1, (int)((right - left + gap) / (barW + gap)));
+        const float slot   = (right - left) / (float)bars;
+
+        if (smooth) {
+            const auto curveTop = [&](float x) {
+                const float u = (x - left) / slot - 0.5f;
+                const int i   = (int)floorf(u);
+                const float t = u - (float)i;
+                const auto at = [&](int k) { return bands[std::clamp(k, 0, bars - 1)]; };
+                const float p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
+                const float level = 0.5f * (2.f * p1 + (p2 - p0) * t + (2.f * p0 - 5.f * p1 + 4.f * p2 - p3) * t * t + (3.f * (p1 - p2) + p3 - p0) * t * t * t);
+                const float h = std::clamp(level, 0.f, 1.f) * visualH;
+                return floorY - (progressBar ? h : (std::max)(1.f, h));
+            };
+            const auto oldFlags = dl->Flags;
+            dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+            for (float x = left; x < right; x += 1.f) {
+                const float x2 = (std::min)(x + 1.f, right);
+                dl->AddQuadFilled(ImVec2(x, curveTop(x)), ImVec2(x2, curveTop(x2)), ImVec2(x2, floorY), ImVec2(x, floorY), color);
+            }
+            dl->Flags = oldFlags;
+            for (float x = left; x < right; x += 1.f) dl->PathLineTo(ImVec2(x, curveTop(x)));
+            dl->PathLineTo(ImVec2(right, curveTop(right)));
+            dl->PathStroke(color, ImDrawFlags_None, 1.f);
+        }
+
+        for (int bar = 0; bar < bars && !smooth; bar++) {
+            const float level = n_audio_bands::bar_level(bands, (std::size_t)bar, (std::size_t)bars);
+            const float barH  = level * visualH;
+            if (progressBar && barH < 1.f) continue;
+            const float top = floorY - (std::max)(1.f, barH);
+            const float x   = floorf(left + slot * (float)bar);
+            const float x2  = bar == bars - 1 ? right : floorf(left + slot * (float)(bar + 1)) - gap;
+            dl->AddRectFilled(ImVec2(x, top), ImVec2(x2, floorY), color);
+        }
+    }
 
     const bool leftSide = align == 0;
     const float artX = leftSide ? posX + padding : posX + width - padding - artSize;
@@ -1026,6 +1632,8 @@ void RenderMediaPlayer()
         dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barWidth, barY + barHeight), IM_COL32(60, 60, 60, 255), 1.f);
         dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barWidth * mp::ProgressOf(track), barY + barHeight), accent, 1.f);
     }
+
+    drawLyrics(dl, fromBottom ? posY - rowGap : posY + height + rowGap, width, background, fx);
 
     if (controlRow) {
         const float rowY = posY + height - padding - controlH;

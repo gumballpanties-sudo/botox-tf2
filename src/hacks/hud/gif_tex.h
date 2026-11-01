@@ -20,3 +20,15 @@ GifTex* GifTex_Get(const char* id, const uint8_t* data, size_t size);
 ImTextureID GifTex_Frame(GifTex* gif, double timeSec);
 
 void GifTex_ReleaseAll();   // device Reset: the DEFAULT-pool frame texture is gone, GDI+ bitmap survives
+
+// pixel size of the decoded GIF (frame 0 = every frame). false until it decoded.
+bool GifTex_Size(GifTex* gif, float& w, float& h);
+
+// botox spectator_list.cpp file_image_frame / url_image_path: a local path as is, an http(s) link
+// (imgur page / .gifv / extensionless -> i.imgur.com raw file) downloaded once off the render
+// thread to C:\botox-tf2\images\<fnv1a>. nullptr until the file exists and decodes.
+GifTex* GifTex_GetFile(const char* setting);
+
+// botox menu_tab_settings.cpp image_path_input( ..., upload = false ): text box + "browse"
+// button (file dialog on its own thread, result lands in buf a frame later).
+void GifTex_PathInput(const char* label, const char* hint, char* buf, size_t bufSize);

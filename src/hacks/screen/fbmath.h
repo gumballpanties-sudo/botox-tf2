@@ -264,4 +264,116 @@ namespace fbm
             rows[r][3] = basis[r][0] * shift[0] + basis[r][1] * shift[1] + basis[r][2] * shift[2];
         }
     }
+
+    // ---- viewmodel sway (botox true_motion_blur.cpp sway_sample / sway_at / sway_velocity) ---
+    // The gun lagging behind a turn, as cl_wpn_sway_interp / cl_wpn_sway_scale model it
+    // (tf_viewmodel.cpp CTFViewModel::CalcViewModelLag): the view angles a short time ago,
+    // turned into how far the forward vector slid in the gun's own frame. The ride is divided
+    // out of every bone proxy, so without this a turn never smears the gun at all.
+    inline float NormAngle(float a)
+    {
+        a = fmodf(a + 180.f, 360.f);
+        if (a < 0.f) a += 360.f;
+        return a - 180.f;
+    }
+
+    struct SwayHistory
+    {
+        static constexpr int N = 128;   // > (interp + window) at 400 fps
+        float time[N]      = {};
+        float angles[N][3] = {};
+        int   head = 0, filled = 0;
+
+        void Clear() { head = filled = 0; }
+
+        void Sample(const float ang[3], float t)
+        {
+            time[head] = t;
+            for (int a = 0; a < 3; ++a) angles[head][a] = ang[a];
+            head = (head + 1) % N;
+            if (filled < N) ++filled;
+        }
+
+        // the angles at time t, interpolated between the two samples around it
+        bool AnglesAt(float t, float out[3]) const
+        {
+            if (filled < 2) return false;
+            const int newest = (head - 1 + N) % N;
+            if (t >= time[newest]) { for (int a = 0; a < 3; ++a) out[a] = angles[newest][a]; return true; }
+
+            int newer = newest;
+            for (int step = 1; step < filled; ++step) {
+                const int older = (newest - step + N) % N;
+                if (time[older] > t) { newer = older; continue; }
+                const float span = time[newer] - time[older];
+                float f = (span > 1e-6f) ? (t - time[older]) / span : 0.f;
+                f = (f < 0.f) ? 0.f : (f > 1.f ? 1.f : f);
+                for (int a = 0; a < 3; ++a)
+                    out[a] = angles[older][a] + NormAngle(angles[newer][a] - angles[older][a]) * f;
+                return true;
+            }
+            return false;
+        }
+    };
+
+    // the gun's offset at time t in VIEW axes (right, up, forward), botox sway_at
+    inline bool SwayAt(const SwayHistory& h, float t, float interp, float scale, float out[3])
+    {
+        out[0] = out[1] = out[2] = 0.f;
+        if (interp <= 0.f) return false;
+
+        float held[3], lagged[3];
+        if (!h.AnglesAt(t, held) || !h.AnglesAt(t - interp, lagged)) return false;
+
+        const float diff[3] = { -NormAngle(lagged[0] - held[0]), -NormAngle(lagged[1] - held[1]),
+                                -NormAngle(lagged[2] - held[2]) };
+        float lf[3], r[3], u[3];
+        AngleVectors(diff, lf, r, u);
+
+        const float slide[3] = { (1.f - lf[0]) * scale, -lf[1] * scale, -lf[2] * scale };
+
+        float f[3];
+        AngleVectors(held, f, r, u);
+        float fade = fabsf(u[2]) - 0.02f;
+        fade = (fade < 0.f) ? 0.f : (fade > 1.f ? 1.f : fade);
+
+        out[0] = -slide[1] * fade;   // TF2 has no cl_righthand: never flipped
+        out[1] =  slide[2] * fade;
+        out[2] =  slide[0] * fade;
+        return true;
+    }
+
+    // units per second, over botox's 30 ms window
+    inline bool SwayVelocity(const SwayHistory& h, float t, float interp, float scale, float out[3])
+    {
+        out[0] = out[1] = out[2] = 0.f;
+        constexpr float window = 0.03f;
+        float now[3], before[3];
+        if (!SwayAt(h, t, interp, scale, now) || !SwayAt(h, t - window, interp, scale, before)) return false;
+        for (int a = 0; a < 3; ++a) out[a] = (now[a] - before[a]) / window;
+        return true;
+    }
+
+    // what goes onto every bone proxy's translation: back along the sway for the shutter,
+    // divided by the viewmodel amount the shader multiplies in, clamped (never dropped -- a
+    // dropped shift changes nothing on the proxy list but pops the streak) at 4 units.
+    inline void SwayShift(const float velocity[3], float shutterSec, float sway, float vmAmount, float out[3])
+    {
+        const float gain = sway / ((vmAmount > 0.05f) ? vmAmount : 0.05f);
+        float len = 0.f;
+        for (int a = 0; a < 3; ++a) { out[a] = -velocity[a] * shutterSec * gain; len += out[a] * out[a]; }
+        len = sqrtf(len);
+        if (len > 4.f) for (int a = 0; a < 3; ++a) out[a] *= 4.f / len;
+    }
+
+    // player trail / animation trail: how much of last frame's history survives this one.
+    // A time constant of shutter x amount, so it reads the same at any fps; capped at 0.9 or the
+    // history never lets go (botox true_motion_blur.cpp:1052).
+    inline float TrailBlend(float elapsedSec, float shutterSec, float amount)
+    {
+        const float trail = shutterSec * ((amount > 0.f) ? amount : 0.f);
+        if (trail <= 0.f || elapsedSec <= 0.f) return 0.f;
+        const float b = expf(-elapsedSec / trail);
+        return (b > 0.9f) ? 0.9f : b;
+    }
 } // namespace fbm

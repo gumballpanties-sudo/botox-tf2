@@ -5,6 +5,7 @@
 #include "flipworld.h"
 #include "../hud/demostreak.h"
 #include "../movement/recorder.h"   // Recorder_FrameStart
+#include "../misc/game_extras.h"     // GameExtras_Frame -- unit game, game-thread tick
 #include "../../dependencies/data/skindata.h"
 #include <cstdlib>
 
@@ -1683,6 +1684,7 @@ static void __fastcall h_FrameStageNotify(int stage)
     if (stage == 5 && !g_eject && g_enableSkins) { SweepViewmodelSequence(); RestampStreak("before think"); }
 
     o_FrameStageNotify(stage);
+    GameExtras_Frame(stage);   // unit game: chat translator print, bot ping, performance, cvar list (restores itself on g_eject)
     // The killstreak color table is a write into the game's own data, so it has to go back
     // before this hook stops running -- nothing else would ever undo it. Same for flip world's
     // cl_flipviewmodels: its SetValue sends userinfo, so it goes back from this thread (eject

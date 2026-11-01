@@ -11,6 +11,7 @@
 #include "world_fx.h"     // WorldFx_Tick -- unit D: fullbright + disable interp pokes
 #include "world_fx2.h"    // WorldFx2_Tick/_OnFindMaterial -- unit D2: dlight, sun angle, tints
 #include "mc_world.h"     // MCWorld_OnSkyBoxDrawn -- minecraft sky behind the 2D sky draw
+#include "../misc/game_extras.h"   // ChatTranslator_OnUserMessage -- unit game, DispatchUserMessage
 #include <intrin.h>       // _ReturnAddress -- net_graph must still read the real lerp
 
 // ConVar-string redirect scratch, file-local because nothing outside this file has ever
@@ -410,6 +411,7 @@ void __fastcall h_CalcViewModelView(void* rcx, void* owner, void* pEyePosition, 
         if (CalcViewModel_Copy(pEyePosition, pEyeAngles, eye, ang))
         {
             if (csAdjust) VmCs_EyeAdjustSafe(owner, eye, ang);
+            if (g_vmOffsetEnable) ang[2] += g_wdVmRoll;   // botox viewmodel_offset roll: the copy only
             float moved[3] = { eye[0], eye[1], eye[2] };
             if (!g_vmOffsetEnable || CalcViewModel_ApplyOffset(eye, ang, moved))
             {
@@ -1312,13 +1314,14 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
     unsigned char vmKind = 0;
     if ((wantFbBones || wantChams || wantVmLowFps) && pInfoB) vmKind = ViewmodelDrawKind(pMdl, nm, entIdx);
 
-    // Low fps viewmodel FIRST (botox draw_model_execute.cpp:98): chams, blend and the motion
-    // blur bones below all see the held pose, so the streak and the cham follow the stepped gun.
-    if (wantVmLowFps && pState && pBones && pMdl && vmKind)
-        pBones = VmLowFps_Bones(pState, pBones, pMdl);
-
+    // Motion blur bones BEFORE the low fps hold: the blur measures the live animation, and the
+    // gun run (frameblend.cpp FbBuildBones) holds that blur with the gun between steps -- low fps
+    // lands on the already-blurred gun. Chams and blend below still see the held pose.
     if (wantFbBones && pInfoB && pBones && vmKind)
         FrameBlend_CollectBones(pState, pInfo, pBones, vmKind == 2);
+
+    if (wantVmLowFps && pState && pBones && pMdl && vmKind)
+        pBones = VmLowFps_Bones(pState, pBones, pMdl);
 
     // Chams + glow (aim/chams.cpp, chams_api.h): every pass goes through o_DrawModelExecute,
     // never this hook, so there is no recursion. A viewmodel keeps the transparent-viewmodel
@@ -1795,6 +1798,7 @@ DispatchUserMessage_t o_DispatchUserMessage = nullptr;
 bool __fastcall h_DispatchUserMessage(void* rcx, int type, void* msgData)
 {
     MiscHookGuard _g;
+    ChatTranslator_OnUserMessage(type, msgData);   // unit game: reads SayText/SayText2 before the original does
     if (g_removeScreenEffects && !g_eject && (type == 10 || type == 11 || type == 13))
         return true; // swallow -> effect never plays
     return o_DispatchUserMessage(rcx, type, msgData);

@@ -34,14 +34,16 @@
 // the clip for a hop instead of a dead stop (botox's own "gain over your own xy" idea, simplified
 // to one trace instead of a budgeted sim search over saved points).
 // ============================================================================
-static void AutoBounce(void* pLocal, UserCmd_t* pCmd)
+static bool s_bounceAssistHit = false;   // the assist's catch jump went out (indicator, cleared at publish)
+
+// Auto bounce itself is botox auto_bounce.cpp now (autobounce.inl); this is bounce assist only.
+static void BounceAssist(void* pLocal, UserCmd_t* pCmd)
 {
-    const bool bAuto   = On(g_autoBounce, g_autoBounceKey, g_autoBounceMode);
     const bool bAssist = On(g_bounceAssist, g_bounceAssistKey, g_bounceAssistMode);
-    if (!bAuto && !bAssist) return;
+    if (!bAssist) return;
     if (EntMoveType(pLocal) != MOVETYPE_WALK || EntGround(pLocal)) return;
     // everyone who already owns the cmd outranks a redirect -- this never fights a live ride
-    if (s_textureBugHit || s_headSurfHit || s_headBounceHit || s_airStuckHit || s_wallClimbHit
+    if (s_ab.ownsCmd || s_textureBugHit || s_headSurfHit || s_headBounceHit || s_airStuckHit || s_wallClimbHit
         || s_psAssistHopActive || s_shouldPixelSurf || s_psRidingNow)
         return;
 
@@ -80,6 +82,7 @@ static void AutoBounce(void* pLocal, UserCmd_t* pCmd)
         if (flDist < 24.f)
         {
             pCmd->buttons |= IN_JUMP;   // catch the contact as a hop, not a stop
+            s_bounceAssistHit = true;
             DebugLog("BNC: assist jump dist=%.1f", flDist);
         }
     }

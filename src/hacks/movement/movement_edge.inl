@@ -404,8 +404,11 @@ static void EdgeSkipPost(void* pLocal, UserCmd_t* pCmd)
     if (s_esStartFlags & FL_ONGROUND)
     {
         if (s_esActive)
+        {
+            if (s_esGroundZ >= s_esPlanGroundZ - 2.f) g_esFired.fetch_add(1);   // botox ++g_es_fired: indicator particles
             DebugLog("ES: landed hit=%d last=%d gz=%.2f z=%.2f lip=%d", s_esHit - 1, s_esLast,
                      s_esPlanGroundZ, s_esGroundZ, s_esGroundZ >= s_esPlanGroundZ - 2.f ? 1 : 0);
+        }
         EsReset(true);
         return;
     }

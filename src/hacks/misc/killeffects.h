@@ -10,7 +10,7 @@
 // Styles (g_dpStyle, botox's m_death_particles_type):
 //   0 blood      -> real engine particle, CTE_DispatchEffect("ParticleEffect", ...) "blood_spray_red_01"
 //                   (each engine style tries a name list, botox try_names(); unprecached -> blood)
-//   1 sparks     -> CS:GO-only IEffects001 slot, no verified TF2 analog -> falls back to blood
+//   1 sparks     -> IEffects001::Sparks (slot 3, sdk IEffects.h); unprecached picks -> EnergySplash (7)
 //   2 confetti   -> engine particle "bday_confetti"
 //   3 smoke      -> own billboard puffs (no hitbox resolver here -> origin + stacked offsets,
 //                   botox's OWN no-bones fallback path, same as its code when bones are missing)
@@ -25,6 +25,10 @@
 //                   mesh + model vvd/vtx skin + 4 compiled shaders (11 revisions, still flagged
 //                   UNTESTED in its own project after all of them). Porting that 1:1 this pass
 //                   is not a safe single-session change -- falls back to blood.
-//   8 mc         -> minecraft crit x's + xp orbs, botox's own fallback OBB (no collideable found)
+//   8 mc         -> minecraft crit x's + xp orbs (botox sprites), TF2 hull as the OBB
+// 11-01: step / alpha / glow / stars / sprite shapes = botox kill_effects_paint 1:1, radii projected
+// from world units; model colors = one back buffer read (killeffects_world.cpp CaptureColors).
+// Body points stay botox's no-bones fallback (8 points up the victim), the visibility trace runs
+// at spawn on the game thread.
 void KillEffects_OnDeath(int victimIdx, int attackerIdx, bool localDied);
 void RenderKillEffects();   // ticks + draws the custom (non-engine) particle styles

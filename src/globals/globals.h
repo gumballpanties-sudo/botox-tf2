@@ -40,7 +40,7 @@ extern ImFont* g_fontBold;
 extern ImFont* g_fontReg;      // Tahoma 13 regular -- the old io.FontDefault, named now that
                                 // verdana 11 took the default slot (botox menu spec section 6)
 extern ImFont* g_fontIcon13;   // botox icon font 13 -- OptionPopup cog
-extern ImFont* g_fontMi;       // movement indicator tags, rasterized AT g_miScale px
+extern ImFont* g_fontMi;       // indicator base face (fonts tab size); per-scale bakes behind IndicatorFont
 extern ImFont* g_fontClarityInter; // clarity v2 watermark body (inter_semibold, embedded)
 extern ImFont* g_fontClarityIcon;  // clarity v2 watermark icon glyph (clarity_icon_font, embedded)
 extern ImFont* g_menuReg;      // botox menu chrome only: verdana 11 (menu_chrome.h/menu.cpp)
@@ -157,22 +157,7 @@ extern char  g_discordImageKey[128];
 extern bool  g_debugMenuEnable;
 extern float g_consoleColor[4];   // ConsoleColorPrint tint (rgb; a unused, FLOAT4 config slot)
 
-// -- Movement indicators (centered stack under the crosshair) ----------------------
-extern bool  g_miEnable;
-extern bool  g_miHorizontal;   // one centred row instead of the vertical stack
-extern bool  g_miMitosis;      // tags divide off each other, letters morphing (migoo.h)
-extern int   g_miShowMask;     // which tags may show, bit per MiSlot (coldtires m_key_indicators)
-extern float g_miOffsetY;      // px up from the BOTTOM edge (coldtires key_indicators_position)
-extern float g_miScale;        // text scale on top of the bold menu font
-extern float g_miIdleColor[4];
-extern float g_miActiveColor[4];
-// velocity indicator (coldtires indicators.cpp velocity)
-extern bool  g_viEnable;
-extern bool  g_viPreSpeed;      // " (takeoff speed)" after the number while airborne + 2s
-extern bool  g_viFadeAlpha;     // alpha = speed / 250
-extern bool  g_viCustomColor;   // color1->color2 blend by speed instead of same/down/up colours
-extern float g_viOffsetY;       // px up from the BOTTOM edge
-extern float g_viColor1[4], g_viColor2[4], g_viColor3[4], g_viColor4[4], g_viColor5[4];
+// -- Movement indicators: vars live in hacks/hud/indicators.h (botox variables.h names) --
 
 // -- Viewmodel ---------------------------------------------------------------------
 extern bool  g_vmSwayEnable;
@@ -706,6 +691,14 @@ void MV_GetJumpstats(int& bhop, int& longjump, int& minijump, int& wallclimb);
 extern bool g_tungSurf;    extern int g_tungSurfKey;    extern int g_tungSurfMode;
 extern float g_tungMaxNz;       // texturebug.inl's ramp_band widened to this while tung is on (def .25, .05-.5)
 extern bool g_autoBounce;  extern int g_autoBounceKey;  extern int g_autoBounceMode;
+extern int   g_abMode;        // auto bounce plan: 0 drop in / 1 keep speed / 2 stop
+extern float g_abMinGain;     // speed it must add over your own xy (def 0, 0-500)
+extern float g_abReach;       // max xy distance to a landing spot (def 128, 16-512)
+extern bool  g_abJump;        // jump on the landing tick (bhop off the face)
+extern bool  g_abCrouch;      // air duck while armed + crouch jump
+extern bool  g_abAlign;       // landing spot by a wall slides flush along it
+extern bool  g_abViz;         // draw the armed plan's flight + landing ring
+extern float g_abVizColor[4];
 extern bool g_bounceAssist; extern int g_bounceAssistKey; extern int g_bounceAssistMode;
 extern float g_bounceReach;     // wall scan reach, units (def 48, 8-128)
 extern float g_bounceMinSpeed;  // min xy speed to bother redirecting (def 150, 0-600)
@@ -952,6 +945,7 @@ extern bool g_netvarsReady;
 // primitive-only declarations duplicated there -- see esp.h's banner comment for why esp.cpp
 // does not include this header) ----------------------------------------------------------
 #include "../hacks/esp/esp_vars.h"
+#include "../hacks/menu/cfg/units.h"   // 11-01 port round: per-unit inline vars
 
 // -- Unit C2: chams (visuals.cpp, piggybacked on the existing h_DrawModelExecute hook --
 // no 2nd MinHook on DrawModelExecute). Players only: colour-modulated ForcedMaterialOverride,
@@ -985,6 +979,8 @@ extern float g_chamsSoundDuration;
 extern bool  g_chamsSoundFade;
 extern float g_chamsSoundMinVolume;
 extern float g_chamsSoundMaxDistance;
+extern float g_chamsTwoToneThreshold;   // botox two tone: gamma lighting level of the light/dark cut
+extern float g_chamsTwoToneEdge;        // botox two tone: cut softness
 extern char  g_chamsVisibleCfg[160];
 extern char  g_chamsOccludedCfg[160];
 extern char  g_chamsSoundCfg[160];

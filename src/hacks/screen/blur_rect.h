@@ -13,5 +13,9 @@
 // corners ever show square blur past the mask.
 void BlurRect(ImDrawList* dl, ImVec2 min, ImVec2 max, float strength, float rounding);
 
+// Same blur, crossfaded over the sharp frame at alpha 0..1 (botox screen_blur_fullscreen tint
+// alpha): the boot screen and the menu background blur fade in/out instead of popping.
+void BlurRectFade(ImDrawList* dl, ImVec2 min, ImVec2 max, float strength, float alpha);
+
 void BlurRect_NewFrame();   // clears this frame's job slots -- call once, near Bloom_NewFrame
 void BlurRect_Destroy();    // device Reset: DEFAULT-pool scratch targets + shader are gone

@@ -139,11 +139,13 @@ inline MenuFlowState g_flow;
 // above the box with the title centred in verdana bold (hover-fades 0.5 -> 1), accent fade line
 // under it, #0F0F0F body, (50,50,50,100) outline round the whole thing. AlwaysUseWindowPadding:
 // botox gets its 8px padding from border=true + ChildBorderSize 1; ours runs ChildBorderSize 0.
-// `w` 0 = fill the column (botox: groups always sit inside a column child).
-inline bool menu_group_begin(const char* name, float w = 0.f)
+// `w` 0 = fill the column (botox: groups always sit inside a column child). `fixedH` > 0 = a
+// box of that height instead of the cached content height (botox cvars_page: one BeginChild
+// sized to the page, show_text = true).
+inline bool menu_group_begin(const char* name, float w = 0.f, float fixedH = 0.f)
 {
     ImGuiWindow* parent = ImGui::GetCurrentWindow();
-    const float h = ImGui::GetStateStorage()->GetFloat(ImGui::GetID(name), 40.f);
+    const float h = fixedH > 0.f ? fixedH : ImGui::GetStateStorage()->GetFloat(ImGui::GetID(name), 40.f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 20.f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
     const bool ret = ImGui::BeginChild(name, ImVec2(w, h), false,

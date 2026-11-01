@@ -1,58 +1,97 @@
 #include "watermark_styles.h"
 #include "watermark.h"            // g_wmBox
 #include "../misc/unitE_logic.h"
+#include "../movement/prediction.h"   // g_globalVars (interval_per_tick), MV_GetIndicators (local speed)
 #include "avatar_cache.h"
 #include "avatar_pure.h"   // n_avatar::FriendIdToSteam64
 #include "gif_tex.h"
+#include "wm_pure.h"
 #include "../screen/blur_rect.h"
 #include "../../dependencies/data/airflow_data.h"   // airflow watermark logo icon
 #include "../../dependencies/imgui/imgui_internal.h"   // ImDrawListSharedData (evolve shadow corners), IM_PI
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <cmath>
 #include <algorithm>
+#include <string>
 #include <utility>
 #include <vector>
 
-// Shared field list every style draws from (feedback-new-wm-spec-same-knobs: one knob set,
-// every style reskins it) -- label/fps/ping/loss/time, same toggles as watermark.cpp's own
-// default body. withFps=false for the styles that draw fps in their own slot (clarity v2).
-static int BuildFields(char field[5][64], bool withFps = true)
+int  Aim_ChokedCommands();                    // aim/wm_aim.cpp: CClientState::chokedcommands
+bool Aim_NetServer(char* out, size_t size);   // aim/wm_aim.cpp: INetChannelInfo::GetAddress
+
+// ==== botox misc.cpp watermark_clock / watermark_label / watermark_brand / watermark_info_parts ====
+// One frame's engine state, read once at the top of Watermark_Draw (render thread).
+struct WmFrame
 {
-    int nf = 0;
-    auto add = [&](const char* fmt, auto... args) {
-        if (nf >= 5) return;
-        snprintf(field[nf], 64, fmt, args...);
-        if (field[nf][0]) ++nf;
-    };
-    if (g_wmShowLabel) add("%s", g_wmLabel[0] ? g_wmLabel : "botox");
-    if (g_wmShowFPS && withFps) add("%d fps", (int)(g_fps.load() + 0.5f));
-    if (g_wmShowPing && g_conn.load()) add("%d ms", g_ping.load());
-    if (g_wmShowLoss && g_conn.load()) add("%d%% loss", g_loss.load());
-    if (g_wmShowTime) {
-        time_t t = time(nullptr); struct tm lt; localtime_s(&lt, &t);
-        add("%02d:%02d", lt.tm_hour, lt.tm_min);
+    bool  inGame   = false;
+    float interval = 0.f;   // gpGlobals->interval_per_tick, 0 = unknown
+    int   speed    = 0;     // local 2d speed (movement thread snapshot), 0 when stale
+};
+static WmFrame s_f;
+
+static std::string Clock(const char* fmt = "%H:%M")
+{
+    time_t raw = time(nullptr); struct tm lt; localtime_s(&lt, &raw);
+    char buf[32]; strftime(buf, sizeof(buf), fmt, &lt);
+    return buf;
+}
+static int AvgFps() { return (int)(g_fps.load() + 0.5f); }   // botox g_utilities.get_average_fps
+static std::string Brand() { return g_wmLabel[0] ? g_wmLabel : "botox"; }
+static std::string User() { return g_wmUserName; }
+static bool TickLive() { return s_f.inGame && s_f.interval > 0.f; }
+static int Tickrate(bool round = true) { return TickLive() ? (int)(1.f / s_f.interval + (round ? 0.5f : 0.f)) : 0; }
+// botox reads the net channel's own latency per style; this DLL keeps one ping (visuals.cpp
+// UpdateNetStats), every style shows that one.
+static int Ping() { return g_conn.load() ? g_ping.load() : 0; }
+
+static std::string Label()
+{
+    switch (g_wmLabelType) {
+    case 0:  return Clock();
+    case 1:  return std::to_string(AvgFps()) + " fps";
+    case 2:  return User();
+    default: return {};
     }
-    return nf;
 }
 
-static void JoinFields(char out[320], const char field[5][64], int nf, const char* sep)
+static std::vector<std::string> InfoParts()
 {
-    out[0] = 0;
-    for (int i = 0; i < nf; ++i) { if (i) strcat_s(out, 320, sep); strcat_s(out, 320, field[i]); }
+    std::vector<std::string> parts;
+    if (g_wmUser) parts.push_back(" | " + User());
+    if (g_wmTickrate && TickLive()) parts.push_back(" | " + std::to_string(Tickrate()) + " tick");   // in game only
+    if (g_wmShowFPS) parts.push_back(" | " + std::to_string(AvgFps()) + " fps");
+    if (g_wmShowTime) parts.push_back(" | " + Clock());
+    return parts;
 }
 
-static ImU32 PackColor(const float c[4])
+// botox legendware: net_channel->get_address(), "loopback" -> "Local server" (aim/wm_aim.cpp, SDK classes)
+static bool NetServer(char* out, size_t n) { return Aim_NetServer(out, n); }
+
+// botox g_trick_time window (points_on_trick stamps it, here Points_OnTrick -> g_wmTrickMs)
+static bool TrickWithin(float seconds)
 {
-    return IM_COL32((int)(c[0] * 255.f), (int)(c[1] * 255.f), (int)(c[2] * 255.f), (int)(c[3] * 255.f));
+    const unsigned long long at = g_wmTrickMs.load();
+    return at && (float)(GetTickCount64() - at) < seconds * 1000.f;
 }
-// botox accent_u32(alpha): where the donor reads ImGuiCol_Accent, the watermark text colour stands in
-static ImU32 AccentA(int a) { return (PackColor(g_wmTextColor) & ~IM_COL32_A_MASK) | ((ImU32)a << IM_COL32_A_SHIFT); }
+
+static ImU32 PackColor(const float c[4], float alphaMul = 1.f)
+{
+    return IM_COL32((int)(c[0] * 255.f), (int)(c[1] * 255.f), (int)(c[2] * 255.f), (int)(c[3] * alphaMul * 255.f));
+}
+// botox accent_u32(alpha): the menu accent (ImGuiCol_Accent) at a fixed alpha
+static ImU32 AccentA(int a)
+{
+    const ImVec4 v = ImGui::GetStyleColorVec4(ImGuiCol_Accent);
+    return IM_COL32((int)(v.x * 255.f), (int)(v.y * 255.f), (int)(v.z * 255.f), a);
+}
 static ImU32 Accent() { return AccentA(255); }
-static const char* Brand() { return g_wmLabel[0] ? g_wmLabel : "botox"; }
-static float TextW(ImFont* f, float px, const char* s) { return f->CalcTextSizeA(px, FLT_MAX, 0.f, s).x; }
+static ImU32 AccentF(float a) { const ImVec4 v = ImGui::GetStyleColorVec4(ImGuiCol_Accent); return ImGui::ColorConvertFloat4ToU32(ImVec4(v.x, v.y, v.z, a)); }
+static float TextW(ImFont* f, float px, const std::string& s) { return f->CalcTextSizeA(px, FLT_MAX, 0.f, s.c_str()).x; }
+static float ImguiW(ImFont* f, const std::string& s) { return floorf(TextW(f, f->FontSize, s) + 0.99999f); }   // botox imgui_text_width
 // botox vgui_text_width / vgui_shadow_text: floored width, floored pos, shadow = black at the colour's alpha
-static float VguiW(ImFont* f, const char* s) { return floorf(TextW(f, f->FontSize, s)); }
+static float VguiW(ImFont* f, const std::string& s) { return floorf(TextW(f, f->FontSize, s)); }
 static void VguiShadowText(ImDrawList* dl, ImFont* f, ImVec2 pos, ImU32 color, const char* s)
 {
     const ImVec2 at(floorf(pos.x), floorf(pos.y));
@@ -60,194 +99,224 @@ static void VguiShadowText(ImDrawList* dl, ImFont* f, ImVec2 pos, ImU32 color, c
     dl->AddText(f, f->FontSize, at, color, s);
 }
 static void SetBox(float x0, float y0, float x1, float y1) { g_wmBox = ImVec4(x0, y0, x1, y1); }
+static ImFont* Or(ImFont* f) { return f ? f : ImGui::GetFont(); }
 
-// style 1: kamibebra -- misc.cpp draw_watermark_kamibebra(). rubik 13, dark rounded box,
-// fixed top-right (donor ignores its own position setting too), text centred, extra fields in
-// a dim grey after " | " separators, the fps NUMBER in the main colour. Width eases toward its
-// target at 12/s so it never pops. Donor defaults kept: regular face, no outline, rounding 4;
-// typing / rgb-cycle / custom-rounding knobs are menu-only extras, skipped.
-static void DrawKamibebra(ImDrawList* dl, ImGuiIO& io)
+using n_wm::Utf8Truncate;   // wm_pure.h, botox spectator_list.cpp utf8_truncate
+
+// style 0: default -- misc.cpp draw_watermark() body. verdana bd 11 brand (white) + verdana 11
+// info parts in the menu accent, (25) box + (50) outline, fixed top-right 8px in.
+static void DrawDefault(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontKamibebra13 ? g_fontKamibebra13 : ImGui::GetFont();
-    const float fs = font->FontSize;
+    ImFont* bold = Or(g_menuBold), * slim = Or(g_menuReg);
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
+    struct Seg { std::string text; ImU32 color; ImFont* font; };
+    std::vector<Seg> segs;
+    segs.push_back({ Brand(), IM_COL32(255, 255, 255, 255), bold });
+    for (auto& part : InfoParts()) segs.push_back({ std::move(part), Accent(), slim });
 
-    char full[384]; snprintf(full, sizeof(full), extra[0] ? "%s | %s" : "%s", Brand(), extra);
+    float contentW = 0.f, contentH = 0.f;
+    for (auto& s : segs) {
+        const ImVec2 sz = s.font->CalcTextSizeA(s.font->FontSize, FLT_MAX, 0.f, s.text.c_str());
+        contentW += sz.x; contentH = (std::max)(contentH, sz.y);
+    }
 
-    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, full);
-    constexpr float minWidth = 95.f, height = 28.f, padX = 14.f;
+    constexpr float padX = 14.f, height = 25.f, minW = 95.f;
+    const float rounding = ImGui::GetStyle().WindowRounding;
+    const float width = segs.size() > 1 ? (std::max)(contentW + padX * 2.f, minW) : contentW + padX * 2.f;
+    const float x = io.DisplaySize.x - width - 8.f, y = 8.f;
+    SetBox(x, y, x + width, y + height);
 
-    static float curWidth = minWidth;
-    const float target = nf > 0 ? (std::max)(ts.x + padX * 2.f, minWidth) : minWidth;
-    curWidth += (target - curWidth) * (12.f * io.DeltaTime);
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + width, y + height), IM_COL32(25, 25, 25, 255), rounding);
+    dl->AddRect(ImVec2(x + 1.f, y + 1.f), ImVec2(x + width - 1.f, y + height - 1.f), IM_COL32(50, 50, 50, 255), rounding);
 
-    const float x = io.DisplaySize.x - curWidth - 8.f, y = 8.f;
-    SetBox(x, y, x + curWidth, y + height);
-
-    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + curWidth, y + height), IM_COL32(16, 16, 16, 255), 4.f);
-
-    const ImU32 main = PackColor(g_wmTextColor);
-    constexpr ImU32 info = IM_COL32(146, 144, 145, 255);
-
-    float tx = x + (curWidth - ts.x) * 0.5f;
-    const float ty = y + (height - ts.y) * 0.5f - 1.f;
-    const auto put = [&](const char* s, ImU32 c) { dl->AddText(font, fs, ImVec2(tx, ty), c, s); tx += TextW(font, fs, s); };
-    put(Brand(), main);
-    for (int i = 0; i < nf; ++i) {
-        put(" | ", info);
-        const char* fps = strstr(field[i], " fps");
-        if (fps && g_wmShowFPS) {   // "123 fps": number main, unit info (donor)
-            char num[64]; snprintf(num, sizeof(num), "%.*s", (int)(fps - field[i]), field[i]);
-            put(num, main); put(" fps", info);
-        } else put(field[i], info);
+    float tx = x + (width - contentW) * 0.5f;
+    const float ty = y + (height - contentH) * 0.5f;
+    for (auto& s : segs) {
+        dl->AddText(s.font, s.font->FontSize, ImVec2(tx, ty), s.color, s.text.c_str());
+        tx += s.font->CalcTextSizeA(s.font->FontSize, FLT_MAX, 0.f, s.text.c_str()).x;
     }
 }
 
-// style 2: clarity -- misc.cpp draw_watermark_clarity(). verdana bold 11, bare text, 1px drop
-// shadow, right/top fixed (donor hardcodes (w-6-tw, 5), ignores position knob).
+// style 1: kamibebra -- misc.cpp draw_watermark_kamibebra(). rubik 13 (or rubik medium 13 = "bold
+// font"), custom text, typing / deleting animation with holds, user / time / fps flags, width eased
+// at 12/s unless "mikudere type" pins it to 95, custom rounding, outline (picked or rgb cycle).
+static ImU32 s_kamiRgbLast = IM_COL32(255, 255, 255, 255);   // botox kami_rgb_last, the media frame reuses it
+static ImU32 KamiRgb(float dt)
+{
+    static float phase = 0.f;
+    float speed = g_wmKamiRgbSpeed;
+    if (speed <= 0.f) speed = 0.5f;
+    phase += dt * speed * 0.2f;
+    if (phase > 1.f) phase -= floorf(phase);
+
+    const float h = phase * 6.f;
+    const int i = (int)h;
+    const float f = h - (float)i, q = 1.f - f;
+    constexpr float s = 0.6f, v = 0.9f;
+    float r = 0.f, g = 0.f, b = 0.f;
+    switch (i % 6) {
+    case 0: r = v; g = v * (1.f - s * (1.f - f)); b = v * (1.f - s); break;
+    case 1: r = v * (1.f - s * q); g = v; b = v * (1.f - s); break;
+    case 2: r = v * (1.f - s); g = v; b = v * (1.f - s * (1.f - f)); break;
+    case 3: r = v * (1.f - s); g = v * (1.f - s * q); b = v; break;
+    case 4: r = v * (1.f - s * (1.f - f)); g = v * (1.f - s); b = v; break;
+    case 5: r = v; g = v * (1.f - s); b = v * (1.f - s * q); break;
+    }
+    return s_kamiRgbLast = IM_COL32((int)(r * 255.f), (int)(g * 255.f), (int)(b * 255.f), 255);
+}
+static float KamiRounding() { return g_wmKamiRounding ? g_wmKamiRoundingValue : 4.f; }
+static void DrawKamibebra(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_wmKamiBold ? g_fontKamibebraBold13 : g_fontKamibebra13);
+    const float dt = io.DeltaTime;
+
+    const bool custom = g_wmKamiCustomText;
+    const std::string mainText = custom ? std::string(g_wmKamiText) : Brand();
+
+    static std::string lastMain;
+    static size_t typingIndex = 0;
+    static float typingTimer = 0.f, pauseTimer = 0.f;
+    static bool deleting = false, inPause = false, pauseAfterTyping = false;
+
+    if (mainText != lastMain) { typingIndex = 0; deleting = false; typingTimer = 0.f; lastMain = mainText; }
+
+    std::string display = mainText;
+    if (g_wmKamiTyping) {
+        if (inPause) {
+            pauseTimer += dt;
+            if (pauseTimer >= (pauseAfterTyping ? g_wmKamiTypingHold : g_wmKamiDeletingHold)) {
+                inPause = false; pauseTimer = 0.f; deleting = pauseAfterTyping;
+            }
+        } else {
+            typingTimer += dt;
+            const int cps = deleting ? g_wmKamiDeletingSpeed : g_wmKamiTypingSpeed;
+            if (typingTimer >= 1.f / (float)(std::max)(cps, 1)) {
+                typingTimer = 0.f;
+                if (!deleting && typingIndex < mainText.length()) ++typingIndex;
+                else if (deleting && typingIndex > 0) --typingIndex;
+                else { inPause = true; pauseTimer = 0.f; pauseAfterTyping = !deleting; }
+            }
+        }
+        display = mainText.substr(0, (std::min)(typingIndex, mainText.length()));
+    } else { typingIndex = 0; deleting = false; }
+
+    const int flags = g_wmKamiShowFlags;
+    const bool showUser = (flags & 1) != 0, showTime = (flags & 2) != 0, showFps = (flags & 4) != 0;
+
+    static int cachedFps = 0;
+    static float fpsTimer = 0.f;
+    if (showFps) {
+        fpsTimer += dt;
+        if (fpsTimer >= 0.5f) { cachedFps = dt > 0.f ? (int)(1.f / dt) : 0; fpsTimer = 0.f; }
+    }
+
+    const std::string timeText = showTime ? Clock() : std::string{};
+    const std::string fpsText = std::to_string(cachedFps);
+    const std::string user = User();
+
+    std::string full = display;
+    if (showUser) full += " | " + user;
+    if (showTime) full += " | " + timeText;
+    if (showFps)  full += " | " + fpsText + " fps";
+
+    const float fs = font->FontSize;
+    const ImVec2 fullSize = font->CalcTextSizeA(fs, FLT_MAX, 0.f, full.c_str());
+    constexpr float minWidth = 95.f, height = 28.f, padX = 14.f;
+
+    float width = minWidth;
+    if (!g_wmKamiMikudere && (custom || (flags & 7) != 0)) {
+        const float target = (std::max)(fullSize.x + padX * 2.f, minWidth);
+        static float current = target;
+        current += (target - current) * 12.f * dt;
+        width = current;
+    }
+
+    const float x = io.DisplaySize.x - width - 8.f, y = 8.f;
+    SetBox(x, y, x + width, y + height);
+
+    const float rounding = KamiRounding();
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + width, y + height), IM_COL32(16, 16, 16, 255), rounding);
+
+    const float* stroke = g_wmKamiOutlineColor;
+    if (g_wmKamiOutline) {
+        const ImU32 outline = g_wmKamiRgb ? KamiRgb(dt) : PackColor(stroke);
+        dl->AddRect(ImVec2(x, y), ImVec2(x + width, y + height), outline, rounding, ImDrawFlags_RoundCornersAll, 1.f);
+    }
+
+    // "text color like stroke" takes the picked colour, never the rgb one (donor)
+    const ImU32 main = g_wmKamiTextLikeStroke
+        ? IM_COL32((int)(stroke[0] * 255.f), (int)(stroke[1] * 255.f), (int)(stroke[2] * 255.f), 255) : IM_COL32(255, 255, 255, 255);
+    constexpr ImU32 info = IM_COL32(146, 144, 145, 255);
+
+    float tx = x + (width - fullSize.x) * 0.5f;
+    const float ty = y + (height - fullSize.y) * 0.5f - 1.f;
+    const auto put = [&](const std::string& s, ImU32 c) { dl->AddText(font, fs, ImVec2(tx, ty), c, s.c_str()); tx += TextW(font, fs, s); };
+
+    put(display, main);
+    if (showUser) { put(" | ", info); put(user, info); }
+    if (showTime) { put(" | ", info); put(timeText, info); }
+    if (showFps)  { put(" | ", info); put(fpsText, main); put(" fps", info); }
+}
+
+// style 2: clarity -- misc.cpp draw_watermark_clarity(). verdana bold 11, brand + info parts,
+// white with a 1px black drop shadow, top-right (w - 6 - tw, 5).
 static void DrawClarity(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_menuBold ? g_menuBold : ImGui::GetFont();
+    ImFont* font = Or(g_menuBold);
+    std::string text = Brand();
+    for (const auto& part : InfoParts()) text += part;
+
     const float fs = font->FontSize;
-
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    char line[384]; snprintf(line, sizeof(line), nf > 0 ? "%s | %s" : "%s", Brand(), extra);
-
-    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, line);
+    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, text.c_str());
     const ImVec2 pos(io.DisplaySize.x - 6.f - ts.x, 5.f);
     SetBox(pos.x, pos.y, pos.x + ts.x, pos.y + ts.y);
 
-    dl->AddText(font, fs, ImVec2(pos.x + 1.f, pos.y + 1.f), IM_COL32(0, 0, 0, 255), line);
-    dl->AddText(font, fs, pos, PackColor(g_wmTextColor), line);
+    dl->AddText(font, fs, ImVec2(pos.x + 1.f, pos.y + 1.f), IM_COL32(0, 0, 0, 255), text.c_str());
+    dl->AddText(font, fs, pos, IM_COL32(255, 255, 255, 255), text.c_str());
 }
 
-// style 4: delusional -- misc.cpp draw_watermark_delusional(). tahoma 12 mono, vertical
-// accent-fade outline (full alpha top -> 0 bottom) + dark fill, shadowed text, fixed right/top.
-static void DrawDelusional(ImDrawList* dl, ImGuiIO& io)
-{
-    ImFont* font = g_fontTahoma12 ? g_fontTahoma12 : ImGui::GetFont();
-    constexpr float fs = 12.f;
-
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    char line[384];
-    snprintf(line, sizeof(line), nf > 0 ? "%s | %s" : "%s", Brand(), extra);
-
-    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, line);
-    const ImVec2 pad(7.f, 7.f), margin(4.f, 3.f);
-    const float w = io.DisplaySize.x;
-
-    const ImVec2 bmin(w - ts.x - pad.x - margin.x * 2.f - 1.f, pad.y - 1.f);
-    const ImVec2 bmax(w - pad.x + 1.f, ts.y + pad.y + margin.y * 2.f + 1.f);
-    SetBox(bmin.x, bmin.y, bmax.x, bmax.y);
-
-    dl->AddRectFilledMultiColor(bmin, bmax, Accent(), Accent(), AccentA(0), AccentA(0));
-    dl->AddRectFilled(ImVec2(w - ts.x - pad.x - margin.x * 2.f, pad.y), ImVec2(w - pad.x, ts.y + pad.y + margin.y * 2.f), IM_COL32(20, 20, 20, 255));
-
-    const ImVec2 tp(w - ts.x - pad.x - margin.x, pad.y + margin.y);
-    dl->AddText(font, fs, ImVec2(tp.x + 1.f, tp.y + 1.f), IM_COL32(0, 0, 0, 255), line);
-    dl->AddText(font, fs, tp, IM_COL32(255, 255, 255, 255), line);
-}
-
-// style 5: interwebz -- misc.cpp draw_watermark_interwebz(). calibri 16 mono, uppercase brand
-// + game tag, 8-way outline, centred at a fixed point in botox's 640x480 virtual canvas; TF2
-// has no such canvas (render.cpp draws straight in io.DisplaySize px) so the point is scaled
-// proportionally (n_unitE::ScaleVirtual640x480). "CS:GO" literal swapped for "TF2" -- the one
-// thing the game itself forces.
-static void DrawInterwebz(ImDrawList* dl, ImGuiIO& io)
-{
-    ImFont* font = g_fontInterwebzCalibri ? g_fontInterwebzCalibri : ImGui::GetFont();
-    const float fs = font->FontSize;
-
-    char brand[64];
-    snprintf(brand, sizeof(brand), "%s", Brand());
-    for (char* p = brand; *p; ++p) *p = (char)toupper((unsigned char)*p);
-
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    char line[384];
-    snprintf(line, sizeof(line), nf > 0 ? "%s TF2 | %s" : "%s TF2", brand, extra);
-
-    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, line);
-    float vx, vy;
-    n_unitE::ScaleVirtual640x480(io.DisplaySize.x, io.DisplaySize.y, 250.f, 36.f, vx, vy);
-    const ImVec2 pos(vx - floorf(ts.x * 0.5f), vy - roundf(font->Ascent));
-    SetBox(pos.x, pos.y, pos.x + ts.x, pos.y + ts.y);
-
-    constexpr ImVec2 off[8] = { {-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1} };
-    for (auto& o : off) dl->AddText(font, fs, ImVec2(pos.x + o.x, pos.y + o.y), IM_COL32(0, 0, 0, 255), line);
-    dl->AddText(font, fs, pos, PackColor(g_wmTextColor), line);
-}
-
-// style 7: onetap -- misc.cpp draw_watermark_onetap(). tahoma 12 mono, fixed 280x20
-// translucent pink/red bar, top-right, fields joined with " | ".
-static void DrawOnetap(ImDrawList* dl, ImGuiIO& io)
-{
-    ImFont* font = g_fontTahoma12 ? g_fontTahoma12 : ImGui::GetFont();
-    const float fs = font->FontSize;
-
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    char line[384];
-    snprintf(line, sizeof(line), nf > 0 ? "%s | %s" : "%s", Brand(), extra);
-
-    const float w = io.DisplaySize.x;
-    SetBox(w - 280.f, 10.f, w - 10.f, 30.f);
-    dl->AddRectFilled(ImVec2(w - 280.f, 10.f), ImVec2(w - 10.f, 30.f), IM_COL32(185, 90, 105, 160));
-    dl->AddText(font, fs, ImVec2(w - 275.f, 14.f), IM_COL32(255, 255, 255, 150), line);
-}
-
-// style 3: clarity v2 -- misc.cpp draw_watermark_clarity_v2(). inter semibold 14, dark rounded
-// box with three rings, fixed top-right (donor ignores the position knob too), icomoon icon
-// glyph bled into the left edge at low alpha. Segments: brand(accent) | fields | fps slot "fps",
-// a 1px (50,50,50) vertical hairline in each 12px gap -- no " | " text. fps slot = digits *
-// width("9") + 3, eased at 15/s so the box never jitters per digit; fps is drawn here always,
-// so the shared field list is built without it. Text is drawn twice at dx 0 / 0.5 with the
-// alpha pre-compensated (1 - sqrt(1 - a)) -- the donor's faux-bold.
+// style 3: clarity v2 -- misc.cpp draw_watermark_clarity_v2(). inter semibold 14, three rings,
+// icon glyph bled into the left edge, brand(accent) | user | fps slot "fps" with hairline gaps.
+// fps = mean frame time over 0.4s windows, slot width eased at 15/s, faux-bold double draw.
 static void DrawClarityV2(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontClarityInter ? g_fontClarityInter : ImGui::GetFont();
+    if (!g_wmEnable) return;   // donor gates itself (draw_watermark dispatches 3 before the m_watermark check)
+
+    ImFont* font = Or(g_fontClarityInter);
     ImFont* iconFont = g_fontClarityIcon ? g_fontClarityIcon : font;
 
-    const auto textSize = [](ImFont* f, const char* text) {
-        const ImVec2 sz = f->CalcTextSizeA(f->FontSize, FLT_MAX, 0.f, text);
+    const auto textSize = [](ImFont* f, const std::string& text) {
+        const ImVec2 sz = f->CalcTextSizeA(f->FontSize, FLT_MAX, 0.f, text.c_str());
         return std::pair{ (int)sz.x, (int)sz.y };
     };
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field, false);
-    JoinFields(extra, field, nf, " | ");
-
-    char fpsText[16]; snprintf(fpsText, sizeof(fpsText), "%d", (int)(g_fps.load() + 0.5f));
-
-    static float slotWidth = 0.f;
-    const float slotTarget = (float)((int)strlen(fpsText) * textSize(font, "9").first + 3);
-    if (slotWidth != slotTarget) slotWidth += (slotTarget - slotWidth) * std::clamp(15.f * io.DeltaTime, 0.f, 1.f);
+    static int fps = 0, frames = 0;
+    static float frameSum = 0.f, lastUpdate = 0.f, slotWidth = 0.f;
+    frameSum += io.DeltaTime; ++frames;
+    if (const float now = (float)ImGui::GetTime(); now - 0.4f >= lastUpdate || now < lastUpdate) {
+        fps = frameSum > 0.f ? (int)(1.f / (frameSum / (float)frames)) : 0;
+        frames = 0; frameSum = 0.f; lastUpdate = now;
+    }
 
     const ImU32 accent = Accent();
-    struct Seg { const char* text; ImU32 color; int width; };   // width -1 = measure, text "" = gap
-    Seg segs[6]; int ns = 0;
-    segs[ns++] = { Brand(), accent, -1 };
-    if (nf > 0) { segs[ns++] = { "", 0, 12 }; segs[ns++] = { extra, IM_COL32(255, 255, 255, 150), -1 }; }
-    segs[ns++] = { "", 0, 12 };
-    segs[ns++] = { fpsText, IM_COL32(255, 255, 255, 255), (int)slotWidth };
-    segs[ns++] = { "fps", IM_COL32(255, 255, 255, 150), -1 };
+    const std::string fpsText = std::to_string(fps);
+
+    const float slotTarget = (float)((int)fpsText.size() * textSize(font, "9").first + 3);
+    if (slotWidth != slotTarget) slotWidth += (slotTarget - slotWidth) * std::clamp(15.f * io.DeltaTime, 0.f, 1.f);
+
+    struct Seg { std::string text; ImU32 color; int width; };   // width -1 = measure, text "" = gap
+    const Seg segs[] = {
+        { Brand(), accent, -1 },
+        { {}, 0, 12 },
+        { User(), IM_COL32(255, 255, 255, 150), -1 },
+        { {}, 0, 12 },
+        { fpsText, IM_COL32(255, 255, 255, 255), (int)slotWidth },
+        { "fps", IM_COL32(255, 255, 255, 150), -1 },
+    };
     const auto segW = [&](const Seg& s) { return s.width == -1 ? textSize(font, s.text).first : s.width; };
 
     int textWidth = 0;
-    for (int i = 0; i < ns; ++i) textWidth += segW(segs[i]);
+    for (const auto& s : segs) textWidth += segW(s);
 
     constexpr int fontH = 10;
     const int w = textWidth + 10 * 2, h = fontH + 7 * 2;
@@ -277,15 +346,14 @@ static void DrawClarityV2(ImDrawList* dl, ImGuiIO& io)
 
     int cursor = x + 10;
     const int mid = y + h / 2;
-    for (int i = 0; i < ns; ++i) {
-        const Seg& s = segs[i];
-        if (s.text[0]) {
+    for (const auto& s : segs) {
+        if (!s.text.empty()) {
             const float ty = (float)(mid - textSize(font, s.text).second / 2);
             const float a = (float)((s.color >> IM_COL32_A_SHIFT) & 0xFF) / 255.f;
             const ImU32 passA = (ImU32)((1.f - sqrtf(1.f - a)) * 255.f + 0.5f);
             const ImU32 color = (s.color & ~IM_COL32_A_MASK) | (passA << IM_COL32_A_SHIFT);
             for (const float dx : { 0.f, 0.5f })
-                dl->AddText(font, font->FontSize, ImVec2((float)cursor + dx, ty), color, s.text);
+                dl->AddText(font, font->FontSize, ImVec2((float)cursor + dx, ty), color, s.text.c_str());
         } else {
             constexpr int half = fontH / 2;
             dl->AddLine(ImVec2((float)(cursor + 6), (float)(mid - half)), ImVec2((float)(cursor + 6), (float)(mid + half)), IM_COL32(50, 50, 50, 255));
@@ -294,15 +362,76 @@ static void DrawClarityV2(ImDrawList* dl, ImGuiIO& io)
     }
 }
 
-// below: styles 6,9-21 -- donor bodies all live in botox's spectator_list.cpp (not misc.cpp),
-// ported the same way: shared field set (BuildFields/JoinFields), each on its own botox face.
+// style 4: delusional -- misc.cpp draw_watermark_delusional(). tahoma 12 mono, "brand | label",
+// vertical accent-fade outline (full alpha top -> 0 bottom) + (20) fill, shadowed white text.
+static void DrawDelusional(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontTahoma12);
+    const std::string label = Label();
+    const std::string main = label.empty() ? Brand() : Brand() + " | " + label;
 
-static ImU32 DimGrey(int a) { return IM_COL32(146, 144, 145, a); }
+    const ImVec2 ts = font->CalcTextSizeA(12.f, FLT_MAX, 0.f, main.c_str());
+    const ImVec2 pad(7.f, 7.f), margin(4.f, 3.f);
+    const float w = io.DisplaySize.x;
 
-// style 6: havoc-1337 -- spectator_list.cpp draw_watermark_havoc(). tahoma 13 mono, nested
-// grey box shells, crossing diagonal lines after the brand (accent + the menu accent), vgui
-// shadow text. botox: accent = m_watermark_havoc_color (-> text colour), accent2 = m_accent
-// (-> ImGuiCol_Accent).
+    const ImVec2 bmin(w - ts.x - pad.x - margin.x * 2.f - 1.f, pad.y - 1.f);
+    const ImVec2 bmax(w - pad.x + 1.f, ts.y + pad.y + margin.y * 2.f + 1.f);
+    SetBox(bmin.x, bmin.y, bmax.x, bmax.y);
+
+    dl->AddRectFilledMultiColor(bmin, bmax, Accent(), Accent(), AccentA(0), AccentA(0));
+    dl->AddRectFilled(ImVec2(w - ts.x - pad.x - margin.x * 2.f, pad.y), ImVec2(w - pad.x, ts.y + pad.y + margin.y * 2.f), IM_COL32(20, 20, 20, 255));
+
+    const ImVec2 tp(w - ts.x - pad.x - margin.x, pad.y + margin.y);
+    dl->AddText(font, 12.f, ImVec2(tp.x + 1.f, tp.y), IM_COL32(0, 0, 0, 255), main.c_str());
+    dl->AddText(font, 12.f, tp, IM_COL32(255, 255, 255, 255), main.c_str());
+}
+
+// style 5: interwebz -- misc.cpp draw_watermark_interwebz(). calibri 16 mono, uppercase brand +
+// game tag + label, 8-way black outline, white, centred on (250, 36) of botox's 640x480 stretch
+// block. TF2 has no such canvas (render.cpp draws in io.DisplaySize px), so the point is scaled
+// (n_unitE::ScaleVirtual640x480). "CS:GO" -> "TF2": the one thing the game forces.
+static void DrawInterwebz(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontInterwebzCalibri);
+    const float fs = font->FontSize;
+
+    std::string brand = Brand();
+    for (char& c : brand) c = (char)toupper((unsigned char)c);
+    const std::string label = Label();
+    const std::string line = brand + " TF2" + (label.empty() ? "" : " | " + label);
+
+    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, line.c_str());
+    float vx, vy;
+    n_unitE::ScaleVirtual640x480(io.DisplaySize.x, io.DisplaySize.y, 250.f, 36.f, vx, vy);
+    const ImVec2 pos(vx - floorf(ts.x * 0.5f), vy - roundf(font->Ascent));
+    SetBox(pos.x, pos.y, pos.x + ts.x, pos.y + ts.y);
+
+    constexpr ImVec2 off[8] = { {-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1} };
+    for (auto& o : off) dl->AddText(font, fs, ImVec2(pos.x + o.x, pos.y + o.y), IM_COL32(0, 0, 0, 255), line.c_str());
+    dl->AddText(font, fs, pos, IM_COL32(255, 255, 255, 255), line.c_str());
+}
+
+// style 7: onetap -- misc.cpp draw_watermark_onetap(). tahoma 12 mono, fixed 280x20 translucent
+// pink bar, "brand | label", in game + " | rate: N | choke: N". botox's " | shots: N" is
+// m_iShotsFired, a CS:GO player netvar TF2 does not have (no tf/ file in source-sdk-2013 has it).
+static void DrawOnetap(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontTahoma12);
+    std::string text = Brand();
+    if (const std::string label = Label(); !label.empty()) text += " | " + label;
+    if (s_f.inGame && GetLocalPlayerIndex() > 0)
+        text += " | rate: " + std::to_string(Tickrate()) + " | choke: " + std::to_string(Aim_ChokedCommands());
+
+    const float w = io.DisplaySize.x;
+    SetBox(w - 280.f, 10.f, w - 10.f, 30.f);
+    dl->AddRectFilled(ImVec2(w - 280.f, 10.f), ImVec2(w - 10.f, 30.f), IM_COL32(185, 90, 105, 160));
+    dl->AddText(font, font->FontSize, ImVec2(w - 275.f, 14.f), IM_COL32(255, 255, 255, 150), text.c_str());
+}
+
+// below: styles 6,8-21 -- donor bodies live in botox's spectator_list.cpp, not misc.cpp.
+
+// style 6: havoc-1337 -- spectator_list.cpp draw_watermark_havoc(). tahoma 13 mono, nested grey
+// shells, crossing diagonals after the brand: accent = "blue color", accent2 = menu accent.
 static void HavocBox(ImDrawList* dl, ImVec2 pos, ImVec2 size, float alpha)
 {
     auto shell = [&](float inset, int shade) {
@@ -315,37 +444,33 @@ static void HavocLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color)
 {
     dl->AddLine(ImVec2(a.x + 0.5f, a.y + 0.5f), ImVec2(b.x + 0.5f, b.y + 0.5f), color);
 }
-static ImU32 HavocAccent2() { return ImGui::GetColorU32(ImGuiCol_Accent); }
+static ImU32 HavocAccent() { return PackColor(g_wmHavocColor); }
+static ImU32 HavocAccent2() { return Accent(); }
 static void DrawHavoc(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontHavocTahoma13 ? g_fontHavocTahoma13 : ImGui::GetFont();
-
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    char name[80]; snprintf(name, sizeof(name), "%s ", Brand());
+    ImFont* font = Or(g_fontHavocTahoma13);
+    const std::string name = Brand() + " ", label = Label();
     const float nameW = VguiW(font, name);
 
-    const ImVec2 size(nameW + VguiW(font, extra) + 37.f, 20.f);
+    const ImVec2 size(nameW + VguiW(font, label) + 37.f, 20.f);
     const ImVec2 pos(io.DisplaySize.x - size.x - 20.f, 15.f);
     SetBox(pos.x, pos.y, pos.x + size.x, pos.y + size.y);
 
     HavocBox(dl, pos, size, 1.f);
 
-    const ImU32 accent = Accent(), accent2 = HavocAccent2();
+    const ImU32 accent = HavocAccent(), accent2 = HavocAccent2();
     for (int i = 0; i < 3; ++i) {
         const float x = pos.x + nameW + 8.f + (float)i;
         HavocLine(dl, ImVec2(x + 19.f, pos.y + 2.f), ImVec2(x + 4.f, pos.y + 17.f), accent2);
         HavocLine(dl, ImVec2(x + 12.f, pos.y + 2.f), ImVec2(x - 3.f, pos.y + 17.f), accent);
     }
 
-    VguiShadowText(dl, font, ImVec2(pos.x + 6.f, pos.y + 3.f), accent, name);
-    VguiShadowText(dl, font, ImVec2(pos.x + nameW + 33.f, pos.y + 3.f), accent2, extra);
+    VguiShadowText(dl, font, ImVec2(pos.x + 6.f, pos.y + 3.f), accent, name.c_str());
+    VguiShadowText(dl, font, ImVec2(pos.x + nameW + 33.f, pos.y + 3.f), accent2, label.c_str());
 }
 
-// style 9: ev0lve -- spectator_list.cpp draw_watermark_evolve(). segoe ui 16 (brand bold),
-// soft drop shadow, dark header block with an accent underline, rest in (220) grey.
+// style 9: ev0lve -- spectator_list.cpp draw_watermark_evolve(). segoe ui 16 (brand bold), soft
+// drop shadow at "alpha override" * 0.25, dark header with an accent underline, label in (220).
 static void EvolveShadow(ImDrawList* dl, ImVec2 min, ImVec2 max, float radius, float alpha)
 {
     const ImU32 dark = IM_COL32(0, 0, 0, (int)(255.f * alpha)), clear = IM_COL32(0, 0, 0, 0);
@@ -372,36 +497,34 @@ static void EvolveShadow(ImDrawList* dl, ImVec2 min, ImVec2 max, float radius, f
 static void EvolveHeader(ImDrawList* dl, ImVec2 min, float width, float alpha)
 {
     dl->AddRectFilled(min, ImVec2(min.x + width, min.y + 24.f), IM_COL32(29, 29, 29, (int)(255.f * alpha)), 4.f, ImDrawFlags_RoundCornersTop);
-    dl->AddRectFilled(ImVec2(min.x, min.y + 24.f), ImVec2(min.x + width, min.y + 25.f), AccentA((int)(255.f * alpha)));
+    dl->AddRectFilled(ImVec2(min.x, min.y + 24.f), ImVec2(min.x + width, min.y + 25.f), AccentF(alpha));
 }
+static float EvolveMaxAlpha() { return std::clamp(g_wmEvolveAlpha / 100.f, 0.f, 1.f); }
 static void DrawEvolve(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontEvolve16 ? g_fontEvolve16 : ImGui::GetFont();
+    ImFont* font = Or(g_fontEvolve16);
     ImFont* bold = g_fontEvolveBold16 ? g_fontEvolveBold16 : font;
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
+    const std::string brand = Brand(), label = Label();
+    const std::string rest = label.empty() ? std::string{} : " | " + label;
 
-    char rest[328] = {}; if (nf > 0) snprintf(rest, sizeof(rest), " | %s", extra);
-
-    // botox imgui_text_width: floor(w + 0.99999)
-    const float brandW = floorf(TextW(bold, bold->FontSize, Brand()) + 0.99999f);
-    const float width = floorf(brandW + floorf(TextW(font, font->FontSize, rest) + 0.99999f) + 20.f);
+    const float brandW = ImguiW(bold, brand);
+    const float width = floorf(brandW + ImguiW(font, rest) + 20.f);
 
     const ImVec2 min(io.DisplaySize.x - width - 10.f, 10.f), max(min.x + width, min.y + 25.f);
     SetBox(min.x, min.y, max.x, max.y);
 
-    EvolveShadow(dl, min, max, 12.f, 0.25f);
+    EvolveShadow(dl, min, max, 12.f, EvolveMaxAlpha() * 0.25f);
     EvolveHeader(dl, min, width, 1.f);
 
     const float ty = floorf(min.y + (24.f - bold->FontSize) * 0.5f);
-    dl->AddText(bold, bold->FontSize, ImVec2(min.x + 10.f, ty), Accent(), Brand());
-    dl->AddText(font, font->FontSize, ImVec2(min.x + 10.f + brandW, ty), IM_COL32(220, 220, 220, 255), rest);
+    dl->AddText(bold, bold->FontSize, ImVec2(min.x + 10.f, ty), Accent(), brand.c_str());
+    dl->AddText(font, font->FontSize, ImVec2(min.x + 10.f + brandW, ty), IM_COL32(220, 220, 220, 255), rest.c_str());
 }
 
-// style 10: legendware -- spectator_list.cpp draw_watermark_legendware(). verdana 12 mono,
-// accent gradient hairlines top+bottom, dark translucent fill, vgui-shadowed text at 220 alpha.
+// style 10: legendware -- spectator_list.cpp draw_watermark_legendware(). verdana 12 mono, accent
+// gradient hairlines top+bottom, (10,150) fill, vgui-shadowed text at 220. "brand | user | HH:MM:SS",
+// in game "brand | user | server | N ms | N tick | HH:MM:SS".
 static void LegendwareGradient(ImDrawList* dl, ImVec2 pos, ImVec2 size, const int rgb[3], int left, int right)
 {
     auto col = [&](int a) { return IM_COL32(rgb[0], rgb[1], rgb[2], a); };
@@ -409,35 +532,38 @@ static void LegendwareGradient(ImDrawList* dl, ImVec2 pos, ImVec2 size, const in
     dl->AddRectFilledMultiColor(pos, end, col(left), col(0), col(0), col(left));
     dl->AddRectFilledMultiColor(pos, end, col(0), col(right), col(right), col(0));
 }
+static void AccentRgb(int rgb[3])
+{
+    const ImVec4 v = ImGui::GetStyleColorVec4(ImGuiCol_Accent);
+    rgb[0] = (int)(v.x * 255.f); rgb[1] = (int)(v.y * 255.f); rgb[2] = (int)(v.z * 255.f);
+}
 static void DrawLegendware(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontLegendwareVerdana12 ? g_fontLegendwareVerdana12 : ImGui::GetFont();
+    ImFont* font = Or(g_fontLegendwareVerdana12);
+    const std::string clock = Clock("%H:%M:%S"), brand = Brand(), user = User();
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    char text[384];
-    snprintf(text, sizeof(text), nf > 0 ? "%s | %s" : "%s", Brand(), extra);
+    std::string text = brand + " | " + user + " | " + clock;
+    char server[128];
+    if (s_f.inGame && NetServer(server, sizeof(server)))
+        text = brand + " | " + user + " | " + server + " | " + std::to_string(Ping()) + " ms | " + std::to_string(Tickrate(false)) + " tick | " + clock;
 
     const int boxW = (int)VguiW(font, text) + 10;
     const int half = boxW / 2;
     const float x = (float)((int)io.DisplaySize.x - 10 - boxW);
     SetBox(x, 10.f, x + (float)boxW, 30.f);
 
-    const int rgb[3] = { (int)(g_wmTextColor[0] * 255.f), (int)(g_wmTextColor[1] * 255.f), (int)(g_wmTextColor[2] * 255.f) };
-
+    int rgb[3]; AccentRgb(rgb);
     for (float lineY : { 10.f, 29.f }) {
         LegendwareGradient(dl, ImVec2(x, lineY), ImVec2((float)half, 1.f), rgb, 170, 240);
         LegendwareGradient(dl, ImVec2(x + (float)half, lineY), ImVec2((float)half, 1.f), rgb, 240, 170);
     }
 
     dl->AddRectFilled(ImVec2(x, 11.f), ImVec2(x + (float)boxW, 29.f), IM_COL32(10, 10, 10, 150));
-    VguiShadowText(dl, font, ImVec2(x + 5.f, 13.f), IM_COL32(255, 255, 255, 220), text);
+    VguiShadowText(dl, font, ImVec2(x + 5.f, 13.f), IM_COL32(255, 255, 255, 220), text.c_str());
 }
 
-// style 11: interium -- spectator_list.cpp draw_watermark_interium(). droid sans bold 24 drawn
-// at 16, slow 4-corner hue cycle border, black fill (donor's interium bg default), shadowed text.
+// style 11: interium -- spectator_list.cpp draw_watermark_interium(). droid sans bold 24 drawn at 16,
+// 4-corner hue cycle border, "background color" fill, shadowed white "brand | label", top-left.
 static float s_interiumHues[4] = { 0.f, 0.25f, 0.5f, 0.75f };
 static ImU32 InteriumHsv(float hue, int alpha)
 {
@@ -445,58 +571,75 @@ static ImU32 InteriumHsv(float hue, int alpha)
     ImGui::ColorConvertHSVtoRGB(hue, 1.f, 0.7f, r, g, b);
     return IM_COL32((int)(r * 255.f), (int)(g * 255.f), (int)(b * 255.f), alpha);
 }
-static void InteriumStep(float dt)
-{
-    const float step = dt * 0.25f;
-    for (float& hue : s_interiumHues) { hue += step; if (hue > 1.f) hue -= 1.f; }
-}
 static void DrawInterium(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontInteriumDroid24 ? g_fontInteriumDroid24 : ImGui::GetFont();
-    InteriumStep(io.DeltaTime);
+    ImFont* font = Or(g_fontInteriumDroid24);
+    const float step = io.DeltaTime * 0.25f;   // donor: gpGlobals->frametime * 0.25
+    for (float& hue : s_interiumHues) { hue += step; if (hue > 1.f) hue -= 1.f; }
     const float* h = s_interiumHues;
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
+    const std::string label = Label();
+    const std::string text = label.empty() ? Brand() : Brand() + " | " + label;
 
-    char text[384];
-    snprintf(text, sizeof(text), nf > 0 ? "%s | %s" : "%s", Brand(), extra);
-
-    const ImVec2 ts = font->CalcTextSizeA(16.f, FLT_MAX, 0.f, text);
+    const ImVec2 ts = font->CalcTextSizeA(16.f, FLT_MAX, 0.f, text.c_str());
     constexpr float x = 5.f, y = 5.f;
     const float right = x + ts.x + 10.f, bottom = y + ts.y + 8.f;
     SetBox(x - 1.f, y - 1.f, right + 1.f, bottom + 1.f);
 
     const auto trunc = [](float v) { return (float)(int)v; };
-
     dl->AddRectFilledMultiColor(ImVec2(x - 1.f, y - 1.f), ImVec2(trunc(right + 1.f), trunc(bottom + 1.f)),
         InteriumHsv(h[0], 100), InteriumHsv(h[1], 100), InteriumHsv(h[2], 100), InteriumHsv(h[3], 100));
     dl->AddRectFilledMultiColor(ImVec2(x, y), ImVec2(trunc(right), trunc(bottom)),
         InteriumHsv(h[0], 255), InteriumHsv(h[1], 255), InteriumHsv(h[2], 255), InteriumHsv(h[3], 255));
-    dl->AddRectFilled(ImVec2(x + 1.f, y + 1.f), ImVec2(trunc(right - 1.f), trunc(bottom - 1.f)), IM_COL32(0, 0, 0, 255));
+    dl->AddRectFilled(ImVec2(x + 1.f, y + 1.f), ImVec2(trunc(right - 1.f), trunc(bottom - 1.f)), PackColor(g_wmInteriumBg));
 
-    dl->AddText(font, 16.f, ImVec2(11.f, 10.f), IM_COL32(0, 0, 0, 255), text);
-    dl->AddText(font, 16.f, ImVec2(10.f, 9.f), IM_COL32(255, 255, 255, 255), text);
+    dl->AddText(font, 16.f, ImVec2(11.f, 10.f), IM_COL32(0, 0, 0, 255), text.c_str());
+    dl->AddText(font, 16.f, ImVec2(10.f, 9.f), IM_COL32(255, 255, 255, 255), text.c_str());
 }
 
-// style 12: skebob -- spectator_list.cpp draw_watermark_skebob(). nunito 14, double dark
-// frame box, accent brand, fields in white after a "|". Donor's typing animation skipped.
+// style 12: skebob -- spectator_list.cpp draw_watermark_skebob(). nunito 14, double dark frame,
+// accent brand | user | N fps (1s refresh of a 0.9/0.1 smoothed frame time). "typing effect":
+// brand types in at 150ms/char, holds 2s, deletes at 100ms/char, loops.
 static void DrawSkebob(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontSkebobNunito14 ? g_fontSkebobNunito14 : ImGui::GetFont();
+    ImFont* font = Or(g_fontSkebobNunito14);
+
+    static float frameTime = 1.f;
+    static std::string fps = "0";
+    static DWORD nextFps = 0;
+    frameTime = frameTime * 0.9f + io.DeltaTime * 0.1f;
+    const DWORD now = GetTickCount();
+    if (now >= nextFps && frameTime > 0.f) { fps = std::to_string((int)(1.f / frameTime)); nextFps = now + 1000; }
+
+    const std::string brand = Brand();
+    std::string shown = brand;
+
+    static bool wasOn = false, typing = true;
+    static int count = 0;
+    static DWORD nextChar = 0, holdUntil = 0;
+    if (g_wmSkebobTyping) {
+        if (!wasOn) { count = 0; typing = true; nextChar = now; holdUntil = 0; }
+        wasOn = true;
+        const int length = (int)brand.size();
+        if (typing) {
+            if (now > nextChar) {
+                ++count; nextChar = now + 150;
+                if (count > length) { typing = false; holdUntil = now + 2000; count = length; }
+            }
+            shown = brand.substr(0, (size_t)std::clamp(count, 0, length));
+        } else if (now > holdUntil && now > nextChar) {
+            --count; nextChar = now + 100;
+            if (count < 0) { typing = true; count = 0; nextChar = now; }
+            else shown = brand.substr(0, (size_t)(std::min)(count, length));
+        }
+    } else wasOn = false;
+
+    const std::string user = User();
     const float size = font->FontSize;
+    const float wBrand = TextW(font, size, shown), wUser = TextW(font, size, user), wFps = TextW(font, size, fps), wSuffix = TextW(font, size, "fps");
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    const float wBrand = TextW(font, size, Brand());
-    const float wExtra = TextW(font, size, extra);
-
-    const float width = wBrand + wExtra + 55.f;
+    const float width = wBrand + wUser + wFps + wSuffix + 70.f;
     const float wx = io.DisplaySize.x - width;
-
     const ImVec2 min(wx + 10.f, 10.f), max(wx + width - 5.f, 40.f);
     SetBox(min.x, min.y, max.x, max.y);
 
@@ -505,131 +648,248 @@ static void DrawSkebob(ImDrawList* dl, ImGuiIO& io)
     dl->AddRectFilled(ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f), IM_COL32(20, 20, 20, 255), 5.f);
     dl->AddRect(ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f), IM_COL32(0, 0, 0, 255), 5.f, 0, 1.f);
 
-    dl->AddText(font, size, ImVec2(wx + 20.f, 20.f), Accent(), Brand());
-    if (nf > 0) {
-        dl->AddText(font, size, ImVec2(wx + wBrand + 25.f, 20.f), IM_COL32(255, 255, 255, 255), "|");
-        dl->AddText(font, size, ImVec2(wx + wBrand + 35.f, 20.f), IM_COL32(255, 255, 255, 255), extra);
-    }
+    constexpr ImU32 white = IM_COL32(255, 255, 255, 255);
+    dl->AddText(font, size, ImVec2(wx + 20.f, 20.f), Accent(), shown.c_str());
+    dl->AddText(font, size, ImVec2(wx + wBrand + 25.f, 20.f), white, "|");
+    dl->AddText(font, size, ImVec2(wx + wBrand + 35.f, 20.f), white, user.c_str());
+    dl->AddText(font, size, ImVec2(wx + wBrand + wUser + 40.f, 20.f), white, "|");
+    dl->AddText(font, size, ImVec2(wx + wBrand + wUser + 50.f, 20.f), white, fps.c_str());
+    dl->AddText(font, size, ImVec2(wx + wBrand + wUser + wFps + 55.f, 20.f), white, "fps");
 }
 
-// style 13: cumidere -- spectator_list.cpp draw_watermark_cumidere(). tahoma 16 light, dark
-// box, open bottom (top+left+right accent lines only), brand accent, number (208) grey, unit
-// (136) grey.
+// style 13: cumidere -- spectator_list.cpp draw_watermark_cumidere(). tahoma 16 light, (23) box open
+// at the bottom (accent top/left/right), brand accent, " | " (27), label (208), fps label: number
+// (208) + " fps" (136), smoothed 0.7/0.3 every 0.5s.
 static void DrawCumidere(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontCumidereTahoma16 ? g_fontCumidereTahoma16 : ImGui::GetFont();
+    ImFont* font = Or(g_fontCumidereTahoma16);
+
+    static float fps = 0.f, last = 0.f;
+    if ((float)ImGui::GetTime() - last >= 0.5f) { fps = fps * 0.7f + 0.3f / (std::max)(io.DeltaTime, 0.0001f); last = (float)ImGui::GetTime(); }
+
+    const int labelType = g_wmLabelType;
+    const std::string brand = Brand();
+    const std::string number = labelType == 1 ? std::to_string((int)fps) : Label();
+    const std::string suffix = labelType == 1 ? " fps" : "";
+    const std::string sep = number.empty() ? "" : " | ";
+
     const float size = font->FontSize;
-
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    const char* sep = nf > 0 ? " | " : "";
-    const float wB = TextW(font, size, Brand());
-    const float wSep = TextW(font, size, sep);
-    const float wN = TextW(font, size, extra);
+    const float wB = TextW(font, size, brand), wSep = TextW(font, size, sep), wN = TextW(font, size, number), wFps = TextW(font, size, suffix);
 
     const float right = io.DisplaySize.x - 10.f;
-    const float left = right - (wB + wSep + wN + 16.f);
+    const float left = right - (wB + wSep + wN + wFps + 16.f);
     const float bottom = size + 20.f;
     SetBox(left, 10.f, right, bottom);
 
     const ImU32 accent = Accent();
-
     dl->AddRectFilled(ImVec2(left, 10.f), ImVec2(right, bottom), IM_COL32(23, 23, 23, 255));
     dl->AddLine(ImVec2(left, 10.f), ImVec2(right, 10.f), accent, 1.f);
     dl->AddLine(ImVec2(left, 10.f), ImVec2(left, bottom), accent, 1.f);
     dl->AddLine(ImVec2(right, 10.f), ImVec2(right, bottom), accent, 1.f);
 
     float x = left + 8.f;
-    dl->AddText(font, size, ImVec2(x, 15.f), accent, Brand()); x += wB;
-    dl->AddText(font, size, ImVec2(x, 15.f), IM_COL32(27, 27, 27, 255), sep); x += wSep;
-    dl->AddText(font, size, ImVec2(x, 15.f), IM_COL32(208, 208, 208, 255), extra);
+    dl->AddText(font, size, ImVec2(x, 15.f), accent, brand.c_str()); x += wB;
+    dl->AddText(font, size, ImVec2(x, 15.f), IM_COL32(27, 27, 27, 255), sep.c_str()); x += wSep;
+    dl->AddText(font, size, ImVec2(x, 15.f), IM_COL32(208, 208, 208, 255), number.c_str()); x += wN;
+    dl->AddText(font, size, ImVec2(x, 15.f), IM_COL32(136, 136, 136, 255), suffix.c_str());
 }
 
-// style 14: illusory -- spectator_list.cpp draw_watermark_illusory(). tahoma 13 mono+bold,
-// rounded dark box, thin grey border, accent(230) under white double-drawn text.
+// style 14: illusory -- spectator_list.cpp draw_watermark_illusory(). tahoma 13 mono+bold, rounded
+// (28) box, (56,128) border, accent(230) under white double-drawn "brand | label" (fps 0.7s smoothed).
 static void DrawIllusory(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontIllusoryTahoma13 ? g_fontIllusoryTahoma13 : ImGui::GetFont();
-    const float fs = 13.f;
+    ImFont* font = Or(g_fontIllusoryTahoma13);
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
+    static float fps = 0.f, last = 0.f;
+    const float now = (float)ImGui::GetTime();
+    if (now - last >= 0.7f && io.DeltaTime > 0.f) { fps = fps * 0.7f + (1.f / io.DeltaTime) * 0.3f; last = now; }
 
-    char text[384];
-    snprintf(text, sizeof(text), nf > 0 ? "%s | %s" : "%s", Brand(), extra);
-
-    const ImVec2 size = font->CalcTextSizeA(fs, FLT_MAX, 0.f, text);
+    const std::string label = g_wmLabelType == 1 ? std::to_string((int)fps) + " fps" : Label();
+    const std::string text = label.empty() ? Brand() : Brand() + " | " + label;
+    const ImVec2 size = font->CalcTextSizeA(13.f, FLT_MAX, 0.f, text.c_str());
     const float w = (float)(int)io.DisplaySize.x;
     SetBox(w - size.x - 18.f, 4.f, w - 4.f, size.y + 16.f);
 
     dl->AddRectFilled(ImVec2(w - size.x - 17.f, 5.f), ImVec2(w - 5.f, size.y + 15.f), IM_COL32(28, 28, 28, 255), 5.5f);
     dl->AddRect(ImVec2(w - size.x - 18.f, 4.f), ImVec2(w - 4.f, size.y + 16.f), IM_COL32(56, 56, 56, 128), 5.5f, 0, 1.f);
 
-    dl->AddText(font, fs, ImVec2(w - size.x - 10.f, 10.f), AccentA(230), text);
-    dl->AddText(font, fs, ImVec2(w - size.x - 11.f, 10.f), IM_COL32(255, 255, 255, 255), text);
+    dl->AddText(font, 13.f, ImVec2(w - size.x - 10.f, 10.f), AccentA(230), text.c_str());
+    dl->AddText(font, 13.f, ImVec2(w - size.x - 11.f, 10.f), IM_COL32(255, 255, 255, 255), text.c_str());
 }
 
-// style 15: lumi -- spectator_list.cpp draw_watermark_lumi(). rubik 16 mono, dark box with a
-// black border, accent diagonal-stripe divider after the white title, " / "-joined accent
-// elements, width eases to its target at 8/s. Donor's rain design, animated title and
-// glow-on-trick are menu-only extras -- skipped.
+// style 15: lumi -- spectator_list.cpp draw_watermark_lumi(). rubik 16 mono, (20) box, title (title
+// colour) then " / "-joined accent elements (user / tick / time / fps), width eased at 8/s.
+// design original = accent stripe divider; new = 16 falling accent rain streaks, 6px gap.
+// animated title = types in at 6.67 chars/s, holds 2s, restarts. glow = accent bloom for 1.5s after a
+// trick (Points_OnTrick), shadow colour = text shadow tinted by it. offset x / y move the box.
+static void LumiGlow(ImDrawList* dl, ImVec2 min, ImVec2 max, float fade)
+{
+    const float radius = (std::max)(g_wmLumiGlowRadius, 1.f);
+    const float opacity = g_wmLumiGlowOpacity;
+    const float falloff = -1.25f / (radius * 0.4f * radius);
+    for (int i = 0; i < 7; ++i) {
+        const float d = (float)(i - 3);
+        const int kernel = (int)(expf(2.f * d * d * falloff) * 255.f) & 0xff;
+        const float a = (float)kernel * opacity * fade;
+        if (a < 0.5f) continue;
+        const float grow = radius * 0.33333334f * (float)i;
+        dl->AddRectFilled(ImVec2(min.x - grow, min.y - grow), ImVec2(max.x + grow, max.y + grow), AccentA((std::min)((int)a, 255)),
+            radius * 0.1f * (float)i + 5.f);
+    }
+}
+struct LumiStreak { float x = 0.f, y = 0.f, speed = 0.f, len = 0.f, alpha = 0.f; };
+static uint32_t s_lumiSeed = 0x51a9c37du;
+static float LumiRand(float scale, float base) { s_lumiSeed = s_lumiSeed * 0x19660du + 0x3c6ef35fu; return (float)(s_lumiSeed >> 8) * scale + base; }
+static void LumiReseed(LumiStreak& s)
+{
+    s.x = LumiRand(5.960465e-08f, 0.f);
+    s.speed = LumiRand(3.874302e-08f, 0.35f);
+    s.len = LumiRand(1.31130236e-08f, 0.1f);
+    s.alpha = LumiRand(2.2649768e-08f, 0.32f);
+}
+static void LumiRain(ImDrawList* dl, ImVec2 min, ImVec2 max, float dtIn)
+{
+    static LumiStreak streaks[16];
+    static bool seeded = false;
+    if (!seeded) {
+        for (auto& s : streaks) {   // donor order: x, y, speed, len, alpha
+            s.x = LumiRand(5.960465e-08f, 0.f); s.y = LumiRand(5.960465e-08f, 0.f);
+            s.speed = LumiRand(3.874302e-08f, 0.35f); s.len = LumiRand(1.31130236e-08f, 0.1f); s.alpha = LumiRand(2.2649768e-08f, 0.32f);
+        }
+        seeded = true;
+    }
+
+    float dt = dtIn <= 0.f ? 0.016f : dtIn;
+    dt = (std::min)(dt, 0.033f);
+
+    const ImVec2 clipMin(min.x + 1.2f, min.y + 1.2f), clipMax(max.x - 1.2f, max.y - 1.2f);
+    if (clipMin.x >= clipMax.x || clipMin.y >= clipMax.y) return;
+
+    dl->PushClipRect(clipMin, clipMax, true);
+    const float w = max.x - min.x, h = max.y - min.y;
+    for (auto& s : streaks) {
+        s.y += dt * s.speed * 0.55f;
+        if (s.y > 1.15f) { s.y = -s.len; LumiReseed(s); }
+        const float x = w * s.x + min.x;
+        const float y0 = s.y * h + min.y, y1 = h * s.len + y0;
+        if (min.y <= y1 && y0 <= max.y)
+            dl->AddLine(ImVec2(x, (std::max)(y0, min.y)), ImVec2(x, (std::min)(y1, max.y)), AccentA((int)(s.alpha * 255.f)), 1.f);
+    }
+    dl->PopClipRect();
+}
 static void DrawLumi(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontLumiRubik16 ? g_fontLumiRubik16 : ImGui::GetFont();
+    ImFont* font = Or(g_fontLumiRubik16);
+    const float now = (float)ImGui::GetTime();
+
+    static float smoothFps = 0.f, lastFps = 0.f;
+    static int shownFps = 0;
+    smoothFps = smoothFps * 0.9f + io.Framerate * 0.100000024f;
+    if (now - lastFps >= 0.3f) { lastFps = now; shownFps = (int)(smoothFps + 0.5f); }
+
+    std::vector<std::string> elements;
+    if (g_wmUser) elements.push_back(User());
+    if (g_wmTickrate && TickLive()) elements.push_back(std::to_string(Tickrate()) + " tick");   // as styles 0 / 2: in game only
+    if (g_wmShowTime) elements.push_back(Clock());
+    if (g_wmShowFPS) elements.push_back(std::to_string(shownFps) + " fps");
+
+    std::string title = Brand();
+
+    static bool typeWasOn = false, typed = false;
+    static float typeStart = 0.f, typeShown = 1.f;
+    static std::string typeTitle;
+    const bool animated = g_wmLumiAnimTitle;
+    if (animated) {
+        if (!typeWasOn || title != typeTitle) { typeTitle = title; typeShown = 1.f; typed = false; typeStart = now; }
+
+        size_t characters = 0;   // utf-8 characters, the cut never splits one
+        for (const char c : title) characters += ((unsigned char)c & 0xc0) != 0x80;
+        const float length = (float)characters;
+
+        if (!typed) {
+            float target = (now - typeStart) * 6.6666665f + 1.f;
+            if (length <= target) {
+                target = length;
+                if (length - 0.1f <= typeShown) { typed = true; typeStart = now; }
+            }
+            const float dt = io.DeltaTime > 0.f ? io.DeltaTime : 0.016f;
+            typeShown = (1.f - expf(-12.f * dt)) * (target - typeShown) + typeShown;
+        } else {
+            typeShown = length;
+            if (now - typeStart >= 2.f) { typed = false; typeShown = 1.f; typeStart = now; }
+        }
+        title = Utf8Truncate(title, (std::min)(characters, (size_t)ceilf((std::max)(typeShown, 0.f))));
+    }
+    typeWasOn = animated;
+
     const float size = font->FontSize;
-
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " / ");
-
-    const char* title = Brand();
-    const float titleW = TextW(font, size, title);
-    const float gap = 27.f;
+    const float titleW = TextW(font, size, title), sepW = TextW(font, size, " / ");
+    const int design = g_wmLumiDesign;
+    const float gap = design == 1 ? 6.f : 27.f;
 
     float content = titleW;
-    if (nf > 0) content += gap + TextW(font, size, extra);
+    if (!elements.empty()) {
+        content += gap + (float)(elements.size() - 1) * sepW;
+        for (const auto& e : elements) content += TextW(font, size, e);
+    }
 
     static float width = 0.f, lastEase = -10.f;
-    const float now = (float)ImGui::GetTime();
     const float target = content + 12.f;
     width = now - lastEase > 1.f || fabsf(width - target) > 200.f ? target : (target - width) * io.DeltaTime * 8.f + width;
     lastEase = now;
 
     const float height = size + 12.f;
-    const float x = io.DisplaySize.x - width - 10.f, y = 10.f;
+    const float x = io.DisplaySize.x - width - 10.f + g_wmLumiX;
+    const float y = 10.f + g_wmLumiY;
     SetBox(x, y, x + width, y + height);
 
     const ImU32 accent = Accent();
 
-    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + width, y + height), IM_COL32(20, 20, 20, 255), 5.f);
-    dl->AddRect(ImVec2(x, y), ImVec2(x + width, y + height), IM_COL32(0, 0, 0, 255), 0.f, 0, 1.f);
+    static float glow = 0.f;
+    const bool glowing = g_wmLumiGlow && TrickWithin(1.5f);
+    glow = std::clamp(glow + io.DeltaTime * (glowing ? 4.f : -4.f), 0.f, 1.f);
+    if (glow > 0.f) LumiGlow(dl, ImVec2(x, y), ImVec2(x + width, y + height), glow);
 
-    const float stripeX = x + titleW + 11.f;
-    for (int i = 15; i < 18; ++i) {
-        const float sx = stripeX + (float)i;
-        dl->AddLine(ImVec2(sx, y + 4.f), ImVec2(sx - 12.f, y + height - 5.f), accent, 1.f);
-        dl->AddLine(ImVec2(sx - 5.f, y + 4.f), ImVec2(sx - 17.f, y + height - 5.f), accent, 1.f);
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + width, y + height), IM_COL32(20, 20, 20, 255), 5.f);
+    if (design == 1) LumiRain(dl, ImVec2(x, y), ImVec2(x + width, y + height), io.DeltaTime);
+    if (!g_wmLumiNoBorder) dl->AddRect(ImVec2(x, y), ImVec2(x + width, y + height), IM_COL32(0, 0, 0, 255), 0.f, 0, 1.f);
+
+    if (design != 1) {
+        const float stripeX = x + titleW + 11.f;
+        for (int i = 15; i < 18; ++i) {
+            const float sx = stripeX + (float)i;
+            dl->AddLine(ImVec2(sx, y + 4.f), ImVec2(sx - 12.f, y + height - 5.f), accent, 1.f);
+            dl->AddLine(ImVec2(sx - 5.f, y + 4.f), ImVec2(sx - 17.f, y + height - 5.f), accent, 1.f);
+        }
+    }
+
+    ImU32 shadow = IM_COL32(0, 0, 0, 255);
+    if (g_wmLumiShadowColor && glow > 0.f) {
+        const ImVec4 a = ImGui::GetStyleColorVec4(ImGuiCol_Accent);
+        shadow = IM_COL32((int)(a.x * glow * 255.f + 0.5f), (int)(a.y * glow * 255.f + 0.5f), (int)(a.z * glow * 255.f + 0.5f), 255);
     }
 
     float tx = (width - content) * 0.5f + x;
     const float ty = floorf((height - size) * 0.5f + y);
     const auto text = [&](float at, ImU32 color, const char* s) {
-        dl->AddText(font, size, ImVec2(at + 1.f, ty + 1.f), IM_COL32(0, 0, 0, 255), s);
+        dl->AddText(font, size, ImVec2(at + 1.f, ty + 1.f), shadow, s);
         dl->AddText(font, size, ImVec2(at, ty), color, s);
     };
-    text(tx, IM_COL32(255, 255, 255, 255), title); tx += titleW + gap;
-    if (nf > 0) text(tx, accent, extra);
+
+    text(tx, PackColor(g_wmLumiTitleColor), title.c_str());
+    tx += titleW + gap;
+    for (size_t i = 0; i < elements.size(); ++i) {
+        if (i > 0) { text(tx, accent, " / "); tx += sepW; }
+        text(tx, accent, elements[i].c_str());
+        tx += TextW(font, size, elements[i]);
+    }
 }
 
-// style 16: billware -- spectator_list.cpp draw_watermark_billware(). tahoma bold 12 mono,
-// nested rounded-corner gradient rings, 10 slow-drifting accent dots inside, accent under
-// white double-drawn text.
+// style 16: billware -- spectator_list.cpp draw_watermark_billware(). tahoma bold 12 mono, nested
+// rounded-corner gradient rings, 10 slow-drifting accent dots, accent under white " brand | label".
 static void BillwareMulticolorRounded(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 bg, ImU32 ul, ImU32 ur, ImU32 br, ImU32 bl, float rounding)
 {
-    const float r = std::min(rounding, std::min(fabsf(max.x - min.x) * 0.5f - 1.f, fabsf(max.y - min.y) * 0.5f - 1.f));
+    const float r = (std::min)(rounding, (std::min)(fabsf(max.x - min.x) * 0.5f - 1.f, fabsf(max.y - min.y) * 0.5f - 1.f));
     if (r <= 0.f) return;
     dl->AddRectFilledMultiColor(min, max, ul, ur, br, bl);
     struct { ImVec2 corner, center; float aMin, aMax; } corners[] = {
@@ -655,17 +915,15 @@ static void BillwareBox(ImDrawList* dl, ImVec2 min, ImVec2 max, float alpha)
 }
 static void DrawBillware(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontTahomaBd12 ? g_fontTahomaBd12 : ImGui::GetFont();
-    const float fs = 12.f;
+    ImFont* font = Or(g_fontTahomaBd12);
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
+    static float fps = 0.f, last = 0.f;
+    const float now = (float)ImGui::GetTime();
+    if (now - last >= 0.5f && io.DeltaTime > 0.f) { fps = fps * 0.7f + (1.f / io.DeltaTime) * 0.5f; last = now; }   // donor's 0.7 / 0.5 kept
 
-    char text[384];
-    snprintf(text, sizeof(text), nf > 0 ? " %s | %s" : " %s", Brand(), extra);
-
-    const ImVec2 size = font->CalcTextSizeA(fs, FLT_MAX, 0.f, text);
+    const std::string label = g_wmLabelType == 1 ? std::to_string((int)fps) + " fps" : Label();
+    const std::string text = " " + Brand() + (label.empty() ? "" : " | " + label);
+    const ImVec2 size = font->CalcTextSizeA(12.f, FLT_MAX, 0.f, text.c_str());
     const float w = (float)(int)io.DisplaySize.x;
     const ImVec2 min(w - size.x - 13.f, 7.f), max(w - 7.f, size.y + 13.f);
     SetBox(min.x - 4.f, min.y - 4.f, max.x + 4.f, max.y + 4.f);
@@ -676,7 +934,7 @@ static void DrawBillware(ImDrawList* dl, ImGuiIO& io)
     auto randomIn = [](float lo, float hi) { return (float)(rand() % (std::max)((int)(hi - lo), 1)) + lo; };
 
     static std::vector<ImVec2> dots;
-    if (dots.empty()) for (int i = 0; i < 10; ++i) dots.emplace_back(randomIn(x0, x1), randomIn(y0, y1));
+    if (dots.empty()) for (int i = 0; i < 10; ++i) { const float x = randomIn(x0, x1); dots.emplace_back(x, randomIn(y0, y1)); }
 
     const ImU32 dotColor = AccentA(102);
     for (auto& dot : dots) {
@@ -686,15 +944,15 @@ static void DrawBillware(ImDrawList* dl, ImGuiIO& io)
         if (dot.y > y1 - 1.f) { dot.y = randomIn(y0, y1); dot.x = randomIn(x0, x1); }
     }
 
-    dl->AddText(font, fs, ImVec2(w - size.x - 12.f, 9.f), Accent(), text);
-    dl->AddText(font, fs, ImVec2(w - size.x - 11.f, 10.f), IM_COL32(255, 255, 255, 255), text);
+    dl->AddText(font, 12.f, ImVec2(w - size.x - 12.f, 9.f), Accent(), text.c_str());
+    dl->AddText(font, 12.f, ImVec2(w - size.x - 11.f, 10.f), IM_COL32(255, 255, 255, 255), text.c_str());
 }
 
-// styles 17/18: dna / dna clarity -- spectator_list.cpp draw_watermark_dna[_clarity]().
-// montserrat 15 / pt root bold 15: nested corner-shaded ring box, brand accent (white-shadowed
-// in dna) + dim fields. dna draws a 60-step accent gradient strip over the text, dna clarity
-// bleeds a huge faint icon glyph into the left edge instead. Donor's glow-on-spot is dropped,
-// no TF2 "enemy spotted" concept to drive it.
+// styles 17/18: dna / dna clarity -- spectator_list.cpp draw_watermark_dna[_clarity](). montserrat
+// 15 / pt root bold 15, corner-shaded ring box, parts brand | user | label (fps label = number +
+// " fps"). dna: 60-step accent strip over the text + "detection glow": accent bloom for glow ticks
+// after a trick, or while an enemy is spotted (TF2: visible, aim/wm_aim.cpp). dna clarity: faint
+// icon glyph bled into the left edge.
 static ImU32 DnaGrey(float v, float a = 1.f) { return ImGui::ColorConvertFloat4ToU32(ImVec4(v, v, v, a)); }
 static void DnaBox(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 ring, ImU32 midRing)
 {
@@ -705,79 +963,127 @@ static void DnaBox(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 ring, ImU32 mid
     dl->AddRect(ImVec2(min.x - 1.f, min.y - 1.f), ImVec2(max.x + 1.f, max.y + 1.f), midRing, 5.5f);
     dl->AddRect(ImVec2(min.x - 2.5f, min.y - 2.5f), ImVec2(max.x + 2.5f, max.y + 2.5f), ring, 5.5f);
 }
-static void DrawDnaCommon(ImDrawList* dl, ImGuiIO& io, bool clarityIcon)
+static int DnaFps(float& rate, float& last, float dt)
 {
-    ImFont* font = clarityIcon ? g_fontDnaPtRootBold15 : g_fontDnaMontserrat15;
-    if (!font) font = ImGui::GetFont();
-    const float fs = 15.f;
+    const float now = (float)ImGui::GetTime();
+    const float ft = dt > 0.f ? dt : 0.0001f;
+    if (now - last >= 0.5f) { rate = rate * 0.7f + 0.3f / ft; last = now; }
+    return (int)rate;
+}
+struct DnaPart { std::string text; ImU32 color; };
+static std::vector<DnaPart> DnaParts(ImU32 brand, ImU32 sep, ImU32 user, ImU32 number, ImU32 unit, int fps)
+{
+    std::vector<DnaPart> parts{ { Brand(), brand } };
+    if (const std::string name = User(); !name.empty()) { parts.push_back({ " | ", sep }); parts.push_back({ name, user }); }
+    if (g_wmLabelType == 1) {
+        parts.push_back({ " | ", sep }); parts.push_back({ std::to_string(fps), number }); parts.push_back({ " fps", unit });
+    } else if (const std::string label = Label(); !label.empty()) {
+        parts.push_back({ " | ", sep }); parts.push_back({ label, number });
+    }
+    return parts;
+}
+static float DnaPartsW(ImFont* f, const std::vector<DnaPart>& parts)
+{
+    float w = 0.f;
+    for (const auto& p : parts) w += TextW(f, 15.f, p.text);
+    return w;
+}
+static void DrawDna(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontDnaMontserrat15);
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
-
-    const char* sep = nf > 0 ? " | " : "";
-    const float wB = TextW(font, fs, Brand());
-    const float wSep = TextW(font, fs, sep);
-    const float wE = TextW(font, fs, extra);
-    const float textW = wB + wSep + wE;
-
+    static float rate = 0.f, last = 0.f;
+    const ImU32 accent = AccentF(1.f), white = DnaGrey(0.8f), darkgrey = DnaGrey(0.4f);
+    const auto parts = DnaParts(accent, darkgrey, darkgrey, white, darkgrey, DnaFps(rate, last, io.DeltaTime));
+    const float textW = DnaPartsW(font, parts);
     const float w = (float)(int)io.DisplaySize.x;
+
     const ImVec2 textPos(w - textW - 10.f, 10.f);
     const ImVec2 min(w - textW - 15.f, 5.f), max(w - 5.f, 30.f);
     SetBox(min.x - 3.f, min.y - 3.f, max.x + 3.f, max.y + 3.f);
 
-    const ImU32 accent = Accent(), white = DnaGrey(0.8f);
+    const float interval = s_f.interval > 0.f ? s_f.interval : 0.015f;
+    const bool trick = TrickWithin((float)g_wmDnaGlowTicks * interval);
+    const bool lit = g_wmDnaGlow && (trick || (g_wmDnaGlowSpotted && s_f.inGame && g_wmEnemySpotted.load()));
 
-    if (clarityIcon) {
-        DnaBox(dl, min, max, IM_COL32(20, 20, 22, 250), IM_COL32(4, 4, 5, 100));
-        ImFont* icon = g_fontDnaClarityIcon50 ? g_fontDnaClarityIcon50 : g_fontClarityIcon;
-        if (icon) {
-            const float iconW = icon->CalcTextSizeA(50.f, FLT_MAX, 0.f, "A").x;
-            dl->PushClipRect(min, max, true);
-            dl->AddText(icon, 50.f, ImVec2(min.x + 6.f - iconW * 0.3f, textPos.y - 17.f), AccentA((int)(0.15f * 255.f)), "A");
-            dl->PopClipRect();
+    static float glow = 0.f;
+    glow = lit ? (std::min)(1.f, glow + 3.f * io.DeltaTime) : (std::max)(0.f, glow - 3.f * io.DeltaTime);
+
+    if (glow > 0.01f) {
+        for (int i = 0; i < 10; ++i) {
+            const float t = (float)i / 9.f, grow = 7.f * glow * t;
+            dl->AddRectFilled(ImVec2(min.x - grow, min.y - grow), ImVec2(max.x + grow, max.y + grow), AccentF(0.75f * glow * (1.f - t)), 5.5f, ImDrawFlags_RoundCornersAll);
         }
-    } else {
-        DnaBox(dl, min, max, IM_COL32(10, 10, 12, 200), IM_COL32(4, 4, 5, 50));
-        const float gradW = textW * 1.1f, center = textPos.x + textW * 0.5f, top = textPos.y - 6.f;
-        for (int i = 0; i < 60; ++i) {
-            const float x0 = center - gradW * 0.5f + gradW / 60.f * (float)i, x1 = x0 + gradW / 60.f;
-            const float a = (std::max)(0.f, 1.f - fabsf((x0 + x1) * 0.5f - center) / (gradW * 0.5f));
-            dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, top + 3.f), AccentA((int)(0.75f * a * 255.f)), 2.f, 0);
-        }
+        dl->AddRectFilled(ImVec2(min.x - 2.f, min.y - 2.f), ImVec2(max.x + 2.f, max.y + 2.f), AccentF(glow * 0.9f), 5.5f, ImDrawFlags_RoundCornersAll);
+    }
+
+    DnaBox(dl, min, max, IM_COL32(10, 10, 12, 200), IM_COL32(4, 4, 5, 50));
+
+    const float gradW = textW * 1.1f, center = textPos.x + textW * 0.5f, top = textPos.y - 6.f;
+    for (int i = 0; i < 60; ++i) {
+        const float x0 = center - gradW * 0.5f + gradW / 60.f * (float)i, x1 = x0 + gradW / 60.f;
+        const float a = (std::max)(0.f, 1.f - fabsf((x0 + x1) * 0.5f - center) / (gradW * 0.5f));
+        dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, top + 3.f), AccentF(0.75f * a), 2.f, 0);
     }
 
     float x = textPos.x;
-    if (!clarityIcon) dl->AddText(font, fs, ImVec2(x + 1.f, textPos.y + 1.f), white, Brand());   // donor: brand shadow, dna only
-    dl->AddText(font, fs, ImVec2(x, textPos.y), accent, Brand()); x += wB;
-    dl->AddText(font, fs, ImVec2(x, textPos.y), DnaGrey(clarityIcon ? 0.2f : 0.4f), sep); x += wSep;
-    dl->AddText(font, fs, ImVec2(x, textPos.y), white, extra);
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i == 0) dl->AddText(font, 15.f, ImVec2(x + 1.f, textPos.y + 1.f), white, parts[i].text.c_str());
+        dl->AddText(font, 15.f, ImVec2(x, textPos.y), parts[i].color, parts[i].text.c_str());
+        x += TextW(font, 15.f, parts[i].text);
+    }
 }
-static void DrawDna(ImDrawList* dl, ImGuiIO& io) { DrawDnaCommon(dl, io, false); }
-static void DrawDnaClarity(ImDrawList* dl, ImGuiIO& io) { DrawDnaCommon(dl, io, true); }
+static void DrawDnaClarity(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontDnaPtRootBold15);
+    ImFont* icon = g_fontDnaClarityIcon50 ? g_fontDnaClarityIcon50 : g_fontClarityIcon;
+
+    static float rate = 0.f, last = 0.f;
+    const ImU32 accent = AccentF(1.f), white = DnaGrey(0.8f), darkgrey = DnaGrey(0.5f), darkgrey2 = DnaGrey(0.2f);
+    const auto parts = DnaParts(accent, darkgrey2, darkgrey, white, darkgrey, DnaFps(rate, last, io.DeltaTime));
+    const float textW = DnaPartsW(font, parts);
+    const float w = (float)(int)io.DisplaySize.x;
+
+    const ImVec2 textPos(w - textW - 10.f, 10.f);
+    const ImVec2 min(w - textW - 15.f, 5.f), max(w - 5.f, 30.f);
+    SetBox(min.x - 3.f, min.y - 3.f, max.x + 3.f, max.y + 3.f);
+
+    DnaBox(dl, min, max, IM_COL32(20, 20, 22, 250), IM_COL32(4, 4, 5, 100));
+    if (icon) {
+        const float iconW = icon->CalcTextSizeA(50.f, FLT_MAX, 0.f, "A").x;
+        dl->PushClipRect(min, max, true);
+        dl->AddText(icon, 50.f, ImVec2(min.x + 6.f - iconW * 0.3f, textPos.y - 17.f), AccentF(0.15f), "A");
+        dl->PopClipRect();
+    }
+
+    float x = textPos.x;
+    for (const auto& p : parts) {
+        dl->AddText(font, 15.f, ImVec2(x, textPos.y), p.color, p.text.c_str());
+        x += TextW(font, 15.f, p.text);
+    }
+}
 
 // style 19: cucumber -- spectator_list.cpp draw_watermark_cucumber(). tahoma 14 draws, verdana 14
-// measures the fields (donor quirk kept), pill bg, brand accent + "|" + fields white, accent
-// underline bar, 5/s fade in/out on the enable toggle.
+// measures the user (donor quirk kept), pill bg, accent brand | user white, accent underline,
+// 5/s fade in/out on the watermark toggle (so it runs with the toggle off until faded).
 static constexpr ImU32 kCucumberBg = IM_COL32(18, 15, 18, 255);
-static float CucumberW(ImFont* f, const char* s) { return (float)(int)(TextW(f, 14.f, s) + 0.95f); }
+static float CucumberW(ImFont* f, const std::string& s) { return (float)(int)(TextW(f, 14.f, s) + 0.95f); }
 static ImU32 CucumberFade(ImU32 color, float alpha)
 {
     return (color & ~IM_COL32_A_MASK) | ((ImU32)((float)(color >> IM_COL32_A_SHIFT) * alpha + 0.5f) << IM_COL32_A_SHIFT);
 }
 static void DrawCucumber(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontCucumberTahoma14 ? g_fontCucumberTahoma14 : ImGui::GetFont();
+    ImFont* font = Or(g_fontCucumberTahoma14);
     ImFont* measure = g_fontCucumberVerdana14 ? g_fontCucumberVerdana14 : font;
 
     static float alpha = 0.f;
-    alpha = std::clamp(alpha + io.DeltaTime * 5.f, 0.f, 1.f);
+    const float step = io.DeltaTime * 5.f;
+    alpha = std::clamp(g_wmEnable ? alpha + step : alpha - step, 0.f, 1.f);
+    if (!g_wmEnable && alpha <= 0.f) return;
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " ");
-
-    const float userW = CucumberW(measure, extra);
+    const std::string brand = Brand(), user = User();
+    const float userW = CucumberW(measure, user);
 
     constexpr float x = 10.f, y = 10.f;
     const ImVec2 max(x + 100.f + userW, y + 20.f);
@@ -787,67 +1093,57 @@ static void DrawCucumber(ImDrawList* dl, ImGuiIO& io)
 
     const ImU32 white = CucumberFade(IM_COL32(255, 255, 255, 255), alpha);
     float tx = x + 16.f;
-    dl->AddText(font, 14.f, ImVec2(tx, y + 2.f), CucumberFade(Accent(), alpha), Brand());
-    tx += CucumberW(font, Brand()) + 8.f;
-    if (nf > 0) {
-        dl->AddText(font, 14.f, ImVec2(tx, y + 2.f), white, "|");
-        tx += CucumberW(font, "|") + 8.f;
-        dl->AddText(font, 14.f, ImVec2(tx, y + 2.f), white, extra);
-    }
+    dl->AddText(font, 14.f, ImVec2(tx, y + 2.f), CucumberFade(Accent(), alpha), brand.c_str());
+    tx += CucumberW(font, brand) + 8.f;
+    dl->AddText(font, 14.f, ImVec2(tx, y + 2.f), white, "|");
+    tx += CucumberW(font, "|") + 8.f;
+    dl->AddText(font, 14.f, ImVec2(tx, y + 2.f), white, user.c_str());
 
     dl->AddRectFilled(ImVec2(x + 15.f, y + 18.f), ImVec2(x + 85.f + userW, y + 20.f), Accent());
 }
 
 // style 20: howeweware -- spectator_list.cpp draw_watermark_howeweware(). minecraft 14, no
-// background, stacked value(grey)+unit(accent) rows, top-left. Donor = imgui 1.70 window: text
-// item width (int)(w + 0.95), padding 8, item spacing 8 x 4, min size 32.
+// background, rows of grey value + accent unit, top-left: brand / user, then time "pm", ping "ms",
+// tick, fps, velocity "vel". imgui 1.70 window metrics: (int)(w + 0.95), padding 8, spacing 8 x 4.
 static constexpr ImU32 kHowewewareGrey = IM_COL32(225, 225, 225, 255);
-static float HowewewareW(ImFont* f, float size, const char* s) { return (float)(int)(TextW(f, size, s) + 0.95f); }
-static void DrawHoweweware(ImDrawList* dl, ImGuiIO&)
+static float HowewewareW(ImFont* f, float size, const std::string& s) { return (float)(int)(TextW(f, size, s) + 0.95f); }
+static void DrawHoweweware(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontHowewewareMinecraft14 ? g_fontHowewewareMinecraft14 : ImGui::GetFont();
+    ImFont* font = Or(g_fontHowewewareMinecraft14);
     constexpr float size = 14.f, line = size + 4.f, pad = 8.f, pos = 5.f, spacing = 8.f;
+    const bool connected = s_f.inGame;
 
-    struct Row { char value[64]; char unit[16]; };
-    Row rows[5]; int nr = 0;
-
-    auto add = [&](const char* value, const char* unit) {
-        if (nr >= 5) return;
-        snprintf(rows[nr].value, sizeof(rows[nr].value), "%s", value);
-        snprintf(rows[nr].unit, sizeof(rows[nr].unit), "%s", unit);
-        ++nr;
-    };
-
-    add(Brand(), "");
-    if (g_wmShowTime) {
-        time_t t = time(nullptr); struct tm lt; localtime_s(&lt, &t);
-        char v[32]; strftime(v, sizeof(v), "%X", &lt);
-        add(v, "pm");
+    std::vector<std::pair<std::string, std::string>> lines{ { Brand(), User() } };
+    if (g_wmShowTime) lines.emplace_back(Clock("%X"), "pm");
+    if (g_wmShowPing && connected) lines.emplace_back(std::to_string(Ping()), "ms");
+    if (g_wmTickrate && TickLive()) lines.emplace_back(std::to_string(Tickrate(false)), " tick");
+    if (g_wmShowFPS) {   // donor's smoothing: 0.9 * last + 0.1 * frame, last always 0
+        float frame = io.DeltaTime * 0.1f;
+        if (frame <= 0.f) frame = 1.f;
+        lines.emplace_back(std::to_string((int)(1.f / frame) / 10), "fps");
     }
-    if (g_wmShowPing && g_conn.load()) { char v[16]; snprintf(v, sizeof(v), "%d", g_ping.load()); add(v, "ms"); }
-    if (g_wmShowLoss && g_conn.load()) { char v[16]; snprintf(v, sizeof(v), "%d", g_loss.load()); add(v, "% loss"); }
-    if (g_wmShowFPS) { char v[16]; snprintf(v, sizeof(v), "%d", (int)(g_fps.load() + 0.5f)); add(v, "fps"); }
+    if (g_wmVelocity && connected) lines.emplace_back(std::to_string(s_f.speed), "vel");
 
     const ImU32 accent = Accent();
     float right = pos + pad;
-    for (int i = 0; i < nr; ++i) {
+    for (size_t i = 0; i < lines.size(); ++i) {
         const float y = pos + pad + line * (float)i;
         float x = pos + pad;
-        dl->AddText(font, size, ImVec2(x, y), kHowewewareGrey, rows[i].value);
-        x += HowewewareW(font, size, rows[i].value) + spacing;
-        dl->AddText(font, size, ImVec2(x, y), accent, rows[i].unit);
-        right = (std::max)(right, x + HowewewareW(font, size, rows[i].unit));
+        dl->AddText(font, size, ImVec2(x, y), kHowewewareGrey, lines[i].first.c_str());
+        x += HowewewareW(font, size, lines[i].first) + spacing;
+        dl->AddText(font, size, ImVec2(x, y), accent, lines[i].second.c_str());
+        right = (std::max)(right, x + HowewewareW(font, size, lines[i].second));
     }
-    const float bottom = pos + pad + line * (float)(nr - 1) + size;
+    const float bottom = pos + pad + line * (float)(lines.size() - 1) + size;
     SetBox(pos, pos, pos + (std::max)(32.f, right - pos + pad), pos + (std::max)(32.f, bottom - pos + pad));
 }
 
-// style 21: gamesense -- spectator_list.cpp draw_watermark_gamesense() (chifirium.dll
-// FUN_1008e770). sf pro display bold 15 px atlas, every measure + draw at 13. 4-layer frame,
-// skeet blue->pink->yellow bar under the inner line, brand split "game"|"sense" two tone
-// (white | sense colour -> text colour), " | " separators in (210) grey, parts (255,230).
+// style 21: gamesense -- spectator_list.cpp draw_watermark_gamesense() (chifirium.dll FUN_1008e770).
+// sf pro display bold 15 px atlas, every measure + draw at 13. 4-layer frame, optional skeet
+// gradient bar, brand split "game"|"sense" (game / sense colours), parts user / fps / ms / tick /
+// vel / HH:MM:SS in (255,230) after (210) " | ", offset x / y move it.
 static constexpr float kGamesenseSize = 13.f;
-static float GamesenseW(ImFont* f, const char* s) { return TextW(f, kGamesenseSize, s); }
+static float GamesenseW(ImFont* f, const std::string& s) { return TextW(f, kGamesenseSize, s); }
 static void GamesenseFrame(ImDrawList* dl, ImVec2 min, ImVec2 max)
 {
     dl->AddRectFilled(ImVec2(min.x - 3.f, min.y - 3.f), ImVec2(max.x + 3.f, max.y + 3.f), IM_COL32(36, 36, 36, 255));
@@ -869,42 +1165,40 @@ void Watermark_GamesenseFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, bool bar)
     if (bar) GamesenseBar(dl, min, max);
 }
 // split at half the codepoints ("gamesense" -> game | sense)
-static size_t GamesenseSplit(const char* text)
+static size_t GamesenseSplit(const std::string& text)
 {
     std::vector<size_t> starts;
-    const size_t n = strlen(text);
-    for (size_t i = 0; i < n; ++i) if (((unsigned char)text[i] & 0xc0) != 0x80) starts.push_back(i);
-    return starts.size() < 2 ? n : starts[starts.size() / 2];
+    for (size_t i = 0; i < text.size(); ++i) if (((unsigned char)text[i] & 0xc0) != 0x80) starts.push_back(i);
+    return starts.size() < 2 ? text.size() : starts[starts.size() / 2];
 }
 static void DrawGamesense(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontGamesenseSfBold15 ? g_fontGamesenseSfBold15 : ImGui::GetFont();
+    ImFont* font = Or(g_fontGamesenseSfBold15);
 
-    // donor parts: user / fps / "{}ms" / "{}tick" / vel / HH:MM:SS -- shared knobs mapped
-    char parts[5][64]; int np = 0;
-    if (g_wmShowFPS) snprintf(parts[np++], 64, "%d fps", (int)(g_fps.load() + 0.5f));
-    if (g_wmShowPing && g_conn.load()) snprintf(parts[np++], 64, "%dms", g_ping.load());
-    if (g_wmShowLoss && g_conn.load()) snprintf(parts[np++], 64, "%d%% loss", g_loss.load());
-    if (g_wmShowTime) {
-        time_t t = time(nullptr); struct tm lt; localtime_s(&lt, &t);
-        snprintf(parts[np++], 64, "%02d:%02d:%02d", lt.tm_hour, lt.tm_min, lt.tm_sec);
-    }
+    static float fps = 0.f;   // donor fps: 0.1 * (1 / frametime) + 0.9 * last
+    fps = 1.f / (std::max)(0.0001f, io.DeltaTime) * 0.1f + fps * 0.9f;
 
-    char brand[64]; snprintf(brand, sizeof(brand), "%s", Brand());
+    std::vector<std::string> parts;
+    if (g_wmUser) parts.push_back(User());
+    if (g_wmShowFPS) parts.push_back(std::to_string((int)(fps + 0.5f)) + " fps");
+    if (g_wmShowPing) parts.push_back(std::to_string(Ping()) + "ms");
+    if (g_wmTickrate && TickLive()) parts.push_back(std::to_string(Tickrate()) + "tick");
+    if (g_wmVelocity) parts.push_back(std::to_string(s_f.inGame ? s_f.speed : 0) + " vel");
+    if (g_wmShowTime) parts.push_back(Clock("%H:%M:%S"));
+
+    const std::string brand = Brand();
     const size_t cut = GamesenseSplit(brand);
-    char game[64], sense[64];
-    snprintf(game, sizeof(game), "%.*s", (int)cut, brand);
-    snprintf(sense, sizeof(sense), "%s", brand + cut);
+    const std::string game = brand.substr(0, cut), sense = brand.substr(cut);
 
     constexpr const char* separator = " | ";
     float width = GamesenseW(font, game) + GamesenseW(font, sense);
-    for (int i = 0; i < np; ++i) width += GamesenseW(font, separator) + GamesenseW(font, parts[i]);
+    for (const auto& p : parts) width += GamesenseW(font, separator) + GamesenseW(font, p);
     width += 14.f;
 
-    constexpr bool bar = true;   // m_watermark_gamesense_bar default
+    const bool bar = g_wmGsBar;
     const float textH = font->CalcTextSizeA(kGamesenseSize, FLT_MAX, 0.f, "A").y;
     const float height = textH + 10.f + (bar ? 3.f : 0.f);
-    const float x = io.DisplaySize.x - width - 15.f, y = 15.f;
+    const float x = io.DisplaySize.x - width - 15.f + g_wmGsX, y = 15.f + g_wmGsY;
     const ImVec2 min(x, y), max(x + width, y + height);
     SetBox(x - 3.f, y - 3.f, max.x + 3.f, max.y + 3.f);
 
@@ -913,18 +1207,17 @@ static void DrawGamesense(ImDrawList* dl, ImGuiIO& io)
 
     const float textY = y + 3.f + (bar ? 2.f : 0.f);
     float textX = x + 7.f;
-    const auto put = [&](const char* s, ImU32 c) { dl->AddText(font, kGamesenseSize, ImVec2(textX, textY), c, s); textX += GamesenseW(font, s); };
+    const auto put = [&](const std::string& s, ImU32 c) { dl->AddText(font, kGamesenseSize, ImVec2(textX, textY), c, s.c_str()); textX += GamesenseW(font, s); };
 
-    put(game, IM_COL32(255, 255, 255, 255));
-    put(sense, Accent());
-    for (int i = 0; i < np; ++i) { put(separator, IM_COL32(210, 210, 210, 255)); put(parts[i], IM_COL32(255, 255, 255, 230)); }
+    put(game, PackColor(g_wmGsGameColor));
+    put(sense, PackColor(g_wmGsSenseColor));
+    for (const auto& p : parts) { put(separator, IM_COL32(210, 210, 210, 255)); put(p, IM_COL32(255, 255, 255, 230)); }
 }
 
 // style 8: airflow -- spectator_list.cpp draw_watermark_airflow(). sf ui display semibold 14.
-// Two-segment rounded bar: left pill (airflow_logo icon tinted accent + brand), right pill
-// (local avatar + the shared field set). Donor's live backbuffer blur under both -> BlurRect
-// (bloom's shader, straight replace instead of an additive combine). Donor box: right edge at
-// w-16, y 11, 29 tall.
+// Two rounded pills over a live backbuffer blur: left = airflow logo (accent) + brand, right =
+// local avatar + "user | HH:MM ping ms". botox modulates the blur image white (left) / (100) grey
+// (right); BlurRect has no tint, so the right pill gets black at 155 alpha over it = blur * 100/255.
 struct WmPlayerInfo_t
 {
     char     name[32];
@@ -948,75 +1241,83 @@ static ImTextureID LocalAvatarTex()
 }
 static void DrawAirflow(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = g_fontAirflow14 ? g_fontAirflow14 : ImGui::GetFont();
+    ImFont* font = Or(g_fontAirflow14);
 
-    char field[5][64]; char extra[320] = {};
-    const int nf = BuildFields(field);
-    JoinFields(extra, field, nf, " | ");
+    const std::string clock = Clock("%H:%M");
+    const std::string prefix = Brand(), ping = std::to_string(Ping()) + "ms", user = User();
 
-    const auto imguiW = [&](const char* s) { return floorf(TextW(font, 14.f, s) + 0.99999f); };
-    const float prefixSize = imguiW(Brand()) + 16.f;
-    const float leftW = prefixSize + 30.f;
-    const float rightW = imguiW(extra) + 35.f;
-    const float width = leftW + rightW;
+    const float textWidth = ImguiW(font, prefix + " " + user + " | " + clock + "  " + ping);
+    const float prefixSize = ImguiW(font, prefix) + 16.f;
+    const float windowWidth = 75.f + textWidth + 16.f;
 
-    const float x = io.DisplaySize.x - width - 16.f, y = 11.f;
-    SetBox(x, y, x + width, y + 29.f);
+    const float x = io.DisplaySize.x - windowWidth - 10.f + 4.f, y = 10.f + 1.f;
+    SetBox(x, y, x + windowWidth - 10.f, y + 29.f);
 
     const ImDrawListFlags oldFlags = dl->Flags;
     dl->Flags |= ImDrawListFlags_AntiAliasedFill | ImDrawListFlags_AntiAliasedLines;
 
-    BlurRect(dl, ImVec2(x, y), ImVec2(x + width, y + 29.f), 1.f, 3.f);
     constexpr ImU32 white = IM_COL32(255, 255, 255, 255);
+    const float rightX = x + prefixSize + 30.f;
+    const ImVec2 rightMax(rightX + windowWidth - prefixSize - 40.f, y + 29.f);
 
-    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + leftW, y + 29.f), IM_COL32(255, 255, 255, 60), 3.f, ImDrawFlags_RoundCornersLeft);
+    BlurRect(dl, ImVec2(x, y), rightMax, 1.f, 3.f);
+    dl->AddRectFilled(ImVec2(rightX, y), rightMax, IM_COL32(0, 0, 0, 155), 3.f, ImDrawFlags_RoundCornersRight);
+
     GifTex* gif = GifTex_Get("airflow_logo", airflow_logo, sizeof(airflow_logo));
-    const ImTextureID logo = GifTex_Frame(gif, 0.0);
-    if (logo) dl->AddImage(logo, ImVec2(x + 10.f, y + 7.f), ImVec2(x + 26.f, y + 23.f), ImVec2(0, 0), ImVec2(1, 1), Accent());
-    dl->AddText(font, 14.f, ImVec2(x + 32.f, y + 6.5f), white, Brand());
+    if (const ImTextureID logo = GifTex_Frame(gif, 0.0))
+        dl->AddImage(logo, ImVec2(x + 10.f, y + 7.f), ImVec2(x + 26.f, y + 23.f), ImVec2(0, 0), ImVec2(1, 1), Accent());
+    dl->AddText(font, 14.f, ImVec2(x + 32.f, y + 6.5f), white, prefix.c_str());
 
-    const float rightX = x + leftW;
-    dl->AddRectFilled(ImVec2(rightX, y), ImVec2(rightX + rightW, y + 29.f), IM_COL32(100, 100, 100, 180), 3.f, ImDrawFlags_RoundCornersRight);
-    const ImTextureID avatar = LocalAvatarTex();
     const ImVec2 avMin(rightX + 7.f, y + 6.f), avMax(rightX + 23.f, y + 22.f);
-    if (avatar) dl->AddImageRounded(avatar, avMin, avMax, ImVec2(0, 0), ImVec2(1, 1), white, 20.f);
+    if (const ImTextureID avatar = LocalAvatarTex()) dl->AddImageRounded(avatar, avMin, avMax, ImVec2(0, 0), ImVec2(1, 1), white, 20.f);
     else dl->AddRectFilled(avMin, avMax, white, 20.f);
-    dl->AddText(font, 14.f, ImVec2(rightX + 29.f, y + 6.5f), white, nf > 0 ? extra : Brand());
+    dl->AddText(font, 14.f, ImVec2(rightX + 29.f, y + 6.5f), white, (user + " | " + clock + " " + ping).c_str());
 
-    dl->AddRect(ImVec2(x, y), ImVec2(x + width, y + 29.f), IM_COL32(120, 120, 120, 100), 3.f);
+    dl->AddRect(ImVec2(x, y), ImVec2(x + windowWidth - 10.f, y + 29.f), IM_COL32(120, 120, 120, 100), 3.f);
     dl->Flags = oldFlags;
 }
 
-bool RenderWatermarkStyled()
+// botox misc.cpp draw_watermark(): clarity v2 (3) and cucumber (19) run before the m_watermark
+// check (they gate / fade on it themselves), every other style needs it on.
+void Watermark_Draw()
 {
-    if (!g_wmEnable || g_wmStyle <= 0) return false;
-
     ImGuiIO& io = ImGui::GetIO();
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    if (io.DisplaySize.x <= 0.f || io.DisplaySize.y <= 0.f) return;
 
-    switch (g_wmStyle) {
-    case 1:  DrawKamibebra(dl, io);   return true;
-    case 2:  DrawClarity(dl, io);     return true;
-    case 3:  DrawClarityV2(dl, io);   return true;
-    case 4:  DrawDelusional(dl, io);  return true;
-    case 5:  DrawInterwebz(dl, io);   return true;
-    case 6:  DrawHavoc(dl, io);       return true;
-    case 7:  DrawOnetap(dl, io);      return true;
-    case 8:  DrawAirflow(dl, io);     return true;
-    case 9:  DrawEvolve(dl, io);      return true;
-    case 10: DrawLegendware(dl, io);  return true;
-    case 11: DrawInterium(dl, io);    return true;
-    case 12: DrawSkebob(dl, io);      return true;
-    case 13: DrawCumidere(dl, io);    return true;
-    case 14: DrawIllusory(dl, io);    return true;
-    case 15: DrawLumi(dl, io);        return true;
-    case 16: DrawBillware(dl, io);    return true;
-    case 17: DrawDna(dl, io);         return true;
-    case 18: DrawDnaClarity(dl, io);  return true;
-    case 19: DrawCucumber(dl, io);    return true;
-    case 20: DrawHoweweware(dl, io);  return true;
-    case 21: DrawGamesense(dl, io);   return true;
-    default: return false;
+    s_f.inGame = IsInGame();
+    s_f.interval = g_globalVars ? g_globalVars->interval_per_tick : 0.f;
+    MvInd_t mv{};
+    MV_GetIndicators(mv);
+    s_f.speed = mv.ms && GetTickCount64() - mv.ms < 250 ? (int)(mv.speed + 0.5f) : 0;
+
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const int style = g_wmStyle;
+
+    if (style == 3) return DrawClarityV2(dl, io);
+    if (style == 19) return DrawCucumber(dl, io);
+    if (!g_wmEnable) return;
+
+    switch (style) {
+    case 1:  return DrawKamibebra(dl, io);
+    case 2:  return DrawClarity(dl, io);
+    case 4:  return DrawDelusional(dl, io);
+    case 5:  return DrawInterwebz(dl, io);
+    case 6:  return DrawHavoc(dl, io);
+    case 7:  return DrawOnetap(dl, io);
+    case 8:  return DrawAirflow(dl, io);
+    case 9:  return DrawEvolve(dl, io);
+    case 10: return DrawLegendware(dl, io);
+    case 11: return DrawInterium(dl, io);
+    case 12: return DrawSkebob(dl, io);
+    case 13: return DrawCumidere(dl, io);
+    case 14: return DrawIllusory(dl, io);
+    case 15: return DrawLumi(dl, io);
+    case 16: return DrawBillware(dl, io);
+    case 17: return DrawDna(dl, io);
+    case 18: return DrawDnaClarity(dl, io);
+    case 20: return DrawHoweweware(dl, io);
+    case 21: return DrawGamesense(dl, io);
+    default: return DrawDefault(dl, io);
     }
 }
 
@@ -1026,14 +1327,18 @@ MediaLook Watermark_MediaLook(int style)
     constexpr ImU32 white = IM_COL32(255, 255, 255, 255);
     const ImU32 accent = Accent();
     switch (style) {
-    case 1:  return { true, white, IM_COL32(146, 144, 145, 255), 0 };
+    case 1: {
+        const float* s = g_wmKamiOutlineColor;
+        const ImU32 main = g_wmKamiTextLikeStroke ? IM_COL32((int)(s[0] * 255.f), (int)(s[1] * 255.f), (int)(s[2] * 255.f), 255) : white;
+        return { true, main, IM_COL32(146, 144, 145, 255), 0 };
+    }
     case 2:  return { false, white, white, 1 };
     case 3:  return { true, accent, IM_COL32(255, 255, 255, 150), 0 };
     case 4:  return { true, white, white, 1 };
     case 5:  return { false, white, white, 2 };
     case 7:  return { true, IM_COL32(255, 255, 255, 150), IM_COL32(255, 255, 255, 150), 0 };
     // spectator_list.cpp media_player_donor_look
-    case 6:  return { true, accent, HavocAccent2(), 1 };
+    case 6:  return { true, HavocAccent(), HavocAccent2(), 1 };
     case 8:  return { true, white, IM_COL32(255, 255, 255, 102), 0 };
     case 9:  return { true, accent, IM_COL32(220, 220, 220, 255), 0 };
     case 10: return { true, IM_COL32(255, 255, 255, 220), IM_COL32(255, 255, 255, 220), 1 };
@@ -1047,8 +1352,8 @@ MediaLook Watermark_MediaLook(int style)
     case 18: return { true, accent, DnaGrey(0.5f), 0 };
     case 19: return { true, accent, white, 0 };
     case 20: return { false, accent, kHowewewareGrey, 0 };
-    case 21: return { true, accent, IM_COL32(255, 255, 255, 230), 0 };
-    default: return { true, white, ImGui::GetColorU32(ImGuiCol_Accent), 0 };   // style 0: menu accent
+    case 21: return { true, PackColor(g_wmGsSenseColor), IM_COL32(255, 255, 255, 230), 0 };
+    default: return { true, white, accent, 0 };   // style 0: menu accent
     }
 }
 
@@ -1060,7 +1365,13 @@ void Watermark_MediaFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, int style)
         dl->AddRectFilled(min, max, IM_COL32(25, 25, 25, 255), ImGui::GetStyle().WindowRounding);
         dl->AddRect(ImVec2(min.x + 1.f, min.y + 1.f), ImVec2(max.x - 1.f, max.y - 1.f), IM_COL32(50, 50, 50, 255), ImGui::GetStyle().WindowRounding);
         break;
-    case 1: dl->AddRectFilled(min, max, IM_COL32(16, 16, 16, 255), 4.f); break;   // kami rounding 4, outline off (donor default)
+    case 1: {
+        const float rounding = KamiRounding();
+        dl->AddRectFilled(min, max, IM_COL32(16, 16, 16, 255), rounding);
+        if (g_wmKamiOutline)
+            dl->AddRect(min, max, g_wmKamiRgb ? s_kamiRgbLast : PackColor(g_wmKamiOutlineColor), rounding, ImDrawFlags_RoundCornersAll, 1.f);
+        break;
+    }
     case 3: {
         dl->AddRectFilled(min, max, IM_COL32(25, 25, 25, 255), 5.f);
         const ImU32 rings[] = { IM_COL32(0, 0, 0, 255), IM_COL32(50, 50, 50, 255), IM_COL32(0, 0, 0, 255) };
@@ -1077,17 +1388,17 @@ void Watermark_MediaFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, int style)
     case 7: dl->AddRectFilled(min, max, IM_COL32(185, 90, 105, 160)); break;
     // spectator_list.cpp media_player_donor_frame
     case 6: HavocBox(dl, min, ImVec2(max.x - min.x, max.y - min.y), 1.f); break;
-    case 8:
+    case 8:   // blur modulated (100) grey = blur under black at 155
         BlurRect(dl, min, max, 1.f, 3.f);
-        dl->AddRectFilled(min, max, IM_COL32(100, 100, 100, 180), 3.f);
+        dl->AddRectFilled(min, max, IM_COL32(0, 0, 0, 155), 3.f);
         break;
     case 9:
-        EvolveShadow(dl, min, max, 12.f, 0.25f);
+        EvolveShadow(dl, min, max, 12.f, EvolveMaxAlpha() * 0.25f);
         dl->AddRectFilled(min, ImVec2(max.x, max.y - 1.f), IM_COL32(29, 29, 29, 255), 4.f, ImDrawFlags_RoundCornersTop);
         dl->AddRectFilled(ImVec2(min.x, max.y - 1.f), max, Accent());
         break;
     case 10: {
-        const int rgb[3] = { (int)(g_wmTextColor[0] * 255.f), (int)(g_wmTextColor[1] * 255.f), (int)(g_wmTextColor[2] * 255.f) };
+        int rgb[3]; AccentRgb(rgb);
         const float half = floorf((max.x - min.x) / 2.f);
         for (const float lineY : { min.y, max.y - 1.f }) {
             LegendwareGradient(dl, ImVec2(min.x, lineY), ImVec2(half, 1.f), rgb, 170, 240);
@@ -1101,12 +1412,12 @@ void Watermark_MediaFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, int style)
         dl->AddRectFilledMultiColor(min, max, InteriumHsv(h[0], 100), InteriumHsv(h[1], 100), InteriumHsv(h[2], 100), InteriumHsv(h[3], 100));
         dl->AddRectFilledMultiColor(ImVec2(min.x + 1.f, min.y + 1.f), ImVec2(max.x - 1.f, max.y - 1.f),
             InteriumHsv(h[0], 255), InteriumHsv(h[1], 255), InteriumHsv(h[2], 255), InteriumHsv(h[3], 255));
-        dl->AddRectFilled(ImVec2(min.x + 2.f, min.y + 2.f), ImVec2(max.x - 2.f, max.y - 2.f), IM_COL32(0, 0, 0, 255));
+        dl->AddRectFilled(ImVec2(min.x + 2.f, min.y + 2.f), ImVec2(max.x - 2.f, max.y - 2.f), PackColor(g_wmInteriumBg));
         break;
     }
     case 15:
         dl->AddRectFilled(min, max, IM_COL32(20, 20, 20, 255), 5.f);
-        dl->AddRect(min, max, IM_COL32(0, 0, 0, 255), 0.f, 0, 1.f);
+        if (!g_wmLumiNoBorder) dl->AddRect(min, max, IM_COL32(0, 0, 0, 255), 0.f, 0, 1.f);
         break;
     case 16: BillwareBox(dl, ImVec2(min.x + 4.f, min.y + 4.f), ImVec2(max.x - 4.f, max.y - 4.f), 1.f); break;
     case 17: DnaBox(dl, ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f), IM_COL32(10, 10, 12, 200), IM_COL32(4, 4, 5, 50)); break;
@@ -1117,7 +1428,7 @@ void Watermark_MediaFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, int style)
         break;
     case 21:
         GamesenseFrame(dl, ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f));
-        GamesenseBar(dl, ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f));
+        if (g_wmGsBar) GamesenseBar(dl, ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f));
         break;
     default: break;
     }

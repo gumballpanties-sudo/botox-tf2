@@ -1,11 +1,8 @@
 #include "config.h"
-#include "../hud/movind.h"   // MI_AST -- the miShowMask migration below is written in slot names
+#include "../hud/indicators.h"   // botox indicators vars (rows in cfg/u_ind.inc)
 #include "../screen/colorcorrect.h"   // CcResetCurve -- a curve that fails to parse goes back to identity
 #include "../aim/aim.h"   // the aimbot's vars ride in this same file
 #include "../visuals/skins.h"     // and so does the skinchanger's per-weapon block
-#include "../hud/velgraph.h"      // unit B
-#include "../hud/keystroke.h"     // unit B
-#include "../hud/keyind_fx.h"     // unit B
 #include "../movement/detections.h"    // unit B
 #include "../movement/ps_lines.h"      // unit B
 #include "../movement/recorder.h"      // unit B
@@ -111,26 +108,6 @@ static const CfgEntry kEntries[] = {
 
     { "debugMenuEnable",  CfgEntry::BOOL,   &g_debugMenuEnable, 0 },
     { "consoleColor",     CfgEntry::FLOAT4, g_consoleColor, 0 },
-
-    { "miEnable",         CfgEntry::BOOL,   &g_miEnable, 0 },
-    { "miHorizontal",     CfgEntry::BOOL,   &g_miHorizontal, 0 },
-    { "miMitosis",        CfgEntry::BOOL,   &g_miMitosis, 0 },
-    { "miShowMask",       CfgEntry::INT,    &g_miShowMask, 0 },
-    { "miOffsetY",        CfgEntry::FLOAT,  &g_miOffsetY, 0 },
-    { "miScale",          CfgEntry::FLOAT,  &g_miScale, 0 },
-    { "miIdleColor",      CfgEntry::FLOAT4, g_miIdleColor, 0 },
-    { "miActiveColor",    CfgEntry::FLOAT4, g_miActiveColor, 0 },
-
-    { "viEnable",         CfgEntry::BOOL,   &g_viEnable, 0 },
-    { "viPreSpeed",       CfgEntry::BOOL,   &g_viPreSpeed, 0 },
-    { "viFadeAlpha",      CfgEntry::BOOL,   &g_viFadeAlpha, 0 },
-    { "viCustomColor",    CfgEntry::BOOL,   &g_viCustomColor, 0 },
-    { "viOffsetY",        CfgEntry::FLOAT,  &g_viOffsetY, 0 },
-    { "viColor1",         CfgEntry::FLOAT4, g_viColor1, 0 },
-    { "viColor2",         CfgEntry::FLOAT4, g_viColor2, 0 },
-    { "viColor3",         CfgEntry::FLOAT4, g_viColor3, 0 },
-    { "viColor4",         CfgEntry::FLOAT4, g_viColor4, 0 },
-    { "viColor5",         CfgEntry::FLOAT4, g_viColor5, 0 },
 
     { "vmSwayEnable",     CfgEntry::BOOL,   &g_vmSwayEnable, 0 },
     { "vmSwayScale",      CfgEntry::FLOAT,  &g_vmSwayScale, 0 },
@@ -552,6 +529,14 @@ static const CfgEntry kEntries[] = {
     { "autoBounce",        CfgEntry::BOOL,  &g_autoBounce, 0 },
     { "autoBounceKey",     CfgEntry::INT,   &g_autoBounceKey, 0 },
     { "autoBounceMode",    CfgEntry::INT,   &g_autoBounceMode, 0 },
+    { "abPlanMode",        CfgEntry::INT,   &g_abMode, 0 },
+    { "abMinGain",         CfgEntry::FLOAT, &g_abMinGain, 0 },
+    { "abReach",           CfgEntry::FLOAT, &g_abReach, 0 },
+    { "abJump",            CfgEntry::BOOL,  &g_abJump, 0 },
+    { "abCrouch",          CfgEntry::BOOL,  &g_abCrouch, 0 },
+    { "abAlign",           CfgEntry::BOOL,  &g_abAlign, 0 },
+    { "abViz",             CfgEntry::BOOL,  &g_abViz, 0 },
+    { "abVizColor",        CfgEntry::FLOAT4, g_abVizColor, 0 },
     { "bounceAssist",      CfgEntry::BOOL,  &g_bounceAssist, 0 },
     { "bounceAssistKey",   CfgEntry::INT,   &g_bounceAssistKey, 0 },
     { "bounceAssistMode",  CfgEntry::INT,   &g_bounceAssistMode, 0 },
@@ -825,7 +810,9 @@ static const CfgEntry kEntries[] = {
     { "chamsSoundFade",         CfgEntry::BOOL,   &g_chamsSoundFade, 0 },
     { "chamsSoundMinVolume",    CfgEntry::FLOAT,  &g_chamsSoundMinVolume, 0 },
     { "chamsSoundMaxDistance",  CfgEntry::FLOAT,  &g_chamsSoundMaxDistance, 0 },
-    { "chamsVisible",           CfgEntry::STR,    g_chamsVisibleCfg, sizeof(g_chamsVisibleCfg) },
+    { "chamsTwoToneThreshold",  CfgEntry::FLOAT,  &g_chamsTwoToneThreshold, 0 },
+    { "chamsTwoToneEdge",       CfgEntry::FLOAT,  &g_chamsTwoToneEdge, 0 },
+    { "chamsVisible",          CfgEntry::STR,    g_chamsVisibleCfg, sizeof(g_chamsVisibleCfg) },
     { "chamsOccluded",          CfgEntry::STR,    g_chamsOccludedCfg, sizeof(g_chamsOccludedCfg) },
     { "chamsSound",             CfgEntry::STR,    g_chamsSoundCfg, sizeof(g_chamsSoundCfg) },
     { "chamsTeamVisible",       CfgEntry::STR,    g_chamsTeamVisibleCfg, sizeof(g_chamsTeamVisibleCfg) },
@@ -934,60 +921,6 @@ static const CfgEntry kEntries[] = {
 
     { "equipRegionUnlock", CfgEntry::BOOL,  &g_equipRegionUnlock, 0 },
 
-    // ---- unit B: velocity graph ----
-    { "vgEnable",       CfgEntry::BOOL,   &g_vgEnable, 0 },
-    { "vgLength",        CfgEntry::INT,    &g_vgLength, 0 },
-    { "vgWidth",         CfgEntry::INT,    &g_vgWidth, 0 },
-    { "vgHeight",        CfgEntry::INT,    &g_vgHeight, 0 },
-    { "vgOffsetX",       CfgEntry::INT,    &g_vgOffsetX, 0 },
-    { "vgPosition",      CfgEntry::INT,    &g_vgPosition, 0 },
-    { "vgMax",           CfgEntry::FLOAT,  &g_vgMax, 0 },
-    { "vgFadeSides",     CfgEntry::BOOL,   &g_vgFadeSides, 0 },
-    { "vgFade",          CfgEntry::FLOAT,  &g_vgFade, 0 },
-    { "vgColor",         CfgEntry::FLOAT4, g_vgColor, 0 },
-    { "vgColorGain",     CfgEntry::FLOAT4, g_vgColorGain, 0 },
-    { "vgColorLoss",     CfgEntry::FLOAT4, g_vgColorLoss, 0 },
-    { "vgFillColor",     CfgEntry::FLOAT4, g_vgFillColor, 0 },
-    { "vgGainColors",    CfgEntry::BOOL,   &g_vgGainColors, 0 },
-    { "vgFill",          CfgEntry::BOOL,   &g_vgFill, 0 },
-    { "vgThickness",     CfgEntry::FLOAT,  &g_vgThickness, 0 },
-    { "vgJumpSpeeds",    CfgEntry::BOOL,   &g_vgJumpSpeeds, 0 },
-    { "vgTextColor",     CfgEntry::FLOAT4, g_vgTextColor, 0 },
-    { "vgTextShadow",    CfgEntry::BOOL,   &g_vgTextShadow, 0 },
-    { "vgTextScale",     CfgEntry::FLOAT,  &g_vgTextScale, 0 },
-
-    // ---- unit B: keystroke indicator ----
-    { "ksEnable",        CfgEntry::BOOL,   &g_ksEnable, 0 },
-    { "ksLayout",        CfgEntry::INT,    &g_ksLayout, 0 },
-    { "ksDuckJump",       CfgEntry::BOOL,   &g_ksDuckJump, 0 },
-    { "ksMouse",          CfgEntry::BOOL,   &g_ksMouse, 0 },
-    { "ksReleased",      CfgEntry::INT,    &g_ksReleased, 0 },
-    { "ksColor",         CfgEntry::FLOAT4, g_ksColor, 0 },
-    { "ksColorReleased", CfgEntry::FLOAT4, g_ksColorReleased, 0 },
-    { "ksFade",          CfgEntry::FLOAT,  &g_ksFade, 0 },
-    { "ksScale",         CfgEntry::FLOAT,  &g_ksScale, 0 },
-    { "ksGapX",          CfgEntry::INT,    &g_ksGapX, 0 },
-    { "ksGapY",          CfgEntry::INT,    &g_ksGapY, 0 },
-    { "ksOffsetX",       CfgEntry::INT,    &g_ksOffsetX, 0 },
-    { "ksPosition",      CfgEntry::INT,    &g_ksPosition, 0 },
-    { "ksShadow",        CfgEntry::BOOL,   &g_ksShadow, 0 },
-
-    // ---- unit B: keybind indicator decorations ----
-    { "miParticles",     CfgEntry::BOOL,   &g_miParticles, 0 },
-    { "miRandomColor",   CfgEntry::BOOL,   &g_miRandomColor, 0 },
-    { "miCustomLabels",  CfgEntry::BOOL,   &g_miCustomLabels, 0 },
-    { "miLabel0",  CfgEntry::STR, g_miLabels[0],  sizeof(g_miLabels[0]) },
-    { "miLabel1",  CfgEntry::STR, g_miLabels[1],  sizeof(g_miLabels[1]) },
-    { "miLabel2",  CfgEntry::STR, g_miLabels[2],  sizeof(g_miLabels[2]) },
-    { "miLabel3",  CfgEntry::STR, g_miLabels[3],  sizeof(g_miLabels[3]) },
-    { "miLabel4",  CfgEntry::STR, g_miLabels[4],  sizeof(g_miLabels[4]) },
-    { "miLabel5",  CfgEntry::STR, g_miLabels[5],  sizeof(g_miLabels[5]) },
-    { "miLabel6",  CfgEntry::STR, g_miLabels[6],  sizeof(g_miLabels[6]) },
-    { "miLabel7",  CfgEntry::STR, g_miLabels[7],  sizeof(g_miLabels[7]) },
-    { "miLabel8",  CfgEntry::STR, g_miLabels[8],  sizeof(g_miLabels[8]) },
-    { "miLabel9",  CfgEntry::STR, g_miLabels[9],  sizeof(g_miLabels[9]) },
-    { "miLabel10", CfgEntry::STR, g_miLabels[10], sizeof(g_miLabels[10]) },
-
     // ---- unit B: detections ----
     { "detections",         CfgEntry::BOOL,   &g_detections, 0 },
     { "detectionStackEb",   CfgEntry::BOOL,   &g_detectionStackEb, 0 },
@@ -1023,6 +956,17 @@ static const CfgEntry kEntries[] = {
     { "recKeyStopPlay",     CfgEntry::INT,  &g_recKeyStopPlay, 0 },
     { "recKeyClear",        CfgEntry::INT,  &g_recKeyClear, 0 },
     { "recKeyClip",         CfgEntry::INT,  &g_recKeyClip, 0 },
+    // 11-01 port round: one row file per unit (cfg/units.h declares the vars)
+#include "cfg/u_ind.inc"
+#include "cfg/u_esp.inc"
+#include "cfg/u_world.inc"
+#include "cfg/u_screen.inc"
+#include "cfg/u_post.inc"
+#include "cfg/u_hud.inc"
+#include "cfg/u_wm.inc"
+#include "cfg/u_spec.inc"
+#include "cfg/u_misc.inc"
+#include "cfg/u_game.inc"
 };
 
 // botox g_config.folder(visuals): visuals files live one folder down
@@ -1086,6 +1030,38 @@ void SaveConfig(const char* path, bool visuals)
     DebugLog("config saved%s: %s", visuals ? " (visuals)" : "", path);
 }
 
+// rows of the coldtires-era indicator port whose shape changed in the botox port. Never written
+// now; read once so an old cfg keeps its picks. Old show / label slots were TB AIR WC PS AST EB JB
+// ST EJ LJ MJ (bit / index 0..10)
+static bool Ind_LoadLegacy(const char* key, const char* val)
+{
+    static constexpr int kShow[11]  = { KI_TB, KI_AS, KI_WC, KI_PS, KI_PSA, KI_EB, KI_JB, KI_ST, KI_EJ, KI_LJ, KI_MJ };
+    static constexpr int kLabel[11] = { LBL_TB, LBL_AIR, LBL_WC, LBL_PS, LBL_AST, LBL_EB, LBL_JB, LBL_AS, LBL_EJ, LBL_LJ, LBL_MJ };
+    const auto f4 = [&](float* c) { sscanf(val, "%f %f %f %f", &c[0], &c[1], &c[2], &c[3]); };
+
+    if (strcmp(key, "miMitosis") == 0) { if (atoi(val)) g_kiStyle = IND_STYLE_MITOSIS; return true; }
+    if (strcmp(key, "miOffsetY") == 0) { g_kiPosition = (int)atof(val); return true; }
+    if (strcmp(key, "miScale") == 0)   { g_kiScale = (float)atof(val); return true; }
+    if (strcmp(key, "miIdleColor") == 0)   { f4(g_kiColor); return true; }
+    if (strcmp(key, "miActiveColor") == 0) { f4(g_kiColorSuccess); return true; }
+    if (strcmp(key, "viOffsetY") == 0) { g_viPadding = (int)atof(val); return true; }
+    if (strcmp(key, "miShowMask") == 0)
+    {
+        const int old = atoi(val);
+        g_kiShow = 0;
+        for (int i = 0; i < 11; ++i)
+            if (old & (1 << i)) g_kiShow |= 1 << kShow[i];
+        return true;
+    }
+    if (strncmp(key, "miLabel", 7) == 0)
+    {
+        const int i = atoi(key + 7);
+        if (i >= 0 && i < 11) strncpy_s(g_kiLabels[kLabel[i]], val, _TRUNCATE);
+        return true;
+    }
+    return strcmp(key, "miOnlyActive") == 0;
+}
+
 // name -> "<ConfigFolder>\<name>.cfg". Path chars stripped so a name can't leave the folder.
 // Returns false if nothing usable left.
 static bool CfgPathFromName(const char* name, char* out, size_t outSz, bool visuals)
@@ -1143,12 +1119,6 @@ void LoadConfig(const char* path, bool visuals)
     FILE* f = fopen(path, "r");
     if (!f) return;
 
-    // MI_HS and MI_BH left the indicator table and MI_AST joined it, so every bit above
-    // MI_TB in a saved miShowMask now points at a different tag. "miOnlyActive" was written by
-    // every build before this one and by none after, so its presence IS the old layout -- remap
-    // once off it instead of silently handing the user someone else's picks
-    bool bLegacyMi = false;
-
     char line[512];
     while (fgets(line, sizeof(line), f))
     {
@@ -1166,13 +1136,13 @@ void LoadConfig(const char* path, bool visuals)
         {
             if (!IsVisualCfgKey(key)) continue;
         }
-        else if (strcmp(key, "miOnlyActive") == 0) bLegacyMi = true;
 
         // Aimbot var? Its key is namespaced ("Vars::..."), so it can never match one of
         // dih's own keys, and consuming it here keeps it out of the kEntries walk.
         if (Aim_LoadVar(key, val)) continue;
         // Same for the skinchanger's "enableSkins" / "skin_<def>_<field>" block.
         if (Skins_LoadCfg(key, val)) continue;
+        if (Ind_LoadLegacy(key, val)) continue;
         // esp rows from before the botox players port: one box combo (0 off, 1 corner, 2 full)
         // and one "health" row that drew bar + number. Never written now, read once into the new rows
         if (strcmp(key, "espBoxStyle") == 0) { const int v = atoi(val); g_espBox = v != 0; g_espBoxCorner = v == 1; continue; }
@@ -1207,20 +1177,6 @@ void LoadConfig(const char* path, bool visuals)
         }
     }
     fclose(f);
-
-    if (bLegacyMi)
-    {
-        // old bit -> new bit. -1 = the tag is gone (hs at 1, bhop at 7). MI_AST is new, so it
-        // is not in the table at all and comes up ON, the way a fresh install shows it
-        static const int kMiRemap[12] = { 0, -1, 1, 2, 3, 5, 6, -1, 7, 8, 9, 10 };
-        const int old = g_miShowMask;
-        int fresh = 1 << MI_AST;
-        for (int i = 0; i < 12; ++i)
-            if ((old & (1 << i)) && kMiRemap[i] >= 0) fresh |= 1 << kMiRemap[i];
-        g_miShowMask = fresh;
-        DebugLog("config: miShowMask %d -> %d (indicator slots renumbered: hs/bhop dropped, "
-                 "ast added)", old, fresh);
-    }
 
     // ---- post-load range clamps -------------------------------------------------------
     // a saved value below a slider floor survives forever -- load is a plain atof
@@ -1272,6 +1228,8 @@ void LoadConfig(const char* path, bool visuals)
           "wider than the band any hop catches in, so the guard never refuses" },
         // the pad is the drawn footprint of the bug tick, not a hitbox -- both ends are taste
         { &g_edgeBugVizSize, 2.f, 64.f, "edgeBugVizSize", nullptr, nullptr },
+        { &g_abReach, 16.f, 512.f, "abReach", nullptr, nullptr },
+        { &g_abMinGain, 0.f, 500.f, "abMinGain", nullptr, nullptr },
         { &g_edgeBugPredictTime, 0.02f, 2.f, "edgeBugPredictTime", nullptr, nullptr },
         { &g_edgeBugStrafeAngleMax, 0.f, 180.f, "edgeBugMaxBend", nullptr, nullptr },
         { &g_edgeBugLockStrength, 0.f, 100.f, "edgeBugLockStrength", nullptr, nullptr },

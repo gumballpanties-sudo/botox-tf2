@@ -2,23 +2,28 @@
 #include "menu.h"          // ImGui::OptionPopup
 #include "../screen/screenfx_passes.h"
 #include "../visuals/world_fx.h"
+#include "../visuals/world_fx3_math.h"   // unit world: world/prop texture presets + categories
 
-// Called inside menu.cpp's "screen" group (Page_VisualsScreen, col1). Labels match
-// botox's own menu_tab_visuals.cpp case 2 where the feature exists there.
+// Called inside menu.cpp's "screen" group (Page_VisualsScreen, col1): botox
+// menu_tab_visuals.cpp 1132-1178 (third person, aspect ratio). Colour correction follows in
+// menu.cpp, then UnitD3_Menu_visuals_screen (sharpen .. show depth).
 void UnitD_Menu_visuals_screen()
 {
     ImGui::Checkbox("third person", &g_thirdPersonEnable);
     if (g_thirdPersonEnable)
-        // no wall collision yet -- botox's "wall collision" sub-toggle is not ported.
         ImGui::OptionPopup("third person settings", [&]() {
-            ImGui::SliderFloat("distance##thirdperson", &g_thirdPersonDistance, 0.f, 400.f, "%.0f");
-        }, ImVec2(210.f, -1));
+            ImGui::Label("third person keybind");
+            ImGui::Keybind("third person key", &g_sfxThirdPersonKey, &g_sfxThirdPersonKeyMode);
+
+            ImGui::SliderFloat("distance##third person", &g_thirdPersonDistance, 20.f, 300.f, "%.0f u",
+                               ImGuiSliderFlags_AlwaysClamp);
+
+            ImGui::Checkbox("wall collision##third person", &g_sfxThirdPersonCollision);
+        }, ImVec2(220.f, -1.f));
 
     ImGui::Checkbox("aspect ratio", &g_aspectRatioEnable);
     if (g_aspectRatioEnable)
-        // botox menu_tab_visuals.cpp:1157 -- slider edits a pending value, apply commits it.
-        // botox's stretch hud/crosshair/cheat overlay toggles not ported: TF2's vgui hud is
-        // not touched by r_aspectratio, and the crosshair/overlay draws live in other files.
+        // slider edits a pending value, apply commits it (botox: r_aspectratio re-lays the view)
         ImGui::OptionPopup("aspect ratio settings", [&]() {
             static float pending_ratio = 0.f;
             static float applied_ratio = 0.f;
@@ -31,249 +36,164 @@ void UnitD_Menu_visuals_screen()
                 g_aspectRatioValue = pending_ratio;
                 applied_ratio      = pending_ratio;
             }
-        }, ImVec2(210.f, -1));
 
-    ImGui::Checkbox("sharpen", &g_sharpenEnable);
-    if (g_sharpenEnable)
-        ImGui::OptionPopup("sharpen settings", [&]() {
-            ImGui::SliderFloat("amount##sharpen", &g_sharpenAmount, 0.f, 2.f, "%.2f");
-        }, ImVec2(210.f, -1));
-
-    ImGui::Checkbox("film grain", &g_filmGrainEnable);
-    if (g_filmGrainEnable)
-        ImGui::OptionPopup("film grain settings", [&]() {
-            ImGui::SliderFloat("amount##grain", &g_filmGrainAmount, 0.f, 0.5f, "%.3f");
-        }, ImVec2(210.f, -1));
-
-    ImGui::Checkbox("vignette", &g_vignetteEnable);
-    if (g_vignetteEnable)
-        ImGui::OptionPopup("vignette settings", [&]() {
-            ImGui::SliderFloat("amount##vignette", &g_vignetteAmount, 0.f, 1.f, "%.2f");
-            ImGui::Checkbox("invert##vignette", &g_vignetteInvert);
-        }, ImVec2(210.f, -1));
-
-    ImGui::Checkbox("invert filter", &g_invertFilterEnable);
-
-    ImGui::Checkbox("posterize", &g_posterizeEnable);
-    if (g_posterizeEnable)
-        ImGui::OptionPopup("posterize settings", [&]() {
-            ImGui::SliderFloat("levels##posterize", &g_posterizeLevels, 2.f, 32.f, "%.0f");
-        }, ImVec2(210.f, -1));
-
-    ImGui::Checkbox("deband", &g_debandEnable);
-    if (g_debandEnable)
-        ImGui::OptionPopup("deband settings", [&]() {
-            ImGui::SliderFloat("amount##deband", &g_debandAmount, 0.f, 32.f, "%.1f");
-        }, ImVec2(210.f, -1));
-
-    ImGui::Checkbox("channel shift", &g_channelShiftEnable);
-    if (g_channelShiftEnable)
-        ImGui::OptionPopup("channel shift settings", [&]() {
-            ImGui::SliderFloat("amount##chshift", &g_channelShiftAmount, 0.f, 10.f, "%.1f");
-            ImGui::Checkbox("depth based##chshift", &g_channelShiftDepth);
-            if (g_channelShiftDepth) {
-                ImGui::Combo("depth side##chshift", &g_channelShiftDepthMode, "background\0" "foreground\0" "both sides\0");
-                ImGui::SliderFloat("distance##chshift", &g_channelShiftDepthDist, 0.f, 4000.f, "%.0f u");
-                ImGui::SliderFloat("range##chshift", &g_channelShiftDepthRange, 0.f, 2000.f, "%.0f u");
-                ImGui::SliderFloat("ramp##chshift", &g_channelShiftDepthRamp, 1.f, 4000.f, "%.0f u");
-            }
-        }, ImVec2(210.f, -1));
-
-    ImGui::Checkbox("depth distort", &g_warpEnable);
-    if (g_warpEnable)
-        ImGui::OptionPopup("depth distort settings", [&]() {
-            ImGui::Combo("effect##warp", &g_warpEffect,
-                         "bulge / pinch\0" "swirl\0" "spliced radials\0" "zigzag\0" "ripple\0" "wave\0" "drunk\0"
-                         "tiny planet\0" "slit scan\0" "radial slit scan\0");
-            const int e = g_warpEffect;
-            const bool radial = e <= 4;
-
-            static const char* k_anim[] = { "no\0" "yes\0", "no\0" "amplitude\0" "phase\0", "no\0" "amplitude\0" "phase\0" "angle\0" };
-            const int animKind = (e == 3 || e == 4) ? 1 : (e == 5 ? 2 : 0);
-            if (e != 6 && e != 7) {
-                g_warpAnimate = std::clamp(g_warpAnimate, 0, animKind + 1);
-                ImGui::Combo("animate##warp", &g_warpAnimate, k_anim[animKind]);
-                if (g_warpAnimate)
-                    ImGui::SliderFloat("animation speed##warp", &g_warpAnimSpeed, 0.05f, 10.f, "%.2f");
-            }
-
-            ImGui::Label("properties");
-            switch (e) {
-            case 0:
-                ImGui::SliderFloat("magnitude##warp", &g_warpMagnitude, -1.f, 1.f, "%.2f");
-                break;
-            case 1:
-            case 2:
-                ImGui::SliderFloat("angle##warp", &g_warpAngle, -1800.f, 1800.f, "%.0f deg");
-                ImGui::SliderFloat("inner radius##warp", &g_warpInnerRadius, 0.f, 1.f, "%.3f");
-                if (e == 1) ImGui::Checkbox("inverse angle##warp", &g_warpInverse);
-                else        ImGui::SliderInt("splices##warp", &g_warpSplices, 1, 50);
-                break;
-            case 3:
-            case 4:
-                ImGui::SliderFloat("angle##warp", &g_warpAngle, -999.f, 999.f, "%.0f");
-                ImGui::SliderFloat("period##warp", &g_warpPeriod, 0.1f, 10.f, "%.2f");
-                ImGui::SliderFloat("amplitude##warp", &g_warpAmplitude, -10.f, 10.f, "%.2f");
-                ImGui::SliderFloat("phase##warp", &g_warpPhase, -5.f, 5.f, "%.2f");
-                break;
-            case 5:
-                ImGui::Combo("wave type##warp", &g_warpWaveType, "x/x\0" "x/y\0");
-                ImGui::SliderFloat("angle##warp", &g_warpWaveAngle, -360.f, 360.f, "%.0f deg");
-                ImGui::SliderFloat("period##warp", &g_warpWavePeriod, 0.1f, 10.f, "%.2f");
-                ImGui::SliderFloat("amplitude##warp", &g_warpWaveAmplitude, -1.f, 1.f, "%.3f");
-                ImGui::SliderFloat("phase##warp", &g_warpPhase, -5.f, 5.f, "%.2f");
-                break;
-            case 6:
-                ImGui::SliderFloat("strength x##warp", &g_warpDrunkStrength[0], 0.f, 100.f, "%.1f");
-                ImGui::SliderFloat("strength y##warp", &g_warpDrunkStrength[1], 0.f, 100.f, "%.1f");
-                ImGui::SliderFloat("speed##warp", &g_warpDrunkSpeed[0], 0.f, 10.f, "%.1f");
-                ImGui::SliderFloat("bending angle##warp", &g_warpDrunkAngle, -1800.f, 1800.f, "%.0f deg");
-                ImGui::SliderFloat("bending speed##warp", &g_warpDrunkAngleSpeed, 0.f, 10.f, "%.1f");
-                break;
-            case 7:
-                ImGui::SliderFloat("scale##warp", &g_warpPlanetScale, 0.f, 10.f, "%.2f");
-                ImGui::SliderFloat("rotation x##warp", &g_warpPlanetRot[0], 0.f, 1.f, "%.3f");
-                ImGui::SliderFloat("rotation y##warp", &g_warpPlanetRot[1], 0.f, 1.f, "%.3f");
-                ImGui::SliderFloat("rotation z##warp", &g_warpPlanetRot[2], 0.f, 360.f, "%.1f deg");
-                ImGui::SliderFloat("offset x##warp", &g_warpPlanetOffset[0], -0.5f, 0.5f, "%.3f");
-                ImGui::SliderFloat("offset y##warp", &g_warpPlanetOffset[1], -0.5f, 0.5f, "%.3f");
-                ImGui::SliderFloat("seam blending##warp", &g_warpPlanetSeam, 0.5f, 1.f, "%.3f");
-                break;
-            case 8:
-                ImGui::Combo("direction##warp", &g_warpSlitDir, "left\0" "right\0" "up\0" "down\0");
-                if (!g_warpAnimate) ImGui::SliderFloat("position##warp", &g_warpSlitPos, 0.f, 1.f, "%.3f");
-                ImGui::SliderFloat("scan speed##warp", &g_warpSlitSpeed, 0.f, 3.f, "%.2f");
-                break;
-            case 9:
-                if (!g_warpAnimate) ImGui::SliderFloat("position##warp", &g_warpSlitPos, 0.f, 1.f, "%.3f");
-                ImGui::ColorRow("border color##warp", g_warpBorderColor);
-                break;
-            }
-
-            if (radial || e == 9) {
-                ImGui::SliderFloat("center x##warp", &g_warpCenter[0], 0.f, 1.f, "%.3f");
-                ImGui::SliderFloat("center y##warp", &g_warpCenter[1], 0.f, 1.f, "%.3f");
-            }
-            if (radial) {
-                ImGui::SliderFloat("radius##warp", &g_warpRadius, 0.f, 1.f, "%.3f");
-                ImGui::SliderFloat("tension##warp", &g_warpTension, 0.f, 10.f, "%.3f");
-                ImGui::SliderFloat("aspect ratio##warp", &g_warpAspect, -100.f, 100.f, "%.1f");
-                ImGui::SliderFloat("aspect angle##warp", &g_warpAspectAngle, -180.f, 180.f, "%.1f deg");
-                ImGui::Checkbox("use offset coordinates##warp", &g_warpUseOffset);
-                if (g_warpUseOffset) {
-                    ImGui::SliderFloat("offset x##warp", &g_warpOffset[0], 0.f, 1.f, "%.3f");
-                    ImGui::SliderFloat("offset y##warp", &g_warpOffset[1], 0.f, 1.f, "%.3f");
-                }
-            }
-
-            ImGui::Label("blending");
-            ImGui::Combo("blending mode##warp", &g_warpBlend,
-                         "normal\0" "darken\0" "  multiply\0" "  color burn\0" "  linear burn\0" "lighten\0" "  screen\0"
-                         "  color dodge\0" "  linear dodge\0" "  addition\0" "  glow\0" "overlay\0" "  soft light\0"
-                         "  hard light\0" "  vivid light\0" "  linear light\0" "  pin light\0" "  hard mix\0" "difference\0"
-                         "  exclusion\0" "subtract\0" "  divide\0" "  divide (alternative)\0" "  divide (photoshop)\0"
-                         "  reflect\0" "  grain extract\0" "  grain merge\0" "hue\0" "  saturation\0" "  color\0"
-                         "  luminosity\0");
-            ImGui::SliderFloat("opacity##warp", &g_warpOpacity, 0.f, 1.f, "%.2f");
-
-            ImGui::Label("depth");
-            ImGui::Combo("depth side##warp", &g_warpDepthMode, "background\0" "foreground\0" "both sides\0");
-            ImGui::SliderFloat("distance##warp", &g_warpDepthDist, 0.f, 4000.f, "%.0f u");
-            ImGui::SliderFloat("range##warp", &g_warpDepthRange, 0.f, 2000.f, "%.0f u");
-            ImGui::SliderFloat("ramp##warp", &g_warpDepthRamp, 1.f, 4000.f, "%.0f u");
-            if (e <= 7) {
-                ImGui::Checkbox("fade transition##warp", &g_warpFade);
-                ImGui::Checkbox("protect edges##warp", &g_warpDepthProtect);
-            }
-        }, ImVec2(230.f, -1));
-
-    // emphasize + show depth: botox menu_tab_visuals.cpp 1395-1460, 1:1 (depth_view.cpp knobs)
-    constexpr ImGuiColorEditFlags k_noAlpha = ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB |
-        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop |
-        ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoBorder | ImGuiColorEditFlags_NoAlpha;
-
-    ImGui::Checkbox("emphasize", &g_emphasizeEnable);
-    if (g_emphasizeEnable)
-        ImGui::OptionPopup("emphasize settings", [&]() {
-            ImGui::SliderFloat("focus depth##emphasize", &g_emphasizeFocusDepth, 0.f, 1.f, "%.3f");
-            ImGui::SliderFloat("focus range##emphasize", &g_emphasizeFocusRange, 0.f, 1.f, "%.3f");
-            ImGui::SliderFloat("focus edge##emphasize", &g_emphasizeFocusEdge, 0.f, 1.f, "%.3f");
-
-            ImGui::Checkbox("spherical##emphasize", &g_emphasizeSpherical);
-            if (g_emphasizeSpherical) {
-                ImGui::SliderInt("sphere fov##emphasize", &g_emphasizeSphereFov, 1, 180, "%d deg");
-                ImGui::SliderFloat("focus x##emphasize", &g_emphasizeSphereX, 0.f, 1.f, "%.3f");
-                ImGui::SliderFloat("focus y##emphasize", &g_emphasizeSphereY, 0.f, 1.f, "%.3f");
-            }
-
-            ImGui::ColorRow("blend color##emphasize", g_emphasizeBlendColor, k_noAlpha);
-            ImGui::SliderFloat("blend factor##emphasize", &g_emphasizeBlendFactor, 0.f, 1.f, "%.3f");
-            ImGui::SliderFloat("effect factor##emphasize", &g_emphasizeAmount, 0.f, 1.f, "%.3f");
-        }, ImVec2(210.f, -1));
-
-    ImGui::Checkbox("show depth", &g_showDepthEnable);
-    if (g_showDepthEnable)
-        ImGui::OptionPopup("show depth settings", [&]() {
-            ImGui::Combo("present type##show depth", &g_showDepthType, "depth map\0" "normal map\0" "show both\0");
-            ImGui::Checkbox("blend into image##show depth", &g_showDepthBlend);
-
-            ImGui::Checkbox("live preview##show depth", &g_showDepthLive);
-            if (g_showDepthLive) {
-                ImGui::Checkbox("upside down##show depth", &g_showDepthUpsideDown);
-                ImGui::Checkbox("reversed##show depth", &g_showDepthReversed);
-                ImGui::Checkbox("logarithmic##show depth", &g_showDepthLog);
-                ImGui::SliderFloat("scale x##show depth", &g_showDepthScaleX, 0.f, 2.f, "%.3f");
-                ImGui::SliderFloat("scale y##show depth", &g_showDepthScaleY, 0.f, 2.f, "%.3f");
-
-                const ImVec2 screen = ImGui::GetIO().DisplaySize;
-                ImGui::SliderInt("offset x##show depth", &g_showDepthOffsetX, -(int)screen.x, (int)screen.x, "%d px");
-                ImGui::SliderInt("offset y##show depth", &g_showDepthOffsetY, -(int)screen.y, (int)screen.y, "%d px");
-
-                ImGui::SliderFloat("far plane##show depth", &g_showDepthFarPlane, 0.f, 1000.f, "%.1f");
-                ImGui::SliderFloat("multiplier##show depth", &g_showDepthMultiplier, 0.f, 1000.f, "%.3f");
-            }
-        }, ImVec2(210.f, -1));
+            ImGui::Checkbox("stretch hud##aspect ratio", &g_sfxAspectHud);
+            ImGui::Checkbox("stretch crosshair##aspect ratio", &g_sfxAspectCrosshair);
+            ImGui::Checkbox("stretch cheat overlays##aspect ratio", &g_sfxAspectCheatOverlay);
+        }, ImVec2(220.f, -1.f));
 }
 
-// Called inside menu.cpp's "world" group (Page_VisualsWorld, col1).
+// Called inside menu.cpp's "world" group (Page_VisualsWorld, col1), after "flip world":
+// botox menu_tab_visuals.cpp world group from "dlight" down, verbatim order / labels / ranges /
+// popup widths. TF2 cuts: custom smoke / molotov colour (no such grenades), custom blood colour
+// (no CParticleCollection layout for TF2 x64), old shaders (TF2 has no PBR shader to swap back),
+// bullet impacts server colour (TF2 has no bullet_impact event). World/prop texture presets are
+// TF2 textures under botox's labels (world_fx3_math.h). Our extra row after botox's: minecraft sky.
+// botox menu_internal.h color_picker_alpha_flags / color_picker_no_alpha_flags
+static constexpr ImGuiColorEditFlags kWdPickerAlpha = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
+    ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip |
+    ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoBorder;
+static constexpr ImGuiColorEditFlags kWdPickerNoAlpha = ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB |
+    ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar |
+    ImGuiColorEditFlags_NoBorder;
+
+// botox menu.cpp modulation_row: checkbox, picker on the same line, brightness slider under it
+static void WdModulationRow(const char* label, bool* enable, float color[4], float* brightness)
+{
+    ImGui::Checkbox(label, enable);
+    if (!*enable)
+        return;
+    char picker[64] = {}, slider[64] = {};
+    snprintf(picker, sizeof(picker), "##%s color picker", label);
+    snprintf(slider, sizeof(slider), "brightness##%s", label);
+    ImGui::SameLine();
+    ImGui::ColorRow(picker, color, kWdPickerAlpha);
+    ImGui::SliderFloat(slider, brightness, 0.f, 400.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
+}
+
 void UnitD_Menu_visuals_world()
 {
-    ImGui::Checkbox("world fov", &g_worldFovEnable);
-    if (g_worldFovEnable)
-        ImGui::OptionPopup("world fov settings", [&]() {
-            ImGui::SliderFloat("fov##worldfov", &g_worldFovAmount, 60.f, 140.f, "%.0f");
-        }, ImVec2(200.f, -1));
-
-    ImGui::Checkbox("fullbright", &g_fullbrightEnable);
-
     ImGui::Checkbox("dlight", &g_dlightEnable);
-    if (g_dlightEnable)
+    if (g_dlightEnable) {
         ImGui::OptionPopup("dlight settings", [&]() {
-            ImGui::ColorEdit4("colour##dlight", g_dlightColor);
-            ImGui::SliderFloat("radius##dlight", &g_dlightRadius, 10.f, 500.f, "%.0f");
-        }, ImVec2(220.f, -1));
+            ImGui::ColorRow("enemies##dlight", g_dlightColor, kWdPickerNoAlpha);
+            ImGui::Checkbox("local player##dlight", &g_wdDlightLocal);
+            if (g_wdDlightLocal)
+                ImGui::ColorRow("local##dlight local color", g_wdDlightLocalColor, kWdPickerNoAlpha);
+            ImGui::SliderFloat("radius##dlight", &g_dlightRadius, 25.f, 1000.f, "%.0f u", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderInt("brightness##dlight", &g_wdDlightBrightness, 0, 10, "%d", ImGuiSliderFlags_AlwaysClamp);
+        }, ImVec2(220.f, -1.f));
+    }
 
-    // moves env_sun's glow sprite only -- baked world lighting is unaffected.
-    ImGui::Checkbox("sun angle", &g_sunAngleEnable);
-    if (g_sunAngleEnable)
-        ImGui::OptionPopup("sun angle settings", [&]() {
-            ImGui::SliderFloat("pitch##sunangle", &g_sunAnglePitch, -90.f, 90.f, "%.0f");
-            ImGui::SliderFloat("yaw##sunangle", &g_sunAngleYaw, 0.f, 360.f, "%.0f");
-        }, ImVec2(220.f, -1));
+    ImGui::Combo("ragdoll gravity", &g_wdRagdollGravity, "off\0away\0fly up\0");
+    if (g_wdRagdollGravity > 0)
+        ImGui::SliderFloat("strength##ragdoll gravity", &g_wdRagdollGravityStrength, 0.1f, 5.f, "%.1fx", ImGuiSliderFlags_AlwaysClamp);
 
-    ImGui::Checkbox("world texture colour", &g_worldTintEnable);
-    if (g_worldTintEnable)
-        ImGui::ColorRow("colour##worldtint", g_worldTintColor);
+    // TF2's precipitation is the rain/snow tracer sprite (c_effects.cpp), tinted where it is looked up
+    ImGui::Checkbox("custom precipitation color", &g_weatherTintEnable);
+    if (g_weatherTintEnable) {
+        ImGui::SameLine();
+        ImGui::ColorRow("##custom precipitation color picker", g_weatherTintColor, kWdPickerAlpha);
+    }
 
-    ImGui::Checkbox("prop texture colour", &g_propTintEnable);
-    if (g_propTintEnable)
-        ImGui::ColorRow("colour##proptint", g_propTintColor);
+    WdModulationRow("world modulation", &g_worldTintEnable, g_worldTintColor, &g_wdWorldModBright);
+    WdModulationRow("prop modulation", &g_propTintEnable, g_propTintColor, &g_wdPropModBright);
+    WdModulationRow("skybox modulation", &g_wdSkyMod, g_wdSkyModColor, &g_wdSkyModBright);
 
-    // rain/snow sprite only. custom blood colour is not ported -- blood is a particle
-    // system, not a single swappable material.
-    ImGui::Checkbox("weather particle colour", &g_weatherTintEnable);
-    if (g_weatherTintEnable)
-        ImGui::ColorRow("colour##weathertint", g_weatherTintColor);
+    // botox commits a custom path only when the box is left (IsItemDeactivatedAfterEdit), so a
+    // half-typed name never reaches the material walk
+    constexpr auto presetLabel = [](void*, int i, const char** out) { *out = wfx3::k_texPresets[i].label; return true; };
+    auto customBox = [](const char* id, char* edit, size_t editSize, char* committed, size_t committedSize) {
+        ImGui::InputTextWithHint(id, "materials/ path, no .vtf", edit, editSize);
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            strncpy_s(committed, committedSize, edit, _TRUNCATE);
+        else if (!ImGui::IsItemActive() && strcmp(edit, committed) != 0)
+            strncpy_s(edit, editSize, committed, _TRUNCATE);
+    };
+
+    ImGui::Checkbox("world texture", &g_wdWorldTex);
+    if (g_wdWorldTex) {
+        ImGui::OptionPopup("world texture settings", [&]() {
+            int all = g_wdWorldTexPreset[0];
+            for (int c = 1; c < wfx3::k_texCategoryCount; ++c)
+                all = g_wdWorldTexPreset[c] == all ? all : -1;
+            if (ImGui::Combo("all##world texture", &all, presetLabel, nullptr, wfx3::k_texPresetCount))
+                for (int c = 0; c < wfx3::k_texCategoryCount; ++c) g_wdWorldTexPreset[c] = all;
+
+            ImGui::Checkbox("remove decals", &g_wdWorldTexDecals);
+
+            static char s_edit[wfx3::k_texCategoryCount][128] = {};
+            for (int c = 0; c < wfx3::k_texCategoryCount; ++c) {
+                ImGui::PushID(c);
+                ImGui::Combo(wfx3::k_texCategories[c], &g_wdWorldTexPreset[c], presetLabel, nullptr, wfx3::k_texPresetCount);
+                if (g_wdWorldTexPreset[c] == wfx3::k_texPresetCustom)
+                    customBox("##custom", s_edit[c], sizeof(s_edit[c]), g_wdWorldTexCustom[c], sizeof(g_wdWorldTexCustom[c]));
+                ImGui::PopID();
+            }
+        }, ImVec2(260.f, -1.f));
+    }
+
+    ImGui::Checkbox("prop texture", &g_wdPropTex);
+    if (g_wdPropTex) {
+        ImGui::OptionPopup("prop texture settings", [&]() {
+            ImGui::Combo("texture##prop texture", &g_wdPropTexPreset, presetLabel, nullptr, wfx3::k_texPresetCount);
+            static char s_edit[128] = {};
+            if (g_wdPropTexPreset == wfx3::k_texPresetCustom)
+                customBox("##prop custom", s_edit, sizeof(s_edit), g_wdPropTexCustom, sizeof(g_wdPropTexCustom));
+        }, ImVec2(220.f, -1.f));
+    }
+
+    ImGui::Checkbox("bullet tracers", &g_wdTracers);
+    if (g_wdTracers) {
+        ImGui::OptionPopup("bullet tracers settings", [&]() {
+            ImGui::Checkbox("local##bullet tracers", &g_wdTracersLocal);
+            ImGui::SameLine();
+            ImGui::ColorRow("##bullet tracers local color", g_wdTracersLocalColor, kWdPickerAlpha);
+
+            ImGui::Checkbox("enemies##bullet tracers", &g_wdTracersEnemy);
+            ImGui::SameLine();
+            ImGui::ColorRow("##bullet tracers enemy color", g_wdTracersEnemyColor, kWdPickerAlpha);
+
+            ImGui::Checkbox("teammates##bullet tracers", &g_wdTracersTeam);
+            ImGui::SameLine();
+            ImGui::ColorRow("##bullet tracers team color", g_wdTracersTeamColor, kWdPickerAlpha);
+
+            ImGui::Combo("sprite##bullet tracers", &g_wdTracersSprite, "purple laser\0phys beam\0laser beam\0white\0");
+            ImGui::SliderFloat("life##bullet tracers", &g_wdTracersLife, 0.1f, 10.f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderFloat("width##bullet tracers", &g_wdTracersWidth, 0.5f, 10.f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+        }, ImVec2(220.f, -1.f));
+    }
+
+    ImGui::Checkbox("movement trail", &g_wdTrail);
+    if (g_wdTrail) {
+        ImGui::OptionPopup("movement trail settings", [&]() {
+            ImGui::ColorRow("color##movement trail", g_wdTrailColor, kWdPickerAlpha);
+            ImGui::ColorRow("crouch color##movement trail", g_wdTrailCrouchColor, kWdPickerAlpha);
+            ImGui::Checkbox("rainbow##movement trail", &g_wdTrailRainbow);
+            ImGui::Checkbox("air only##movement trail", &g_wdTrailAirOnly);
+            ImGui::Combo("sprite##movement trail", &g_wdTrailSprite, "purple laser\0phys beam\0laser beam\0white\0");
+            ImGui::SliderFloat("life##movement trail", &g_wdTrailLife, 0.1f, 10.f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderFloat("width##movement trail", &g_wdTrailWidth, 0.5f, 20.f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+        }, ImVec2(220.f, -1.f));
+    }
+
+    ImGui::Checkbox("bullet impacts", &g_wdImpacts);
+    if (g_wdImpacts) {
+        ImGui::OptionPopup("bullet impacts settings", [&]() {
+            ImGui::ColorRow("client color##bullet impacts", g_wdImpactsClientColor, kWdPickerAlpha);
+            ImGui::SliderFloat("size##bullet impacts", &g_wdImpactsSize, 0.5f, 10.f, "%.1f u", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderFloat("duration##bullet impacts", &g_wdImpactsDuration, 0.1f, 30.f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
+        }, ImVec2(220.f, -1.f));
+    }
+
+    ImGui::Checkbox("world hit marker", &g_wdHitMarker);
+    if (g_wdHitMarker) {
+        ImGui::OptionPopup("world hit marker settings", [&]() {
+            ImGui::ColorRow("color##world hit marker", g_wdHitMarkerColor, kWdPickerAlpha);
+            ImGui::SliderFloat("size##world hit marker", &g_wdHitMarkerSize, 2.f, 20.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderFloat("duration##world hit marker", &g_wdHitMarkerDuration, 0.1f, 5.f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
+        }, ImVec2(220.f, -1.f));
+    }
 
     ImGui::Checkbox("minecraft sky + clouds", &g_mcWorldEnable);
 }

@@ -191,7 +191,7 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         return ok;
     };
 
-    const bool keys_free = true;   /* botox: !auto_bounce.owns_cmd && !fireman.owns_cmd -- neither exists here */
+    const bool keys_free = !AutoBounceOwnsCmd();   /* botox: !auto_bounce.owns_cmd && !fireman.owns_cmd -- TF2 has no fireman */
     const auto hold      = [&]() -> int {
         RestoreToFrame(frame);
         Vec3 n{};

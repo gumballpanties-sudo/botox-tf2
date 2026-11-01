@@ -45,12 +45,14 @@ add_library(botox SHARED
     src/hacks/hud/hitmarker.cpp
     src/hacks/misc/killeffects.cpp
     src/hacks/misc/killeffects_world.cpp
+    src/hacks/misc/misc_overlays.cpp
     src/hacks/hud/points.cpp
     src/hacks/hud/spectator_list.cpp
     src/hacks/misc/discord_ex.cpp
+    src/hacks/misc/game_extras.cpp
     src/hacks/menu/debugmenu.cpp
     src/hacks/menu/unitE_menu.cpp
-    src/hacks/hud/movind.cpp
+    src/hacks/hud/indicators.cpp
     src/hacks/menu/menu.cpp
     src/hacks/menu/config.cpp
     src/hooks/thread.cpp
@@ -64,8 +66,6 @@ add_library(botox SHARED
     src/hooks/crashlog.cpp
     src/hacks/visuals/skins.cpp
     src/hacks/visuals/flipworld.cpp
-    src/hacks/hud/velgraph.cpp
-    src/hacks/hud/keystroke.cpp
     src/hacks/movement/detections.cpp
     src/hacks/movement/recorder.cpp
     src/hacks/menu/unitB_menu.cpp
@@ -74,14 +74,19 @@ add_library(botox SHARED
     src/hacks/screen/screenfx_passes.cpp
     src/hacks/visuals/world_fx.cpp
     src/hacks/visuals/world_fx2.cpp
+    src/hacks/visuals/world_fx3.cpp
     src/hacks/menu/unitD_menu.cpp
     src/hacks/visuals/reflections.cpp
     src/hacks/visuals/mc_world.cpp
     src/hacks/menu/unitD3_menu.cpp
+    src/hacks/screen/aspect_stretch.cpp
     src/hacks/hud/gif_tex.cpp
     src/hacks/hud/avatar_cache.cpp
     src/hacks/screen/blur_rect.cpp
+    src/hacks/hud/hud_extra.cpp   # unit hud: fov circle, net graph, hud fonts
     src/hacks/menu/fonts.cpp
+    src/hacks/visuals/lsd_chams.cpp
+    src/hacks/visuals/player_stencil.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
@@ -215,15 +220,35 @@ add_executable(jbpredict_test tests/jbpredict_test.cpp)
 # Build + run: cmake --build build --config Release --target mediaplayer_test && build\Release\mediaplayer_test.exe
 add_executable(mediaplayer_test tests/mediaplayer_test.cpp)
 
+# Gate test for the media player's waveform bands (src/hacks/hud/audio_bands.h, botox verbatim) and
+# lyrics pure half (src/hacks/hud/mp_lyrics.h: lrclib json read, LRC parse, url encode, row window).
+# Build + run: powershell -NoProfile -File tools/locked_build.ps1 -Target mpaudio_test && build\Release\mpaudio_test.exe
+add_executable(mpaudio_test tests/mpaudio_test.cpp)
+
 # Gate test for unit E's pure logic (src/hacks/misc/unitE_logic.h): ehandle decode (spectator
 # list), discord IPC JSON escaping, and the shared fade-fraction math.
 # Build + run: cmake --build build --config Release --target unitE_test && build\Release\unitE_test.exe
 add_executable(unitE_test tests/unitE_test.cpp)
 
+# Gate test for unit game's pure halves (src/hacks/misc/game_pure.h): SayText2/SayText reads, chat
+# line pick, TF2 colour strip, gtx JSON accept rule, steam profile xml, split_cvars.
+# Build + run: powershell -NoProfile -File tools/locked_build.ps1 -Target gamepure_test && build\Release\gamepure_test.exe
+add_executable(gamepure_test tests/gamepure_test.cpp)
+
 # Gate test for unit E5's gif frame math (src/hacks/hud/gif_frame.h): frame-index-from-time
 # with variable per-frame delays and infinite loop wrap.
 # Build + run: cmake --build build --config Release --target giftex_test && build\Release\giftex_test.exe
 add_executable(giftex_test tests/giftex_test.cpp)
+
+# Gate test for unit hud's pure logic (src/hacks/hud/hud_math.h): net graph warn grades + stock
+# position, interwebz sniper crosshair band.
+# Build + run: cmake --build build --config Release --target hudmath_test && build\Release\hudmath_test.exe
+add_executable(hudmath_test tests/hudmath_test.cpp)
+
+# Gate test for unit wm's watermark pure halves (src/hacks/hud/wm_pure.h): imgur url rewrite,
+# fnv-1a cache name, utf8 truncate, gif-next-to-watermark placement.
+# Build + run: cmake --build build --config Release --target wmpure_test && build\Release\wmpure_test.exe
+add_executable(wmpure_test tests/wmpure_test.cpp)
 
 # Gate test for unit E5's avatar cache arithmetic (src/hacks/hud/avatar_pure.h): friendsID ->
 # steamid64, and the RGBA->BGRA swizzle before a d3d9 upload.
@@ -244,6 +269,9 @@ target_compile_definitions(bloom_test PRIVATE BLOOM_SRC_DIR="${CMAKE_CURRENT_SOU
 # Build + run: cmake --build build --config Release --target fbmath_test && build\Release\fbmath_test.exe
 add_executable(fbmath_test tests/fbmath_test.cpp)
 target_compile_definitions(fbmath_test PRIVATE FB_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/hacks/screen/shaders")
+
+# Gate test for the aspect ratio overlay stretch math (src/hacks/screen/aspect_stretch_math.h).
+add_executable(aspect_stretch_test tests/aspect_stretch_test.cpp)
 
 # Gate test for the strafe air-accel math (src/hacks/movement/airlean.h): the closed-form best-gain and
 # free-turn wish angles vs a brute-force sweep of the same AirAccelerate tick.
@@ -268,6 +296,9 @@ add_executable(movementex_test tests/movementex_test.cpp)
 # flip, tung surf's widened ramp band, edge bug style preset bundles.
 # Build + run: cmake --build build --config Release --target movementtricks2_test && build\Release\movementtricks2_test.exe
 add_executable(movementtricks2_test tests/movementtricks2_test.cpp)
+# Gate test for auto bounce pure math (src/hacks/movement/autobounce_pure.h): clip/bhop crop/ttc/air step.
+# Build + run: cmake --build build --config Release --target autobounce_test && build\Release\autobounce_test.exe
+add_executable(autobounce_test tests/autobounce_test.cpp)
 # Gate test for Unit A2's pure decisions (src/hacks/movement/movement_edge_pure.h): edge skip's
 # duck gate, blockbot's head-mode wish + strafe sign.
 # Build + run: cmake --build build --config Release --target movementedge_test && build\Release\movementedge_test.exe
@@ -443,6 +474,9 @@ add_executable(mcworld_test tests/mcworld_test.cpp)
 # Gate test for Unit D2's pure helpers (src/hacks/visuals/world_fx2.h).
 # Build + run: cmake --build build --config Release --target worldfx2_test && build\Release\worldfx2_test.exe
 add_executable(worldfx2_test tests/worldfx2_test.cpp)
+# Gate test for unit world's pure helpers (src/hacks/visuals/world_fx3_math.h): world hit marker
+# impact pick + fade, trail stepping, rainbow, ragdoll force modes, sun drift, hud panel names.
+add_executable(worldfx3_test tests/worldfx3_test.cpp)
 # Gate test for the fonts tab's pure helpers (src/hacks/menu/fonts.h): settings signature, the
 # 250ms settle gate, freetype-flags -> vgui face mapping, indicator px.
 # Build + run: cmake --build build --config Release --target fonts_test && build\Release\fonts_test.exe
@@ -452,3 +486,8 @@ add_executable(fonts_test tests/fonts_test.cpp)
 # round trip, garbage skip, dropdown toggle order.
 # Build + run: cmake --build build --config Release --target chams_layers_test && build\Release\chams_layers_test.exe
 add_executable(chams_layers_test tests/chams_layers_test.cpp)
+
+# Gate test for the spectator list's pure helpers (src/hacks/hud/spec_pure.h): utf8 cut, imgur link
+# resolve, url cache hash, eyes row layout.
+# Build + run: cmake --build build --config Release --target specpure_test && build\Release\specpure_test.exe
+add_executable(specpure_test tests/specpure_test.cpp)

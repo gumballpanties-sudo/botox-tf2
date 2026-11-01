@@ -1,69 +1,248 @@
 #include "unitB_menu.h"
 #include "menu.h"        // MenuBindKey
-#include "../hud/velgraph.h"
-#include "../hud/keystroke.h"
-#include "../hud/keyind_fx.h"
-#include "../hud/movind.h"      // MI_COUNT / kMiNames
+#include "../hud/indicators.h"
 #include "../movement/detections.h"
 #include "../movement/ps_lines.h"
 #include "../movement/recorder.h"
 #include "menu_chrome.h"   // menu_columns_* / menu_group_*
 #include <cstdio>
 
+// botox menu_tab_movement.cpp case 1, "indicators" group body, 1:1 (stamina indicator dropped:
+// TF2 has no stamina stat). color_picker_alpha_flags = ColorRow's defaults here
 void UnitB_Menu_movement_indicators()
 {
+    const ImVec2 screen = ImGui::GetIO().DisplaySize;
+
+    ImGui::Checkbox("velocity indicator", &g_viEnable);
+    if (g_viEnable)
+        ImGui::OptionPopup("velocity indicator settings", [&]() {
+            ImGui::Combo("style##velocity indicator style", &g_viStyle, kIndStyleNames);
+
+            if (g_viStyle == IND_STYLE_SMOOTH)
+                ImGui::Combo("comes from##velocity indicator", &g_viSmoothOrigin, kSmoothOriginNames);
+
+            if (g_viStyle == IND_STYLE_KAMIDERE)
+                ImGui::ColorRow("kami shadow color##velocity indicator", g_indKamiShadowColor);
+
+            if (g_viCustomColor)
+            {
+                ImGui::ColorRow("velocity colors##velocity indicator color 1", g_viColor1);
+                ImGui::SameLine();
+                ImGui::ColorRow("##velocity indicator color 2", g_viColor2, 0, 1);
+            }
+            else
+            {
+                ImGui::ColorRow("velocity colors##velocity indicator color 3", g_viColor3);
+                ImGui::SameLine();
+                ImGui::ColorRow("##velocity indicator color 4", g_viColor4, 0, 1);
+                ImGui::SameLine();
+                ImGui::ColorRow("##velocity indicator color 5", g_viColor5, 0, 2);
+            }
+
+            ImGui::Checkbox("show pre speed##velocity indicator", &g_viPreSpeed);
+            if (g_viPreSpeed)
+            {
+                ImGui::Combo("pre speed position##velocity indicator", &g_viPreLayout, kPreLayoutNames);
+                ImGui::SliderFloat("pre speed scale##velocity indicator", &g_viPreScale, 0.25f, 2.f, "%.2fx");
+                if (g_viPreLayout == PRE_LAYOUT_RIGHT)
+                    ImGui::Combo("pre speed align##velocity indicator", &g_viPreAlign, kPreAlignNames);
+            }
+
+            ImGui::Checkbox("fade alpha##velocity indicator", &g_viFadeAlpha);
+
+            ImGui::Checkbox("custom color##velocity indicator", &g_viCustomColor);
+
+            ImGui::Checkbox("shadow##velocity indicator", &g_viShadow);
+            if (g_viShadow)
+            {
+                ImGui::SliderFloat("shadow blur##velocity indicator", &g_viShadowBlur, 0.f, 20.f, "%.1f");
+                if (g_viStyle != IND_STYLE_KAMIDERE)
+                    ImGui::ColorRow("shadow color##velocity indicator", g_viShadowColor);
+                ImGui::SliderInt("shadow x##velocity indicator", &g_viShadowX, -10, 10, "%d px");
+                ImGui::SliderInt("shadow y##velocity indicator", &g_viShadowY, -10, 10, "%d px");
+            }
+
+            ImGui::Checkbox("outline##velocity indicator", &g_viOutline);
+            if (g_viOutline)
+            {
+                ImGui::ColorRow("outline color##velocity indicator", g_viOutlineColor);
+                ImGui::SliderInt("outline thickness##velocity indicator", &g_viOutlinePx, 1, 5, "%d px");
+            }
+
+            ImGui::SliderFloat("scale##velocity indicator", &g_viScale, kIndScaleMin, 3.f, "%.2fx");
+
+            ImGui::SliderInt("position##velocity indicator", &g_viPadding, 30, (int)screen.y);
+        }, ImVec2(220.f, -1.f));
+
     ImGui::Checkbox("velocity graph", &g_vgEnable);
     if (g_vgEnable)
         ImGui::OptionPopup("velocity graph settings", [&]() {
-            ImGui::SliderInt("history##vg", &g_vgLength, 2, 512);
-            ImGui::SliderInt("width##vg", &g_vgWidth, 10, 600);
-            ImGui::SliderInt("height##vg", &g_vgHeight, 5, 300);
-            ImGui::SliderInt("position##vg", &g_vgPosition, 0, 600);
-            ImGui::SliderInt("x offset##vg", &g_vgOffsetX, -600, 600);
-            ImGui::SliderFloat("max speed (0=auto)##vg", &g_vgMax, 0.f, 2000.f);
-            ImGui::Checkbox("fill##vg", &g_vgFill);
-            ImGui::Checkbox("fade sides##vg", &g_vgFadeSides);
-            ImGui::Checkbox("gain/loss colors##vg", &g_vgGainColors);
-            ImGui::Checkbox("jump speed labels##vg", &g_vgJumpSpeeds);
-            ImGui::SliderFloat("thickness##vg", &g_vgThickness, 0.5f, 6.f);
-            ImGui::ColorRow("line color##vg", g_vgColor);
+            ImGui::ColorRow("line color##velocity graph", g_vgColor);
+            ImGui::SliderFloat("thickness##velocity graph", &g_vgThickness, 0.5f, 6.f, "%.1f");
+
+            ImGui::Checkbox("gain colors##velocity graph", &g_vgGainColors);
             if (g_vgGainColors)
             {
-                ImGui::ColorRow("gain color##vg", g_vgColorGain);
-                ImGui::ColorRow("loss color##vg", g_vgColorLoss);
+                ImGui::ColorRow("gain / loss##velocity graph gain", g_vgColorGain);
+                ImGui::SameLine();
+                ImGui::ColorRow("##velocity graph loss", g_vgColorLoss, 0, 1);
             }
-            if (g_vgFill) ImGui::ColorRow("fill color##vg", g_vgFillColor);
-        }, ImVec2(240.f, -1));
 
-    ImGui::Checkbox("particles on hit##mi", &g_miParticles);
-    ImGui::Checkbox("random color per tag##mi", &g_miRandomColor);
-    ImGui::Checkbox("custom labels##mi", &g_miCustomLabels);
-    if (g_miCustomLabels)
-        ImGui::OptionPopup("custom bind labels", [&]() {
-            for (int i = 0; i < MI_COUNT; ++i)
+            ImGui::Checkbox("fill##velocity graph", &g_vgFill);
+            if (g_vgFill)
+                ImGui::ColorRow("fill color##velocity graph", g_vgFillColor);
+
+            ImGui::Checkbox("fade sides##velocity graph", &g_vgFadeSides);
+            if (g_vgFadeSides)
+                ImGui::SliderFloat("fade width##velocity graph", &g_vgFade, 0.01f, 0.5f, "%.2f");
+
+            ImGui::Checkbox("jump speeds##velocity graph", &g_vgJumpSpeeds);
+            if (g_vgJumpSpeeds)
             {
-                char id[32]; snprintf(id, sizeof(id), "%s##milabel", kMiNames[i]);
-                ImGui::InputText(id, g_miLabels[i], sizeof(g_miLabels[i]));
+                ImGui::ColorRow("text color##velocity graph", g_vgTextColor);
+                ImGui::Checkbox("text shadow##velocity graph", &g_vgTextShadow);
+                ImGui::SliderFloat("text scale##velocity graph", &g_vgTextScale, kIndScaleMin, 3.f, "%.2fx");
             }
-        }, ImVec2(220.f, -1));
 
-    ImGui::Checkbox("keystroke indicator", &g_ksEnable);
-    if (g_ksEnable)
+            ImGui::SliderInt("length##velocity graph", &g_vgLength, 16, 1024);
+            ImGui::SliderFloat("max speed##velocity graph", &g_vgMax, 0.f, 1000.f, g_vgMax <= 0.f ? "auto" : "%.0f");
+            ImGui::SliderInt("width##velocity graph", &g_vgWidth, 50, (int)screen.x);
+            ImGui::SliderInt("height##velocity graph", &g_vgHeight, 10, 400);
+            ImGui::SliderInt("offset x##velocity graph", &g_vgOffsetX, -(int)screen.x / 2, (int)screen.x / 2);
+            ImGui::SliderInt("position##velocity graph", &g_vgPosition, 0, (int)screen.y);
+        }, ImVec2(220.f, -1.f));
+
+    ImGui::Checkbox("keybind indicators", &g_kiEnable);
+    if (g_kiEnable)
+        ImGui::OptionPopup("keybind indicator settings", [&]() {
+            ImGui::Combo("style##keybind indicator style", &g_kiStyle, kIndStyleNames);
+
+            if (g_kiStyle == IND_STYLE_SMOOTH)
+                ImGui::Combo("comes from##keybind indicators", &g_kiSmoothOrigin, kSmoothOriginNames);
+
+            if (g_kiStyle == IND_STYLE_STATIC)
+                ImGui::SliderFloat("fade in##keybind indicators", &g_kiStaticFade, 0.f, 1.f, "%.2f s");
+
+            if (g_kiStyle == IND_STYLE_KAMIDERE)
+                ImGui::ColorRow("kami shadow color##keybind indicator", g_indKamiShadowColor);
+
+            ImGui::ColorRow("keybind colors##keybind color", g_kiColor);
+            ImGui::SameLine();
+            ImGui::ColorRow("##keybind success color", g_kiColorSuccess, 0, 1);
+
+            ImGui::ColorRow("in prediction color##keybind predict color", g_kiColorPredict);
+
+            ImGui::Checkbox("horizontal layout", &g_kiHorizontal);
+
+            ImGui::SliderInt("spacing##keybind indicators", &g_kiSpacing, -10, 40, "%d px");
+
+            ImGui::Checkbox("shadow##keybind indicators", &g_kiShadow);
+            if (g_kiShadow)
+            {
+                ImGui::SliderFloat("shadow blur##keybind indicators", &g_kiShadowBlur, 0.f, 20.f, "%.1f");
+
+                if (g_kiStyle != IND_STYLE_KAMIDERE)
+                    ImGui::ColorRow("shadow color##keybind indicators", g_kiShadowColor);
+
+                ImGui::Checkbox("detect on shadow", &g_kiShadowDetect);
+                ImGui::SliderInt("shadow x##keybind indicators", &g_kiShadowX, -10, 10, "%d px");
+                ImGui::SliderInt("shadow y##keybind indicators", &g_kiShadowY, -10, 10, "%d px");
+            }
+
+            ImGui::Checkbox("outline##keybind indicators", &g_kiOutline);
+            if (g_kiOutline)
+            {
+                ImGui::ColorRow("outline color##keybind indicators", g_kiOutlineColor);
+                ImGui::SliderInt("outline thickness##keybind indicators", &g_kiOutlinePx, 1, 5, "%d px");
+            }
+
+            ImGui::SliderFloat("scale##keybind indicators", &g_kiScale, kIndScaleMin, 3.f, "%.2fx");
+
+            ImGui::Checkbox("detection particles", &g_kiParticles);
+            if (g_kiParticles)
+            {
+                ImGui::Checkbox("random colors##key particles", &g_kiParticleRandom);
+                if (!g_kiParticleRandom)
+                    ImGui::ColorRow("particle color##key particles", g_kiParticleColor);
+                ImGui::SliderInt("amount##key particles", &g_kiParticleAmount, 1, 60);
+                ImGui::SliderFloat("size##key particles", &g_kiParticleSize, 1.f, 12.f, "%.1f");
+                ImGui::SliderFloat("speed##key particles", &g_kiParticleSpeed, 10.f, 600.f, "%.0f");
+                ImGui::SliderFloat("gravity##key particles", &g_kiParticleGravity, -300.f, 800.f, "%.0f");
+                ImGui::SliderFloat("life##key particles", &g_kiParticleLife, 0.2f, 3.f, "%.1f s");
+                ImGui::SliderFloat("cooldown##key particles", &g_kiParticleCooldown, 0.f, 2.f, "%.2f s");
+            }
+
+            ImGui::SliderInt("position##sub indicators", &g_kiPosition, 30, (int)screen.y);
+
+            ImGui::MultiCombo("displayed keybinds", &g_kiShow, kKiToggleNames, KI_COUNT);
+
+            // per-bind label override; empty = stock label (hint). 16 = botox's buffer
+            ImGui::Checkbox("custom labels", &g_kiCustomLabels);
+            if (g_kiCustomLabels)
+            {
+                float name_width = 0.f;
+                for (int i = 0; i < LBL_COUNT; i++)
+                    name_width = ImMax(name_width, ImGui::CalcTextSize(kKiLabels[i][0]).x);
+                name_width += 8.f;
+
+                for (int i = 0; i < LBL_COUNT; i++)
+                {
+                    ImGui::PushID(i);
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 7.f - (i > 0 ? ImGui::GetStyle().ItemSpacing.y : 0.f));
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + name_width);
+                    ImGui::InputTextWithHint("##label", kKiLabels[i][1], g_kiLabels[i], sizeof(g_kiLabels[i]));
+                    const ImVec2 box = ImGui::GetItemRectMin();
+                    ImGui::GetWindowDrawList()->AddText(ImVec2(box.x - name_width, box.y + (17.f - ImGui::GetFontSize()) * 0.5f),
+                                                        ImGui::GetColorU32(ImGuiCol_Text), kKiLabels[i][0]);
+                    ImGui::PopID();
+                }
+            }
+        }, ImVec2(220.f, -1.f));
+
+    ImGui::Checkbox("keystroke indicators", &g_kpEnable);
+    if (g_kpEnable)
         ImGui::OptionPopup("keystroke indicator settings", [&]() {
-            ImGui::SliderInt("layout##ks", &g_ksLayout, 0, 1);
-            ImGui::Checkbox("duck/jump row##ks", &g_ksDuckJump);
-            ImGui::Checkbox("mouse arrows##ks", &g_ksMouse);
-            ImGui::Combo("released style##ks", &g_ksReleased, "cross fade\0color lerp\0fade only\0");
-            ImGui::SliderFloat("fade time##ks", &g_ksFade, 0.f, 0.5f);
-            ImGui::SliderFloat("scale##ks", &g_ksScale, 0.5f, 3.f);
-            ImGui::SliderInt("position##ks", &g_ksPosition, 0, 600);
-            ImGui::SliderInt("x offset##ks", &g_ksOffsetX, -600, 600);
-            ImGui::ColorRow("on color##ks", g_ksColor);
-            ImGui::ColorRow("released color##ks", g_ksColorReleased);
-        }, ImVec2(240.f, -1));
+            ImGui::Combo("layout##key press", &g_kpLayout, "clarity (a w d / c s j)\0keyboard (c w j / a s d)\0");
+
+            ImGui::Combo("released##key press", &g_kpReleased, "underscore\0dim letter\0hidden\0");
+
+            ImGui::ColorRow("key colors##key press color", g_kpColor);
+            ImGui::SameLine();
+            ImGui::ColorRow("##key press released color", g_kpColorReleased, 0, 1);
+
+            ImGui::Checkbox("duck / jump##key press", &g_kpDuckJump);
+            ImGui::Checkbox("mouse direction##key press", &g_kpMouse);
+
+            ImGui::Checkbox("shadow##key press", &g_kpShadow);
+            if (g_kpShadow)
+            {
+                ImGui::SliderFloat("shadow blur##key press", &g_kpShadowBlur, 0.f, 20.f, "%.1f");
+                ImGui::SliderInt("shadow x##key press", &g_kpShadowX, -10, 10, "%d px");
+                ImGui::SliderInt("shadow y##key press", &g_kpShadowY, -10, 10, "%d px");
+            }
+
+            ImGui::Checkbox("outline##key press", &g_kpOutline);
+            if (g_kpOutline)
+            {
+                ImGui::ColorRow("outline color##key press", g_kpOutlineColor);
+                ImGui::SliderInt("outline thickness##key press", &g_kpOutlinePx, 1, 5, "%d px");
+            }
+
+            ImGui::SliderFloat("fade##key press", &g_kpFade, 0.f, 0.3f, "%.2f s");
+
+            ImGui::SliderInt("key gap##key press", &g_kpGapX, 0, 60);
+            ImGui::SliderInt("row gap##key press", &g_kpGapY, -10, 60);
+
+            ImGui::SliderFloat("scale##key press", &g_kpScale, kIndScaleMin, 3.f, "%.2fx");
+
+            ImGui::SliderInt("position##key press", &g_kpPosition, 30, (int)screen.y);
+            ImGui::SliderInt("x offset##key press", &g_kpOffsetX, -(int)(screen.x / 2.f), (int)(screen.x / 2.f));
+        }, ImVec2(220.f, -1.f));
 }
 
-void UnitB_Menu_movement_calculator()
+// botox menu_tab_movement.cpp case 1, "detections" group body (its edgebug visualize lives in
+// the edge bug popup here)
+void UnitB_Menu_movement_detections()
 {
     // botox menu_tab_movement "detections": label list order must match DetType
     ImGui::Checkbox("detections", &g_detections);

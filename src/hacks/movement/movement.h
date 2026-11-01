@@ -202,7 +202,12 @@ struct MvInd_t
     bool  ebOn = false, ebHit = false;
     bool  strafeOn = false, ejOn = false, ljOn = false, mjOn = false;
     bool  mjHit = false;                 // mini jump: hit = the takeoff duck went out this tick
-    bool  jbOn = false, jbHit = false;   // jumpbug: hit = the unduck+jump fired this tick
+    bool  jbOn = false, jbHit = false;   // jumpbug: hit = the unduck+jump fired in the last 0.2 s (botox m_can_jb hold)
+    bool  ebPred = false;                // eb plan latched, its landing tick still ahead (botox m_edge_bug_tick > tick)
+    // botox keybind indicator rows with no landing state (plain labels), and the two that have one
+    bool  dhOn = false, acOn = false, abOn = false, tungOn = false, hswOn = false;
+    bool  bastOn = false, bastHit = false;   // bounce assist: hit = its catch jump went out (botox HITGODA2)
+    bool  esOn = false, esHit = false;       // edge skip: hit = a plan is flying (botox g_edge_skip.active())
     bool  onGround = false;
     float speed = 0.f;
     int   tick = 0;        // globals tickcount / curtime after Pred_End (real, not a sim's)
@@ -227,6 +232,16 @@ struct EbDrawData
     bool active = false;
 };
 void EB_GetDrawData(EbDrawData& out);
+
+// ==== auto bounce plan snapshot (movement thread -> render thread) ====
+// botox auto_bounce_render: the armed plan's verified flight (engine tick + fly) and the face it lands on.
+struct AbDrawData
+{
+    std::vector<Vec3> path;
+    Vec3 land, normal;
+    bool active = false;
+};
+void AB_GetDrawData(AbDrawData& out);
 
 // ==== PS finder/assist draw snapshot (movement thread -> render thread) ====
 // Render copies under the movement-side mutex; stale when aliveMs is old

@@ -479,7 +479,7 @@ static void FlipRunTick(bool onGameThread)
     const uint64_t last = s_lastTickMs.load();
     const bool wanted = onGameThread && FlipWanted();
     const FlipCoreIn in = { wanted, o_FlipWriteVars != nullptr, onGameThread,
-                            !onGameThread && (last == 0 || now - last >= 1000) };
+                            !onGameThread && (last == 0 || now - last >= 1000), g_wdFlipGunOtherSide };
     FlipLock _l;
     FlipEnv env;
     FlipCoreTick(s_core, env, in);

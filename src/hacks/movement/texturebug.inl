@@ -878,7 +878,7 @@ static constexpr float k_hbCutMin = 1.f;
 // is the real frame guard, so the count must not truncate the only pass that finds a bounce
 static constexpr int k_hbSimCap = 160;
 
-// ---- TB phase, for the on-screen indicator (movind.cpp, which has its own labels) ----
+// ---- TB phase, for the on-screen indicator (hud/indicators.cpp, which has its own labels) ----
 enum TbPhase_t { TBP_OFF = 0, TBP_SCAN, TBP_HUG, TBP_ARM, TBP_PIN, TBP_RIDE, TBP_PARK };
 static TbPhase_t s_tbPhase   = TBP_OFF;
 static int   s_tbRideLen = 0;   // pinned ticks in the current ride

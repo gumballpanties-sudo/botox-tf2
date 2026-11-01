@@ -1,11 +1,15 @@
 #include "screenfx.h"
 #include "fbbones.h"
 #include "fbmath.h"            // the reprojection, the bone conversion, the shutter's power
+#include "../visuals/visuals.h" // CachedCVar -- cl_wpn_sway_interp / scale for the sway model
+#include "../visuals/viewmodel_fps.h" // g_vmFps.Stepped -- low fps viewmodel holds the gun's blur too
+#include "../movement/prediction.h"   // g_globalVars (framecount, main thread)
 #include "shaders/fx_fb_velocity.h"    // k_fxFbVelocityBytes
 #include "shaders/fx_fb_tile_h.h"      // k_fxFbTileHBytes
 #include "shaders/fx_fb_tile_v.h"      // k_fxFbTileVBytes
 #include "shaders/fx_fb_neighbour.h"   // k_fxFbNeighbourBytes
 #include "shaders/fx_fb_gather.h"      // k_fxFbGatherBytes
+#include "shaders/fx_fb_trail.h"       // k_fxFbTrailBytes -- player / animation trail history
 
 #include <atomic>
 #include <math.h>
@@ -115,6 +119,15 @@ struct FbFrame
     // shutter rather than stretched, so the arc it draws is the arc the animation really took
     float gunExposure = 0.f;
 
+    // botox extras: how much history survives (player trail = the world run), and the sway
+    // shift every bone proxy gets in view space
+    float trailBlend    = 0.f;
+    float swayShift[3]  = {};
+
+    // low fps viewmodel between steps: the gun is held in view space, so its blur is too --
+    // the gun run replays the bone block it built on the last step frame
+    bool  vmHold = false;
+
     int   playerCount = 0;
     float playerBox[k_maxPlayers][2][4] = {};
     float playerRows[k_maxPlayers][3][4] = {};
@@ -141,8 +154,12 @@ static float s_playerPose[k_playerSlots][3] = {};
 
 static std::atomic<int> s_frameId{ 0 };
 
+// the view angles over the last half second, for the sway model (main thread only)
+static fbm::SwayHistory s_sway;
+static double           s_swayBase = 0.0;   // float time loses ms precision past a day of uptime
+
 // ---- device objects ----------------------------------------------------------------------
-enum FbShader { FB_VELOCITY = 0, FB_TILE_H, FB_TILE_V, FB_NEIGHBOUR, FB_GATHER, FB_SHADER_MAX };
+enum FbShader { FB_VELOCITY = 0, FB_TILE_H, FB_TILE_V, FB_NEIGHBOUR, FB_GATHER, FB_TRAIL, FB_SHADER_MAX };
 
 static IDirect3DPixelShader9* s_ps[FB_SHADER_MAX] = {};
 
@@ -156,6 +173,15 @@ static IDirect3DSurface9* s_resolveSurf = nullptr;
 // the velocity buffer, frame sized
 static IDirect3DTexture9* s_infoTex  = nullptr;
 static IDirect3DSurface9* s_infoSurf = nullptr;
+
+// the trails (botox accumulate pass): [0] world run history, [1] gun run history, each a
+// ping-pong pair; s_trailCur is where the gather lands when a trail pass follows it
+static IDirect3DTexture9* s_histTex[2][2]  = {};
+static IDirect3DSurface9* s_histSurf[2][2] = {};
+static int                s_histIdx[2]     = {};
+static bool               s_histEmpty[2]   = { true, true };
+static IDirect3DTexture9* s_trailCurTex    = nullptr;
+static IDirect3DSurface9* s_trailCurSurf   = nullptr;
 
 // the tile chain
 static IDirect3DTexture9* s_tileRowTex  = nullptr;
@@ -183,6 +209,8 @@ void FrameBlend_Reset()
     s_havePrev = false;
     s_ready.store(-1, std::memory_order_release);
     FbBones::Flush();
+    // and so is every trail: a new map's first frame must not fade in from the old one
+    s_histEmpty[0] = s_histEmpty[1] = true;
 }
 
 __declspec(noinline) static bool FbReadOrigin(const void* ent, float out[3])
@@ -310,6 +338,7 @@ void FrameBlend_UpdateView(const float origin[3], const float angles[3],
         // and reading across that gap is a teleport
         s_havePrev = false;
         s_ready.store(-1, std::memory_order_release);
+        s_sway.Clear();
         return;
     }
 
@@ -334,6 +363,10 @@ void FrameBlend_UpdateView(const float origin[3], const float angles[3],
     const double now = (freq.QuadPart > 0) ? (double)ctr.QuadPart / (double)freq.QuadPart : 0.0;
 
     const double elapsed = s_havePrev ? (now - s_prevTime) : 0.0;
+
+    // sampled every frame, valid or not: the lag model looks back a tenth of a second
+    if (s_sway.filled == 0) s_swayBase = now;
+    s_sway.Sample(angles, (float)(now - s_swayBase));
 
     const float step[3] = { origin[0] - s_prevOrigin[0],
                             origin[1] - s_prevOrigin[1],
@@ -368,10 +401,30 @@ void FrameBlend_UpdateView(const float origin[3], const float angles[3],
 
         f.exposure    = ((g_fbAmount < 0.f) ? 0.f : g_fbAmount) * capped;
         f.gunExposure = capped;
+
+        // botox player trail: history time constant off the shutter
+        f.trailBlend    = fbm::TrailBlend((float)elapsed, shutter, g_fbObject);
+
+        // botox viewmodel sway. TF2 ships cl_wpn_sway_interp 0 (tf_viewmodel.cpp:65, "timing
+        // bug") so its gun never lags; 0 there falls back to TF2's own 0.1 / 5 so the slider
+        // has a lag to smear. A value the user set wins.
+        if (g_fbViewmodel && g_fbVmSway > 0.f && g_cvar) {
+            static CachedCVar ccInterp, ccScale;
+            ConVar* ci = ccInterp.Get("cl_wpn_sway_interp");
+            ConVar* cs = ccScale.Get("cl_wpn_sway_scale");
+            const float interp = (ci && ci->GetFloat() > 0.f) ? ci->GetFloat() : 0.1f;
+            const float scale  = (ci && ci->GetFloat() > 0.f && cs) ? cs->GetFloat() : 5.f;
+            float vel[3];
+            if (fbm::SwayVelocity(s_sway, (float)(now - s_swayBase), interp, scale, vel))
+                fbm::SwayShift(vel, shutter, g_fbVmSway, g_fbVmAmount, f.swayShift);
+        }
     }
 
     memcpy(f.basis, basis, sizeof(basis));
     memcpy(f.origin, origin, sizeof(float) * 3);
+
+    // OverrideView (world_fx.cpp) ran g_vmFps.Frame for this frame before the post slot
+    f.vmHold = g_vmLowFps && g_globalVars && g_vmFps.OnFrame(g_globalVars->framecount) && !g_vmFps.Stepped();
 
     const int ready = s_ready.load(std::memory_order_relaxed);
     const int next  = (ready == 0) ? 1 : 0;
@@ -410,6 +463,12 @@ void FrameBlend_Destroy()
     FbReleaseTarget(s_tileRowTex, s_tileRowSurf);
     FbReleaseTarget(s_infoTex, s_infoSurf);
     FbReleaseTarget(s_stageTex, s_stageSurf);
+    for (int k = 0; k < 2; ++k) {
+        for (int i = 0; i < 2; ++i) FbReleaseTarget(s_histTex[k][i], s_histSurf[k][i]);
+        s_histIdx[k] = 0;
+        s_histEmpty[k] = true;
+    }
+    FbReleaseTarget(s_trailCurTex, s_trailCurSurf);
 
     if (s_resolveSurf) { s_resolveSurf->Release(); s_resolveSurf = nullptr; }
 
@@ -436,7 +495,8 @@ static IDirect3DPixelShader9* FbShaderFor(IDirect3DDevice9* dev, FbShader which)
         case FB_TILE_H:    bytes = k_fxFbTileHBytes;     size = sizeof(k_fxFbTileHBytes);     break;
         case FB_TILE_V:    bytes = k_fxFbTileVBytes;     size = sizeof(k_fxFbTileVBytes);     break;
         case FB_NEIGHBOUR: bytes = k_fxFbNeighbourBytes; size = sizeof(k_fxFbNeighbourBytes); break;
-        default:           bytes = k_fxFbGatherBytes;    size = sizeof(k_fxFbGatherBytes);    break;
+        case FB_GATHER:    bytes = k_fxFbGatherBytes;    size = sizeof(k_fxFbGatherBytes);    break;
+        default:           bytes = k_fxFbTrailBytes;     size = sizeof(k_fxFbTrailBytes);     break;
     }
 
     std::vector<DWORD> code((size + 3) / 4);
@@ -531,6 +591,30 @@ static bool FbBuild(IDirect3DDevice9* dev, const D3DSURFACE_DESC& desc)
     DebugLog("frameblend: built %dx%d msaa %d tile %d (%dx%d)",
              width, height, (int)desc.MultiSampleType, tile, s_tileW, s_tileH);
     return true;
+}
+
+// The trail targets, frame sized, plain A8R8G8B8: rgb the picture, alpha the gun mask the
+// animation trail fades by. Freed with everything else in FrameBlend_Destroy.
+static bool FbEnsureTrail(IDirect3DDevice9* dev, int which)
+{
+    const auto make = [&](IDirect3DTexture9*& tex, IDirect3DSurface9*& surf) {
+        if (tex) return true;
+        if (SUCCEEDED(dev->CreateTexture((UINT)s_w, (UINT)s_h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+                                         D3DPOOL_DEFAULT, &tex, nullptr)) &&
+            SUCCEEDED(tex->GetSurfaceLevel(0, &surf)))
+            return true;
+        FbReleaseTarget(tex, surf);
+        return false;
+    };
+
+    const bool ok = make(s_histTex[which][0], s_histSurf[which][0]) &&
+                    make(s_histTex[which][1], s_histSurf[which][1]) &&
+                    make(s_trailCurTex, s_trailCurSurf);
+    if (!ok) {
+        static bool logged = false;
+        if (!logged) { logged = true; DebugLog("frameblend: trail history targets failed -- no player / animation trail"); }
+    }
+    return ok;
 }
 
 // ---- the state this pass borrows ---------------------------------------------------------
@@ -643,6 +727,18 @@ static int FbBuildBones(const FbFrame& f, float block[k_fbRegisters][4], float a
     // and a blur that switches off for one frame in twenty is the pop the eye reads as jitter.
     if (set.count <= 0 || set.frame < f.frame - 1) return 0;
 
+    // LOW FPS VIEWMODEL, AFTER THE BLUR: the bones above are the LIVE gun (visuals.cpp collects
+    // them before the hold swaps them), so a step frame blurs the real animation. Between steps
+    // the gun's pixels sit still in view space and so does this block -- the blurred gun is what
+    // gets held, not a stepped gun that streaks once per step. Render thread only.
+    static float s_held[FbBones::kMaxProxies * 4][4] = {};
+    static int   s_heldCount = 0;
+    float (*bones)[4] = block + k_boneBase;
+    if (f.vmHold && s_heldCount > 0) {
+        memcpy(bones, s_held, sizeof(s_held));
+        return s_heldCount;
+    }
+
     // Everything reaching here is supposed to be one frame of ANIMATION, and one frame of
     // animation turns a bone a few degrees: a melee swing is half a turn in a sixth of a second,
     // five degrees a frame at 250fps. Thirty in a frame is not an animation -- it is an anim
@@ -696,6 +792,10 @@ static int FbBuildBones(const FbFrame& f, float block[k_fbRegisters][4], float a
 
         fbm::PowerRows(rows, boneExposure);
 
+        // viewmodel sway: the lag the ride division took out, put back by the slider's share
+        // (botox true_motion_blur.cpp:1212 -- after the bone, onto its translation)
+        for (int r = 0; r < 3; ++r) rows[r][3] += f.swayShift[r];
+
         // and the bone itself into view space, which is where the pixel measures its distance
         const float away[3] = { p.center[0] - f.origin[0],
                                 p.center[1] - f.origin[1],
@@ -716,6 +816,9 @@ static int FbBuildBones(const FbFrame& f, float block[k_fbRegisters][4], float a
         block[base][0] = block[base][1] = block[base][2] = 1e6f;
     }
 
+    memcpy(s_held, bones, sizeof(s_held));
+    s_heldCount = count;
+
     (void)amount;
     return count;
 }
@@ -733,12 +836,18 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     if (ready < 0) return;
 
     const FbFrame f = s_slot[ready];
-    if (!f.valid) return;
+    // a frame with no history behind it is a cut: every trail starts over from it
+    if (!f.valid) { s_histEmpty[0] = s_histEmpty[1] = true; return; }
 
-    // nothing to smear this frame: the world run wants an exposure, the gun run wants bones
+    // nothing to smear this frame: the world run wants an exposure, the gun run wants bones.
+    // The trail (botox accumulate) runs on its own -- it wants only its history.
     const float amount = (g_fbVmAmount < 0.f) ? 0.f : ((g_fbVmAmount > 64.f) ? 64.f : g_fbVmAmount);
-    if (!gunPass && f.exposure <= 0.f) return;
-    if (gunPass && amount <= 0.f) return;
+    const int   hk     = gunPass ? 1 : 0;
+    const float trail  = gunPass ? 0.f : f.trailBlend;   // gun run has no trail (animation trail removed)
+    bool wantTrail = trail > 0.01f;
+    bool blur      = gunPass ? (amount > 0.f && g_fbViewmodel) : (f.exposure > 0.f);
+    if (!wantTrail) s_histEmpty[hk] = true;
+    if (!blur && !wantTrail) return;
 
     if (!FbBuild(dev, desc)) return;
 
@@ -747,7 +856,13 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     IDirect3DPixelShader9* tileV     = FbShaderFor(dev, FB_TILE_V);
     IDirect3DPixelShader9* neighbour = FbShaderFor(dev, FB_NEIGHBOUR);
     IDirect3DPixelShader9* gather    = FbShaderFor(dev, FB_GATHER);
+    IDirect3DPixelShader9* trailPs   = wantTrail ? FbShaderFor(dev, FB_TRAIL) : nullptr;
     if (!velocity || !tileH || !tileV || !neighbour || !gather) return;
+
+    // the history pair for this run + the gather's landing spot, built the first time a trail
+    // is asked for: five frame-sized targets nobody pays for with the sliders at 0
+    if (wantTrail && (!trailPs || !FbEnsureTrail(dev, hk))) wantTrail = false;
+    if (!blur && !wantTrail) return;
 
     // full frame sized, or we are sampling something that was never the scene's depth
     D3DSURFACE_DESC dd{};
@@ -865,8 +980,18 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
         }
     }
 
-    // the gun run with no skeleton to hang anything on has nothing to draw
-    if (gunPass && boneCount <= 0) return;
+    // the gun run with no skeleton to hang anything on has nothing to smear (the trail still runs)
+    if (gunPass && boneCount <= 0) blur = false;
+    if (!blur && !wantTrail) return;
+
+    // c14 = blur gamma, 1 / gamma (botox f0e average_bright, 2 = the old c*c / sqrt look),
+    //       trail blend (0 on a history that holds nothing yet), -
+    {
+        const float gamma = (g_fbGamma < 1.f) ? 1.f : (g_fbGamma > 10.f ? 10.f : g_fbGamma);
+        block[14][0] = gamma;
+        block[14][1] = 1.f / gamma;
+        block[14][2] = (wantTrail && !s_histEmpty[hk]) ? trail : 0.f;
+    }
 
     if (!gunPass) {
         for (int i = 0; i < k_maxPlayers; ++i) {
@@ -949,33 +1074,64 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
         ScreenFx_DrawQuad(dev, w, h);
     };
 
-    // PASS ONE: the velocity buffer, off the depth
-    dev->SetTexture(0, depth);
-    pass(s_infoSurf, s_w, s_h, velocity);
+    const DWORD rgbOnly = D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE;
 
-    // PASSES TWO AND THREE: the longest streak in each tile, one axis at a time
-    dev->SetTexture(0, s_infoTex);
-    pass(s_tileRowSurf, s_tileW, s_h, tileH);
+    if (blur) {
+        // PASS ONE: the velocity buffer, off the depth
+        dev->SetTexture(0, depth);
+        pass(s_infoSurf, s_w, s_h, velocity);
 
-    dev->SetTexture(0, s_tileRowTex);
-    pass(s_tileSurf, s_tileW, s_tileH, tileV);
+        // PASSES TWO AND THREE: the longest streak in each tile, one axis at a time
+        dev->SetTexture(0, s_infoTex);
+        pass(s_tileRowSurf, s_tileW, s_h, tileH);
 
-    // PASS FOUR: and the longest of each tile's neighbours, which is how far a blur may reach out
-    dev->SetTexture(0, s_tileTex);
-    pass(s_nbrSurf, s_tileW, s_tileH, neighbour);
+        dev->SetTexture(0, s_tileRowTex);
+        pass(s_tileSurf, s_tileW, s_tileH, tileV);
 
-    // PASS FIVE: the reconstruction, straight onto the frame. Colour filtered, velocity never.
-    dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
-    dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        // PASS FOUR: and the longest of each tile's neighbours, which is how far a blur may reach out
+        dev->SetTexture(0, s_tileTex);
+        pass(s_nbrSurf, s_tileW, s_tileH, neighbour);
 
-    // rgb only: the alpha channel is the engine's and other passes read it
-    dev->SetRenderState(D3DRS_COLORWRITEENABLE,
-                        D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
+        // PASS FIVE: the reconstruction, straight onto the frame -- or into the trail's input when
+        // a trail follows. Colour filtered, velocity never.
+        dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
 
-    dev->SetTexture(0, s_stageTex);
-    dev->SetTexture(1, s_infoTex);
-    dev->SetTexture(2, s_nbrTex);
-    pass(target, s_w, s_h, gather);
+        // rgb only: the alpha channel is the engine's and other passes read it
+        dev->SetRenderState(D3DRS_COLORWRITEENABLE, wantTrail ? 0x0f : rgbOnly);
+
+        dev->SetTexture(0, s_stageTex);
+        dev->SetTexture(1, s_infoTex);
+        dev->SetTexture(2, s_nbrTex);
+        pass(wantTrail ? s_trailCurSurf : target, s_w, s_h, gather);
+    }
+
+    // PASS SIX (botox accumulate): last frame's history blended over this one -- the world run
+    // reprojects it through the camera so only what moved on its own leaves a trail, the gun run
+    // reads it in place because the gun is bolted to the lens. Drawn twice with the same inputs:
+    // into the next history (rgba, alpha = the gun mask) and onto the frame (rgb).
+    if (wantTrail) {
+        const int next = 1 - s_histIdx[hk];
+
+        dev->SetTexture(0, blur ? s_trailCurTex : s_stageTex);
+        dev->SetTexture(1, s_histTex[hk][s_histIdx[hk]]);
+        dev->SetTexture(2, depth);
+        dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        dev->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);   // a reprojected read lands between texels
+        dev->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        dev->SetSamplerState(2, D3DSAMP_MINFILTER, D3DTEXF_POINT);    // INTZ: never filtered
+        dev->SetSamplerState(2, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+
+        dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0f);
+        pass(s_histSurf[hk][next], s_w, s_h, trailPs);
+
+        dev->SetRenderState(D3DRS_COLORWRITEENABLE, rgbOnly);
+        pass(target, s_w, s_h, trailPs);
+
+        s_histIdx[hk]   = next;
+        s_histEmpty[hk] = false;
+    }
 
     FbRestore(dev, st);
 
@@ -983,8 +1139,9 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     if (!s_logged[gunPass ? 1 : 0]) {
         s_logged[gunPass ? 1 : 0] = true;
         DebugLog("^FX: frame blending %s drew %dx%d tile %d exposure=%.2f gun=%.2f bones=%d "
-                 "players=%d taps=%d max=%.0fpx",
+                 "players=%d taps=%d max=%.0fpx blur=%d trail=%.2f gamma=%.2f sway=%.2f,%.2f,%.2f",
                  gunPass ? "gun" : "world", s_w, s_h, s_tileSize, f.exposure, f.gunExposure,
-                 boneCount, f.playerCount, taps, maxLength);
+                 boneCount, f.playerCount, taps, maxLength, (int)blur, wantTrail ? trail : 0.f,
+                 block[14][0], f.swayShift[0], f.swayShift[1], f.swayShift[2]);
     }
 }

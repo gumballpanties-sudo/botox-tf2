@@ -1,32 +1,25 @@
 #include "screenfx_passes.h"
-#include "shaders/fx_simplefx.h"   // k_fxSimpleFxBytes  -- compiled from fx_simplefx.hlsl by fxc
 #include "shaders/fx_depthview.h"  // k_fxDepthViewBytes -- compiled from fx_depthview.hlsl by fxc
 #include "shaders/fx_warp.h"       // k_fxWarpPs / k_fxWarpWrite -- fx_warp_build.sh from fx_warp.hlsl
 #include "screenfx.h"      // shared quad -- emphasize/show depth draw through its vs_3_0
 #include "../movement/prediction.h"   // g_globalVars (warp clock, main thread)
 #include <cmath>           // fmodf (grain phase)
 
-// The simple passes read the FINISHED frame -- no depth, no new hook. Same "copy the
-// backbuffer, sample the copy" shape as bloom.cpp, for the same reason: a render target
-// cannot be bound as its own sampler input.
+// Sharpen / grain / vignette / invert / posterize / deband / channel shift used to be a
+// ps_2_0 pass here. botox runs them inside its colour correction shader, so they moved to
+// colorcorrect.cpp (fx_grade.hlsl) with botox's options; ScreenFxPasses_Frame is a no-op kept
+// for its render.cpp call sites.
 //
 // Emphasize and show depth are NOT in that pass: both are depth based (botox depth_view.cpp)
 // and draw from screenfx.cpp's post slot through ScreenFxPasses_DepthView below. They used to
 // run here, at the vgui point / EndScene, where nothing had resolved the depth for them
 // (ScreenFx_Frame only resolved for ao/dof/fb) and the depth there reads far everywhere.
 
-static IDirect3DPixelShader9* s_psSimple = nullptr;
 static IDirect3DPixelShader9* s_psDepthView = nullptr;   // fx_depthview.hlsl, ps_3_0
 static IDirect3DTexture9*     s_dvFrameTex  = nullptr;   // depth view's own frame copy
 static IDirect3DSurface9*     s_dvFrameSurf = nullptr;
 static int  s_dvW = 0, s_dvH = 0;
 static bool s_dvFailed = false;
-static IDirect3DTexture9*     s_sceneTex  = nullptr;
-static IDirect3DSurface9*     s_sceneSurf = nullptr;
-static int  s_w = 0, s_h = 0;
-static bool s_failed = false;
-static bool s_done   = false;
-static float s_noisePhase = 0.f;
 
 static IDirect3DPixelShader9* s_wpPs[11][4]{};
 static IDirect3DPixelShader9* s_wpWrite[2]{};
@@ -53,221 +46,23 @@ static void WarpRelease()
     s_wpHistEffect = -1;
 }
 
-void ScreenFxPasses_NewFrame() { s_done = false; }
+void ScreenFxPasses_NewFrame() {}
 
 void ScreenFxPasses_Destroy()
 {
     WarpRelease();
-    if (s_sceneSurf)   { s_sceneSurf->Release();   s_sceneSurf   = nullptr; }
-    if (s_sceneTex)    { s_sceneTex->Release();    s_sceneTex    = nullptr; }
-    if (s_psSimple)    { s_psSimple->Release();    s_psSimple    = nullptr; }
     if (s_psDepthView) { s_psDepthView->Release(); s_psDepthView = nullptr; }
     if (s_dvFrameSurf) { s_dvFrameSurf->Release(); s_dvFrameSurf = nullptr; }
     if (s_dvFrameTex)  { s_dvFrameTex->Release();  s_dvFrameTex  = nullptr; }
-    s_w = s_h = 0;
     s_dvW = s_dvH = 0;
 }
 
-static bool WantAny()
-{
-    return g_sharpenEnable || g_filmGrainEnable || g_vignetteEnable || g_invertFilterEnable ||
-           g_posterizeEnable || g_debandEnable || (g_channelShiftEnable && !g_channelShiftDepth);
-}
-
-static bool Ensure(IDirect3DDevice9* dev, IDirect3DSurface9* bb)
-{
-    D3DSURFACE_DESC desc{};
-    if (FAILED(bb->GetDesc(&desc))) return false;
-
-    if (s_psSimple && s_sceneTex && s_w == (int)desc.Width && s_h == (int)desc.Height)
-        return true;
-
-    if (s_sceneSurf) { s_sceneSurf->Release(); s_sceneSurf = nullptr; }
-    if (s_sceneTex)  { s_sceneTex->Release();  s_sceneTex  = nullptr; }
-    if (s_psSimple)  { s_psSimple->Release();  s_psSimple  = nullptr; }
-    s_w = s_h = 0;
-
-    {
-        std::vector<DWORD> code((sizeof(k_fxSimpleFxBytes) + 3) / 4);
-        memcpy(code.data(), k_fxSimpleFxBytes, sizeof(k_fxSimpleFxBytes));
-        if (FAILED(dev->CreatePixelShader(code.data(), &s_psSimple)) || !s_psSimple) {
-            s_failed = true;
-            DebugLog("screenfx_passes: the card refused the simplefx shader -- sharpen/grain/"
-                     "vignette/invert/posterize/deband/channel-shift are off");
-            ScreenFxPasses_Destroy();
-            return false;
-        }
-    }
-
-    // Backbuffer-format copy, same reasoning as bloom.cpp's s_sceneTex.
-    HRESULT hr = dev->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET,
-                                    desc.Format, D3DPOOL_DEFAULT, &s_sceneTex, nullptr);
-    if (FAILED(hr))
-        hr = dev->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET,
-                                D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &s_sceneTex, nullptr);
-    if (FAILED(hr) || FAILED(s_sceneTex->GetSurfaceLevel(0, &s_sceneSurf))) {
-        DebugLog("screenfx_passes: frame copy target failed 0x%08lx", (unsigned long)hr);
-        ScreenFxPasses_Destroy();
-        return false;
-    }
-
-    s_w = (int)desc.Width; s_h = (int)desc.Height;
-    DebugLog("screenfx_passes: built %dx%d", s_w, s_h);
-    return true;
-}
-
-struct SfxSaved
-{
-    IDirect3DPixelShader9*       ps;
-    IDirect3DVertexShader9*      vs;
-    IDirect3DVertexDeclaration9* decl;
-    IDirect3DBaseTexture9*       tex0;
-    IDirect3DVertexBuffer9*      stream;
-    IDirect3DIndexBuffer9*       indices;
-    UINT   streamOffset, streamStride;
-    DWORD  fvf;
-    D3DVIEWPORT9 vp;
-    DWORD  rs[8];
-    DWORD  samp[6];
-    float  psc[4][4];   // the shaderapi caches ps constants -- ours must not leak into the hud
-};
-static const D3DRENDERSTATETYPE k_sfxRS[8] = {
-    D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE,
-    D3DRS_CULLMODE, D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_COLORWRITEENABLE,
-};
 static const D3DSAMPLERSTATETYPE k_sfxSamp[6] = {
     D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_MAGFILTER,
     D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE,
 };
 
-static void SfxSave(IDirect3DDevice9* dev, SfxSaved& s)
-{
-    dev->GetPixelShader(&s.ps);
-    dev->GetVertexShader(&s.vs);
-    dev->GetVertexDeclaration(&s.decl);
-    dev->GetTexture(0, &s.tex0);
-    dev->GetStreamSource(0, &s.stream, &s.streamOffset, &s.streamStride);
-    dev->GetIndices(&s.indices);
-    dev->GetFVF(&s.fvf);
-    dev->GetViewport(&s.vp);
-    for (int i = 0; i < 8; ++i) dev->GetRenderState(k_sfxRS[i], &s.rs[i]);
-    for (int i = 0; i < 6; ++i) dev->GetSamplerState(0, k_sfxSamp[i], &s.samp[i]);
-    dev->GetPixelShaderConstantF(0, s.psc[0], 4);
-}
-static void SfxRestore(IDirect3DDevice9* dev, SfxSaved& s)
-{
-    for (int i = 0; i < 8; ++i) dev->SetRenderState(k_sfxRS[i], s.rs[i]);
-    for (int i = 0; i < 6; ++i) dev->SetSamplerState(0, k_sfxSamp[i], s.samp[i]);
-    dev->SetPixelShaderConstantF(0, s.psc[0], 4);
-    dev->SetViewport(&s.vp);
-    dev->SetTexture(0, s.tex0);
-    dev->SetPixelShader(s.ps);
-    dev->SetVertexShader(s.vs);
-    if (s.decl) dev->SetVertexDeclaration(s.decl); else dev->SetFVF(s.fvf);
-    dev->SetStreamSource(0, s.stream, s.streamOffset, s.streamStride);
-    dev->SetIndices(s.indices);
-    if (s.tex0)    s.tex0->Release();
-    if (s.ps)      s.ps->Release();
-    if (s.vs)      s.vs->Release();
-    if (s.decl)    s.decl->Release();
-    if (s.stream)  s.stream->Release();
-    if (s.indices) s.indices->Release();
-}
-
-struct SfxVert { float x, y, z, rhw, u, v; };
-static void SfxQuad(SfxVert (&q)[4], int w, int h)
-{
-    const float W = (float)w, H = (float)h;
-    q[0] = { -0.5f,    -0.5f,     0.f, 1.f, 0.f, 0.f };
-    q[1] = { W - 0.5f, -0.5f,     0.f, 1.f, 1.f, 0.f };
-    q[2] = { -0.5f,     H - 0.5f, 0.f, 1.f, 0.f, 1.f };
-    q[3] = { W - 0.5f,  H - 0.5f, 0.f, 1.f, 1.f, 1.f };
-}
-
-static void Draw(IDirect3DDevice9* dev, IDirect3DSurface9* bb)
-{
-    SfxVert quad[4];
-    SfxQuad(quad, s_w, s_h);
-    const D3DVIEWPORT9 vp{ 0, 0, (DWORD)s_w, (DWORD)s_h, 0.f, 1.f };
-
-    SfxSaved st{};
-    SfxSave(dev, st);
-
-    for (int i = 0; i < 8; ++i) dev->SetRenderState(k_sfxRS[i], FALSE);
-    dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-    dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0f);
-    dev->SetVertexShader(nullptr);
-    dev->SetVertexDeclaration(nullptr);
-    dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
-    dev->SetSamplerState(0, D3DSAMP_ADDRESSU,    D3DTADDRESS_CLAMP);
-    dev->SetSamplerState(0, D3DSAMP_ADDRESSV,    D3DTADDRESS_CLAMP);
-    dev->SetSamplerState(0, D3DSAMP_MAGFILTER,   D3DTEXF_LINEAR);
-    dev->SetSamplerState(0, D3DSAMP_MINFILTER,   D3DTEXF_LINEAR);
-    dev->SetSamplerState(0, D3DSAMP_MIPFILTER,   D3DTEXF_NONE);
-    dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, 0);
-    dev->SetViewport(&vp);
-    dev->SetRenderTarget(0, bb);
-
-    if (FAILED(dev->StretchRect(bb, nullptr, s_sceneSurf, nullptr, D3DTEXF_NONE)))
-    {
-        static bool logged = false;
-        if (!logged) { logged = true; DebugLog("screenfx_passes: frame copy blit failed -- nothing drawn"); }
-    }
-    else
-    {
-        // whole-ish pixel jump per frame so the grain re-rolls every frame instead of creeping
-        s_noisePhase = fmodf(s_noisePhase + 61.37f, 997.f);
-
-        // Posterize off = CPU sends 1024 "levels", a quantization step fine enough to be
-        // invisible -- see fx_simplefx.hlsl's note on why that beats a branch under ps_2_0.
-        const float levels = g_posterizeEnable ? (g_posterizeLevels < 2.f ? 2.f : g_posterizeLevels) : 1024.f;
-
-        const float c0[4] = { 1.f / (float)s_w, 1.f / (float)s_h,
-                               g_sharpenEnable   ? g_sharpenAmount   : 0.f,
-                               g_filmGrainEnable ? g_filmGrainAmount : 0.f };
-        const float c1[4] = { g_vignetteEnable ? g_vignetteAmount : 0.f,
-                               g_vignetteInvert ? 1.f : 0.f,
-                               levels,
-                               g_debandEnable ? g_debandAmount : 0.f };
-        const float c2[4] = { (g_channelShiftEnable && !g_channelShiftDepth) ? g_channelShiftAmount : 0.f, 0.f, 0.f,
-                               g_invertFilterEnable ? 1.f : 0.f };
-        const float c3[4] = { s_noisePhase, (float)s_w, (float)s_h, 0.f };
-
-        dev->SetPixelShaderConstantF(0, c0, 1);
-        dev->SetPixelShaderConstantF(1, c1, 1);
-        dev->SetPixelShaderConstantF(2, c2, 1);
-        dev->SetPixelShaderConstantF(3, c3, 1);
-        dev->SetTexture(0, s_sceneTex);
-        dev->SetPixelShader(s_psSimple);
-        dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(SfxVert));
-    }
-
-    SfxRestore(dev, st);
-}
-
-bool ScreenFxPasses_Frame(IDirect3DDevice9* dev, bool forceBackbuffer)
-{
-    if (s_done || !dev || s_failed || !WantAny()) return false;
-    if (!IsInGame()) return false;
-
-    IDirect3DSurface9* rt = nullptr;
-    IDirect3DSurface9* bb = nullptr;
-    bool ok = false;
-    if (SUCCEEDED(dev->GetRenderTarget(0, &rt)) && rt &&
-        SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb)
-        ok = forceBackbuffer || (rt == bb);
-
-    bool drew = false;
-    if (ok && Ensure(dev, bb)) {
-        Draw(dev, bb);
-        s_done = true;
-        drew   = true;
-    }
-
-    if (rt) rt->Release();
-    if (bb) bb->Release();
-    return drew;
-}
+bool ScreenFxPasses_Frame(IDirect3DDevice9*, bool) { return false; }   // moved into colorcorrect.cpp
 
 // ==== emphasize + show depth (botox depth_view.cpp) ======================================
 // Render thread, from ScreenFx_Frame at the game's post slot, right after the depth resolve --
@@ -540,8 +335,11 @@ void ScreenFxPasses_Warp(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     }
     const float fill = g_warpAnimate ? PingPong(clock * 0.1 * g_warpAnimSpeed) : g_warpSlitPos;
 
+    // botox depth_warp.cpp: per channel x/y offsets in uv, red/green in c9, blue in c10
     const bool shift = g_channelShiftEnable && g_channelShiftDepth;
-    const float sx = shift ? g_channelShiftAmount / W : 0.f;
+    const float sh[6] = { shift ? g_sfxShiftRedX / W : 0.f,   shift ? g_sfxShiftRedY / H : 0.f,
+                          shift ? g_sfxShiftGreenX / W : 0.f, shift ? g_sfxShiftGreenY / H : 0.f,
+                          shift ? g_sfxShiftBlueX / W : 0.f,  shift ? g_sfxShiftBlueY / H : 0.f };
     const float* center = effect == 8 ? g_warpPlanetRot : g_warpCenter;
 
     constexpr int kC = 18;
@@ -555,8 +353,8 @@ void ScreenFxPasses_Warp(IDirect3DDevice9* dev, IDirect3DSurface9* target,
         { g_warpDepthDist, g_warpDepthRange, 1.f / std::max(g_warpDepthRamp, 1.f), (float)g_warpDepthMode },
         { (float)blend, g_warpEnable ? g_warpOpacity : 0.f, g_warpFade ? 1.f : 0.f, g_warpDepthProtect ? 1.f : 0.f },
         { view.zNear, view.zFar, 0.f, 0.f },
-        { sx, 0.f, 0.f, 0.f },
-        { -sx, 0.f, shift ? 1.f : 0.f, 0.f },
+        { sh[0], sh[1], sh[2], sh[3] },
+        { sh[4], sh[5], shift ? 1.f : 0.f, 0.f },
         { g_channelShiftDepthDist, g_channelShiftDepthRange, 1.f / std::max(g_channelShiftDepthRamp, 1.f), (float)g_channelShiftDepthMode },
         { g_warpDrunkStrength[0], g_warpDrunkStrength[1], g_warpDrunkSpeed[0], g_warpDrunkSpeed[1] },
         { g_warpDrunkAngle, g_warpDrunkAngleSpeed, g_warpPlanetScale, g_warpPlanetRot[2] },

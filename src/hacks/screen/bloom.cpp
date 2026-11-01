@@ -275,13 +275,19 @@ static void BloomDraw(IDirect3DDevice9* dev, IDirect3DSurface9* bb)
     const float neutral[4] = { 1.f, 1.f, 1.f, 1.f };
     dev->SetPixelShader(s_psBlur);
 
+    // botox "aspect ratio" (bloom.cpp:519): + = wide (y steps shrink), - = tall (x steps shrink).
+    // One axis only ever shrinks, so no tap lands further from its neighbour than it did.
+    const float aspect = (g_bloomAspect < -1.f) ? -1.f : (g_bloomAspect > 1.f ? 1.f : g_bloomAspect);
+    const float scaleX = 1.f - ((aspect < 0.f) ? -aspect : 0.f);
+    const float scaleY = 1.f - ((aspect > 0.f) ? aspect : 0.f);
+
     for (int i = 0; i < passes; ++i)
     {
         const float step = (float)(i + 1);
         const bool  last = (i == passes - 1);
 
         // x: A -> B
-        const float cx[4] = { step / (float)s_bw, 0.f, 0.f, 0.f };
+        const float cx[4] = { step * scaleX / (float)s_bw, 0.f, 0.f, 0.f };
         dev->SetPixelShaderConstantF(0, cx, 1);
         dev->SetPixelShaderConstantF(1, neutral, 1);
         dev->SetRenderTarget(0, s_surfB);
@@ -290,7 +296,7 @@ static void BloomDraw(IDirect3DDevice9* dev, IDirect3DSurface9* bb)
         dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quadGlow, sizeof(BloomVert));
 
         // y: B -> A, or on the last pass B -> the frame itself, added
-        const float cy[4] = { 0.f, step / (float)s_bh, 0.f, 0.f };
+        const float cy[4] = { 0.f, step * scaleY / (float)s_bh, 0.f, 0.f };
         dev->SetPixelShaderConstantF(0, cy, 1);
         dev->SetTexture(0, s_texB);
 

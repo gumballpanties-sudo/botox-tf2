@@ -7,7 +7,7 @@
 #include <cstring>
 #include <filesystem>
 
-char g_fontIndName[64] = "tahomabd";
+char g_fontIndName[64] = "verdanab";
 int  g_fontIndSize     = kFontIndDefSize;
 int  g_fontIndFlags    = kFontIndDefFlags;
 char g_fontEspName[64] = "Verdana";

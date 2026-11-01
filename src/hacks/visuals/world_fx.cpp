@@ -5,6 +5,8 @@
 #include "../movement/prediction.h"   // g_globalVars -- framecount + absoluteframetime, main thread only
 #include "viewmodel_fps.h"            // g_vmFps.Frame -- the camera the low fps viewmodel re-attaches to
 #include "../network/netregion.h"     // FindMatSystemSurface -- cloak meter hook
+#include "world_fx2.h"                // WorldFx2_Frame -- sun angle, per frame
+#include "world_fx3.h"                // WorldFx3_Frame -- trail, dlights, modulation, per frame
 
 // ==== fullbright + disable interp ===================================================
 // Both are plain convar pokes -- gap.md flags them "trivial... no hook needed". Ridden on
@@ -68,6 +70,29 @@ void WorldFx_Tick()
             s_arWas = arOn;
         }
     }
+
+    // ==== disable post processing: botox misc.cpp disable_post_processing() ====
+    // CS:GO's mat_postprocess_enable does not exist in TF2 (no such string in TF2 x64
+    // engine/client/materialsystem). TF2's DoEnginePostProcessing is bloom + tonemap +
+    // colour correction (sdk viewpostprocess.cpp); mat_disable_bloom (engine/client) and
+    // mat_colorcorrection (engine/client/materialsystem) are its two switches. Safe mode keeps
+    // it off, as botox does. Off / eject -> the values we found.
+    static CachedCVar cc_bloom, cc_ccorr;
+    static int s_bloomOrig = -1, s_ccorrOrig = -1;
+    const bool ppOff = g_sfxDisablePostProcessing && !g_safeMode && !g_eject;
+    ConVar* bloom = cc_bloom.Get("mat_disable_bloom");
+    ConVar* ccorr = cc_ccorr.Get("mat_colorcorrection");
+    if (ppOff) {
+        if (bloom && s_bloomOrig < 0) s_bloomOrig = (int)bloom->GetFloat();
+        if (ccorr && s_ccorrOrig < 0) s_ccorrOrig = (int)ccorr->GetFloat();
+        if (bloom && (int)bloom->GetFloat() != 1) CVar_ForceInt(bloom, 1);
+        if (ccorr && (int)ccorr->GetFloat() != 0) CVar_ForceInt(ccorr, 0);
+    } else if (s_bloomOrig >= 0 || s_ccorrOrig >= 0) {
+        if (bloom && s_bloomOrig >= 0) CVar_ForceInt(bloom, s_bloomOrig);
+        if (ccorr && s_ccorrOrig >= 0) CVar_ForceInt(ccorr, s_ccorrOrig);
+        DebugLog("disable post processing: restored mat_disable_bloom %d mat_colorcorrection %d", s_bloomOrig, s_ccorrOrig);
+        s_bloomOrig = s_ccorrOrig = -1;
+    }
 }
 
 // ==== world fov + third person -- IClientMode::OverrideView, vtable slot 16 ==========
@@ -87,34 +112,153 @@ inline constexpr size_t k_vsAngles = 76;   // QAngle, 3 floats
 using OverrideView_t = void(__fastcall*)(void*, void*);
 static OverrideView_t o_OverrideView = nullptr;
 
+// ==== third person: botox screen.cpp third_person() ====================================
+// botox forces CInput::m_camera_in_third_person + m_camera_offset; TF2's CInput exposes the
+// same switch as virtuals (Amalgam IInput.h, counted: CAM_IsThirdPerson 31, CAM_ToThirdPerson 32,
+// CAM_ToFirstPerson 33) and C_TFPlayer::ThirdPersonSwitch (Amalgam CTFPlayer.h VIRTUAL 256)
+// re-flushes the local player's draw state, as tf's own taunt camera does. ClientModeShared::
+// OverrideView then lays the camera back by cam_idealdist; the hook below overwrites that with
+// eye - forward * distance (hull-traced when "wall collision" is on), Amalgam ThirdPerson().
+static constexpr int k_inCamIsThirdPerson  = 31;
+static constexpr int k_inCamToThirdPerson  = 32;
+static constexpr int k_inCamToFirstPerson  = 33;
+static constexpr int k_plThirdPersonSwitch = 256;
+
+// botox key_bind_t styles: 0 = always (off while the menu is open), 1 = hold, 2 = toggle
+static bool ThirdPersonKey()
+{
+    if (g_sfxThirdPersonKeyMode == 0) return !g_showMenu;
+    if (g_hwnd && GetForegroundWindow() != g_hwnd) return false;
+    const int key = g_sfxThirdPersonKey;
+    if (key <= 0 || key > 0xFE) return false;
+    return g_sfxThirdPersonKeyMode == 1 ? (GetAsyncKeyState(key) & 0x8000) != 0
+                                        : (GetKeyState(key) & 1) != 0;
+}
+
+// IEngineTrace::TraceRay slot 4 (movement.h kTrace_TraceRay). World + static props only, the
+// shape of Amalgam's CTraceFilterWorldAndPropsOnly: players and the local model never stop it.
+struct TpTraceFilter
+{
+    void** vfptr;
+    static bool __fastcall sShouldHit(TpTraceFilter*, void* pEnt, int)
+    {
+        unsigned int h = 0xFFFFFFFF;
+        __try {
+            unsigned int* pH = VCall<unsigned int*>(pEnt, 2);   // IHandleEntity::GetRefEHandle
+            if (pH) h = *pH;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        return (h >> 16) == (1u << 15);                       // static prop serial
+    }
+    static int __fastcall sTraceType(TpTraceFilter*) { return 3; }   // TRACE_EVERYTHING_FILTER_PROPS
+    TpTraceFilter() { static void* vt[2] = { (void*)&sShouldHit, (void*)&sTraceType }; vfptr = vt; }
+};
+
+// __try lives alone here: C2712 refuses it next to objects that need unwinding.
+static bool TpTraceRaw(void* trace, const Ray_mv& ray, void* filter, GameTrace_t* tr)
+{
+    using TraceRay_t = void(__fastcall*)(void*, const Ray_mv&, unsigned, void*, GameTrace_t*);
+    __try {
+        void** vt = *(void***)trace;
+        ((TraceRay_t)vt[kTrace_TraceRay])(trace, ray, 0x200400B /* MASK_SOLID */, filter, tr);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static float ThirdPersonCollide(const Vec3& eye, const Vec3& cam)
+{
+    static void* s_trace = GetInterface("engine.dll", "EngineTraceClient003");
+    if (!s_trace) return 1.f;
+    constexpr float hull = 9.f;   // botox / Amalgam / tf taunt camera hull
+    Ray_mv ray;
+    ray.Init(eye, cam, Vec3(-hull, -hull, -hull), Vec3(hull, hull, hull));
+    TpTraceFilter filter;
+    GameTrace_t tr{};
+    if (!TpTraceRaw(s_trace, ray, &filter, &tr)) return 1.f;
+    return tr.fraction < 0.f ? 0.f : (tr.fraction > 1.f ? 1.f : tr.fraction);
+}
+
+// Main thread, inside OverrideView. Returns true while the camera is ours.
+static bool ThirdPersonSet(bool wanted)
+{
+    static bool s_forced = false;
+    if (!g_input) return false;
+    __try {
+        void** vt = *(void***)g_input;
+        if (wanted && !s_forced) {
+            ((void(__fastcall*)(void*))vt[k_inCamToThirdPerson])(g_input);
+            if (void* local = GetClientEntity(GetLocalPlayerIndex()))
+                VCall<void>(local, k_plThirdPersonSwitch, true);
+            s_forced = true;
+            DebugLog("third person: on (CAM_ToThirdPerson)");
+        } else if (!wanted && s_forced) {
+            ((void(__fastcall*)(void*))vt[k_inCamToFirstPerson])(g_input);
+            if (void* local = GetClientEntity(GetLocalPlayerIndex()))
+                VCall<void>(local, k_plThirdPersonSwitch, false);
+            s_forced = false;
+            DebugLog("third person: off (CAM_ToFirstPerson)");
+        }
+        return s_forced && ((int(__fastcall*)(void*))vt[k_inCamIsThirdPerson])(g_input) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { s_forced = false; return false; }
+}
+
+// botox screen.cpp: the world fov offset only while alive and not scoped (TF_COND_ZOOMED = bit 1
+// of m_nPlayerCond), so a sniper's zoom is never undone by it.
+static bool WorldFov_Wanted()
+{
+    if (!g_worldFovEnable || g_wdWorldFov == 0.f || g_eject || !IsLocalPlayerAlive()) return false;
+    if (g_offCond <= 0) return true;
+    void* pLocal = GetClientEntity(GetLocalPlayerIndex());
+    int cond = 0;
+    __try { cond = pLocal ? *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(pLocal) + g_offCond) : 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { cond = 0; }
+    return (cond & (1 << 1)) == 0;
+}
+
 static void __fastcall h_OverrideView(void* rcx, void* pView)
 {
+    // the eye, before ClientModeShared::OverrideView lays a third person camera back from it
+    float eye[3] = { 0.f, 0.f, 0.f };
+    if (pView)
+        __try { memcpy(eye, reinterpret_cast<const float*>(reinterpret_cast<uintptr_t>(pView) + k_vsOrigin), sizeof(eye)); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+
     o_OverrideView(rcx, pView);
-    if (!pView || (!g_worldFovEnable && !g_thirdPersonEnable && !g_vmLowFps)) return;
+
+    // unit world: main thread, once a frame, before any model draw
+    WorldFx2_Frame();   // sun angle + shadow_control
+    WorldFx3_Frame();   // movement trail, dlights, world/prop/skybox modulation walk
+    const bool fovOn = WorldFov_Wanted();
+
+    const bool tpOn = ThirdPersonSet(g_thirdPersonEnable && !g_eject && ThirdPersonKey() && IsLocalPlayerAlive());
+    if (!pView || (!fovOn && !tpOn && !g_vmLowFps)) return;
 
     const uintptr_t p = reinterpret_cast<uintptr_t>(pView);
     __try
     {
-        if (g_worldFovEnable && g_worldFovAmount > 1.f && g_worldFovAmount < 179.f)
-            *reinterpret_cast<float*>(p + k_vsFov) = g_worldFovAmount;
+        if (fovOn)   // botox screen.cpp: setup->m_fov += m_world_fov
+        {
+            float* fov = reinterpret_cast<float*>(p + k_vsFov);
+            const float want = *fov + g_wdWorldFov;
+            if (*fov > 1.f && *fov < 179.f) *fov = want < 1.f ? 1.f : (want > 179.f ? 179.f : want);
+        }
 
-        if (g_thirdPersonEnable)
+        if (tpOn)
         {
             float* o = reinterpret_cast<float*>(p + k_vsOrigin);
             const float* a = reinterpret_cast<float*>(p + k_vsAngles);
-            const Vec3 angles(a[0], a[1], a[2]);
+            const Vec3 angles(a[0], a[1], 0.f);
             if (angles.x > -91.f && angles.x < 91.f)   // sane pitch, or the pattern/offsets are wrong
             {
                 Vec3 fwd;
                 AngleVectors(angles, &fwd);
-                const float dist = g_thirdPersonDistance < 0.f ? 0.f :
-                                   (g_thirdPersonDistance > 400.f ? 400.f : g_thirdPersonDistance);
-                // No wall-collision trace (botox's "+collision" sub-toggle) -- ponytail: the
-                // camera can clip into geometry at distances a trace would have pulled in.
-                // Add a TraceRay-gated clamp here if that turns out to matter in play.
-                o[0] -= fwd.x * dist;
-                o[1] -= fwd.y * dist;
-                o[2] -= fwd.z * dist;
+                float dist = g_thirdPersonDistance < 20.f ? 20.f :
+                             (g_thirdPersonDistance > 300.f ? 300.f : g_thirdPersonDistance);   // botox slider range
+                const Vec3 from(eye[0], eye[1], eye[2]);
+                if (g_sfxThirdPersonCollision)
+                    dist *= ThirdPersonCollide(from, from - fwd * dist);
+                o[0] = from.x - fwd.x * dist;
+                o[1] = from.y - fwd.y * dist;
+                o[2] = from.z - fwd.z * dist;
             }
         }
 

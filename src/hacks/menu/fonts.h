@@ -2,7 +2,7 @@
 // botox tab_fonts port (menu_tab_settings.cpp tab_fonts + globals/fonts/fonts.cpp).
 // Two botox pages map to TF2:
 //   indicators -> g_fontMi, the ImGui atlas face every movement indicator draws with
-//                 (render.cpp BuildFontAtlas, rasterized at size * g_miScale px)
+//                 (render.cpp BuildFontAtlas; re-baked per indicator scale, IndicatorFont)
 //   esp        -> the vgui surface face the aim-tree esp draws with (aim/helpers.cpp
 //                 CFonts::Reload, FONT_INDICATORS). vgui takes a GDI family name, not a file,
 //                 so this page lists families instead of font files.
@@ -19,11 +19,10 @@ enum FontFlagBit
     FF_MONOHINTING, FF_BOLD, FF_OBLIQUE, FF_MONOCHROME, FF_COUNT
 };
 
-// Defaults = what this DLL drew with before the tab existed, so an old cfg looks unchanged:
-// indicators tahomabd 12 light-hinted, esp Verdana 22 bold.
-constexpr const char* kFontIndDefName = "tahomabd";
-constexpr int         kFontIndDefSize = 12;
-constexpr int         kFontIndDefFlags = 1 << FF_LIGHTHINTING;
+// Defaults: indicators = botox m_indicator_font_settings ("Verdanab", 29, no flags), esp Verdana 22 bold.
+constexpr const char* kFontIndDefName = "verdanab";
+constexpr int         kFontIndDefSize = 29;
+constexpr int         kFontIndDefFlags = 0;
 constexpr const char* kFontEspDefName = "Verdana";
 constexpr int         kFontEspDefSize = 22;
 constexpr int         kFontEspDefFlags = 1 << FF_BOLD;
