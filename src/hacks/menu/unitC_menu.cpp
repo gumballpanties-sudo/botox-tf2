@@ -409,6 +409,9 @@ void UnitC_Menu_visuals_chams()
 
     ChamsDropdown("visible material", g_chamsVisibleCfg);
     ChamsDropdown("occluded material", g_chamsOccludedCfg);
+    // TF2 extra: replace the visible material while ubered / cloaked; empty = the normal one
+    ChamsDropdown("ubered material", g_chamsUberCfg);
+    ChamsDropdown("cloaked material", g_chamsCloakCfg);
 
     ImGui::Checkbox("ragdolls##chams ragdolls", &g_chamsRagdolls);
 
@@ -430,6 +433,8 @@ void UnitC_Menu_visuals_chams()
 
     ChamsDropdown("visible material##team chams", g_chamsTeamVisibleCfg);
     ChamsDropdown("occluded material##team chams", g_chamsTeamOccludedCfg);
+    ChamsDropdown("ubered material##team chams", g_chamsTeamUberCfg);
+    ChamsDropdown("cloaked material##team chams", g_chamsTeamCloakCfg);
 
     ImGui::EndDisabled();
 
@@ -445,7 +450,7 @@ void UnitC_Menu_visuals_chams()
 
     bool two_tone_used = false;
     for (const char* cfg : { g_chamsVisibleCfg, g_chamsOccludedCfg, g_chamsSoundCfg, g_chamsTeamVisibleCfg, g_chamsTeamOccludedCfg,
-                             g_chamsWeaponCfg, g_chamsArmsCfg, g_chamsSleeveCfg }) {
+                             g_chamsUberCfg, g_chamsCloakCfg, g_chamsTeamUberCfg, g_chamsTeamCloakCfg, g_chamsWeaponCfg, g_chamsArmsCfg, g_chamsSleeveCfg }) {
         ChamsLayers::List l;
         ChamsLayers::Parse(cfg, l);
         two_tone_used |= ChamsLayers::IndexOf(l, ChamsLayers::TwoTone) >= 0;

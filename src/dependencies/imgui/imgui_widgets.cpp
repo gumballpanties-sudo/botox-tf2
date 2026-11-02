@@ -727,11 +727,11 @@ bool ImGui::ButtonEx(const char* label, const ImVec2& size_arg, ImGuiButtonFlags
 
     const ImColor accent_color = ImGui::GetColorU32(ImGuiCol_::ImGuiCol_Accent);
 
-    RenderFrame(bb.Min - ImVec2(2.f, 2.f), bb.Max + ImVec2(2.f, 2.f), ImColor(25 / 255.f, 25 / 255.f, 25 / 255.f), true, g.Style.FrameRounding);
+    RenderFrame(bb.Min - ImVec2(2.f, 2.f), bb.Max + ImVec2(2.f, 2.f), ImGui::GetColorU32(ImGuiCol_MenuFrame), true, g.Style.FrameRounding);
     RenderFrame(bb.Min - ImVec2(2.f, 2.f), bb.Max + ImVec2(2.f, 2.f),
                 ImColor(accent_color.Value.x, accent_color.Value.y, accent_color.Value.z, 1.f * frame_animation.AnimationData->second), true,
                 g.Style.FrameRounding);
-    window->DrawList->AddRect(bb.Min - ImVec2(2.f, 2.f), bb.Max + ImVec2(2.f, 2.f), ImColor(50, 50, 50, 100), g.Style.FrameRounding);
+    window->DrawList->AddRect(bb.Min - ImVec2(2.f, 2.f), bb.Max + ImVec2(2.f, 2.f), ImGui::GetColorU32(ImGuiCol_MenuOutline), g.Style.FrameRounding);
 
     auto text_animation = ImAnimationHelper(id + ImHashStr("text-animation"), ImGui::GetIO().DeltaTime);
     text_animation.Update(hovered || g.ActiveId == id ? 4.f : -4.f, 1.f, 0.5f, 1.f);
@@ -1274,14 +1274,14 @@ bool ImGui::Checkbox(const char* label, bool* v)
 
     const bool render_decorations = frame_animation.AnimationData->second != 1.f;
     if (render_decorations)
-        RenderFrame(check_bb.Min, check_bb.Max, ImColor(25 / 255.f, 25 / 255.f, 25 / 255.f), true, style.FrameRounding);
+        RenderFrame(check_bb.Min, check_bb.Max, ImGui::GetColorU32(ImGuiCol_MenuFrame), true, style.FrameRounding);
 
     const ImColor accent_color = ImGui::GetColorU32(ImGuiCol_::ImGuiCol_Accent);
     RenderFrame(check_bb.Min, check_bb.Max,
                 ImColor(accent_color.Value.x, accent_color.Value.y, accent_color.Value.z, 1.f * frame_animation.AnimationData->second), true,
                 style.FrameRounding);
 
-    window->DrawList->AddRect(check_bb.Min, check_bb.Max, ImColor(50, 50, 50, 100), style.FrameRounding);
+    window->DrawList->AddRect(check_bb.Min, check_bb.Max, ImGui::GetColorU32(ImGuiCol_MenuOutline), style.FrameRounding);
 
     auto text_animation = ImAnimationHelper(id + 1u, ImGui::GetIO().DeltaTime);
     text_animation.Update(hovered || *v ? 4.f : -4.f, 1.f, 0.5f, 1.f);
@@ -1855,9 +1855,9 @@ bool ImGui::BeginCombo(const char* label, const char* preview_value, ImGuiComboF
     RenderNavHighlight(frame_bb, id);
     if (!(flags & ImGuiComboFlags_NoPreview))
     {
-        window->DrawList->AddRectFilled(frame_bb.Min, ImVec2(value_x2, frame_bb.Max.y), ImColor(25 / 255.f, 25 / 255.f, 25 / 255.f),
+        window->DrawList->AddRectFilled(frame_bb.Min, ImVec2(value_x2, frame_bb.Max.y), ImGui::GetColorU32(ImGuiCol_MenuFrame),
                                          style.PopupRounding);
-        window->DrawList->AddRect(frame_bb.Min, ImVec2(value_x2, frame_bb.Max.y), ImColor(50, 50, 50, 100), style.FrameRounding);
+        window->DrawList->AddRect(frame_bb.Min, ImVec2(value_x2, frame_bb.Max.y), ImGui::GetColorU32(ImGuiCol_MenuOutline), style.FrameRounding);
     }
 
     if (!(flags & ImGuiComboFlags_NoArrowButton))
@@ -1952,11 +1952,11 @@ bool ImGui::BeginCombo(const char* label, const char* preview_value, ImGuiComboF
     // Horizontally align ourselves with the framed text
     PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.FramePadding.x, style.WindowPadding.y - 4.f));
     PushStyleVar(ImGuiStyleVar_ScrollbarSize, 0.f);
-    PushStyleColor(ImGuiCol_PopupBg, ImVec4(25 / 255.f, 25 / 255.f, 25 / 255.f, 1.f));
+    PushStyleColor(ImGuiCol_PopupBg, ImGui::GetStyleColorVec4(ImGuiCol_MenuFrame));
     bool ret = Begin(name, NULL, window_flags);
 
     PushClipRect(GetWindowPos(), GetWindowSize() + GetWindowPos(), false);
-    GetWindowDrawList()->AddRect(GetWindowPos(), GetWindowSize() + GetWindowPos(), ImColor(50, 50, 50, 100), style.FrameRounding);
+    GetWindowDrawList()->AddRect(GetWindowPos(), GetWindowSize() + GetWindowPos(), ImGui::GetColorU32(ImGuiCol_MenuOutline), style.FrameRounding);
     PopClipRect();
 
     PopStyleColor();
@@ -3304,8 +3304,8 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
                                      (p_min == NULL || p_max == NULL || DataTypeCompare(data_type, p_min, p_max) < 0);
 
         // keep bar + fill + label visible under the typing box
-        RenderFrame(frame_bb.Min, frame_bb.Max, ImColor(25 / 255.f, 25 / 255.f, 25 / 255.f, 1.f), true, g.Style.FrameRounding);
-        window->DrawList->AddRect(frame_bb.Min, frame_bb.Max, ImColor(50, 50, 50, 100), g.Style.FrameRounding);
+        RenderFrame(frame_bb.Min, frame_bb.Max, ImGui::GetColorU32(ImGuiCol_MenuFrame), true, g.Style.FrameRounding);
+        window->DrawList->AddRect(frame_bb.Min, frame_bb.Max, ImGui::GetColorU32(ImGuiCol_MenuOutline), g.Style.FrameRounding);
 
         const ImColor accent_fill = ImGui::GetColorU32(ImGuiCol_::ImGuiCol_Accent);
         decltype(old_value)::iterator last_fill_width = old_value.find(id);
@@ -3333,8 +3333,8 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
         return text_changed;
     }
 
-    RenderFrame(frame_bb.Min, frame_bb.Max, ImColor(25 / 255.f, 25 / 255.f, 25 / 255.f, 1.f), true, g.Style.FrameRounding);
-    window->DrawList->AddRect(frame_bb.Min, frame_bb.Max, ImColor(50, 50, 50, 100), g.Style.FrameRounding);
+    RenderFrame(frame_bb.Min, frame_bb.Max, ImGui::GetColorU32(ImGuiCol_MenuFrame), true, g.Style.FrameRounding);
+    window->DrawList->AddRect(frame_bb.Min, frame_bb.Max, ImGui::GetColorU32(ImGuiCol_MenuOutline), g.Style.FrameRounding);
 
     // Slider behavior. botox: fill = floor(percent / 100 * track width). The old grab-centre fill
     // never drew on a float slider: GrabMinSize 0 made grab_bb zero-wide, failing the test below.
@@ -5100,8 +5100,8 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
     {
         // botox: #191919 fill (popup rounding), (50,50,50,100) outline
         RenderNavHighlight(frame_bb, id);
-        RenderFrame(frame_bb.Min, frame_bb.Max, ImColor(25 / 255.f, 25 / 255.f, 25 / 255.f, 1.f), true, style.PopupRounding);
-        window->DrawList->AddRect(frame_bb.Min, frame_bb.Max, ImColor(50, 50, 50, 100), g.Style.FrameRounding);
+        RenderFrame(frame_bb.Min, frame_bb.Max, ImGui::GetColorU32(ImGuiCol_MenuFrame), true, style.PopupRounding);
+        window->DrawList->AddRect(frame_bb.Min, frame_bb.Max, ImGui::GetColorU32(ImGuiCol_MenuOutline), g.Style.FrameRounding);
     }
 
     const ImVec4 clip_rect(frame_bb.Min.x, frame_bb.Min.y, frame_bb.Min.x + inner_size.x, frame_bb.Min.y + inner_size.y); // Not using frame_bb.Max because we have adjusted size
@@ -5560,7 +5560,7 @@ bool ImGui::ColorEdit4(const char* label, float col[4], ImGuiColorEditFlags flag
                 const ImVec2 size = GetWindowSize();
 
                 PushClipRect(position, position + size, false);
-                GetWindowDrawList()->AddRect(position, position + size, ImColor(50, 50, 50, 100), style.WindowRounding);
+                GetWindowDrawList()->AddRect(position, position + size, ImGui::GetColorU32(ImGuiCol_MenuOutline), style.WindowRounding);
                 PopClipRect();
 
                 ImGuiColorEditFlags picker_flags_to_forward = ImGuiColorEditFlags_DataTypeMask_ | ImGuiColorEditFlags_PickerMask_ | ImGuiColorEditFlags_InputMask_ |
@@ -5949,7 +5949,7 @@ bool ImGui::ColorPicker4(const char* label, float col[4], ImGuiColorEditFlags fl
     // SV cursor: 2px square, #191919 ring
     draw_list->AddRect(sv_cursor_pos, sv_cursor_pos + ImVec2(2.f, 2.f), user_col32_striped_of_alpha);
     draw_list->AddRect(sv_cursor_pos - ImVec2(1.f, 1.f), sv_cursor_pos + ImVec2(2.f, 2.f) + ImVec2(1.f, 1.f),
-                       ImColor(25 / 255.f, 25 / 255.f, 25 / 255.f, 1.f));
+                       ImGui::GetColorU32(ImGuiCol_MenuFrame));
 
     // Render alpha bar
     if (alpha_bar)
@@ -6880,7 +6880,7 @@ bool ImGui::BeginListBox(const char* label, const ImVec2& size_arg)
     // botox RenderChildBorder(parent, child, show_text = false): (50,50,50,100) outline on the
     // parent's list, top corners rounded. botox gets it from border=true; ours runs border size 0.
     ImGuiWindow* child = g.CurrentWindow;
-    window->DrawList->AddRect(child->Pos, child->Pos + child->Size, IM_COL32(50, 50, 50, 100),
+    window->DrawList->AddRect(child->Pos, child->Pos + child->Size, ImGui::GetColorU32(ImGuiCol_MenuOutline),
                               style.WindowRounding - 2.f, ImDrawFlags_RoundCornersTop);
     return true;
 }

@@ -544,6 +544,7 @@ void Aim_RenderMenuTab()
 				// Silent only: Legit never moves the view, so a cone there could only refuse.
 				if (Aimbot::Melee::BackstabAimType.Value == Aimbot::Melee::BackstabAimTypeEnum::Silent)
 					VarSlider(Aimbot::Melee::BackstabFOV);
+				VarToggle(Aimbot::Melee::BackstabBacktrack);
 				VarMulti(Aimbot::Melee::BackstabIgnore);
 				if (Aimbot::Melee::BackstabIgnore.Value & Aimbot::Melee::BackstabIgnoreEnum::Invisible)
 					VarSlider(Aimbot::General::IgnoreInvisible);

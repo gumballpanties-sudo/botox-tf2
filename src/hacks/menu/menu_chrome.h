@@ -32,9 +32,11 @@ inline const ImU32 kGroupBg     = IM_COL32(14, 14, 14, 255);
 inline const ImU32 kGroupBorder = IM_COL32(38, 38, 38, 255);
 inline const ImU32 kPanelBorder = IM_COL32(40, 40, 40, 255);
 // botox_menu_spec.md section 1/2: #191919 bands + tab boxes, #323232 @ full and @ ~39%.
-inline const ImU32 kBandBg      = IM_COL32(25, 25, 25, 255);
-inline const ImU32 kWindowBorder= IM_COL32(50, 50, 50, 255);
-inline const ImU32 kTabBorder   = IM_COL32(50, 50, 50, 100);
+// Functions, not consts: menu style (settings tab) repaints these live via ImGuiCol_MenuBand/
+// MenuWindowOutline/MenuOutline, so the band/border colour has to read the style each draw.
+inline ImU32 kBandBg()       { return ImGui::GetColorU32(ImGuiCol_MenuBand); }
+inline ImU32 kWindowBorder() { return ImGui::GetColorU32(ImGuiCol_MenuWindowOutline); }
+inline ImU32 kTabBorder()    { return ImGui::GetColorU32(ImGuiCol_MenuOutline); }
 
 // The accent, for everything the menu draws by hand. render.cpp now writes zui's
 // 160,170,220 into BOTH ImGuiCol_CheckMark and the botox-ported ImGuiCol_Accent slot
@@ -158,7 +160,7 @@ inline bool menu_group_begin(const char* name, float w = 0.f, float fixedH = 0.f
     const ImVec2 bot(child->Pos.x + child->Size.x, child->Pos.y + child->Size.y);
 
     ImDrawList* pdl = parent->DrawList;
-    pdl->AddRectFilled(top, ImVec2(bot.x, child->Pos.y), kBandBg, rnd, ImDrawFlags_RoundCornersTop);
+    pdl->AddRectFilled(top, ImVec2(bot.x, child->Pos.y), kBandBg(), rnd, ImDrawFlags_RoundCornersTop);
     auto anim = ImAnimationHelper(child->ChildId, ImGui::GetIO().DeltaTime);
     anim.Update(ImGui::IsMouseHoveringRect(top, bot, false) ? 3.f : -2.f, 1.f, 0.5f, 1.f);
     const char* end = ImGui::FindRenderedTextEnd(name);
@@ -172,7 +174,7 @@ inline bool menu_group_begin(const char* name, float w = 0.f, float fixedH = 0.f
     clip.ClipWithFull(parent->ClipRect);
     child->DrawList->PushClipRect(clip.Min, clip.Max);
     child->DrawList->AddRectFilled(child->Pos, bot, ImGui::GetColorU32(ImGuiCol_ChildBg), rnd, ImDrawFlags_RoundCornersBottom);
-    child->DrawList->AddRect(top, bot, kTabBorder, rnd);
+    child->DrawList->AddRect(top, bot, kTabBorder(), rnd);
     child->DrawList->PopClipRect();
     return ret;
 }
@@ -319,8 +321,8 @@ inline bool SidebarTab_Draw(const SidebarTab& t, int tabIdx, bool selected, int&
     auto sel = ImAnimationHelper(sid, dt); const float lit = sel.Update(2.f, selected ? 2.f : -2.f);
 
     const float rnd = ImGui::GetStyle().WindowRounding - 2.f;
-    dl->AddRectFilled(a, b, kBandBg, rnd);
-    dl->AddRect(a, b, kTabBorder, rnd);
+    dl->AddRectFilled(a, b, kBandBg(), rnd);
+    dl->AddRect(a, b, kTabBorder(), rnd);
     const ImColor accentC = ImGui::GetColorU32(ImGuiCol_Accent);
     RenderFadedGradientLine(dl, ImVec2(a.x, b.y - 1.f), ImVec2(mf::kTabW, 1.f),
                             ImColor(accentC.Value.x, accentC.Value.y, accentC.Value.z, lit));

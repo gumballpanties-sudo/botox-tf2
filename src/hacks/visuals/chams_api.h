@@ -17,6 +17,10 @@ bool Chams_AnyActive();
 // CSoundEmitterSystem::EmitSound peek (visuals.cpp h_EmitSound): sound chams timestamps.
 void Chams_OnSound(int entindex, float volume, const float* origin);
 
+// screenfx.cpp DoPostScreenSpaceEffects, before Glow_Render: fully cloaked spies (the engine never
+// draws them) through the "cloaked material" list.
+void Chams_RenderCloaked();
+
 // Material lifetime: released on level shutdown (DecRef + DeleteIfUnreferenced), rebuilt
 // lazily on the first draw of the next map. Both are called from visuals.cpp Chams_LevelInit /
 // Chams_LevelUnload (flipworld.cpp's CViewRender::LevelInit/LevelShutdown hook).

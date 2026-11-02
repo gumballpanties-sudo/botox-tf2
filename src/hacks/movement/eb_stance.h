@@ -146,6 +146,12 @@ inline int MV_EbPickLip(const MvEbLane* l, int n, float stepUp, float standable,
     return best;
 }
 
+// smallest drop that is a lip. Not sv_stepsize 18: nothing steps in air, so a 10u curb under a
+// lip is a real bug (vz reset, then a short fall). Floor: off the lip CategorizePosition grounds
+// anything within 2u, so under ~3u it's a landing. Ceiling: a 45 deg (0.7 nz) slope drops 4u over
+// the 4u lane gap and must stay one floor. 6u sits between.
+inline constexpr float k_mvEbLipDrop = 6.f;
+
 // near-edge gate: ground ahead dropped more than a step below the feet (or nothing in reach).
 // botox wanted > 52u of a 66u ray, which every crate / low ledge under 50u failed.
 inline bool MV_EbDropAhead(bool hit, float floorZ, float feetZ, float stepUp)
@@ -176,20 +182,48 @@ inline MvEbPress MV_EbSweepWindow(int centre, bool approx, int runTicks, bool tw
 //   fam 0 = the even base run (no duck),  fam 1 = the odd base run (ducked from 0).
 // sweep   (even v, duckAt k)     = fam 0 for ticks < k, then pressed -> resumes at k
 // release (even v, duckAt 0, k)  = fam 1 for ticks < k, then let go  -> resumes at k
+// brake   (any v, brakeAt j)     = its own base run's family for ticks < j -> resumes at j
 // base runs (duckAt/undoAt -1) ARE their family for the whole run and only feed it.
 // limit = ticks of this run that equal the family (states before tick `limit` may be saved),
 // resumeAt = tick whose family state the run may start from (-1 = start at 0).
 struct MvEbFam { int fam; int limit; int resumeAt; };
-inline MvEbFam MV_EbFamily(int v, int duckAt, int undoAt, int bend)
+inline MvEbFam MV_EbFamily(int v, int duckAt, int undoAt, int bend, int brakeAt = -1)
 {
     constexpr int kAll = 1 << 30;
     if (v < 0 || v >= 8 || bend != 0) return { -1, 0, -1 };
     const bool odd = (v & 1) != 0;
+    if (brakeAt >= 0)
+        return (duckAt < 0 && undoAt < 0) ? MvEbFam{ odd ? 1 : 0, brakeAt, brakeAt } : MvEbFam{ -1, 0, -1 };
     if (duckAt < 0 && undoAt < 0) return { odd ? 1 : 0, kAll, -1 };
     if (odd) return { -1, 0, -1 };
     if (duckAt > 0 && undoAt < 0) return { 0, duckAt, duckAt };
     if (duckAt == 0 && undoAt > 0) return { 1, undoAt, undoAt };
     return { -1, 0, -1 };
+}
+
+// ================= brake bisect (TF2, not botox) ==============================================
+// run(a) flies the run braked at strength a in (0, 1] and says how it ended. Along a the outcome
+// goes fly past | bug | land (or the reverse): more brake = contact further back. a = 0 is the base
+// run, its outcome given as loLand. a = 1 first; the same outcome as a = 0 = no bracket, stop.
+// Else halve toward the boundary, the bug band sits on it. iters halvings after the a = 1 run.
+// stop() = out of budget. Returns runs flown.
+enum MvEbOut { kEbOutAir = 0, kEbOutLand = 1, kEbOutBug = 2 };
+template <class RunFn, class StopFn>
+inline int MV_EbBisect(bool loLand, int iters, RunFn run, StopFn stop)
+{
+    int runs = 1;
+    const MvEbOut top = run(1.f);
+    if (top == kEbOutBug || (top == kEbOutLand) == loLand) return runs;
+    float lo = 0.f, hi = 1.f;
+    for (int it = 0; it < iters && !stop(); it++)
+    {
+        const float mid = 0.5f * (lo + hi);
+        const MvEbOut o = run(mid);
+        runs++;
+        if (o == kEbOutBug) break;
+        if ((o == kEbOutLand) == loLand) lo = mid; else hi = mid;
+    }
+    return runs;
 }
 
 // ================= deep pass cost (TF2 port, not botox) =======================================

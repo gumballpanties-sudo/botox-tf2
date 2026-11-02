@@ -701,6 +701,13 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 		tOut.m_flRel = flRel;
 		tOut.m_iK = e.k; tOut.m_iHeld = tHold.m_iCount;
 		tOut.m_bReachNext = bReachNext;
+		{	// forensics only -- nothing below feeds the decision
+			const BsMath::V3 r = vHC - vEye;
+			const float flBear = BsMath::Deg(atan2f(r.y, r.x));
+			tOut.m_flSeenMargin = BsMath::StabProbability(flBear, c.vAng.y, e.seen, 1.f, 1.f).margin;
+			tOut.m_flRelYaw = BsMath::Wrap(e.seen - flBear);
+			tOut.m_flBearRate = BsMath::Deg((r.x * vRel.y - r.y * vRel.x) / std::max(r.x * r.x + r.y * r.y, 1.f));
+		}
 
 		if (tOut.m_bFire)
 		{
@@ -982,7 +989,9 @@ static inline void DrawVisuals(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 {
 	static bool s_bStamped = false; // tells which knife build wrote a log (bs14 tier=, bs15 p=, bs16 p= pb= pg=)
-	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs17 (bs16 + thin-reach hold). Thin hold UNVERIFIED IN GAME."); }
+	// bs17 thin hold verified: first log 52 swings, 0 whiffs, thin= gated 8 commands. bs17b added
+	// front-stab forensics (sm= rb= brate= lat= exp=). bs18 = knife backtrack (bt=), see RewindBackTicks.
+	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs18 (bs17b + knife backtrack bt=). Backtrack UNVERIFIED IN GAME."); }
 	m_bBackstabLegit = Vars::Aimbot::Melee::BackstabAimType.Value == Vars::Aimbot::Melee::BackstabAimTypeEnum::Legit;
 	const int iAimType = GetAimType(pWeapon);
 	// Wall clock for everything that has to line up with player_hurt: inside engine prediction
@@ -1053,88 +1062,109 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 		m_flKnifeHull *= pLocal->m_flModelScale();
 	}
 
-	// EVERY player's box where lag compensation will put him, both teams: with a melee weapon out
-	// teammates are rewound too (tf_player.cpp:20105-20111) and the swing stops on them. Gathered on
-	// the REWOUND box, not the raw origin -- a fleeing target's raw origin leads the box the swing
-	// actually meets by lerp + his tickbase lead.
-	m_iBoxes = 0;
-	{
-		const float flGather = m_flKnifeRange + m_flKnifeHull * 1.7320508f + 8.f;
-		const BsMath::V3 vEye = ToBs(m_vKnifeEye);
-		for (auto pEntity : H::Entities.GetGroup(EntityEnum::PlayerAll))
-		{
-			const int i = pEntity->entindex();
-			auto pPlayer = pEntity->As<CTFPlayer>();
-			if (m_iBoxes >= k_boxMax || pEntity == pLocal || i < 1 || i >= k_maxPlayers
-				|| pEntity->IsDormant() || !pPlayer->IsAlive()
-				|| pPlayer->InCond(TF_COND_HALLOWEEN_GHOST_MODE))   // SOLID_NONE: neither target nor blocker
-				continue;
-			BsMath::V3 o, mn, mx;
-			float flExtrap = 0.f;
-			if (!BsMath::Rewind(g_aTrack[i], m_flTRewind, k_maxExtrap, o, mn, mx, flExtrap, m_flTDue))
-			{	// no record yet: the raw snapshot is the best there is (only ever a blocker; JudgeKnife
-				// refuses to stab a player with no track)
-				o = ToBs(pEntity->m_vecOrigin()); mn = ToBs(pEntity->m_vecMins()); mx = ToBs(pEntity->m_vecMaxs());
-			}
-			const BsMath::V3 lo = o + mn, hi = o + mx;
-			const BsMath::V3 d = BsMath::V3{ std::clamp(vEye.x, lo.x, hi.x), std::clamp(vEye.y, lo.y, hi.y),
-				std::clamp(vEye.z, lo.z, hi.z) } - vEye;
-			if (sqrtf(d.x * d.x + d.y * d.y + d.z * d.z) > flGather)
-				continue;
-			m_aBoxes[m_iBoxes] = { lo, hi, i };
-			m_aBoxEnt[m_iBoxes] = pEntity;
-			m_aBoxTeam[m_iBoxes] = pEntity->m_iTeamNum();
-			{	// 3D: the extrapolation moves him in z too, and the reach test is a 3D box
-				const BsMath::V3 v = BsMath::Velocity(g_aTrack[i]);
-				m_aBoxSpeed[m_iBoxes] = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-			}
-			m_aBoxExtrap[m_iBoxes] = flExtrap;
-			++m_iBoxes;
-		}
-	}
+	// KNIFE BACKTRACK (dih-bs18). Lag compensation rewinds everybody to the tick OUR tick_count
+	// names; his yaw is read live whatever we ask. So when the default rewind cannot stab, an older
+	// tick inside the server's 0.2 s window (bs_math.h RewindBackTicks) is judged the same way:
+	// every player's box at that tick, the same odds, the same reach. First tick that fires wins,
+	// newest first; tick_count is moved back by that many ticks. Stats and the miss line stay on
+	// the default tick so they read the same as bs17's.
+	const float flTRewind0 = m_flTRewind;
+	const int nBack = Vars::Aimbot::Melee::BackstabBacktrack.Value
+		? BsMath::RewindBackTicks(m_flTDue, flTRewind0, BacktrackCorrect(), TICK_INTERVAL)
+		: 0;
 
-	// the targets: every enemy box the knife's own ignore list allows, nearest first. No cap -- with
-	// enemies stacked the nearest is often the one you cannot stab. Never a teammate, friendly fire
-	// or not: the backstab path requires an enemy (knife:203).
-	int aTargets[k_boxMax], nTargets = 0;
+	BsJudge tBest = {};   // the default tick's furthest judgement (logged), or the one that fired
+	bool bFired = false;
+	int iBack = 0, nTargets = 0, nTargets0 = 0;
+	for (int j = 0; j <= nBack && !bFired; j++)
 	{
-		for (int b = 0; b < m_iBoxes; b++)
+		m_flTRewind = flTRewind0 - j * TICK_INTERVAL;
+
+		// EVERY player's box where lag compensation will put him, both teams: with a melee weapon out
+		// teammates are rewound too (tf_player.cpp:20105-20111) and the swing stops on them. Gathered on
+		// the REWOUND box, not the raw origin -- a fleeing target's raw origin leads the box the swing
+		// actually meets by lerp + his tickbase lead.
+		m_iBoxes = 0;
 		{
-			if (m_aBoxTeam[b] == pLocal->m_iTeamNum())
-				continue;
-			if (F::AimbotGlobal.ShouldIgnore(m_aBoxEnt[b], pLocal, pWeapon, Vars::Aimbot::Melee::BackstabIgnore.Value))
-				continue;
-			aTargets[nTargets++] = b;
+			const float flGather = m_flKnifeRange + m_flKnifeHull * 1.7320508f + 8.f;
+			const BsMath::V3 vEye = ToBs(m_vKnifeEye);
+			for (auto pEntity : H::Entities.GetGroup(EntityEnum::PlayerAll))
+			{
+				const int i = pEntity->entindex();
+				auto pPlayer = pEntity->As<CTFPlayer>();
+				if (m_iBoxes >= k_boxMax || pEntity == pLocal || i < 1 || i >= k_maxPlayers
+					|| pEntity->IsDormant() || !pPlayer->IsAlive()
+					|| pPlayer->InCond(TF_COND_HALLOWEEN_GHOST_MODE))   // SOLID_NONE: neither target nor blocker
+					continue;
+				BsMath::V3 o, mn, mx;
+				float flExtrap = 0.f;
+				if (!BsMath::Rewind(g_aTrack[i], m_flTRewind, k_maxExtrap, o, mn, mx, flExtrap, m_flTDue))
+				{	// no record yet: the raw snapshot is the best there is (only ever a blocker; JudgeKnife
+					// refuses to stab a player with no track)
+					o = ToBs(pEntity->m_vecOrigin()); mn = ToBs(pEntity->m_vecMins()); mx = ToBs(pEntity->m_vecMaxs());
+				}
+				const BsMath::V3 lo = o + mn, hi = o + mx;
+				const BsMath::V3 d = BsMath::V3{ std::clamp(vEye.x, lo.x, hi.x), std::clamp(vEye.y, lo.y, hi.y),
+					std::clamp(vEye.z, lo.z, hi.z) } - vEye;
+				if (sqrtf(d.x * d.x + d.y * d.y + d.z * d.z) > flGather)
+					continue;
+				m_aBoxes[m_iBoxes] = { lo, hi, i };
+				m_aBoxEnt[m_iBoxes] = pEntity;
+				m_aBoxTeam[m_iBoxes] = pEntity->m_iTeamNum();
+				{	// 3D: the extrapolation moves him in z too, and the reach test is a 3D box
+					const BsMath::V3 v = BsMath::Velocity(g_aTrack[i]);
+					m_aBoxSpeed[m_iBoxes] = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+				}
+				m_aBoxExtrap[m_iBoxes] = flExtrap;
+				++m_iBoxes;
+			}
 		}
-		const BsMath::V3 vEye = ToBs(m_vKnifeEye);
-		std::sort(aTargets, aTargets + nTargets, [&](int a, int b)
+
+		// the targets: every enemy box the knife's own ignore list allows, nearest first. No cap -- with
+		// enemies stacked the nearest is often the one you cannot stab. Never a teammate, friendly fire
+		// or not: the backstab path requires an enemy (knife:203).
+		int aTargets[k_boxMax];
+		nTargets = 0;
 		{
-			const BsMath::V3 ca = (m_aBoxes[a].lo + m_aBoxes[a].hi) * 0.5f - vEye, cb = (m_aBoxes[b].lo + m_aBoxes[b].hi) * 0.5f - vEye;
-			return ca.x * ca.x + ca.y * ca.y + ca.z * ca.z < cb.x * cb.x + cb.y * cb.y + cb.z * cb.z;
-		});
+			for (int b = 0; b < m_iBoxes; b++)
+			{
+				if (m_aBoxTeam[b] == pLocal->m_iTeamNum())
+					continue;
+				if (F::AimbotGlobal.ShouldIgnore(m_aBoxEnt[b], pLocal, pWeapon, Vars::Aimbot::Melee::BackstabIgnore.Value))
+					continue;
+				aTargets[nTargets++] = b;
+			}
+			const BsMath::V3 vEye = ToBs(m_vKnifeEye);
+			std::sort(aTargets, aTargets + nTargets, [&](int a, int b)
+			{
+				const BsMath::V3 ca = (m_aBoxes[a].lo + m_aBoxes[a].hi) * 0.5f - vEye, cb = (m_aBoxes[b].lo + m_aBoxes[b].hi) * 0.5f - vEye;
+				return ca.x * ca.x + ca.y * ca.y + ca.z * ca.z < cb.x * cb.x + cb.y * cb.y + cb.z * cb.z;
+			});
+		}
+		if (!j)
+			nTargets0 = nTargets;
+
+		for (int t = 0; t < nTargets; t++)
+		{
+			BsJudge tJudge = {};
+			if (JudgeKnife(aTargets[t], pLocal, pWeapon, tJudge))
+			{
+				tBest = tJudge;
+				bFired = true;
+				iBack = j;
+				break;
+			}
+			// the line worth logging is the one that got furthest down the pipeline -- on the default tick
+			if (!j && (tJudge.m_iGate > tBest.m_iGate || tJudge.m_iGate == tBest.m_iGate && tJudge.m_flP > tBest.m_flP))
+				tBest = tJudge;
+		}
 	}
-	if (!nTargets)
+	if (!nTargets0 && !bFired)
 	{
 		++m_aGateHits[BSG_NOTARGET];
 		return;
 	}
-
-	BsJudge tBest = {};
-	bool bFired = false;
-	for (int t = 0; t < nTargets; t++)
-	{
-		BsJudge tJudge = {};
-		if (JudgeKnife(aTargets[t], pLocal, pWeapon, tJudge))
-		{
-			tBest = tJudge;
-			bFired = true;
-			break;
-		}
-		// the line worth logging is the one that got furthest down the pipeline
-		if (tJudge.m_iGate > tBest.m_iGate || tJudge.m_iGate == tBest.m_iGate && tJudge.m_flP > tBest.m_flP)
-			tBest = tJudge;
-	}
-	++m_aGateHits[std::clamp(tBest.m_iGate, 0, int(BSG_COUNT) - 1)];
+	++m_aGateHits[bFired ? BSG_FIRE : std::clamp(tBest.m_iGate, 0, int(BSG_COUNT) - 1)];
 
 	if (bFired)
 	{
@@ -1144,23 +1174,33 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 		pCmd->buttons |= IN_ATTACK;
 		if (m_iDoubletapTicks)
 			F::Ticks.m_bDoubletap = true;
+		// targettick = tick_count - lerpTicks (lagcomp.cpp:401): j ticks older box = j off tick_count.
+		// After UpdateBackstabTracks, so the yaw audit keeps the real tick.
+		if (iBack)
+		{
+			pCmd->tick_count -= iBack;
+			++m_iBtFires;
+		}
 
 		++m_iFires;
 		m_tLastFire = { flNow, tBest.m_iIndex, tBest.m_flP, tBest.m_flSigma, tBest.m_flMargin,
 			tBest.m_flSlack, tBest.m_flPad, tBest.m_flHorizon, tBest.m_flExtrap, tBest.m_flDist, tBest.m_flSpeed, tBest.m_iK,
-			tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flRate, tBest.m_flGuardMargin, tBest.m_flSigCore };
+			tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flRate, tBest.m_flGuardMargin, tBest.m_flSigCore,
+			tBest.m_flSeenMargin, tBest.m_flRelYaw, tBest.m_flBearRate, tBest.m_flRel, AimLatency(), iBack };
 		m_iQuietTick = I::GlobalVars->tickcount;
 		m_flPendTime = flNow;
 		m_flPendNext = pWeapon->m_flNextPrimaryAttack();
 		m_flWhiffTime = -1.f;
 		DebugLog("BS: STAB idx=%d p=%.3f pb=%.3f pg=%.3f gm=%.1f sc=%.1f next=%.3f margin=%.1f fac=%.1f sig=%.1f bear=%.2f k=%d rate=%.0f "
-			"hor=%.3f lerp=%.3f ext=%.3f slack=%.1f pad=%.2f thinpad=%.2f rnext=%d held=%d d=%.1f spd=%.0f my=%.0f rel=%.0f legit=%d n=%d",
+			"hor=%.3f lerp=%.3f ext=%.3f slack=%.1f pad=%.2f thinpad=%.2f rnext=%d held=%d d=%.1f spd=%.0f my=%.0f rel=%.0f legit=%d n=%d "
+			"sm=%.1f rb=%.1f brate=%.0f lat=%.0f bt=%d/%d",
 			tBest.m_iIndex, tBest.m_flP, tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flGuardMargin, tBest.m_flSigCore,
 			tBest.m_flPNext, tBest.m_flMargin, tBest.m_flFacing, tBest.m_flSigma,
 			tBest.m_flSigBear, tBest.m_iK, tBest.m_flRate, tBest.m_flHorizon, flLerp, tBest.m_flExtrap,
 			tBest.m_flSlack, tBest.m_flPad, BsMath::ThinPad(tBest.m_flPad, tBest.m_flRel), int(tBest.m_bReachNext),
 			tBest.m_iHeld, tBest.m_flDist, tBest.m_flSpeed, pLocal->m_vecVelocity().Length2D(), tBest.m_flRel,
-			int(m_bBackstabLegit), nTargets);
+			int(m_bBackstabLegit), nTargets,
+			tBest.m_flSeenMargin, tBest.m_flRelYaw, tBest.m_flBearRate, AimLatency() * 1000.f, iBack, nBack);
 
 		G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
 		Vec3 vAim = tBest.m_vAim;
@@ -1180,7 +1220,7 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 		DebugLog("BS: miss why=%s idx=%d p=%.3f pb=%.3f pg=%.3f gm=%.1f sc=%.1f next=%.3f margin=%.1f fac=%.1f sig=%.1f bear=%.2f k=%d "
 			"rate=%.0f hor=%.3f lerp=%.3f ext=%.3f slack=%.1f pad=%.2f held=%d d=%.1f spd=%.0f legit=%d "
 			"fovcap=%.0f | us=%.0f/%.0f | gates cd=%d nt=%d ntr=%d rng=%d fov=%d blk=%d miss=%d ign=%d "
-			"rch=%d fac=%d odds=%d turn=%d hold=%d thin=%d | fires=%d stabs=%d front=%d whiff=%d",
+			"rch=%d fac=%d odds=%d turn=%d hold=%d thin=%d | fires=%d stabs=%d front=%d whiff=%d btfires=%d",
 			BsGateName(tBest.m_iGate), tBest.m_iIndex, tBest.m_flP, tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flGuardMargin,
 			tBest.m_flSigCore, tBest.m_flPNext, tBest.m_flMargin,
 			tBest.m_flFacing, tBest.m_flSigma, tBest.m_flSigBear, tBest.m_iK, tBest.m_flRate, tBest.m_flHorizon,
@@ -1190,7 +1230,7 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 			m_aGateHits[BSG_COOLDOWN], m_aGateHits[BSG_NOTARGET], m_aGateHits[BSG_NOTRACK],
 			m_aGateHits[BSG_RANGE], m_aGateHits[BSG_FOV], m_aGateHits[BSG_BLOCKED], m_aGateHits[BSG_TRACEMISS],
 			m_aGateHits[BSG_IGNORED], m_aGateHits[BSG_REACH], m_aGateHits[BSG_FACING], m_aGateHits[BSG_ODDS],
-			m_aGateHits[BSG_TURN], m_aGateHits[BSG_HOLD], m_aGateHits[BSG_THIN], m_iFires, m_iStabs, m_iFrontStabs, m_iWhiffs);
+			m_aGateHits[BSG_TURN], m_aGateHits[BSG_HOLD], m_aGateHits[BSG_THIN], m_iFires, m_iStabs, m_iFrontStabs, m_iWhiffs, m_iBtFires);
 		memset(m_aGateHits, 0, sizeof(m_aGateHits));
 		m_flCostSum = m_flCostMax = 0.0;
 		m_iCostN = 0;
@@ -1322,15 +1362,17 @@ void CAimbotMelee::Event(IGameEvent* pEvent, uint32_t uHash, CTFPlayer* pLocal)
 		++m_iStabs;
 	else
 		++m_iFrontStabs;
+	m_flExpFront += 1.0 - m_tLastFire.m_flP;
 	DebugLog("BS: outcome idx=%d(fired %d) dmg=%d custom=%d %s | p=%.3f pb=%.3f pg=%.3f gm=%.1f sc=%.1f rate=%.0f sig=%.1f margin=%.1f k=%d hor=%.3f "
-		"slack=%.1f pad=%.2f ext=%.3f d=%.1f spd=%.0f dt=%.0fms | %d/%d",
+		"slack=%.1f pad=%.2f ext=%.3f d=%.1f spd=%.0f dt=%.0fms sm=%.1f rb=%.1f brate=%.0f rel=%.0f lat=%.0f bt=%d | %d/%d front=%d exp=%.2f",
 		iVictim, m_tLastFire.m_iIndex, pEvent->GetInt("damageamount"), iCustom,
 		bBackstab ? "BACKSTAB" : "NOT A BACKSTAB", m_tLastFire.m_flP, m_tLastFire.m_flPBest, m_tLastFire.m_flPGuard,
 		m_tLastFire.m_flGuardMargin, m_tLastFire.m_flSigCore,
 		m_tLastFire.m_flRate, m_tLastFire.m_flSigma,
 		m_tLastFire.m_flMargin, m_tLastFire.m_iK, m_tLastFire.m_flHorizon, m_tLastFire.m_flSlack,
 		m_tLastFire.m_flPad, m_tLastFire.m_flExtrap, m_tLastFire.m_flDist, m_tLastFire.m_flSpeed,
-		flSince * 1000.f, m_iStabs, m_iStabs + m_iFrontStabs);
+		flSince * 1000.f, m_tLastFire.m_flSeenMargin, m_tLastFire.m_flRelYaw, m_tLastFire.m_flBearRate,
+		m_tLastFire.m_flRel, m_tLastFire.m_flLat * 1000.f, m_tLastFire.m_iBack, m_iStabs, m_iStabs + m_iFrontStabs, m_iFrontStabs, m_flExpFront);
 	m_tLastFire.m_flTime = -1000.f;       // one outcome per fire
 	m_flPendTime = m_flWhiffTime = -1.f;  // it swung and it landed
 }

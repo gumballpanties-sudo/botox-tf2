@@ -28,7 +28,7 @@ struct EbCmd_t { Vec3 view; float fwd; float side; int buttons; Vec3 origin; };
 struct EbPlan_t
 {
     EbCmd_t cmds[k_ebMaxTicks];
-    int ticks = 0, variant = 0, bend = 0;
+    int ticks = 0, variant = 0, bend = 0, brake = -1;
     Vec3 end{};
     bool ducked = false, blocked = false;
 };
@@ -257,7 +257,7 @@ static bool EbSurfaceUsable(void* pLocal, const Vec3& from, const Vec3& vel)
 }
 
 // lookahead is a DISTANCE (2-3 ticks of travel at 64): stepped in 64-tick units at any rate.
-// edge = floor ahead more than a step down (sv_stepsize 18), MV_EbDropAhead
+// edge = floor ahead more than k_mvEbLipDrop down, MV_EbDropAhead
 static bool EbIsNearEdge(void* pLocal)
 {
     const Vec3 origin = EntV3(pLocal, g_offOrigin);
@@ -272,7 +272,7 @@ static bool EbIsNearEdge(void* pLocal)
         const Vec3 p = origin + dir * (speed * (1.f / 64.f) * s);
         GameTrace_t tr{};
         TraceLine(Vec3(p.x, p.y, origin.z + 2.f), Vec3(p.x, p.y, origin.z - 64.f), MASK_PLAYERSOLID, &filter, &tr);
-        if (MV_EbDropAhead(tr.fraction < 1.f, tr.endpos.z, origin.z, 18.f)) return true;
+        if (MV_EbDropAhead(tr.fraction < 1.f, tr.endpos.z, origin.z, k_mvEbLipDrop)) return true;
     }
     return false;
 }
@@ -374,7 +374,7 @@ static bool EbFindEdgeTarget(void* pLocal, int reachTick, int windowTicks, float
     p.z = origin.z + vel.z * t - 0.5f * grav * t * t;
     const Vec3 right(vel.y / speed, -vel.x / speed, 0.f);
     constexpr int k_lanes = 33;
-    constexpr float k_lane = 4.f, k_stepUp = 18.f;
+    constexpr float k_lane = 4.f, k_stepUp = k_mvEbLipDrop;
     // start one tick of fall above p: reach is a chord estimate, p can already sit under the lip top
     const float top = p.z + 16.f + std::max(0.f, -(vel.z - grav * t)) * ipt;
     const Vec3 mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);
@@ -882,14 +882,23 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         for (auto& e : s_ebBendRes) e.tick = -1;
         int bendResumes = 0, bendSkipped = 0;
         for (int& n : s_ebFamCmdN) n = 0;
-        const int famSaveFrom = std::max(1, reachTick + 1 - duckRetry - approxSlack);
+        // brake window: one tick of air brake ~ accel * maxspeed * dt (~45 u/s at 66) moves the
+        // contact point back ~0.7u per tick still to fly, so 8 ticks back ladder ~6u in sub-window
+        // steps (single) and ~25u (held). Its resume states come from the same family ring
+        const int brakeWin = std::clamp(EbTicks(8), 3, 14);
+        const int famSaveFrom = std::max(1, reachTick + 1 - std::max(duckRetry, brakeWin) - approxSlack);
         const bool famWant[2] = { stance != 2, stance != 1 };
         int famSaves = 0, famResumes = 0, famSkipped = 0;
         const long long snapUs0 = Pred_SnapUs();
 
         // one pass. duckAt = press held from this tick (-1 = variant's own rule); undoAt = released
-        // and left released (-1 = never); bend = first |bend| ticks pushed across the velocity
-        auto runVariant = [&](int v, int duckAt, int undoAt = -1, int bend = 0)
+        // and left released (-1 = never); bend = first |bend| ticks pushed across the velocity;
+        // brakeAt = tick j pushed against the velocity (hold = j to the end), -1 = never;
+        // brakeAmt = its wish as a share of maxspeed (1 = full 450 push)
+        bool lastRunFound = false;   // the last run met a bug (kept or not): bisect stops on it
+        const float brakeMax = (g_offMaxspeed > 0 && EntF(pLocal, g_offMaxspeed) > 1.f) ? EntF(pLocal, g_offMaxspeed) : 450.f;
+        auto runVariant = [&](int v, int duckAt, int undoAt = -1, int bend = 0, int brakeAt = -1, bool brakeHold = false,
+                              float brakeAmt = 1.f)
         {
             const long long runStarted = budget.UsedUs();
             RestoreEntityToPredicted();
@@ -901,7 +910,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
             Vec3 cur = origView;
             contactTick = -1;
             // family state: same restore-then-load as edge skip (movement_edge.inl EsGrab)
-            const MvEbFam fam = MV_EbFamily(v, duckAt, undoAt, bend);
+            const MvEbFam fam = MV_EbFamily(v, duckAt, undoAt, bend, brakeAt);
             const int famIdx = fam.fam >= 0 ? (v >> 1) * 2 + fam.fam : -1;
             const bool famFeed = famIdx >= 0 && famWant[fam.fam];
             int i0 = 0;
@@ -996,7 +1005,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 else s_ebPlanCount++;
                 EbPlan_t& pl = s_ebPlans[slot];
                 memcpy(pl.cmds, s_ebRun, sizeof(EbCmd_t) * (tickIndex + 1));
-                pl.ticks = tickIndex; pl.variant = v; pl.bend = bend; pl.end = endPos;
+                pl.ticks = tickIndex; pl.variant = v; pl.bend = bend; pl.brake = brakeAt; pl.end = endPos;
                 pl.ducked = ducked; pl.blocked = blocked;
             };
             for (int i = i0; i < runTicks || (pending >= 0 && i < maxTicks); i++)
@@ -1057,6 +1066,18 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                         EbCommitStrafe(pLocal, &c, wish);
                     }
                 }
+                // brake: wish against velocity (air accel takes the full wishspeed, not the 30 cap).
+                // Not on the confirm tick: that one is the player's own cmd past the replay
+                if (brakeAt >= 0 && pending < 0 && (i == brakeAt || (brakeHold && i > brakeAt)))
+                {
+                    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+                    if (vel.Length2D() > 1.f)
+                    {
+                        const Vec3 wish(0.f, NormalizeAngle(RAD2DEGF(atan2f(vel.y, vel.x)) + 180.f), 0.f);
+                        c.forwardmove = brakeAmt >= 1.f ? 450.f : brakeAmt * brakeMax; c.sidemove = 0.f;
+                        EbCommitStrafe(pLocal, &c, wish);
+                    }
+                }
                 if (duckAt >= 0) { if (i < duckAt) c.buttons &= ~IN_DUCK; else c.buttons |= IN_DUCK; }
                 // release = the -20u knob: air unduck is instant (CTFGameMovement::OnUnDuck in air)
                 if (undoAt >= 0 && i >= undoAt) c.buttons &= ~IN_DUCK;
@@ -1105,6 +1126,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 { tailCut += runTicks - i - 1; break; }
             }
             if (!runFound && pending >= 0) latch(pending, pendingPos, pendingDucked);
+            lastRunFound = runFound;
             if (const long long spent = budget.UsedUs() - runStarted; spent > worstRunUs) worstRunUs = spent;
         };
 
@@ -1163,6 +1185,56 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         // stop at half and the bend order carries over to the next search (TF2, eb_stance.h)
         const bool deepFull = MV_EbDeepFull(bestContact, EbTicks(6));
         auto deepOut = [&] { return outOfBudget() || (!deepFull && budget.UsedUs() + worstRunUs >= budget.capUs / 2); };
+        // PASS 1b: BRAKE (TF2, not botox). Bend only moves the path ACROSS itself, so a lip that
+        // crosses the path (a ledge you fall past, a crate top you fall onto) was only ever caught
+        // when a base run happened to clip it. Braking moves the contact point back along the path:
+        // Each run resumes its base run's state at j.
+        // BISECT first: hold from the window start at strength a (a * maxspeed of wish, dv scales
+        // with it). a = 0 is the base run, a = 1 the full brake; one lands and the other flies past =
+        // the bug band lies between (fly past | bug | land) -> halve 7 times, ~0.3u of a ~37u reach.
+        // Short falls need it: at -215 u/s a tick falls 3.2u and CategorizePosition grounds anything
+        // within 2u of the lip, so the band is under ~1.7u wide, finer than any fixed ladder.
+        // LADDERS after, with what is left: single = one tick at j (0.7u steps), hold = j to the end
+        // (coarse). Latest j first = smallest shift first, variants round robin.
+        int brakeRuns = 0, bisectRuns = 0;
+        // half of what the deep passes may spend: bend finds what braking can't (lips along the path)
+        auto brakeOut = [&] { return deepOut() || totalPredictions * 2 >= maxPredictions
+                                  || (budget.UsedUs() + worstRunUs) * (deepFull ? 2 : 4) >= budget.capUs; };
+        if (autostrafe && nearGeometry && !enough())
+        {
+            int brakeFirst[8]{}, brakeLast[8]{};
+            int brakeOff = -1;
+            for (int v = 0; v < 8; v++)
+            {
+                const MvEbPress w = baseRan[v] ? MV_EbSweepWindow(sweepCenter[v], sweepApprox[v], runTicks, false, brakeWin, approxSlack)
+                                               : MvEbPress{ 0, -1 };
+                brakeFirst[v] = w.first; brakeLast[v] = w.last;
+                if (w.last >= 0 && w.last - w.first > brakeOff) brakeOff = w.last - w.first;
+            }
+            for (int idx = 0; idx < searchCount && !enough() && !brakeOut(); idx++)
+            {
+                const int v = variantAt(idx);
+                if (v >= 8 || brakeLast[v] < 0) continue;
+                const int j0 = brakeFirst[v];
+                bisectRuns += MV_EbBisect(!sweepApprox[v], 7, [&](float a)
+                {
+                    runVariant(v, -1, -1, 0, j0, true, a);
+                    return lastRunFound ? kEbOutBug : contactTick >= 0 ? kEbOutLand : kEbOutAir;
+                }, [&] { return enough() || brakeOut(); });
+            }
+            for (int off = 0; off <= brakeOff && !enough() && !brakeOut(); off++)
+                for (int idx = 0; idx < searchCount && !enough() && !brakeOut(); idx++)
+                {
+                    const int v = variantAt(idx);
+                    if (v >= 8 || brakeLast[v] < 0 || brakeLast[v] - off < brakeFirst[v]) continue;
+                    const int j = brakeLast[v] - off;
+                    runVariant(v, -1, -1, 0, j, false);
+                    brakeRuns++;
+                    if (enough() || brakeOut()) break;
+                    runVariant(v, -1, -1, 0, j, true);
+                    brakeRuns++;
+                }
+        }
         // PASS 2: BEND, smallest first, near geometry + no usable plan yet
         int bendStart = -1;
         if (autostrafe && nearGeometry && goodPlans() == 0)
@@ -1234,13 +1306,14 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         // scrapes refused (face nz < 0.7), duck = latched hull,
         // pre = prefix snapshots saved / runs resumed / sim ticks skipped, snap = their copy cost us,
         // bre = bend runs resumed / ticks skipped, deep = 1 full / 0 half share for bend + ebanat,
-        // bc = bend order start (-1 = pass skipped)
-        DebugLog("EB: mode=%d win=%d run=%d reach=%d edge=%d vars=%d base=%d sw=%d rel=%d bnd=%d ebv=%d sims=%d/%d cut=%d "
-                 "us=%lld/%lld con=%d vz=%.2f found=%d var=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d surf=%d duck=%d fb=%d "
+        // bc = bend order start (-1 = pass skipped), brk / bis = brake ladder / bisect runs, bk = picked plan's brake tick
+        DebugLog("EB: mode=%d win=%d run=%d reach=%d edge=%d vars=%d base=%d sw=%d rel=%d brk=%d bis=%d bnd=%d ebv=%d sims=%d/%d cut=%d "
+                 "us=%lld/%lld con=%d vz=%.2f found=%d var=%d bk=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d surf=%d duck=%d fb=%d "
                  "pre=%d/%d/%d snap=%lld bre=%d/%d deep=%d bc=%d",
                  mode, maxTicks, runTicks, reachTick, s_ebEdgeTargetValid ? 1 : 0, searchCount, baseRuns, sweepRuns,
-                 releaseRuns, bendRuns, ebRuns, totalPredictions, maxPredictions, tailCut, budget.UsedUs(), budget.capUs,
-                 bestContact, s_ebVelBackup.z, s_ebDetected ? 1 : 0, s_ebLastVariant, s_ebDetected ? s_ebLockTicks : -1,
+                 releaseRuns, brakeRuns, bisectRuns, bendRuns, ebRuns, totalPredictions, maxPredictions, tailCut, budget.UsedUs(), budget.capUs,
+                 bestContact, s_ebVelBackup.z, s_ebDetected ? 1 : 0, s_ebLastVariant,
+                 sel >= 0 ? s_ebPlans[sel].brake : -1, s_ebDetected ? s_ebLockTicks : -1,
                  s_ebPlanCount, wantPaths, nJumpChecks, nBlocked, nStance, nRejSurf,
                  sel >= 0 ? (s_ebPlans[sel].ducked ? 1 : 0) : -1, s_ebFollowBlocked ? 1 : 0,
                  famSaves, famResumes, famSkipped, Pred_SnapUs() - snapUs0,

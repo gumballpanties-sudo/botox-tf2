@@ -1703,7 +1703,7 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
 
     // Player glow (aim/chams.cpp): Amalgam runs CGlow::RenderMain here, before the original --
     // scene complete, viewmodel + HUD still to come. Material-system calls only, so queued mode is fine.
-    if (!g_eject) Glow_Render();
+    if (!g_eject) { Chams_RenderCloaked(); Glow_Render(); }
 
     const bool ret = o_DoPostSSE(thisptr, setup);
 

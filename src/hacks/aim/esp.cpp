@@ -269,7 +269,7 @@ namespace
 		case 1:  y = b.b + 2 + p.pad[PAD_BOTTOM]; break;
 		case 2:  y = b.t + 2.f; break;
 		case 3:  y = b.b - 2 - h; break;
-		default: y = b.t - 3 - h; break;
+		default: y = b.t - 8 - h; break;   // botox 3px; TF2 hull top = head top, needs more air
 		}
 		EspQ::Text(x, y, s.c_str(), EspCol(col, p.a), Black(p.a), 0.5f);
 		if (g_espNamePosition == 0) p.pad[PAD_TOP] -= h - 20;

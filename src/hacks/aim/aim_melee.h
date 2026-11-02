@@ -74,6 +74,10 @@ private:
 		float m_flRel = 0.f;         // 2D speed between us and him, u/s (ThinPad)
 		int   m_iK = 1;             // yaw estimator: 0 hold, 1 half rate, 2 full rate
 		int   m_iHeld = 0;
+		// front-stab forensics (bs17b, log only): sm = margin at his last SEEN yaw (sm < margin = the
+		// bet turns him deeper in), rb = seen yaw - bearing (0 = dead behind), brate = how fast the
+		// bearing swings as we pass (deg/s), the term sigBear does not price
+		float m_flSeenMargin = 0.f, m_flRelYaw = 0.f, m_flBearRate = 0.f;
 		bool  m_bReachNext = true;
 	};
 	void RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd);
@@ -130,7 +134,13 @@ private:
 		float m_flDist = 0.f, m_flSpeed = 0.f;
 		int   m_iK = 1;
 		float m_flPBest = 0.f, m_flPGuard = 0.f, m_flRate = 0.f, m_flGuardMargin = 0.f, m_flSigCore = 0.f;
+		float m_flSeenMargin = 0.f, m_flRelYaw = 0.f, m_flBearRate = 0.f, m_flRel = 0.f;
+		float m_flLat = 0.f;        // AimLatency at the fire: outcome dt well past it = ping spiked mid-swing
+		int   m_iBack = 0;          // bs18: ticks the rewind was moved back (0 = default tick)
 	};
+	int m_iBtFires = 0;            // swings that only existed on an older tick
+	// sum of (1 - p) over judged swings: the fronts the odds PROMISED, next to the fronts that came
+	double m_flExpFront = 0.0;
 	BackstabFire m_tLastFire = {};
 	int m_iQuietTick = 0;      // throttle for the "nothing fired" line
 	// realtime clocks: inside engine prediction tickcount is the tickbase, events are not

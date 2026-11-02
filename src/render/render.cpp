@@ -1419,6 +1419,13 @@ static void BuildFontAtlas()
     g_fontTahomaBd12 = sys("tahomabd.ttf", 12.f, mono);                    orElse(g_fontTahomaBd12, g_fontBold);
     g_fontChillware13 = sys("verdanab.ttf", 13.f, flagged(ImGuiFreeTypeBuilderFlags_NoHinting)); orElse(g_fontChillware13, g_fontBold);
 
+    // menu style clarity v1 regular / lobotomy v1 pair -- same tahoma face, menu-only sizes
+    g_fontMenuTahoma11 = sys("tahoma.ttf", 11.f, mono); orElse(g_fontMenuTahoma11, g_fontReg);
+    g_fontMenuTahoma9  = sys("tahoma.ttf", 9.f, flagged(ImGuiFreeTypeBuilderFlags_Monochrome | ImGuiFreeTypeBuilderFlags_MonoHinting | ImGuiFreeTypeBuilderFlags_Bitmap), cyr);
+    orElse(g_fontMenuTahoma9, g_fontReg);
+    g_fontMenuTahomaBd9 = sys("tahomabd.ttf", 9.f, flagged(ImGuiFreeTypeBuilderFlags_Monochrome | ImGuiFreeTypeBuilderFlags_MonoHinting | ImGuiFreeTypeBuilderFlags_Bitmap), cyr);
+    orElse(g_fontMenuTahomaBd9, g_fontBold);
+
     g_fontLobotomy13     = donor(sf_pro_display_semibold, sizeof(sf_pro_display_semibold), 13.f, ImGuiFreeTypeBuilderFlags_Bitmap);
     g_fontLobotomyBold13 = donor(sf_pro_display_bold, sizeof(sf_pro_display_bold), 13.f, ImGuiFreeTypeBuilderFlags_Bitmap);
     g_fontKamibebra13     = donor(rubik_regular, sizeof(rubik_regular), 13.f, ImGuiFreeTypeBuilderFlags_Bitmap);

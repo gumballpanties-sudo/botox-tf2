@@ -53,7 +53,9 @@ ImFont* g_fontCucumberTahoma14 = nullptr, *g_fontCucumberVerdana14 = nullptr;
 ImFont* g_fontHowewewareMinecraft14 = nullptr, *g_fontGamesenseSfBold15 = nullptr;
 ImFont* g_fontHeroinArialBd16 = nullptr, *g_fontHeroinProggy13 = nullptr, *g_fontHeroinTahoma16 = nullptr;
 ImFont* g_fontHeroinTahomaBd14 = nullptr, *g_fontHeroinTahoma14 = nullptr;
+ImFont* g_fontMenuTahoma11 = nullptr, *g_fontMenuTahoma9 = nullptr, *g_fontMenuTahomaBd9 = nullptr;
 
+int   g_menuStyle      = 0;
 float g_accentColor[4] = { 160.f / 255.f, 170.f / 255.f, 220.f / 255.f, 1.f };   // matches render.cpp's old fixed kAccent
 float g_dpiScale       = 100.f;
 bool  g_dpiScalePanels = false;
@@ -923,6 +925,10 @@ char  g_chamsTeamOccludedCfg[160] = "";
 char  g_chamsWeaponCfg[160] = "";
 char  g_chamsArmsCfg[160] = "";
 char  g_chamsSleeveCfg[160] = "";
+char  g_chamsUberCfg[160] = "";        // enemy: replaces the visible list while ubered/bonked
+char  g_chamsCloakCfg[160] = "";       // enemy: replaces the visible list while cloaked
+char  g_chamsTeamUberCfg[160] = "";    // team: same pair for teammates
+char  g_chamsTeamCloakCfg[160] = "";
 
 float g_glowVisColor[4]        = { 224 / 255.f, 175 / 255.f, 86 / 255.f, 153 / 255.f };
 float g_glowInvisColor[4]      = { 114 / 255.f, 155 / 255.f, 221 / 255.f, 153 / 255.f };

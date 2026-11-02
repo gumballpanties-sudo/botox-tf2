@@ -78,10 +78,10 @@ static void PopupChrome(const char* title, const char* title_end, ImGuiID anim_i
     const ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
     const float rnd = ImGui::GetStyle().WindowRounding - 2.f;
     ImGui::PushClipRect(p, ImVec2(p.x + sz.x, p.y + 20.f), false);
-    dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + 20.f), kBandBg, rnd, ImDrawFlags_RoundCornersTop);
+    dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + 20.f), kBandBg(), rnd, ImDrawFlags_RoundCornersTop);
     ImGui::PopClipRect();
     ImGui::PushClipRect(p, ImVec2(p.x + sz.x, p.y + sz.y), false);
-    dl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y), kTabBorder, rnd);
+    dl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y), kTabBorder(), rnd);
     auto anim = ImAnimationHelper(anim_id, ImGui::GetIO().DeltaTime);
     anim.Update(ImGui::IsMouseHoveringRect(p, ImVec2(p.x + sz.x, p.y + sz.y)) ? 3.f : -2.f, 1.f, 0.5f, 1.f);
     ImGui::PopClipRect();
@@ -190,7 +190,7 @@ bool ImGui::Keybind(const char* label, int* key, int* mode, bool has_style)
     if (BeginPopup(label, ImGuiWindowFlags_NoMove))
     {
         ImGuiWindow* pw = GetCurrentWindow();
-        pw->DrawList->AddRect(pw->Pos, ImVec2(pw->Pos.x + pw->Size.x, pw->Pos.y + pw->Size.y), kTabBorder, GetStyle().WindowRounding);
+        pw->DrawList->AddRect(pw->Pos, ImVec2(pw->Pos.x + pw->Size.x, pw->Pos.y + pw->Size.y), kTabBorder(), GetStyle().WindowRounding);
         if (Selectable("always on", *mode == 0, ImGuiSelectableFlags_DontClosePopups)) *mode = 0;
         if (Selectable("hold",      *mode == 1, ImGuiSelectableFlags_DontClosePopups)) *mode = 1;
         if (Selectable("toggle",    *mode == 2, ImGuiSelectableFlags_DontClosePopups)) *mode = 2;
@@ -3179,6 +3179,79 @@ static void ConfigPanel(const bool visuals)
     });
 }
 
+// ==== settings > menu: style dropdown ============================================
+// Look only -- colours, borders, rounding, fonts. Never layout, never animation. Picking a
+// style also sets the accent to that style's donor accent (accent alpha 0 = keep the user's).
+struct MenuStyleRow
+{
+    const char* name;
+    ImU32 window, band, child, frame, outline, windowOutline, popup, text, textDim;
+    float windowRounding, frameRounding, popupRounding;
+    ImFont* (*regFont)();    // nullptr = leave the chrome font alone (default style)
+    ImFont* (*boldFont)();
+    ImU32 accent;             // alpha 0 = keep the user's current accent
+};
+
+static const MenuStyleRow k_menuStyles[] = {
+    { "default", IM_COL32(10, 10, 10, 255), IM_COL32(25, 25, 25, 255), IM_COL32(15, 15, 15, 255), IM_COL32(25, 25, 25, 255),
+      IM_COL32(50, 50, 50, 100), IM_COL32(50, 50, 50, 255), IM_COL32(20, 20, 20, 255), IM_COL32(255, 255, 255, 255),
+      IM_COL32(128, 128, 128, 255), 5.f, 2.f, 3.f, nullptr, nullptr, IM_COL32(160, 170, 220, 255) },
+    { "delusional", IM_COL32(13, 13, 13, 255), IM_COL32(13, 13, 13, 255), IM_COL32(20, 20, 20, 153), IM_COL32(13, 13, 13, 255),
+      IM_COL32(26, 26, 26, 178), IM_COL32(26, 26, 26, 178), IM_COL32(20, 20, 20, 255), IM_COL32(255, 255, 255, 255),
+      IM_COL32(77, 77, 77, 217), 4.f, 2.f, 4.f, []() -> ImFont* { return g_fontTahoma12; }, []() -> ImFont* { return g_fontTahomaBd12; },
+      IM_COL32(245, 40, 40, 255) },
+    { "kamibebra", IM_COL32(13, 13, 13, 255), IM_COL32(16, 16, 16, 255), IM_COL32(13, 13, 13, 255), IM_COL32(16, 16, 16, 255),
+      IM_COL32(33, 33, 33, 255), IM_COL32(11, 11, 11, 255), IM_COL32(13, 13, 13, 255), IM_COL32(200, 200, 200, 255),
+      IM_COL32(150, 150, 150, 255), 6.f, 4.f, 6.f, []() -> ImFont* { return g_fontKamibebra13; }, []() -> ImFont* { return g_fontKamibebraBold13; },
+      IM_COL32(252, 194, 255, 255) },
+    { "clarity v1", IM_COL32(40, 40, 40, 235), IM_COL32(45, 45, 45, 255), IM_COL32(40, 40, 40, 255), IM_COL32(35, 35, 35, 255),
+      IM_COL32(65, 65, 65, 255), IM_COL32(25, 25, 25, 255), IM_COL32(45, 45, 45, 255), IM_COL32(181, 181, 181, 255),
+      IM_COL32(120, 120, 120, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontMenuTahoma11; }, []() -> ImFont* { return g_fontAirplaneRows; },
+      IM_COL32(208, 128, 255, 255) },
+    // clarity v2 accent alpha 0 = keep the user's accent
+    { "clarity v2", IM_COL32(23, 23, 23, 255), IM_COL32(28, 28, 28, 255), IM_COL32(23, 23, 23, 255), IM_COL32(28, 28, 28, 255),
+      IM_COL32(55, 55, 55, 255), IM_COL32(7, 7, 7, 255), IM_COL32(23, 23, 23, 255), IM_COL32(255, 255, 255, 255),
+      IM_COL32(100, 100, 100, 255), 5.f, 5.f, 5.f, []() -> ImFont* { return g_fontClarityInter; }, []() -> ImFont* { return g_fontInterBold15; },
+      IM_COL32(0, 0, 0, 0) },
+    { "lobotomy v1", IM_COL32(15, 15, 15, 255), IM_COL32(13, 13, 13, 255), IM_COL32(15, 15, 15, 255), IM_COL32(13, 13, 13, 255),
+      IM_COL32(30, 30, 30, 255), IM_COL32(30, 30, 30, 255), IM_COL32(15, 15, 15, 255), IM_COL32(255, 255, 255, 255),
+      IM_COL32(200, 200, 200, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontMenuTahoma9; }, []() -> ImFont* { return g_fontMenuTahomaBd9; },
+      IM_COL32(87, 87, 87, 255) },
+    { "lobotomy v2", IM_COL32(7, 7, 7, 255), IM_COL32(10, 10, 10, 255), IM_COL32(10, 10, 10, 255), IM_COL32(25, 25, 25, 255),
+      IM_COL32(25, 25, 25, 255), IM_COL32(25, 25, 25, 255), IM_COL32(7, 7, 7, 255), IM_COL32(255, 255, 255, 255),
+      IM_COL32(180, 180, 180, 255), 6.f, 2.f, 4.f, []() -> ImFont* { return g_fontLobotomy13; }, []() -> ImFont* { return g_fontLobotomyBold13; },
+      IM_COL32(129, 99, 251, 255) },
+    { "dna", IM_COL32(9, 9, 9, 240), IM_COL32(9, 9, 9, 240), IM_COL32(20, 20, 20, 153), IM_COL32(13, 13, 13, 255),
+      IM_COL32(26, 26, 26, 178), IM_COL32(255, 255, 255, 8), IM_COL32(20, 20, 20, 255), IM_COL32(242, 242, 242, 255),
+      IM_COL32(77, 77, 77, 217), 4.f, 2.f, 4.f, []() -> ImFont* { return g_fontDnaMontserrat15; }, []() -> ImFont* { return g_fontDnaPtRootBold15; },
+      IM_COL32(255, 165, 255, 255) },
+    { "interwebz", IM_COL32(50, 50, 50, 255), IM_COL32(35, 35, 35, 255), IM_COL32(50, 50, 50, 255), IM_COL32(60, 60, 60, 255),
+      IM_COL32(0, 0, 0, 255), IM_COL32(0, 0, 0, 255), IM_COL32(35, 35, 35, 255), IM_COL32(255, 255, 255, 255),
+      IM_COL32(140, 140, 140, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontInterwebzCalibri; }, []() -> ImFont* { return g_fontInterwebzCalibri; },
+      IM_COL32(140, 0, 0, 255) },
+};
+static const int k_menuStyleCount = (int)(sizeof(k_menuStyles) / sizeof(k_menuStyles[0]));
+
+static void MenuStyleApply(const MenuStyleRow& s)
+{
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.Colors[ImGuiCol_WindowBg]         = ImGui::ColorConvertU32ToFloat4(s.window);
+    style.Colors[ImGuiCol_ChildBg]          = ImGui::ColorConvertU32ToFloat4(s.child);
+    style.Colors[ImGuiCol_PopupBg]          = ImGui::ColorConvertU32ToFloat4(s.popup);
+    style.Colors[ImGuiCol_Text]             = ImGui::ColorConvertU32ToFloat4(s.text);
+    style.Colors[ImGuiCol_TextDisabled]     = ImGui::ColorConvertU32ToFloat4(s.textDim);
+    style.Colors[ImGuiCol_MenuBand]         = ImGui::ColorConvertU32ToFloat4(s.band);
+    style.Colors[ImGuiCol_MenuFrame]        = ImGui::ColorConvertU32ToFloat4(s.frame);
+    style.Colors[ImGuiCol_MenuOutline]      = ImGui::ColorConvertU32ToFloat4(s.outline);
+    style.Colors[ImGuiCol_MenuWindowOutline]= ImGui::ColorConvertU32ToFloat4(s.windowOutline);
+    style.WindowRounding = s.windowRounding;
+    style.FrameRounding  = s.frameRounding;
+    style.PopupRounding  = s.popupRounding;
+    // null = font not loaded (system calibri missing): keep the verdana pair, chrome calls CalcTextSize on it
+    if (ImFont* f = s.regFont ? s.regFont() : nullptr)   g_menuReg  = f;
+    if (ImFont* f = s.boldFont ? s.boldFont() : nullptr) g_menuBold = f;
+}
+
 // botox tab_settings: col1 "config" + "system", col2 "visuals config" + "menu". Left out, no
 // TF2 counterpart: "botox network" (no TF2 server).
 static void Tab_Settings()
@@ -3216,6 +3289,15 @@ static void Tab_Settings()
 
     if (menu_group_begin("menu"))
     {
+        if (g_menuStyle < 0 || g_menuStyle >= k_menuStyleCount) g_menuStyle = 0;
+        const auto styleName = [](void*, int index, const char** out) { *out = k_menuStyles[index].name; return true; };
+        if (ImGui::Combo("style", &g_menuStyle, styleName, nullptr, k_menuStyleCount) &&
+            ((k_menuStyles[g_menuStyle].accent >> IM_COL32_A_SHIFT) & 0xFF) > 0)
+        {
+            const ImVec4 accent = ImGui::ColorConvertU32ToFloat4(k_menuStyles[g_menuStyle].accent);
+            g_accentColor[0] = accent.x; g_accentColor[1] = accent.y; g_accentColor[2] = accent.z; g_accentColor[3] = accent.w;
+        }
+
         ImGui::ColorRow("accent color##accent color", g_accentColor, kPickerNoAlpha);
 
         // botox menu_tab_settings: edits a copy, commits while not held -- the whole menu
@@ -3468,6 +3550,28 @@ void RenderMenu()
 
     if (!g_showMenu && s_animProgress <= 0.f) return;
 
+    // menu style: colours/borders/rounding/fonts only. Restore once this window is built --
+    // HUD panels elsewhere read GetStyle() (rounding, colours) and must never see the swap.
+    struct MenuStyleScope
+    {
+        ImGuiStyle m_saved     = ImGui::GetStyle();
+        ImFont*    m_savedReg  = g_menuReg;
+        ImFont*    m_savedBold = g_menuBold;
+        MenuStyleScope()
+        {
+            if (g_menuStyle < 0 || g_menuStyle >= k_menuStyleCount) g_menuStyle = 0;
+            MenuStyleApply(k_menuStyles[g_menuStyle]);
+            ImGui::PushFont(g_menuReg);
+        }
+        ~MenuStyleScope()
+        {
+            ImGui::PopFont();
+            ImGui::GetStyle() = m_saved;
+            g_menuReg  = m_savedReg;
+            g_menuBold = m_savedBold;
+        }
+    } styleScope;
+
     // the main viewport, not io.DisplaySize: windows lay out in logical (dpi) px, io.DisplaySize
     // is the screen outside NewFrame (render/dpi.cpp)
     const ImVec2 view = ImGui::GetMainViewport()->Size;
@@ -3496,16 +3600,16 @@ void RenderMenu()
     // Bands + border each get botox's own PushClipRect(.., false): the window's clip rect is
     // inset WindowPadding.x/2 = 4px per side, which cut the bands and the side border short.
     dl->PushClipRect(wp, ImVec2(wp.x + wz.x, wp.y + mf::kHeaderH), false);
-    dl->AddRectFilled(wp, ImVec2(wp.x + wz.x, wp.y + mf::kHeaderH), kBandBg, rnd, ImDrawFlags_RoundCornersTop);
+    dl->AddRectFilled(wp, ImVec2(wp.x + wz.x, wp.y + mf::kHeaderH), kBandBg(), rnd, ImDrawFlags_RoundCornersTop);
     dl->PopClipRect();
     dl->PushClipRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), false);
-    dl->AddRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), kWindowBorder, rnd);
+    dl->AddRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), kWindowBorder(), rnd);
     dl->PopClipRect();
     RenderFadedGradientLine(dl, ImVec2(wp.x, wp.y + mf::kHeaderH - 1.f), ImVec2(wz.x, 1.f), ImColor(Accent()));
 
     const float botY = wp.y + wz.y - 12.f;   // menu_bottom_band_height
     dl->PushClipRect(ImVec2(wp.x, botY), ImVec2(wp.x + wz.x, wp.y + wz.y), false);
-    dl->AddRectFilled(ImVec2(wp.x, botY), ImVec2(wp.x + wz.x, wp.y + wz.y), kBandBg, rnd, ImDrawFlags_RoundCornersBottom);
+    dl->AddRectFilled(ImVec2(wp.x, botY), ImVec2(wp.x + wz.x, wp.y + wz.y), kBandBg(), rnd, ImDrawFlags_RoundCornersBottom);
     dl->PopClipRect();
     RenderFadedGradientLine(dl, ImVec2(wp.x, botY), ImVec2(wz.x, 1.f), ImColor(Accent()));
 

@@ -90,7 +90,13 @@ extern ImFont* g_fontHeroinTahoma16;     // tahoma 16  Monochrome|MonoHinting (h
 extern ImFont* g_fontHeroinTahomaBd14;   // tahoma bd 14  Monochrome|MonoHinting (heroin interwebz rows)
 extern ImFont* g_fontHeroinTahoma14;     // tahoma 14  Monochrome|MonoHinting (heroin legacy list)
 
+// -- Menu style (settings > menu "style" dropdown) donor fonts not already covered above
+extern ImFont* g_fontMenuTahoma11;       // tahoma 11  Monochrome|MonoHinting (clarity v1 regular)
+extern ImFont* g_fontMenuTahoma9;        // tahoma 9   Monochrome|MonoHinting|Bitmap, cyrillic (lobotomy v1 regular)
+extern ImFont* g_fontMenuTahomaBd9;      // tahoma bd 9  Monochrome|MonoHinting|Bitmap, cyrillic (lobotomy v1 bold)
+
 // -- Menu settings tab (stage 4: appearance + safety) ------------------------------
+extern int   g_menuStyle;      // settings > menu "style": index into menu.cpp's k_menuStyles
 extern float g_accentColor[4]; // live ImGuiCol_Accent, pushed every frame in RenderMenu
 extern float g_dpiScale;       // botox m_dpi_scale: percent, 25-200 (render/dpi.cpp)
 extern bool  g_dpiScalePanels; // botox m_dpi_scale_panels: hud panels grow with it too
@@ -999,6 +1005,10 @@ extern char  g_chamsOccludedCfg[160];
 extern char  g_chamsSoundCfg[160];
 extern char  g_chamsTeamVisibleCfg[160];
 extern char  g_chamsTeamOccludedCfg[160];
+extern char  g_chamsUberCfg[160];
+extern char  g_chamsCloakCfg[160];
+extern char  g_chamsTeamUberCfg[160];
+extern char  g_chamsTeamCloakCfg[160];
 extern char  g_chamsWeaponCfg[160];
 extern char  g_chamsArmsCfg[160];
 extern char  g_chamsSleeveCfg[160];

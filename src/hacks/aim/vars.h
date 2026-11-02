@@ -428,6 +428,9 @@ namespace Vars
 			// longer do that quietly -- a target it refuses is counted and printed as why=fov in
 			// the debug log, with a one-off line the first time it refuses somebody in reach.
 			CVar(BackstabFOV, "Backstab FOV", 180.f, SLIDER_CLAMP | SLIDER_PRECISION, 0.f, 180.f);
+			// dih-bs18: when the default rewind cannot stab, ask the server for an older tick (his box
+			// where he was, his yaw still live). A feature switch, not a tuning knob.
+			CVar(BackstabBacktrack, "Backstab backtrack", true);
 			// dih-bs13: BackstabAutoShoot DELETED. Off meant the feature never pressed anything,
 			// and in Legit mode (which has no view assist at all) that is the whole feature -- the
 			// cfg was found on that value too. Auto backstab IS the auto swing. Its key goes with

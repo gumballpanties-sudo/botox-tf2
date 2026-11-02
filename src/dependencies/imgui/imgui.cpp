@@ -3196,6 +3196,11 @@ const char* ImGui::GetStyleColorName(ImGuiCol idx)
     case ImGuiCol_NavWindowingHighlight: return "NavWindowingHighlight";
     case ImGuiCol_NavWindowingDimBg: return "NavWindowingDimBg";
     case ImGuiCol_ModalWindowDimBg: return "ModalWindowDimBg";
+    case ImGuiCol_Accent: return "Accent";
+    case ImGuiCol_MenuBand: return "MenuBand";
+    case ImGuiCol_MenuFrame: return "MenuFrame";
+    case ImGuiCol_MenuOutline: return "MenuOutline";
+    case ImGuiCol_MenuWindowOutline: return "MenuWindowOutline";
     }
     IM_ASSERT(0);
     return "Unknown";

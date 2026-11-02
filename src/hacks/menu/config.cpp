@@ -136,6 +136,7 @@ static const CfgEntry kEntries[] = {
     { "vmLowFpsRate",     CfgEntry::FLOAT,  &g_vmLowFpsRate, 0 },
 
     { "debugLog",         CfgEntry::BOOL,   &g_debugLogEnable, 0 },
+    { "menuStyle",        CfgEntry::INT,    &g_menuStyle, 0 },
     { "accentColor",      CfgEntry::FLOAT4, g_accentColor, 0 },
     { "dpiScale",         CfgEntry::FLOAT,  &g_dpiScale, 0 },
     { "dpiScalePanels",   CfgEntry::BOOL,   &g_dpiScalePanels, 0 },
@@ -828,6 +829,10 @@ static const CfgEntry kEntries[] = {
     { "chamsWeapon",            CfgEntry::STR,    g_chamsWeaponCfg, sizeof(g_chamsWeaponCfg) },
     { "chamsArms",              CfgEntry::STR,    g_chamsArmsCfg, sizeof(g_chamsArmsCfg) },
     { "chamsSleeve",            CfgEntry::STR,    g_chamsSleeveCfg, sizeof(g_chamsSleeveCfg) },
+    { "chamsUber",              CfgEntry::STR,    g_chamsUberCfg, sizeof(g_chamsUberCfg) },
+    { "chamsCloak",             CfgEntry::STR,    g_chamsCloakCfg, sizeof(g_chamsCloakCfg) },
+    { "chamsTeamUber",          CfgEntry::STR,    g_chamsTeamUberCfg, sizeof(g_chamsTeamUberCfg) },
+    { "chamsTeamCloak",         CfgEntry::STR,    g_chamsTeamCloakCfg, sizeof(g_chamsTeamCloakCfg) },
     { "glowVisColor",           CfgEntry::FLOAT4, g_glowVisColor, 0 },
     { "glowInvisColor",         CfgEntry::FLOAT4, g_glowInvisColor, 0 },
     { "glowLegacy",             CfgEntry::BOOL,   &g_glowLegacy, 0 },

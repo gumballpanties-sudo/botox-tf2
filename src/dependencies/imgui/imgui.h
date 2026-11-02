@@ -1617,6 +1617,10 @@ enum ImGuiCol_
     ImGuiCol_NavWindowingDimBg,     // Darken/colorize entire screen behind the CTRL+TAB window list, when active
     ImGuiCol_ModalWindowDimBg,      // Darken/colorize entire screen behind a modal window, when one is active
     ImGuiCol_Accent,                // botox: the one user-configurable accent, pushed every frame (render.cpp)
+    ImGuiCol_MenuBand,              // botox menu style: title/bottom bands, tab boxes, group+popup header strips
+    ImGuiCol_MenuFrame,             // botox menu style: widget fill (checkbox/slider/combo/input)
+    ImGuiCol_MenuOutline,           // botox menu style: widget/group/tab/popup 1px border
+    ImGuiCol_MenuWindowOutline,     // botox menu style: outer window ring
     ImGuiCol_COUNT
 };
 

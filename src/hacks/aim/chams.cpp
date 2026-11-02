@@ -47,6 +47,10 @@ extern char  g_chamsTeamOccludedCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsWeaponCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsArmsCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsSleeveCfg[ChamsLayers::kCfgLen];
+extern char  g_chamsUberCfg[ChamsLayers::kCfgLen];        // TF2 extra: enemy visible list while ubered / bonked
+extern char  g_chamsCloakCfg[ChamsLayers::kCfgLen];       // TF2 extra: enemy visible list while cloaked
+extern char  g_chamsTeamUberCfg[ChamsLayers::kCfgLen];    // same pair, teammates
+extern char  g_chamsTeamCloakCfg[ChamsLayers::kCfgLen];
 
 extern bool  g_espEnable;                // botox m_players: stencil / inner / full-res glow need it
 extern bool  g_glowEnable;               // botox "player glow"
@@ -330,6 +334,7 @@ namespace
 	struct DrawCtx
 	{
 		ChamsDrawFn fn; void* rcx; const void* pState; const void* pInfo; const void* pBones;
+		IMaterial* pOrigMat; int iOrigType;   // the override the engine had up (uber material), "original" keeps it
 		void Draw(const void* pOtherBones = nullptr) const { fn(rcx, pState, pInfo, pOtherBones ? pOtherBones : pBones); }
 	};
 
@@ -345,7 +350,7 @@ namespace
 			if (index == ChamsLayers::Original)
 			{
 				SetModulation(c, alphaScale);
-				ForceMaterial(nullptr);
+				ForceMaterial(ctx.pOrigMat, ctx.iOrigType);
 				if (c[3] * alphaScale > 0.f) { ctx.Draw(pBones); bDrew = true; }
 				continue;
 			}
@@ -411,7 +416,12 @@ namespace
 	};
 	CfgList s_visible{ g_chamsVisibleCfg }, s_occluded{ g_chamsOccludedCfg },
 	        s_sound{ g_chamsSoundCfg }, s_teamVisible{ g_chamsTeamVisibleCfg }, s_teamOccluded{ g_chamsTeamOccludedCfg },
-	        s_weapon{ g_chamsWeaponCfg }, s_arms{ g_chamsArmsCfg }, s_sleeve{ g_chamsSleeveCfg };
+	        s_weapon{ g_chamsWeaponCfg }, s_arms{ g_chamsArmsCfg }, s_sleeve{ g_chamsSleeveCfg },
+	        s_uber{ g_chamsUberCfg }, s_cloak{ g_chamsCloakCfg },
+	        s_teamUber{ g_chamsTeamUberCfg }, s_teamCloak{ g_chamsTeamCloakCfg };
+
+	// set while Chams_RenderCloaked force-draws a fully cloaked spy (m_flInvisibility zeroed for the draw)
+	CBaseEntity* s_cloakForced = nullptr;
 
 	// ---- sound chams stamps (botox sound_esp m_last_sound / m_origin) ----
 	float s_soundMs[65] = {};
@@ -453,13 +463,16 @@ namespace
 	}
 
 	// ---- entity classification ----
+	// Amalgam CBaseEntity::IsWearable set (+ CTFWearableItem, CEconWearable): canteen and the
+	// engineer PDA expansions are wearables too
 	bool IsWearableClass(ETFClassID id)
 	{
 		switch (id)
 		{
 		case ETFClassID::CTFWearable: case ETFClassID::CTFWearableItem: case ETFClassID::CTFWearableDemoShield:
 		case ETFClassID::CTFWearableRazorback: case ETFClassID::CTFWearableRobotArm: case ETFClassID::CTFWearableLevelableItem:
-		case ETFClassID::CTFWearableCampaignItem:
+		case ETFClassID::CTFWearableCampaignItem: case ETFClassID::CEconWearable: case ETFClassID::CTFPowerupBottle:
+		case ETFClassID::CTFWeaponPDAExpansion_Dispenser: case ETFClassID::CTFWeaponPDAExpansion_Teleporter:
 			return true;
 		default:
 			return false;
@@ -488,7 +501,7 @@ namespace
 		return pOwnerEnt->IsPlayer() ? pOwnerEnt->As<CTFPlayer>() : nullptr;
 	}
 
-	bool s_loggedDraw = false;
+	bool s_loggedDraw = false, s_loggedAttach = false, s_loggedCloak = false;
 }
 
 void Chams_ReleaseMaterials()
@@ -540,6 +553,8 @@ bool Chams_AnyActive()
 	if (g_glowEnable) return true;
 	if (g_chamsEnable && (s_visible.Get().used || s_occluded.Get().used || s_sound.Get().used)) return true;
 	if (g_chamsTeam && (s_teamVisible.Get().used || s_teamOccluded.Get().used)) return true;
+	if (g_chamsEnable && (s_uber.Get().used || s_cloak.Get().used)) return true;
+	if (g_chamsTeam && (s_teamUber.Get().used || s_teamCloak.Get().used)) return true;
 	if (g_chamsLocalEnable && (s_weapon.Get().used || s_arms.Get().used || s_sleeve.Get().used)) return true;
 	return false;
 }
@@ -552,17 +567,23 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 	if (*reinterpret_cast<const int*>(reinterpret_cast<const uint8_t*>(pInfo) + kInfoFlags) & kDepthPassFlags)
 		return false;
 
-	// someone else's override is live (TF2's own glow outline pass, a depth pass): leave it alone
+	// someone else's override is live (TF2's own glow outline pass, a depth pass): leave it alone.
+	// Except TF2's uber material: an ubered player's hats + gun draw under it (tf_item_wearable.cpp /
+	// tf_weaponbase.cpp InternalDrawModel), so without this they never got chams. Restore puts it back.
 	IMaterial* pOrigMat = nullptr; int iOrigType = 0;
 	VCallAt<void>(g_modelRender, kMdlGetMaterialOverride, &pOrigMat, &iOrigType);
 	if (pOrigMat)
-		return false;
+	{
+		const char* sOrig = pOrigMat->GetName();
+		if (!sOrig || !strstr(sOrig, "invulnfx"))
+			return false;
+	}
 
 	auto pLocal = H::Entities.GetLocal();
 	if (!pLocal)
 		return false;
 
-	const DrawCtx ctx{ fnOriginal, rcx, pState, pInfo, pBones };
+	const DrawCtx ctx{ fnOriginal, rcx, pState, pInfo, pBones, pOrigMat, iOrigType };
 
 	float aOrigColor[3] = { 1.f, 1.f, 1.f };
 	I::RenderView->GetColorModulation(aOrigColor);
@@ -627,8 +648,21 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 	if (bRagdoll && !bEnemy)
 		return false;   // botox: enemy ragdolls only
 
+	// TF2 extra: ubered / cloaked swap the visible list. pPlayer is the owner for hats + the held
+	// gun, so they follow the body. Cloaked wins (it changes what you see more than uber does).
+	const bool bForced = pEnt == s_cloakForced;   // Chams_RenderCloaked: invisibility zeroed for this draw
+	const float flInvis = !pPlayer ? 0.f : bForced ? 1.f : pPlayer->GetEffectiveInvisibilityLevel();
+	const ChamsLayers::List& lCloak = bEnemy ? s_cloak.Get() : s_teamCloak.Get();
+	const ChamsLayers::List& lUber  = bEnemy ? s_uber.Get()  : s_teamUber.Get();
+	const ChamsLayers::List* pStateList = flInvis > 0.f && lCloak.used ? &lCloak
+		: pPlayer && pPlayer->IsInvulnerable() && lUber.used ? &lUber : nullptr;
+	// fully cloaked, no cloaked list: the engine hides the body (c_tf_player.cpp DrawModel), and chams
+	// on the hats/gun would float them in the air -- let the engine's own invisible draw happen
+	if (flInvis >= 1.f && !pStateList)
+		return false;
+
 	const bool bChams = bEnemy ? g_chamsEnable : g_chamsTeam;
-	const ChamsLayers::List& lVisible  = bEnemy ? s_visible.Get()  : s_teamVisible.Get();
+	const ChamsLayers::List& lVisible  = pStateList ? *pStateList : bEnemy ? s_visible.Get() : s_teamVisible.Get();
 	const ChamsLayers::List& lOccluded = bEnemy ? s_occluded.Get() : s_teamOccluded.Get();
 	const bool bLivePlayer = pPlayer && !bAttachment;
 	const float flSound = bChams && bEnemy && bLivePlayer && s_sound.Get().used ? SoundAlphaFor(entIdx, pLocal->m_vecOrigin()) : 0.f;
@@ -636,7 +670,7 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 	const bool bDrawOccluded = bChams && lOccluded.used;
 
 	if (!bDrawVisible && !bDrawOccluded && flSound <= 0.f)
-		return false;
+		return bForced;   // forced: true = draw nothing, false would let the hook reveal the spy
 
 	// botox order: sound, occluded (all ignorez first), then the model itself
 	if (flSound > 0.f)  DrawLayers(s_sound.Get(), true, flSound, ctx);
@@ -645,7 +679,7 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 	bool bDrewModel = false;
 	if (bDrawVisible)
 		bDrewModel = DrawLayers(lVisible, false, 1.f, ctx);
-	if (!bDrewModel)
+	if (!bDrewModel && !bForced)   // forced: the engine would never have drawn this body
 	{
 		Restore();
 		ctx.Draw();
@@ -653,6 +687,16 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 
 	Restore();
 
+	if (bAttachment && !s_loggedAttach)
+	{
+		s_loggedAttach = true;
+		DebugLog("chams: first hat/weapon chams draw (ent %d, %s, owner %d)", entIdx, modelName ? modelName : "?", pPlayer->entindex());
+	}
+	if (pStateList && !s_loggedCloak)
+	{
+		s_loggedCloak = true;
+		DebugLog("chams: first %s chams draw (ent %d, forced %d)", pStateList == &lCloak ? "cloaked" : "ubered", entIdx, (int)bForced);
+	}
 	if (!s_loggedDraw)
 	{
 		s_loggedDraw = true;
@@ -660,6 +704,54 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 			lVisible.used, lOccluded.used);
 	}
 	return true;
+}
+
+namespace
+{
+	// no C++ unwinding inside: __try (C2712)
+	__declspec(noinline) void DrawCloakedSEH(CTFPlayer* pPlayer)
+	{
+		const float flInvis = pPlayer->m_flInvisibility();
+		__try
+		{
+			s_cloakForced = pPlayer;
+			pPlayer->m_flInvisibility() = 0.f;
+			pPlayer->DrawModel(0x1 /*STUDIO_RENDER*/);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			DebugLog("chams: exception in the cloaked draw (ent %d)", pPlayer->entindex());
+		}
+		pPlayer->m_flInvisibility() = flInvis;
+		s_cloakForced = nullptr;
+	}
+}
+
+// Fully cloaked spies never reach DrawModelExecute (c_tf_player.cpp C_TFPlayer::DrawModel returns 0
+// at invisibility >= 1), so the cloaked list draws them here. Amalgam Glow::DrawModel's trick:
+// invisibility zeroed for one DrawModel, which comes back through h_DrawModelExecute ->
+// Chams_DrawModel (s_cloakForced). Partly cloaked spies are drawn by the engine and swap lists there.
+void Chams_RenderCloaked()
+{
+	const bool bEnemyOn = g_chamsEnable && s_cloak.Get().used, bTeamOn = g_chamsTeam && s_teamCloak.Get().used;
+	if (!bEnemyOn && !bTeamOn)
+		return;
+	if (!Aim_Active() || !g_modelRender || !g_matSystem || !I::RenderView || !I::ClientEntityList)
+		return;
+	auto pLocal = H::Entities.GetLocal();
+	if (!pLocal)
+		return;
+	for (auto pEntity : H::Entities.GetGroup(EntityEnum::PlayerAll))
+	{
+		auto pPlayer = pEntity->As<CTFPlayer>();
+		if (!pPlayer || pPlayer == pLocal || pPlayer->IsDormant() || !pPlayer->IsAlive() || !pPlayer->ShouldDraw())
+			continue;
+		if (!(pPlayer->m_iTeamNum() != pLocal->m_iTeamNum() ? bEnemyOn : bTeamOn))   // that team's own cloaked list
+			continue;
+		if (pPlayer->GetEffectiveInvisibilityLevel() < 1.f || !SDK::IsOnScreen(pPlayer, false))
+			continue;
+		DrawCloakedSEH(pPlayer);
+	}
 }
 
 // ==== player glow ====================================================================

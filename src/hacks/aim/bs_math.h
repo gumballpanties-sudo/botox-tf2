@@ -707,6 +707,38 @@ namespace BsMath
 		return floor + 0.5f * speed * extrap + 1500.f * extrap * extrap;
 	}
 
+	// ---- THE REWIND WINDOW (dih-bs18, knife backtrack) ---------------------------------------------
+	// Lag compensation puts every player where OUR tick_count says (targettick = tick_count -
+	// lerpTicks), but his yaw stays LIVE. So asking for an older tick moves his box (reach, bearing)
+	// and nothing else -- the knife can stab where he was a few ticks ago. The server only takes the
+	// ask while (lagcomp.cpp:396-412)
+	//     |correct - (its tick - targettick)| <= 0.2 s,   correct = clamp(its outgoing latency + lerp)
+	// and past that rewinds to its own guess (tick - correct) -- the default box, the one we just
+	// judged and did not like. ServerTakesRewind is that test verbatim (the tests' ground truth).
+	constexpr float k_unlagWindow = 0.2f;
+	// Our side of it is an estimate: its tick is tDue (our tick + round trip) give or take jitter,
+	// and its latency is not quite ours. 3 ticks of the 13 the window has.
+	constexpr float k_btSafety = 0.045f;
+	constexpr int   k_btMax    = 12;
+
+	inline bool ServerTakesRewind(int cmdTick, int lerpTicks, int serverTick, float correct, float tick)
+	{
+		const int targettick = cmdTick - lerpTicks;
+		const float deltaTime = correct - float(serverTick - targettick) * tick;
+		return !(std::fabs(deltaTime) > k_unlagWindow);
+	}
+
+	// How many ticks back from the default rewind (tRewind0) the server will still take. Each tick
+	// back moves deltaTime down by one tick; 0 = only the default.
+	inline int RewindBackTicks(float tDue, float tRewind0, float correct, float tick, int maxBack = k_btMax)
+	{
+		const float delta0 = correct - (tDue - tRewind0);
+		const float room = delta0 + (k_unlagWindow - k_btSafety);
+		if (room <= 0.f)
+			return 0;
+		return std::min(maxBack, int(room / tick + 1e-4f));
+	}
+
 	// ---- when to swing ----------------------------------------------------------------------------
 	constexpr float k_pSure    = 0.90f;   // take it on the spot
 	constexpr float k_pTake    = 0.70f;   // take it unless the next tick is clearly better (a failed swing alerts him)
