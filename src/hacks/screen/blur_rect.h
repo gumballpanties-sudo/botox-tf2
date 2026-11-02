@@ -17,5 +17,9 @@ void BlurRect(ImDrawList* dl, ImVec2 min, ImVec2 max, float strength, float roun
 // alpha): the boot screen and the menu background blur fade in/out instead of popping.
 void BlurRectFade(ImDrawList* dl, ImVec2 min, ImVec2 max, float strength, float alpha);
 
+// A blur job's rect moved with the vertices around it (render/dpi.cpp panel scale): if cmd is a
+// blur callback, its rect becomes pivot + (rect - pivot) * scale. Any other cmd: untouched.
+void BlurRect_ScaleJob(const ImDrawCmd& cmd, ImVec2 pivot, float scale);
+
 void BlurRect_NewFrame();   // clears this frame's job slots -- call once, near Bloom_NewFrame
 void BlurRect_Destroy();    // device Reset: DEFAULT-pool scratch targets + shader are gone

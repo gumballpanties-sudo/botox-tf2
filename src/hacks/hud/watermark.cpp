@@ -2,6 +2,7 @@
 #include "watermark_styles.h"
 #include "gif_tex.h"
 #include "wm_pure.h"   // n_wm::GifPlace
+#include "../../render/dpi.h"   // botox stretch block per panel (dpi scale panels)
 #include "../../dependencies/data/kamibebra_gif_data.h"   // gif type original / shit (botox spectator_gifs)
 #include <algorithm>
 #include <cmath>
@@ -51,6 +52,7 @@ static void RenderWatermarkGif()
 void RenderWatermark()
 {
     g_wmBox = { };
-    Watermark_Draw();
-    RenderWatermarkGif();
+    // botox: every watermark style and the gif are their own stretch block
+    { DpiPanelScope block(ImGui::GetBackgroundDrawList()); Watermark_Draw(); }
+    { DpiPanelScope block(ImGui::GetBackgroundDrawList()); RenderWatermarkGif(); }
 }

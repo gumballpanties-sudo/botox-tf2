@@ -1,5 +1,6 @@
 #include "misc_overlays.h"
 #include "../movement/prediction.h"   // TickInterval
+#include "../../render/dpi.h"          // botox logger: queued stretch block (dpi scale panels)
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -187,6 +188,7 @@ static void RenderLogs(ImDrawList* dl)
         ++i;
     }
     if (s_logs.empty()) return;
+    DpiPanelScope block(dl);
 
     ImFont* bold = g_fontTahomaBd12 ? g_fontTahomaBd12 : ImGui::GetFont();
     ImFont* reg  = g_fontTahoma12 ? g_fontTahoma12 : ImGui::GetFont();

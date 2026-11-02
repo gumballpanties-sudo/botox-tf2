@@ -92,7 +92,8 @@ extern ImFont* g_fontHeroinTahoma14;     // tahoma 14  Monochrome|MonoHinting (h
 
 // -- Menu settings tab (stage 4: appearance + safety) ------------------------------
 extern float g_accentColor[4]; // live ImGuiCol_Accent, pushed every frame in RenderMenu
-extern float g_dpiScale;       // whole-menu scale (style.ScaleAllSizes + FontGlobalScale)
+extern float g_dpiScale;       // botox m_dpi_scale: percent, 25-200 (render/dpi.cpp)
+extern bool  g_dpiScalePanels; // botox m_dpi_scale_panels: hud panels grow with it too
 extern bool  g_safeMode;       // master gate for risky hooks -- config var only this pass
 
 // -- Watermark (simplified) --------------------------------------------------------
@@ -762,6 +763,7 @@ extern float g_psFinderBudget;     // ms of scan per cmd (def 6, 0.25-32). The c
 extern bool  g_psFinderStrict;     // pfstrict: keep only pins a real FALL catches + hull can reach
 extern bool  g_psFinderTb;         // also mark texturebug seams on the column (red rings)
 extern bool  g_psFinderNoProps;    // finder traces refuse props (static + prop_* ents)
+extern bool  g_psFinderLength;     // walk each found surf along its wall, draw how long it runs (heroin finder_length)
 extern bool  g_psMapLines;         // show whole-map scan lines -- survives the finder going off
 extern bool g_psAssist;    extern int g_psAssistKey;    extern int g_psAssistMode;
 extern int  g_psSetPointKey;       // save aimed finder point as assist target (edge press)
@@ -819,6 +821,8 @@ extern int   g_pcPlaceKey;         // pixel calculator: put the one pixel marker
 extern int   g_pcSolveKey;         // pixel calculator: combos from where you stand to it
 extern bool  g_pcShowMarker;       // draw the pixel marker in the world
 extern bool  g_pcShowPanel;        // draw its answer panel
+extern bool  g_pcBuildings;        // also answer from a building top under you (heroin building calculator)
+extern int   g_pcBuildMask;        // which ones: bit0 teleporter, bit1 dispenser, bit2 mini sentry, bit3 sentry
 
 // Practice (practice.inl): console commands on a server you host, sv_cheats 1. Nothing online.
 extern bool g_prInfAmmo;           // impulse 101 twice a second (ammo, metal, clips, meters)

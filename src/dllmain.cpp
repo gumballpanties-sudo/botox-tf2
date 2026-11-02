@@ -55,7 +55,8 @@ ImFont* g_fontHeroinArialBd16 = nullptr, *g_fontHeroinProggy13 = nullptr, *g_fon
 ImFont* g_fontHeroinTahomaBd14 = nullptr, *g_fontHeroinTahoma14 = nullptr;
 
 float g_accentColor[4] = { 160.f / 255.f, 170.f / 255.f, 220.f / 255.f, 1.f };   // matches render.cpp's old fixed kAccent
-float g_dpiScale       = 1.f;
+float g_dpiScale       = 100.f;
+bool  g_dpiScalePanels = false;
 bool  g_safeMode       = false;
 
 // -- Watermark -------------------------------------------------------------------
@@ -705,6 +706,7 @@ float g_psFinderMargin = 8.f;
 bool  g_psFinderStrict = true;  // pfstrict: drop teleport-only pins + spots sealed off (clip in front)
 bool  g_psFinderTb = true;      // run the texturebug seam pass too (the red rings)
 bool  g_psFinderNoProps = true; // props are not map geometry -- finder traces refuse them
+bool  g_psFinderLength = true;  // walk found surfs along the wall, draw their length
 bool  g_psMapLines = true;      // draw the whole-map scan's lines (own switch, not the finder's)
 float g_psFinderBudget = 16.f;  // ms per cmd the chunked finder scan may spend (;
                                 // raised 2 -> 16: the scan no longer shares the TB clock, so this
@@ -751,6 +753,8 @@ int  g_pcPlaceKey = 0;
 int  g_pcSolveKey = 0;
 bool g_pcShowMarker = true;
 bool g_pcShowPanel = true;
+bool g_pcBuildings = false;
+int  g_pcBuildMask = 15;
 
 // -- Practice (practice.inl) -- console commands on a local server, sv_cheats 1 ------
 bool g_prInfAmmo = false;

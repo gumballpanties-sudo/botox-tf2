@@ -7,6 +7,7 @@
 #include "kopuz.h"       // botox globals/media_player/kopuz.h, verbatim
 #include "media_file.h"  // botox globals/media_player/media_file.h, verbatim
 #include "../../dependencies/imgui/imgui_internal.h"   // GImGui->HoveredWindow: a menu window over the player eats the click
+#include "../../render/dpi.h"   // botox panel stretch block + panel_mouse (dpi scale panels)
 
 // botox csgo-sdk/globals/media_player/media_player.cpp on_update + run_command + main.cpp
 // media_player_thread, 1:1: playing SMTC session > playing kopuz > audible app (song file it has
@@ -1449,7 +1450,7 @@ void RenderMediaPlayer()
 
     // botox draw_lyrics: `rows` lines centred on the one playing, the rest fading out by distance,
     // scrolled + resized with a 10/s ease, in its own frame when the player has one
-    const auto drawLyrics = [&](ImDrawList* list, float edge, float playerW, bool boxed, int effect) {
+    const auto drawLyrics = [&](ImDrawList* list, float edge, float playerW, bool boxed, int effect, ImRect& bounds) {
         static std::vector<mpl::Line> lines{};
         static int generation = -1;
         static float scroll = 0.f, boxW = 0.f;
@@ -1486,6 +1487,7 @@ void RenderMediaPlayer()
         const float boxH = pad * 2.f + (float)shown * artistPx + (float)(shown - 1) * rowGap;
         const float top  = fromBottom ? edge - boxH : edge;
         const ImVec2 mn(leftOf(boxW), top), mx(mn.x + boxW, top + boxH);
+        bounds.Add(ImRect(mn, mx));
         if (boxed) Watermark_MediaFrame(list, mn, mx, frameStyle);
 
         list->PushClipRect(mn, mx, true);
@@ -1505,7 +1507,7 @@ void RenderMediaPlayer()
     };
 
     // prev / play-pause / next while the menu is open. drawn last: the hit test needs the whole
-    // block's bounds
+    // block's bounds, dpi panel scale pivots on them (same mapping as the spectator list drag)
     const mp::Track track   = CurrentTrack();
     const bool buttons      = g_showMenu;
     const std::string timeNow = g_mpTime ? TimeText(track) : std::string{};
@@ -1514,8 +1516,8 @@ void RenderMediaPlayer()
     const float buttonsW    = buttons ? cell * 3.f + cellGap * 2.f : 0.f;
     const ImU32 accent      = ImGui::GetColorU32(ImGuiCol_Accent);
 
-    const auto drawButtons = [&](ImDrawList* list, float x, float midY, int effect) {
-        const ImVec2 at = io.MousePos;
+    const auto drawButtons = [&](ImDrawList* list, float x, float midY, int effect, const ImRect& bounds) {
+        const ImVec2 at = Dpi_PanelMouse(bounds.Min, bounds.GetSize());
         const bool live  = !GImGui->HoveredWindow;   // a menu window over the player eats the click
         const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         const ImU32 hoverColor = look.title != look.artist ? look.title : accent;
@@ -1549,6 +1551,7 @@ void RenderMediaPlayer()
     };
 
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    DpiPanelScope block(dl);   // botox begin_stretch_block: the player is one hud panel
 
     if (g_mpSimple) {
         std::string line = artist.empty() ? title : title + " - " + artist;
@@ -1559,8 +1562,9 @@ void RenderMediaPlayer()
         const float lineY = fromBottom ? anchorY - lineSize.y : anchorY;
         const float lineX = floorf(leftOf(totalW));
         put(dl, bareFx, artistFont, artistPx, ImVec2(lineX, lineY), look.title, line);
-        drawLyrics(dl, fromBottom ? lineY - rowGap : lineY + lineSize.y + rowGap, totalW, false, bareFx);
-        if (buttons) drawButtons(dl, lineX + lineSize.x + cellGap * 2.f, floorf(lineY + lineSize.y * 0.5f), bareFx);
+        ImRect bounds(ImVec2(lineX, lineY), ImVec2(lineX + totalW, lineY + lineSize.y));
+        drawLyrics(dl, fromBottom ? lineY - rowGap : lineY + lineSize.y + rowGap, totalW, false, bareFx, bounds);
+        if (buttons) drawButtons(dl, lineX + lineSize.x + cellGap * 2.f, floorf(lineY + lineSize.y * 0.5f), bareFx, bounds);
         return;
     }
 
@@ -1672,7 +1676,8 @@ void RenderMediaPlayer()
         dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barWidth * mp::ProgressOf(track), barY + barHeight), accent, 1.f);
     }
 
-    drawLyrics(dl, fromBottom ? posY - rowGap : posY + height + rowGap, width, background, fx);
+    ImRect bounds(ImVec2(posX, posY), ImVec2(posX + width, posY + height));
+    drawLyrics(dl, fromBottom ? posY - rowGap : posY + height + rowGap, width, background, fx, bounds);
 
     if (controlRow) {
         const float rowY = posY + height - padding - controlH;
@@ -1681,7 +1686,7 @@ void RenderMediaPlayer()
             put(dl, fx, artistFont, artistPx, ImVec2(floorf(timeX), floorf(rowY + (controlH - artistSize.y) * 0.5f)), look.artist, timeNow);
         }
         if (buttons)
-            drawButtons(dl, leftSide ? posX + padding : posX + width - padding - buttonsW, floorf(rowY + controlH * 0.5f), fx);
+            drawButtons(dl, leftSide ? posX + padding : posX + width - padding - buttonsW, floorf(rowY + controlH * 0.5f), fx, bounds);
     }
 }
 

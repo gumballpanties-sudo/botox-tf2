@@ -1532,6 +1532,7 @@ static void Page_MovementMain()
                 ImGui::Checkbox("find headbounces##pf", &g_psFinderHeadbounce);
                 ImGui::Checkbox("find pixeljumps##pf", &g_psFinderPixeljump);
                 ImGui::Checkbox("ignore props##pf", &g_psFinderNoProps);
+                ImGui::Checkbox("draw pixelsurf length##pf", &g_psFinderLength);
                 ImGui::Checkbox("surf fix (hold duck into a ride)##pf", &g_psSurfFix);
 
                 // whole-map scan: the same scanner, pointed at every brush edge in the map
@@ -1586,6 +1587,12 @@ static void Page_MovementMain()
                 ImGui::Checkbox("show answer panel", &g_pcShowPanel);
                 ImGui::Label("jump types (shared with route calculator)");
                 RcMoveMaskCombo("##pcmoves", g_rcMoveMask);
+                ImGui::Checkbox("building calculator", &g_pcBuildings);
+                if (g_pcBuildings)
+                {
+                    static const char* kBld[] = { "teleporter", "dispenser", "mini sentry", "sentry" };
+                    ImGui::MultiCombo("##pcbuildings", &g_pcBuildMask, kBld, 4);
+                }
             }, ImVec2(260.f, -1));
 
     }
@@ -3157,8 +3164,7 @@ static void ConfigPanel(const bool visuals)
 }
 
 // botox tab_settings: col1 "config" + "system", col2 "visuals config" + "menu". Left out, no
-// TF2 counterpart: "botox network" (no TF2 server) and "dpi scale panels" (botox render.cpp's
-// panel-dpi layer; this DLL's hud panels have no dpi path).
+// TF2 counterpart: "botox network" (no TF2 server).
 static void Tab_Settings()
 {
     // botox menu_internal.h color_picker_no_alpha_flags
@@ -3196,16 +3202,18 @@ static void Tab_Settings()
     {
         ImGui::ColorRow("accent color##accent color", g_accentColor, kPickerNoAlpha);
 
-        // botox: edits a copy, commits on release -- the whole menu rescales under the cursor
-        // otherwise. 50% floor, not botox's 25%: RenderMenu resets anything under 0.5 to 1.
-        static float s_dpiEdit = 100.f;
-        static bool s_dpiActive = false;
-        if (!s_dpiActive) s_dpiEdit = g_dpiScale * 100.f;
-        ImGui::SliderFloat("dpi scale", &s_dpiEdit, 50.f, 200.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
-        s_dpiActive = ImGui::IsItemActive();
-        // commit on release only: x*100/100 is not exact, and RenderMenu rescales the whole
-        // style on any change, so a per-frame write would drift every size
-        if (ImGui::IsItemDeactivatedAfterEdit()) g_dpiScale = s_dpiEdit / 100.f;
+        // botox menu_tab_settings: edits a copy, commits while not held -- the whole menu
+        // rescales under the cursor otherwise (render/dpi.cpp)
+        {
+            static float s_dpiEdit = 100.f;
+            static bool s_dpiActive = false;
+            if (!s_dpiActive) s_dpiEdit = g_dpiScale;
+            ImGui::SliderFloat("dpi scale", &s_dpiEdit, 25.f, 200.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
+            s_dpiActive = ImGui::IsItemActive();
+            if (!s_dpiActive) g_dpiScale = s_dpiEdit;
+
+            ImGui::Checkbox("dpi scale panels", &g_dpiScalePanels);
+        }
 
         ImGui::Checkbox("background blur", &g_menuBlur);
         if (g_menuBlur)
@@ -3398,14 +3406,15 @@ void Menu_DropPopupGhosts()
 // BlurRectFade's alpha like botox's tint. The blur samples the backbuffer when its callback
 // replays, so only what the background list drew BEFORE this call blurs: render.cpp calls it
 // after esp + world fx, before the HUD panels (spec list, watermark...), which stay sharp.
-void RenderMenuBlur()
+// true = it blurred or darkened this frame (render.cpp then keeps the crosshair over it).
+bool RenderMenuBlur()
 {
     ImGuiIO& io = ImGui::GetIO();
     static float s_blurFade = 0.f;
     const float step = (std::min)(io.DeltaTime, 1.f / 30.f) / 0.12f;   // menu_anim_duration
     const bool want = g_showMenu && g_menuBlur;
     s_blurFade = g_eject ? 0.f : ImClamp(s_blurFade + (want ? step : -step), 0.f, 1.f);
-    if (s_blurFade <= 0.f) return;
+    if (s_blurFade <= 0.f) return false;
 
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
     const float amount = ImClamp(g_menuBlurAmount, 0.f, 100.f) / 100.f;
@@ -3413,6 +3422,7 @@ void RenderMenuBlur()
     if (amount > 0.f) BlurRectFade(bg, ImVec2(0.f, 0.f), io.DisplaySize, amount, s_blurFade);
     if (darken > 0.f)
         bg->AddRectFilled(ImVec2(0.f, 0.f), io.DisplaySize, IM_COL32(0, 0, 0, (int)(darken * s_blurFade * 255.f + 0.5f)));
+    return amount > 0.f || darken > 0.f;
 }
 
 void RenderMenu()
@@ -3424,24 +3434,7 @@ void RenderMenu()
     ImGui::GetStyle().Colors[ImGuiCol_Accent] =
         ImVec4(g_accentColor[0], g_accentColor[1], g_accentColor[2], g_accentColor[3]);
 
-    // whole-menu dpi scale (settings tab slider). ScaleAllSizes mutates the CURRENT
-    // style multiplicatively -- applying it every frame would compound, so it only runs
-    // on the frame the value actually changed, as a ratio against what was last applied.
-    {
-        // a bad saved value (0, negative, NaN) would zero out the style forever via the
-        // ratio below -- same floor/ceiling as the settings slider's own range.
-        if (!(g_dpiScale >= 0.5f && g_dpiScale <= 2.f)) g_dpiScale = 1.f;
-        static float s_appliedDpi = 1.f;
-        if (g_dpiScale != s_appliedDpi)
-        {
-            ImGui::GetStyle().ScaleAllSizes(g_dpiScale / s_appliedDpi);
-            // ScaleAllSizes floors MouseCursorScale: any ratio < 1 turns 1.0 into 0 = no
-            // software cursor, and every later ratio multiplies that 0. Pin it back.
-            ImGui::GetStyle().MouseCursorScale = 1.f;
-            io.FontGlobalScale = g_dpiScale;
-            s_appliedDpi = g_dpiScale;
-        }
-    }
+    // dpi scale: render/dpi.cpp (logical layout + vertex scale + font twins), nothing here.
 
     // botox menu.cpp on_end_scene, verbatim (botox_menu_spec.md section 1): fixed
     // 750 x (640 - (menu_band_height - menu_bottom_band_height)) = 750x627, centred once,
@@ -3459,8 +3452,10 @@ void RenderMenu()
 
     if (!g_showMenu && s_animProgress <= 0.f) return;
 
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
-                            ImGuiCond_Once, ImVec2(0.5f, 0.5f));
+    // the main viewport, not io.DisplaySize: windows lay out in logical (dpi) px, io.DisplaySize
+    // is the screen outside NewFrame (render/dpi.cpp)
+    const ImVec2 view = ImGui::GetMainViewport()->Size;
+    ImGui::SetNextWindowPos(ImVec2(view.x * 0.5f, view.y * 0.5f), ImGuiCond_Once, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(750.f, 640.f - (25.f - 12.f)), ImGuiCond_Always);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |

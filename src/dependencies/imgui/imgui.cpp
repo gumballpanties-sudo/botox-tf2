@@ -1000,6 +1000,10 @@ static const float WINDOWS_MOUSE_WHEEL_SCROLL_LOCK_TIMER    = 0.70f;    // Lock 
 //-------------------------------------------------------------------------
 
 static void             SetCurrentWindow(ImGuiWindow* window);
+// botox: render/dpi.cpp sets it. the scale a root window's vertices grow by at render, 1 = drawn as laid out, 0 / NULL
+// = no dpi layer (test targets). A pointer, not an extern, for those targets
+float                   (*GBotoxDpiWindowScale)(const ImGuiWindow* root) = NULL;
+void                    (*GBotoxDpiMouse)(ImVec2* mouse_pos) = NULL;   // botox: render/dpi.cpp, screen -> logical mouse
 static void             FindHoveredWindow();
 static ImGuiWindow*     CreateNewWindow(const char* name, ImGuiWindowFlags flags);
 static ImVec2           CalcNextScrollFromScrollTargetAndClamp(ImGuiWindow* window);
@@ -4444,6 +4448,9 @@ void ImGui::NewFrame()
     // Process input queue (trickle as many events as possible), turn events into writes to IO structure
     g.InputEventsTrail.resize(0);
     UpdateInputEvents(g.IO.ConfigInputTrickleEventQueue);
+    // botox: render/dpi.cpp maps the screen mouse into logical (dpi scaled) px, before anything reads it
+    if (GBotoxDpiMouse)
+        GBotoxDpiMouse(&g.IO.MousePos);
 
     // Update viewports (after processing input queue, so io.MouseHoveredViewport is set)
     UpdateViewportsNewFrame();
@@ -6294,6 +6301,14 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
         window->ClipRect = ImVec4(-FLT_MAX, -FLT_MAX, +FLT_MAX, +FLT_MAX);
         window->IDStack.resize(1);
         window->DrawList->_ResetForNewFrame();
+        // botox: dpi scale grows window vertices at render ( 1:1 panels don't, render/dpi.cpp ); AA fringe stays 1 screen px
+        if (const float botox_scale = GBotoxDpiWindowScale ? GBotoxDpiWindowScale(window->RootWindow) : 0.0f; botox_scale > 0.0f)
+        {
+            window->DrawList->_FringeScale = 1.0f / botox_scale;
+            // botox: atlas lines carry a 100 % AA ramp ( smears scaled ), geometry AA keeps the 1 px fringe
+            if (botox_scale != 1.0f)
+                window->DrawList->Flags &= ~ImDrawListFlags_AntiAliasedLinesUseTex;
+        }
         window->DC.CurrentTableIdx = -1;
 
         // Restore buffer capacity when woken from a compacted state, to avoid

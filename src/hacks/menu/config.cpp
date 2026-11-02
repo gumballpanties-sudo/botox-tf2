@@ -138,6 +138,7 @@ static const CfgEntry kEntries[] = {
     { "debugLog",         CfgEntry::BOOL,   &g_debugLogEnable, 0 },
     { "accentColor",      CfgEntry::FLOAT4, g_accentColor, 0 },
     { "dpiScale",         CfgEntry::FLOAT,  &g_dpiScale, 0 },
+    { "dpiScalePanels",   CfgEntry::BOOL,   &g_dpiScalePanels, 0 },
     { "safeMode",         CfgEntry::BOOL,   &g_safeMode, 0 },
 
     { "fogEnable",        CfgEntry::BOOL,   &g_fogEnable, 0 },
@@ -608,6 +609,7 @@ static const CfgEntry kEntries[] = {
     { "psFinderStrict",   CfgEntry::BOOL,   &g_psFinderStrict, 0 },
     { "psFinderTb",       CfgEntry::BOOL,   &g_psFinderTb, 0 },
     { "psFinderNoProps",  CfgEntry::BOOL,   &g_psFinderNoProps, 0 },
+    { "psFinderLength",   CfgEntry::BOOL,   &g_psFinderLength, 0 },
     { "psMapLines",       CfgEntry::BOOL,   &g_psMapLines, 0 },
     { "psAssist",         CfgEntry::BOOL,   &g_psAssist, 0 },
     { "psAssistKey",      CfgEntry::INT,    &g_psAssistKey, 0 },
@@ -654,6 +656,8 @@ static const CfgEntry kEntries[] = {
     { "pcSolveKey",       CfgEntry::INT,    &g_pcSolveKey, 0 },
     { "pcShowMarker",     CfgEntry::BOOL,   &g_pcShowMarker, 0 },
     { "pcShowPanel",      CfgEntry::BOOL,   &g_pcShowPanel, 0 },
+    { "pcBuildings",      CfgEntry::BOOL,   &g_pcBuildings, 0 },
+    { "pcBuildMask",      CfgEntry::INT,    &g_pcBuildMask, 0 },
 
     { "prInfAmmo",        CfgEntry::BOOL,   &g_prInfAmmo, 0 },
     { "prInfHealth",      CfgEntry::BOOL,   &g_prInfHealth, 0 },
@@ -1187,6 +1191,14 @@ void LoadConfig(const char* path, bool visuals)
     // logs it -- a silently corrected cfg is how the case above went unnoticed for so long.
     // kNoLo / kNoHi = that end was never bounded. Do not invent a bound for it.
     constexpr float kNoLo = -FLT_MAX, kNoHi = FLT_MAX;
+
+    // dpiScale was a fraction (0.5-2) before the botox port made it a percent (25-200). A
+    // percent that small cannot be saved by the slider, so <= 2 is always an old cfg.
+    if (g_dpiScale > 0.f && g_dpiScale <= 2.f)
+    {
+        DebugLog("config: dpiScale=%.3f is the old fraction -- read as %.0f %%", g_dpiScale, g_dpiScale * 100.f);
+        g_dpiScale *= 100.f;
+    }
 
     struct FloatClamp { float* p; float lo, hi; const char* name; const char* whyLo; const char* whyHi; };
     static const FloatClamp kFloatClamps[] = {

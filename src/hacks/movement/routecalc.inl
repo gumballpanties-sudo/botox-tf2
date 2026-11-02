@@ -130,12 +130,38 @@ static bool s_pcPathSet = false;             // the drawn arc belongs to the fir
 static bool s_pcAnyCombo = false;            // any pass found anything (else the last one explains)
 static std::vector<std::string> s_pcStack;   // lines of the finished passes (under g_rcLock)
 
+// ---- PIXEL CALCULATOR: FROM A BUILDING TOP (heroin "building calculator") ----------------------
+// heroin's pixel calc re-flies its jumps from a teleporter / dispenser / mini / sentry under you
+// (FUN_18006e060, pixelcalc_buildings + _mode bitmask), so an engineer knows what to build where
+// before building it. Here: one more pass per ticked building after the hop passes, single press
+// off its top, same solver. No building has to exist -- the start is just lifted by its height.
+// Heights are the hull tops from the SDK: TELEPORTER_MAXS 12 (tf_obj_teleporter.cpp:35),
+// DISPENSER_MAXS 55 (tf_obj_dispenser.cpp:25), SENTRYGUN_MAXS 66 (tf_obj_sentrygun.cpp:49) and the
+// mini = 66 x MINI_SENTRY_SCALE 0.75 (SetModelScale scales its hull, :2148). heroin's 12.03125 etc.
+// are the same tops + 1/32; our start z is already the settled feet (floor + 1/32), so it adds h.
+struct PcBuilding { const char* name; float h; };
+static constexpr PcBuilding k_pcBld[5] = {
+    { "", 0.f }, { "teleporter", 12.f }, { "dispenser", 55.f }, { "mini sentry", 49.5f }, { "sentry", 66.f },
+};
+static int s_pcBld = 0;                      // building under you this pass (0 = the real floor)
+static int s_pcNextBld = 0;                  // building of the queued pass
+
+// next ticked building after `after` (0 = none left)
+static int PcNextBuilding(int after)
+{
+    if (!g_pcBuildings) return 0;
+    for (int b = after + 1; b <= 4; b++)
+        if (g_pcBuildMask & (1 << (b - 1))) return b;
+    return 0;
+}
+
 // ---- markers are session only -------------------------------------------------------
 // No marker file: a new map, or a new game, starts empty. Marker z is measured off THIS session's
 // world (pixel finder / snapped hits), so a reloaded one was a stale number pretending to be exact
 static void RcResetForMap(const char* map)
 {
     s_pcNextHops = -1;      // a queued hop pass belongs to the map it was pressed on
+    s_pcNextBld = 0;
     std::lock_guard<std::mutex> l(g_rcLock);
     s_rcPoints.clear();
     s_pcHave = false;
@@ -504,6 +530,7 @@ static void RcSolveCancel(const char* why)
     s_rcJob.reset();          // the worker thread keeps the job alive through its own shared_ptr
     s_rcSolveGen++;
     s_pcNextHops = -1;
+    s_pcNextBld = 0;
     std::lock_guard<std::mutex> l(g_rcLock);
     s_pcStack.clear();
     if (why && *why) s_rcMessage = why;
@@ -512,12 +539,17 @@ static void RcSolveCancel(const char* why)
 
 // bPixel: the pixel calculator -- route = the one pixel marker, start = where you are.
 // nHops: pixel calculator only, ground markers at your own floor in front of it (see above)
-static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int nHops = 0)
+// nBld: pixel calculator only, k_pcBld index of the building top the start is lifted onto
+static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int nHops = 0, int nBld = 0)
 {
     s_rcMs = 0.0; s_rcDuckLeft = 0;
     s_pcHops = bPixel ? std::clamp(nHops, 0, k_pcMaxHops) : 0;
+    s_pcBld  = bPixel ? std::clamp(nBld, 0, 4) : 0;
+    if (s_pcBld > 0) s_pcHops = 0;   // a building pass is one press off its top
     s_pcNextHops = -1;
-    if (s_pcHops == 0)      // a fresh press, not the next pass of one
+    s_pcNextBld = 0;
+    const bool bFresh = s_pcHops == 0 && s_pcBld == 0;   // a fresh press, not the next pass of one
+    if (bFresh)
     {
         s_pcPathSet = false; s_pcAnyCombo = false;
         std::lock_guard<std::mutex> l(g_rcLock);
@@ -528,7 +560,7 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         std::lock_guard<std::mutex> l(g_rcLock);
         s_rcPixelSolve = bPixel;       // read by the render thread (which panel owns the answer)
         // a later hop pass keeps what the passes before it already answered, and their arc
-        if (s_pcHops == 0) { s_rcLines.clear(); s_rcPath.clear(); }
+        if (bFresh) { s_rcLines.clear(); s_rcPath.clear(); }
         s_rcMessage.clear();
         s_rcProgress = 0.f;
     }
@@ -624,7 +656,7 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
 
     // one Pred_Simulate flight from where you stand. Every hop pass of one pixel solve would
     // measure the same floor off the same spot, so it runs on the first pass and the rest keep it
-    if (s_pcHops == 0)
+    if (bFresh)
     {
         s_rcCheck = RcCheck();
         if (bCheck)
@@ -636,6 +668,12 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         // a standing start is the settled floor: the check just measured it
         float z = bHere ? vLive.z : pts[0].pos.z;
         if (s_rcCheck.ran && fabsf(s_rcCheck.floorZ - z) < 4.f) z = s_rcCheck.floorZ;
+        // building pass: the same settled feet, lifted onto the top (a top is a floor like any other)
+        if (s_pcBld > 0)
+        {
+            z += k_pcBld[s_pcBld].h;
+            start.building = true; start.player = false;
+        }
         start.floorEff = z;
         if (bHere)
         {
@@ -712,9 +750,9 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
     // route leaves from -- you, or marker 1 when marker 1 is the start
     {
         std::lock_guard<std::mutex> l(g_rcLock);
-        if (s_pcHops == 0) s_rcPath.clear();
+        if (bFresh) s_rcPath.clear();
         s_rcAnchors.clear();
-        s_rcAnchors.push_back(bHere ? vLive : pts[0].pos);
+        s_rcAnchors.push_back(bHere ? vLive + Vec3(0.f, 0.f, k_pcBld[s_pcBld].h) : pts[0].pos);
         // a hop marker is your own feet: the arc draws the loop back down to them
         if (s_pcHopStart)
             for (int h = 0; h < s_pcHops; h++) s_rcAnchors.push_back(vLive);
@@ -734,9 +772,10 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
     s_rcJob = job;
     s_rcBusy = true;
 
-    DebugLog("RC: solve (dihrc32) -- %d marker(s), start %s z %.3f vz %.1f%s, moves 0x%X start 0x%X, "
+    DebugLog("RC: solve (dihrc32) -- %d marker(s), start %s%s%s z %.3f vz %.1f%s, moves 0x%X start 0x%X, "
              "delay hop %dt, gravity %.0f, tick %.4f, scale %.2f, jump mod %.4f, bhop crop %.4f",
              (int)route.size(), start.air ? "IN AIR" : (bHere ? "where you stand" : "marker 1"),
+             s_pcBld > 0 ? " on a " : "", k_pcBld[s_pcBld].name,
              start.s.z, start.s.vz, start.s.fDuck ? " ducked" : "", opt.moves, start.moves,
              params.delayTicks, params.gravity, params.dt, params.scale, params.jumpMod, params.cropFrac);
     for (size_t i = 0; i < route.size(); i++)
@@ -807,9 +846,17 @@ static void RcSolveFinish(RcJob& job)
     const int shown = std::clamp(g_rcMaxShown, 1, 64);
     // a pixel pass past the first gets half the rows: the single jumps are the answer you asked
     // for, the hop chains are what to run when there are none of those
-    const int rows = (s_rcPixelSolve && s_pcHops > 0) ? std::max(2, shown / 2) : shown;
+    const int rows = (s_rcPixelSolve && (s_pcHops > 0 || s_pcBld > 0)) ? std::max(2, shown / 2) : shown;
+    // the next pass of this press: hops 1..max off the real floor, then one per ticked building.
+    // Only off a grounded start -- in the air there is no flat of yours and nothing to build on
+    int nNextHops = -1, nNextBld = 0;
+    if (s_rcPixelSolve && s_pcHopStart)
+    {
+        if (s_pcBld == 0 && s_pcHops < k_pcMaxHops) nNextHops = s_pcHops + 1;
+        else if ((nNextBld = PcNextBuilding(s_pcBld)) != 0) nNextHops = 0;
+    }
     // the last pass of this press: the only one that explains a pixel nothing reached
-    const bool bLast = !s_rcPixelSolve || !s_pcHopStart || s_pcHops >= k_pcMaxHops;
+    const bool bLast = nNextHops < 0;
 
     // THE PIXEL CALCULATOR'S PANEL IS THE COMBOS, NOTHING ELSE. Every row that is prose about
     // the answer rather than an answer goes to C:\dih\debug.log instead -- the diagnosis is not
@@ -831,6 +878,12 @@ static void RcSolveFinish(RcJob& job)
         if (s_pcHops > 0)
         {
             snprintf(b, sizeof(b), RC_HEAD "+%d hop%s first:", s_pcHops, s_pcHops == 1 ? "" : "s");
+            lines.push_back(b);
+        }
+        // a building pass that found nothing says nothing: four empty headings would bury the answer
+        else if (s_pcBld > 0 && r.total > 0.0)
+        {
+            snprintf(b, sizeof(b), RC_HEAD "off a %s (%.1fu):", k_pcBld[s_pcBld].name, k_pcBld[s_pcBld].h);
             lines.push_back(b);
         }
     }
@@ -980,8 +1033,8 @@ static void RcSolveFinish(RcJob& job)
         s_rcProgress = 1.f;
     }
     s_rcBusy = false;
-    // queue the next hop pass of this press (RouteCalc_Tick starts it: it has the live command)
-    if (s_rcPixelSolve && !bLast) s_pcNextHops = s_pcHops + 1;
+    // queue the next pass of this press (RouteCalc_Tick starts it: it has the live command)
+    if (!bLast) { s_pcNextHops = nNextHops; s_pcNextBld = nNextBld; }
 
     std::string layers;
     for (size_t i = 0; i < r.layerNodes.size(); i++) layers += " " + std::to_string(r.layerNodes[i]);
@@ -1610,12 +1663,17 @@ static void RouteCalc_Tick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     }
     s_pcPlaceHeld = bPcPlace; s_pcSolveHeld = bPcSolve;
 
-    // the next hop pass of a pixel press, started here because RcSolveBegin needs the live command
-    if (!s_rcBusy && s_pcNextHops > 0 && bPredicted)
+    // the next pass of a pixel press, started here because RcSolveBegin needs the live command.
+    // A building pass lifts a GROUNDED start: jumped since the press = there is nothing to lift,
+    // and running it anyway would print pass 0 again under a building heading
+    if (!s_rcBusy && s_pcNextHops >= 0 && bPredicted)
     {
-        const int h = s_pcNextHops;
-        s_pcNextHops = -1;
-        RcSolveBegin(pLocal, pCmd, true, h);
+        const int h = s_pcNextHops, b = s_pcNextBld;
+        s_pcNextHops = -1; s_pcNextBld = 0;
+        if (b > 0 && !(EntI(pLocal, g_offFlags) & FL_ONGROUND))
+            DebugLog("RC: building passes dropped -- you left the ground before they ran");
+        else
+            RcSolveBegin(pLocal, pCmd, true, h, b);
     }
 
     // the search is pure math on a copied route: it needs no prediction once it has started

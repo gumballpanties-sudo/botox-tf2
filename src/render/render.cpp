@@ -55,6 +55,7 @@
 #include "../dependencies/fonts/minecraft_ttf.h"
 #include <timeapi.h>
 #include "../hacks/screen/aspect_stretch.h"   // unit screen: AspectStretch_Run (aspect ratio overlay stretch)
+#include "dpi.h"                              // botox dpi scale + dpi scale panels
 #pragma comment(lib, "winmm.lib")
 
 // ==== PS finder/assist world overlay ==============================================
@@ -405,17 +406,19 @@ static void RenderPsOverlay()
     // The pieces carry the END FADE too: alpha per piece over the last kFadeU of each end, so a
     // line tapers out instead of stopping dead on a hard pixel. Only the fade zones are cut fine
     // (kFine); the middle stays on the old 64u grid, so a long seam costs ~len/64 + 8 lines.
-    if (g_psMapLines && d.mapLines.size() >= 2)
+    // the finder's surf lengths (g_psFinderLength) are the same kind of mark, drawn the same way
+    // in the finder's surf colour
+    auto DrawSegs = [&](const std::vector<Vec3>& segs, int r, int g, int b8)
     {
         constexpr float kPiece = 64.f;   // middle of the line
         constexpr float kFine  = 6.f;    // inside a fade zone: one alpha step per piece
         constexpr float kFadeU = 48.f;   // world units of taper at each end
         constexpr float kLineA = 220.f;
         ImVec2 p0, p1;
-        for (size_t i = 0; i + 1 < d.mapLines.size(); i += 2)
+        for (size_t i = 0; i + 1 < segs.size(); i += 2)
         {
-            const Vec3& a = d.mapLines[i];
-            const Vec3& b = d.mapLines[i + 1];
+            const Vec3& a = segs[i];
+            const Vec3& b = segs[i + 1];
             const Vec3 dir = b - a;
             const float len = dir.Length();
             if (len < 0.01f) continue;
@@ -432,11 +435,15 @@ static void RenderPsOverlay()
                 const float fa = Clamp01(std::min(mid, len - mid) / fade);
                 const float sm = fa * fa * (3.f - 2.f * fa);   // smoothstep: no banding at the tip
                 if (W2S(a + dir * (dA / len), p0) && W2S(a + dir * (dB / len), p1))
-                    dl->AddLine(p0, p1, IM_COL32(255, 255, 255, int(kLineA * sm)), 1.f);
+                    dl->AddLine(p0, p1, IM_COL32(r, g, b8, int(kLineA * sm)), 1.f);
                 dA = dB;
             }
         }
-    }
+    };
+    if (g_psMapLines && d.mapLines.size() >= 2)
+        DrawSegs(d.mapLines, 255, 255, 255);
+    if (bFinder && g_psFinderLength && d.finderLines.size() >= 2)
+        DrawSegs(d.finderLines, kPfRgb[2][0], kPfRgb[2][1], kPfRgb[2][2]);
 
     // finder scan column while stretching -- dih's own, the reference has no equivalent.
     // 1px on the pixel grid like everything else
@@ -928,6 +935,7 @@ static void RenderRouteOverlay()
 
     const int   a        = (int)(alpha * 255.f);
     const float rounding = ImGui::GetStyle().WindowRounding;
+    DpiPanelScope block(dl);   // botox draw_popup: one stretch block
 
     dl->AddRectFilled(ImVec2(box_x, box_y), ImVec2(box_x + body_w, box_y + body_h), IM_COL32(15, 15, 15, a), rounding);
     dl->AddRect(ImVec2(box_x + 1.f, box_y + 1.f), ImVec2(box_x + body_w - 1.f, box_y + body_h - 1.f),
@@ -979,7 +987,8 @@ void RenderPsPointWindow()
     if (!PS_PointGet(s_psPointWin, pos, mask, radius)) { s_psPointWin = -1; return; }
 
     ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f + 48.f, io.DisplaySize.y * 0.5f - 24.f), ImGuiCond_Appearing);
+    const ImVec2 view = ImGui::GetMainViewport()->Size;   // logical (dpi) px, io.DisplaySize is the screen
+    ImGui::SetNextWindowPos(ImVec2(view.x * 0.5f + 48.f, view.y * 0.5f - 24.f), ImGuiCond_Appearing);
     if (ImGui::Begin("ps point", nullptr,
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar))
@@ -1101,8 +1110,14 @@ SetCursorPos_t o_SetCursorPos = nullptr;
 // undraggable and unclickable (hover hit-tests the PREVIOUS frame's rects and the two
 // contexts never agreed which frame that was); a second window (the old overlaywin) put
 // the menu outside the game and broke ShadowPlay.
+// Since the overlay move: "game" = the crosshair ONLY (its own list, s_chList). Every other
+// overlay (esp, hud panels, world fx, their windows) is "ov" and renders in h_Present like the
+// menu: on top of the finished game frame instead of inside its UI pass.
 static ImDrawList* s_gameLists[64]; static int s_gameCount = 0;
+static ImDrawList* s_ovLists[64];   static int s_ovCount = 0;
 static ImDrawList* s_menuLists[64]; static int s_menuCount = 0;
+static ImDrawList* s_chList = nullptr;   // crosshair, drawn in place of the background list (RenderCrosshairList)
+static bool        s_chOverBlur = false;   // menu blur drew this frame: crosshair moves to the Present pass, over it
 static ImDrawList* s_fadeLists[64]; static int s_fadeCount = 0;   // botox menu window + its popups: one faded layer
 static MenuFadedList s_popLists[16]; static int s_popCount = 0;    // confirm popups + ghosts, each at its own alpha, over the menu
 
@@ -1118,9 +1133,14 @@ static bool s_menuScene   = false;
 
 static void SplitDrawData()
 {
-    s_gameCount = s_menuCount = s_fadeCount = s_popCount = 0;
+    s_gameCount = s_ovCount = s_menuCount = s_fadeCount = s_popCount = 0;
     ImDrawData* dd = ImGui::GetDrawData();
     if (!dd || !dd->Valid) return;
+
+    // the crosshair is not in dd (swapped out of the viewport before Render). Inside the game's
+    // frame, recorded -- unless the menu blur is up: then it goes over the blur, below.
+    const bool chDrew = s_chList && s_chList->VtxBuffer.Size > 0;
+    if (chDrew && !s_chOverBlur) s_gameLists[s_gameCount++] = s_chList;
 
     ImGuiContext& g = *ImGui::GetCurrentContext();
     ImGuiWindow* menuRoot = ImGui::FindWindowByName("botox");
@@ -1131,9 +1151,9 @@ static void SplitDrawData()
         ImDrawList* dl = dd->CmdLists[i];
         bool menu = false, fade = false;
 
-        // Every recorded overlay draws to the BACKGROUND list, so the foreground list holds
-        // only imgui's software mouse cursor -- and that is only drawn while the menu is up.
-        // It belongs with the menu, otherwise a cursor with no menu shows up in the capture.
+        // The foreground list holds the boot screen, a few panels' top layer and imgui's
+        // software cursor (menu up only). It renders after every window, so it goes with the
+        // menu layer: cursor over the menu, and both on top of the overlays.
         if (dl->_OwnerName && strcmp(dl->_OwnerName, "##Foreground") == 0)
             menu = true;
 
@@ -1150,7 +1170,15 @@ static void SplitDrawData()
 
         if (fade) { if (s_fadeCount < IM_ARRAYSIZE(s_fadeLists)) s_fadeLists[s_fadeCount++] = dl; }
         else if (menu) { if (s_menuCount < IM_ARRAYSIZE(s_menuLists)) s_menuLists[s_menuCount++] = dl; }
-        else      { if (s_gameCount < IM_ARRAYSIZE(s_gameLists)) s_gameLists[s_gameCount++] = dl; }
+        else if (s_ovCount < IM_ARRAYSIZE(s_ovLists))
+        {
+            s_ovLists[s_ovCount++] = dl;
+            // menu blur sits on the background list: the crosshair right after it, so the blur
+            // and darken never reach it (they did not when it shared that list either)
+            if (chDrew && s_chOverBlur && strcmp(dl->_OwnerName ? dl->_OwnerName : "", "##Background") == 0 &&
+                s_ovCount < IM_ARRAYSIZE(s_ovLists))
+                s_ovLists[s_ovCount++] = s_chList;
+        }
     }
     s_popCount = Menu_SplitPopups(s_fadeLists, s_fadeCount, s_popLists, IM_ARRAYSIZE(s_popLists));
 }
@@ -1288,6 +1316,7 @@ static std::string ValidEspFont()
 static void BuildFontAtlas()
 {
     ImGuiIO& io = ImGui::GetIO();
+    Dpi_DropFonts();   // twins point at the fonts Clear() frees
     io.Fonts->Clear();
 
     // Tahoma, ANTIALIASED. Was MonoHinting|Monochrome = 1-bit coverage, i.e.
@@ -1633,6 +1662,32 @@ static void RenderEspQueue()
 // splitting the BUILD is what broke input the last time.
 void RenderWorldFx3();   // unit world (visuals/world_fx3.cpp): bullet impact boxes + world hit markers
 
+// The crosshair draws through ImGui::GetBackgroundDrawList() like every overlay, so for its call
+// the viewport's background slot points at s_chList instead: every crosshair style (and the
+// aspect stretch wrapped round it) lands there untouched, and SplitDrawData sends that one list
+// to the game's frame. The real background list is fetched FIRST so imgui has already reset it
+// this frame -- GetBackgroundDrawList only resets a slot whose frame stamp is stale, and the
+// stamp is per slot, not per list, so the swap never resets or loses either one.
+static void RenderCrosshairList()
+{
+    ImGuiViewportP* vp = (ImGuiViewportP*)ImGui::GetMainViewport();
+    ImDrawList* const bg = ImGui::GetBackgroundDrawList();
+    if (!s_chList)
+    {
+        s_chList = IM_NEW(ImDrawList)(ImGui::GetDrawListSharedData());
+        s_chList->_OwnerName = "##Crosshair";
+    }
+    s_chList->_ResetForNewFrame();
+    s_chList->PushTextureID(ImGui::GetIO().Fonts->TexID);
+    // the screen, not the viewport: that is logical (dpi) px, the crosshair draws in screen px
+    const ImVec2 screen = ImGui::GetIO().DisplaySize;
+    s_chList->PushClipRect(ImVec2(0.f, 0.f), ImMax(screen, vp->Size), false);
+
+    vp->DrawLists[0] = s_chList;
+    AspectStretch_Run(RenderCrosshair, AsCrosshair);
+    vp->DrawLists[0] = bg;
+}
+
 static void BuildImGuiFrame()
 {
     if (s_frameBuilt) return;
@@ -1658,15 +1713,23 @@ static void BuildImGuiFrame()
         s_popCount = 0;
         Menu_DropPopupGhosts();                    // ghosts point at the old atlas texture
     }
+    // dpi font twins: same safe point, same reason (botox update_dpi_fonts)
+    if (Dpi_UpdateFonts(g_d3dDev))
+    {
+        s_popCount = 0;
+        Menu_DropPopupGhosts();                    // ghosts point at the old twin texture
+    }
 
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
+    Dpi_BeginFrame();      // io.DisplaySize -> logical px for NewFrame (botox on_end_scene)
     ImGui::NewFrame();
+    Dpi_AfterNewFrame();   // ...and back to the screen for every overlay below
     ImGui::GetIO().MouseDrawCursor = menuUp;
 
     RenderEspQueue();     // botox: esp under every other overlay (background list, first in)
     RenderWorldFx3();     // unit world: background list too, under the HUD overlays
-    RenderMenuBlur();     // menu bg blur: blurs game + esp + world fx above, every HUD panel below stays sharp
+    s_chOverBlur = RenderMenuBlur();   // menu bg blur: blurs game + esp + world fx above, every HUD panel below stays sharp
     RenderBootScreen();   // foreground draw list draws last regardless of call order: always on top
     RenderPsOverlay();
     RenderRouteOverlay();
@@ -1679,7 +1742,7 @@ static void BuildImGuiFrame()
     AspectStretch_Run(RenderIndicators, AsPanel);   // botox order: velocity, graph, keybinds, particles, keystrokes
     Recorder_Render();           // unit B: path, route starts, timer, clipper box, clip editor
     RenderHudExtras();           // unit hud: aimbot fov circle + custom net graph
-    AspectStretch_Run(RenderCrosshair, AsCrosshair);
+    RenderCrosshairList();       // own list: the one overlay drawn inside the game's frame
     AspectStretch_Run(RenderSpectatorList, AsPanel);       // unit E: misc HUD
     AspectStretch_Run(RenderHitMarker, AsPanel);
     RenderKillEffects();
@@ -1690,7 +1753,9 @@ static void BuildImGuiFrame()
     RenderMenu();   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
 
     ImGui::EndFrame();
+    Dpi_BeforeRender();    // the software cursor is drawn by Render on the 1:1 foreground list: screen mouse
     ImGui::Render();
+    Dpi_ScaleDrawData(ImGui::GetDrawData());       // windows grow by the dpi scale (panels did at their block end)
     BootScreen_FadeOthers(ImGui::GetDrawData());   // unit game: overlay fades in after the boot splash
     SplitDrawData();
 }
@@ -1937,8 +2002,9 @@ static void Render_RebindDevice(IDirect3DDevice9* dev)
     ImGui_ImplDX9_Shutdown();
     ImGui_ImplDX9_Init(dev);
     s_imguiDev = dev;
+    Dpi_DropFonts();   // twin texture is the old device's; re-baked for this one
 
-    s_gameCount = s_menuCount = s_fadeCount = s_popCount = 0;   // lists reference the dropped font texture
+    s_gameCount = s_ovCount = s_menuCount = s_fadeCount = s_popCount = 0;   // lists reference the dropped font texture
     Menu_DropPopupGhosts();
     s_frameBuilt = false;
     s_vguiDrew   = false;
@@ -2087,9 +2153,13 @@ chain:
         // what puts it on top of the crosshair (every EndScene pass has already run) and
         // what keeps it out of the recording -- a capture hook that owns the Present entry
         // has copied the backbuffer before this line runs.
-        if ((s_menuCount > 0 || s_fadeCount > 0 || s_popCount > 0) && SUCCEEDED(dev->BeginScene()))
+        // The overlays go in first, same scene: over the whole game frame (vgui, console,
+        // pause menu included), under the menu. Panel blur callbacks sample the backbuffer as
+        // they replay, so here they blur the finished frame -- what sits under them on screen.
+        if ((s_ovCount > 0 || s_menuCount > 0 || s_fadeCount > 0 || s_popCount > 0) && SUCCEEDED(dev->BeginScene()))
         {
             s_menuScene = true;
+            RenderSubset(s_ovLists, s_ovCount);
             RenderSubset(s_fadeLists, s_fadeCount, Menu_FadeAlpha());
             for (int i = 0; i < s_popCount; ++i)   // botox: popups on top of the menu, each at its own alpha
                 RenderSubset(&s_popLists[i].list, 1, s_popLists[i].alpha);
@@ -2137,7 +2207,7 @@ HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     if (g_imguiInit) ImGui_ImplDX9_InvalidateDeviceObjects();
     // The split arrays point at draw lists from the frame being dropped -- a Present that
     // renders them after a Reset would submit freed geometry.
-    s_gameCount = s_menuCount = s_fadeCount = s_popCount = 0;
+    s_gameCount = s_ovCount = s_menuCount = s_fadeCount = s_popCount = 0;
     Menu_DropPopupGhosts();
     s_frameBuilt = false;
     s_vguiDrew   = false;

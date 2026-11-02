@@ -253,6 +253,8 @@ struct PsDrawData
     std::vector<Vec3> assistPts;   // saved assist targets (current map)
     // whole-map scan (psmap.inl): confirmed surf segments, A then B, one pair per line
     std::vector<Vec3> mapLines;
+    // finder surf lengths (g_psFinderLength): how far each found pin holds along its wall, A then B
+    std::vector<Vec3> finderLines;
     // ...and the texturebug seams that scan found. Its own list because it follows the map
     // scan's switch, not the finder's: a scan is minutes of work and its marks outlive the aim
     std::vector<Vec3> mapTbPts;

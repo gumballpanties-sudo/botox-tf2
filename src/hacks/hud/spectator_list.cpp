@@ -1,5 +1,6 @@
 #include "spectator_list.h"
 #include "../../render/render.h"   // RenderFadedGradientLine
+#include "../../render/dpi.h"      // botox stretch blocks + panel mouse (dpi scale panels)
 #include "watermark_styles.h"      // Watermark_GamesenseFrame
 #include "mediaplayer.h"           // MediaPlayer_HasSession (illusory track line)
 #include "../misc/unitE_logic.h"
@@ -1312,7 +1313,7 @@ static void DrawClarityV2(ImDrawList* dl, ImGuiIO& io)
 
     float fx, fy; Place((float)winW + 6.f, (float)winH + 6.f, fx, fy);
     const int x = (int)fx + 3, y = (int)fy + 3;
-    const ImVec2 m = io.MousePos;
+    const ImVec2 m = Dpi_PanelMouse(ImVec2((float)x, (float)y), ImVec2((float)winW, (float)winH));   // layout px
     const bool hovered = g_showMenu && m.x >= x && m.x <= x + winW && m.y >= y && m.y <= y + winH && !GImGui->HoveredWindow;
     const bool dragging = hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left);
     const auto faded = [&](int r, int g, int b, int a) { return IM_COL32(r, g, b, (int)(a * alpha)); };
@@ -1773,7 +1774,7 @@ static void DrawChillwareV2()
     // last position we wrote; a differing g_specCv2X/Y = cfg load -> force it
     static float s_lastX = -2.f, s_lastY = -2.f;
     if (g_specCv2X < 0.f || g_specCv2Y < 0.f)
-        ImGui::SetNextWindowPos(ImVec2(15.f, ImGui::GetIO().DisplaySize.y * 0.3f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(15.f, ImGui::GetMainViewport()->Size.y * 0.3f), ImGuiCond_FirstUseEver);   // logical px (render/dpi.cpp)
     else if (g_specCv2X != s_lastX || g_specCv2Y != s_lastY)
         ImGui::SetNextWindowPos(ImVec2(g_specCv2X, g_specCv2Y), ImGuiCond_Always);
     ImGui::SetNextWindowSizeConstraints(ImVec2(100.f, 20.f), ImVec2(400.f, 800.f));
@@ -1838,7 +1839,7 @@ static void DrawSkebob(ImDrawList* dl, ImGuiIO& io)
     const float w = ImMax(210.f, widest);
     const float h = (title ? 30.f : 10.f) + (float)rows.size() * rowH;
     float x, y; Place(w, h, x, y);
-    const ImVec2 m = io.MousePos;
+    const ImVec2 m = Dpi_PanelMouse(ImVec2(x, y), ImVec2(w, h));   // layout px
     const bool hovered = g_showMenu && m.x >= x && m.x <= x + w && m.y >= y && m.y <= y + h;
     if (background) {
         dl->AddRectFilled(ImVec2(x + 1.f, y + 1.f), ImVec2(x + w - 1.f, y + h - 1.f), IM_COL32(19, 19, 19, 242), 5.f);
@@ -2021,18 +2022,23 @@ static void DrawLumiNew(ImDrawList* dl, ImGuiIO& io)
     static bool dragging = false;
     static ImVec2 grabMouse, grabOffset;
     if (g_showMenu) {
-        const ImVec2 m = io.MousePos;
+        // botox: screen mouse against where the mascot shows, the move divided back by the scale
+        const ImVec2 m = Dpi_ScreenMouse();
+        const ImVec2 shown = Dpi_PanelPos(at, ImVec2(side, side));
+        const float scale = Dpi_PanelScale();
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) dragging = false;
         else if (!dragging && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !GImGui->HoveredWindow &&
-                 m.x >= at.x && m.x <= at.x + side && m.y >= at.y && m.y <= at.y + side) {
+                 m.x >= shown.x && m.x <= shown.x + side * scale && m.y >= shown.y && m.y <= shown.y + side * scale) {
             dragging = true; grabMouse = m; grabOffset = ImVec2(g_specLumiMascotX, g_specLumiMascotY);
         }
-        if (dragging) {
-            g_specLumiMascotX = ImClamp(grabOffset.x + (m.x - grabMouse.x), -100.f, 100.f);
-            g_specLumiMascotY = ImClamp(grabOffset.y + (m.y - grabMouse.y), -150.f, 150.f);
+        if (dragging && scale > 0.f) {
+            g_specLumiMascotX = ImClamp(grabOffset.x + (m.x - grabMouse.x) / scale, -100.f, 100.f);
+            g_specLumiMascotY = ImClamp(grabOffset.y + (m.y - grabMouse.y) / scale, -150.f, 150.f);
         }
     } else dragging = false;
-    ImGui::GetForegroundDrawList()->AddImage(mascot, at, ImVec2(at.x + side, at.y + side));
+    ImDrawList* const fg = ImGui::GetForegroundDrawList();
+    DpiPanelScope top(fg);   // botox top_block: the mascot pivots on its own
+    fg->AddImage(mascot, at, ImVec2(at.x + side, at.y + side));
 }
 
 static void DrawLumiInterwebz(ImDrawList* dl)
@@ -2552,16 +2558,15 @@ static bool StyleFixedPos(int style)
     }
 }
 
-// Drag to reposition, menu open only: LMB drag moves, RMB resets to the bare g_specPos anchor.
-// Panel rect = bounds of the vertices this frame's Draw* added (from v0). Delta lands next frame.
-static void SpecDrag(ImDrawList* dl, ImGuiIO& io, int v0)
+// Panel rect = bounds of the vertices this frame's Draw* added (from v0). SpecPlace runs inside
+// the panel's dpi block (layout px): shifts the fixed-position styles by the drag offset.
+static bool SpecPlace(ImDrawList* dl, ImGuiIO& io, int v0, ImVec2& mn, ImVec2& mx)
 {
-    static bool s_drag = false;
     ImDrawVert* v = dl->VtxBuffer.Data;
     const int v1 = dl->VtxBuffer.Size;
-    if (v1 <= v0) { s_drag = false; return; }
+    if (v1 <= v0) return false;
 
-    ImVec2 mn(FLT_MAX, FLT_MAX), mx(-FLT_MAX, -FLT_MAX);
+    mn = ImVec2(FLT_MAX, FLT_MAX); mx = ImVec2(-FLT_MAX, -FLT_MAX);
     for (int i = v0; i < v1; ++i) { mn = ImMin(mn, v[i].pos); mx = ImMax(mx, v[i].pos); }
 
     if (StyleFixedPos(g_specStyle)) {
@@ -2570,18 +2575,37 @@ static void SpecDrag(ImDrawList* dl, ImGuiIO& io, int v0)
         for (int i = v0; i < v1; ++i) { v[i].pos.x += dx; v[i].pos.y += dy; }
         mn.x += dx; mn.y += dy; mx.x += dx; mx.y += dy;
     }
+    return true;
+}
+
+// Drag to reposition, menu open only: LMB drag moves, RMB resets to the bare g_specPos anchor.
+// Runs after the dpi block ended: the vertices are where they show (screen px), so the hit test
+// takes the screen mouse, and the drag maps the shown move back to layout px (botox
+// drag_placed_panel: dpi_panel_layout_pos). lmn / lmx = the layout bounds. Delta lands next frame.
+static void SpecDrag(ImDrawList* dl, ImGuiIO& io, int v0, bool drew, ImVec2 lmn, ImVec2 lmx)
+{
+    static bool s_drag = false;
+    if (!drew) { s_drag = false; return; }
+    ImDrawVert* v = dl->VtxBuffer.Data;
+    ImVec2 mn(FLT_MAX, FLT_MAX), mx(-FLT_MAX, -FLT_MAX);
+    for (int i = v0; i < dl->VtxBuffer.Size; ++i) { mn = ImMin(mn, v[i].pos); mx = ImMax(mx, v[i].pos); }
 
     if (!g_showMenu) { s_drag = false; return; }
 
-    const ImVec2 m = io.MousePos;
+    const ImVec2 m = Dpi_ScreenMouse();
     const bool hovered = !GImGui->HoveredWindow && m.x >= mn.x && m.x <= mx.x && m.y >= mn.y && m.y <= mx.y;
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) s_drag = true;
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_drag = false;
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) { g_specOffX = g_specOffY = 0.f; s_drag = false; }
 
     if (s_drag) {
-        g_specOffX += fmaxf(-mn.x, fminf(io.MouseDelta.x, io.DisplaySize.x - mx.x));
-        g_specOffY += fmaxf(-mn.y, fminf(io.MouseDelta.y, io.DisplaySize.y - mx.y));
+        // io.MouseDelta is logical px (the mouse imgui sees is screen / dpi scale)
+        const float k = Dpi_Scale();
+        const ImVec2 d(fmaxf(-mn.x, fminf(io.MouseDelta.x * k, io.DisplaySize.x - mx.x)),
+                       fmaxf(-mn.y, fminf(io.MouseDelta.y * k, io.DisplaySize.y - mx.y)));
+        const ImVec2 at = Dpi_PanelLayoutPos(ImVec2(mn.x + d.x, mn.y + d.y), ImVec2(lmx.x - lmn.x, lmx.y - lmn.y));
+        g_specOffX += at.x - lmn.x;
+        g_specOffY += at.y - lmn.y;
     }
     if (hovered || s_drag) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
@@ -2649,8 +2673,14 @@ void RenderSpectatorList()
         ImGuiIO& io = ImGui::GetIO();
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
         const int v0 = dl->VtxBuffer.Size;
-        DrawStyle(dl, io);
-        SpecDrag(dl, io, v0);
+        ImVec2 lmn, lmx;
+        bool drew;
+        {
+            DpiPanelScope block(dl);   // botox: each spectator style is one stretch block
+            DrawStyle(dl, io);
+            drew = SpecPlace(dl, io, v0, lmn, lmx);
+        }
+        SpecDrag(dl, io, v0, drew, lmn, lmx);
     }
 
     if (force) for (int i = 0; i < 3; ++i) *flags[i] = saved[i];

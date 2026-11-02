@@ -2,7 +2,7 @@
 #include "../../globals/globals.h"
 
 void RenderMenu();
-void RenderMenuBlur();    // background blur: call after the layers it should blur (esp, world fx), before HUD panels
+bool RenderMenuBlur();    // background blur: call after the layers it should blur (esp, world fx), before HUD panels. true = drew
 float Menu_FadeAlpha();   // botox m_anim_progress, render.cpp fades the menu layer by it
 
 // botox fade_draw_lists popup half: confirm popups (SavePopup) fade on their own, 2x menu speed.

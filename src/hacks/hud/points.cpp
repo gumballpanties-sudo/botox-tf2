@@ -1,5 +1,6 @@
 #include "points.h"
 #include "watermark.h"   // g_wmBox -- botox sits the counter beside the watermark box
+#include "../../render/dpi.h"   // botox stretch block (dpi scale panels)
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -231,6 +232,7 @@ void RenderPoints()
     const auto accentA = [&](float a) { return IM_COL32(ar, ag, ab, (int)std::clamp(alpha * a, 0.f, 255.f)); };
 
     ImDrawList* dl = ImGui::GetForegroundDrawList();
+    DpiPanelScope block(dl);   // botox points_draw: one stretch block
     const char* t = text.c_str();
     dl->AddText(font, fontSize, ImVec2(x + 1.8f, y + 1.8f + trail * 1.35f), accentA(90.f), t);
     dl->AddText(font, fontSize, ImVec2(x + 1.25f, y + 1.25f + trail), accentA(135.f), t);

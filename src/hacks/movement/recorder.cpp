@@ -5,6 +5,7 @@
 #include "prediction.h"            // EntV3 / EntI, g_globalVars
 #include "../aim/aim.h"            // Aim_ChatPrint
 #include "../../render/render.h"   // W2S_Project
+#include "../../render/dpi.h"      // botox render_indicator: queued stretch block (dpi scale panels)
 #include <atomic>
 #include <cfloat>
 #include <cstdio>
@@ -933,6 +934,7 @@ static void RenderIndicator(ImDrawList* dl)
     const float target = (s_recording || OwnsCmd()) ? 1.f : 0.f;
     s_indAlpha = std::clamp(s_indAlpha + (target - s_indAlpha) * (1.f - std::exp(-k_indicatorLerpK * dt)), 0.f, 1.f);
     if (s_indAlpha <= 0.01f) return;
+    DpiPanelScope block(dl);
     ImFont* font = g_menuReg ? g_menuReg : ImGui::GetFont();
 
     const std::string text = s_recording ? "rec " + std::to_string(s_recFrames.size())
@@ -994,7 +996,7 @@ static void RenderClipEditor()
     if (s_editorClip < 0 || s_editorClip >= (int)s_clips.size() || s_clips[s_editorClip].frames.empty()) { s_editorOpen = false; return; }
     RecClip& clip = s_clips[s_editorClip];
 
-    const ImVec2 disp = ImGui::GetIO().DisplaySize;
+    const ImVec2 disp = ImGui::GetMainViewport()->Size;   // a window: logical (dpi) px, not the screen
     ImGui::SetNextWindowPos(ImVec2(disp.x - 330.f, 20.f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(310.f, 165.f), ImGuiCond_FirstUseEver);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.04f, 0.04f, 1.f));

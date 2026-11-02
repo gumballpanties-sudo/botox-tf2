@@ -132,6 +132,31 @@ static std::vector<PfFallMemo> s_pfFallMemo;
 static std::vector<Vec3> s_pfJumpPts;        // g_psFinderPixeljump: pins no FALL catches, kept instead of dropped
 static std::vector<Vec3> s_pfHeadbouncePts;  // g_psFinderHeadbounce: ascent (ceiling) pins
 
+// ---- SURF LENGTH (g_psFinderLength, heroin finder_length / "draw pixelsurf length") -----------
+// heroin's finder (FUN_18007de00) walks every pin it finds along the wall, 10u a step, re-proving
+// it at the same z until it stops holding, and draws the run. A dot says "this height catches
+// here"; the line says "and this far either side of here", which is where you can actually line
+// up for it. Same here, after the column: 8u steps out each way, the end bisected to 1u, chunked
+// on the scan budget like the column itself. Crosshair finder only (the map scan draws its own).
+struct PfHit
+{
+    Vec3  wall;          // on the wall surface, z = the engine's settled pin
+    Vec3  n;             // the face normal the cell pinned on (xy, unit)
+    float gap = 0.f;     // hull origin offset off that face (support - 0.022 / + 0.001)
+    bool  duck = false;
+    float ext[2] = { 0.f, 0.f };   // run along the tangent (n.y, -n.x): ext[0] <= 0 <= ext[1]
+};
+static std::vector<PfHit> s_pfHits;          // lockstep with s_pfFound while !s_pfQuiet
+static std::vector<PfHit> s_pfLen;           // deduped pins being walked
+static int s_pfLenI = -1;                    // pin being walked (-1 = walk not started)
+static int s_pfLenDir = 0, s_pfLenK = 1;     // 0 = toward -tangent, 1 = +; next step index
+static int s_pfLenSims = 0;                  // sims the walk spent (diag)
+static int s_pfLenLost = 0;                  // pins the walk could not re-prove where found (diag)
+static int s_pfUnheld = 0;                   // pins dropped: held one tick, not the next (diag)
+static std::vector<Vec3> s_psFinderLines;    // published runs, A then B (under g_psLock)
+static constexpr float k_pfLenStep = 8.f;
+static constexpr int   k_pfLenMax  = 160;    // steps per side: 1280u, longer than any real wall face
+
 // ---- who is driving the column scanner ------------------------------------------------------
 // Two features anchor columns now: the crosshair finder below, and the whole-map scan
 // (psmap.inl), which walks the map's own brush edges and hands this scanner one cell at a time.
@@ -151,6 +176,7 @@ static void PfCancelScan()
     s_pfFound.clear();
     s_pfFallMemo.clear();
     s_pfJumpPts.clear(); s_pfHeadbouncePts.clear();
+    s_pfHits.clear(); s_pfLen.clear(); s_pfLenI = -1;
 }
 
 // Unit A3 port: publish the two new finder lists (copy under the render lock, same as PS_GetDrawData)
@@ -212,6 +238,7 @@ static void PsLoadPointsForMap(const char* map)
     std::lock_guard<std::mutex> l(g_psLock);
     s_psAssistPts.swap(pts);
     s_psFinderPts.clear(); // finder results are per-session, drop on map change
+    s_psFinderLines.clear();
     s_psTbPts.clear();
     s_psMapLines.clear();
     s_psMapTbPts.clear();
@@ -257,18 +284,26 @@ static void PsWritePoints()
 
 // dedupe collapses runs of adjacent steps that converged on one catch; keep the FIRST pin
 // of each run verbatim (the engine's exact settled height). Unchanged from the one-shot scan
-static std::vector<Vec3> PfDedupe(const std::vector<Vec3>& vIn)
+// (indices, so s_pfHits -- pushed in lockstep -- dedupes the same way)
+static std::vector<int> PfDedupeIdx(const std::vector<Vec3>& vIn)
 {
-    if (vIn.size() <= 1) return vIn;
-    std::vector<Vec3> vOut;
-    vOut.push_back(vIn.front());
+    std::vector<int> vOut;
+    if (vIn.empty()) return vOut;
+    vOut.push_back(0);
     float flPrevZ = vIn.front().z;
     for (size_t i = 1; i < vIn.size(); i++)
     {
         if (fabsf(vIn[i].z - flPrevZ) > 1.5f)
-            vOut.push_back(vIn[i]);
+            vOut.push_back((int)i);
         flPrevZ = vIn[i].z;
     }
+    return vOut;
+}
+
+static std::vector<Vec3> PfDedupe(const std::vector<Vec3>& vIn)
+{
+    std::vector<Vec3> vOut;
+    for (int i : PfDedupeIdx(vIn)) vOut.push_back(vIn[i]);
     return vOut;
 }
 
@@ -360,7 +395,18 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
                 if (fabsf(EntV3(pLocal, g_offVelocity).z + flHalfGrav) < flSurfTol)
                 {
                     flPinZ = EntV3(pLocal, g_offOrigin).z; // the engine's own settled catch height
-                    return true;
+                    // HOLD PROOF (heroin FUN_18007de00 runs ProcessMovement twice and wants vz ==
+                    // -g*dt/2 after both, ground entity null). One pinned tick is also what a hull
+                    // grazing a lip on its way past reads like; a surf is a pin that is STILL a pin
+                    // on the next tick, at the same height, in the air. One sim, pins only
+                    Pred_Simulate(pLocal, pCmd);
+                    s_pfProbes++;
+                    if (!(EntI(pLocal, g_offFlags) & FL_ONGROUND)
+                        && fabsf(EntV3(pLocal, g_offVelocity).z + flHalfGrav) < flSurfTol
+                        && fabsf(EntV3(pLocal, g_offOrigin).z - flPinZ) < 0.1f)
+                        return true;
+                    s_pfUnheld++;
+                    return false;
                 }
                 if (EntV3(pLocal, g_offOrigin).z < flFloorZ)
                     break;                                 // fell out of this cell's own step
@@ -722,6 +768,12 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
                     continue;
                 // store ON the wall surface at the engine's settled height
                 s_pfFound.push_back(Vec3(vWallXY.x, vWallXY.y, flPinZ));
+                if (!s_pfQuiet)
+                {
+                    PfHit h;
+                    h.wall = s_pfFound.back(); h.n = vN; h.gap = flGap; h.duck = bDuck;
+                    s_pfHits.push_back(h);
+                }
                 s_pfHeightHit = true;
             }
             else if (g_psFinderHeadbounce && !s_pfQuiet)
@@ -767,6 +819,88 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
             break;
     }
 
+    // ---- SURF LENGTH: the column is done, walk each pin along its wall (see PfHit) -------------
+    // Holds = heroin's re-proof at one spot: hull at the pin z on the same face, the pin's own
+    // vz and press, two ticks, still pinned at the same height, still in the air. The fit trace
+    // first: a hull teleported into solid gets its velocity zeroed every tick, and gravity on top
+    // of zero reads exactly like a pin -- that is how a walk would run on through the next wall.
+    // ponytail: no MV_PinOnProp per step (16 traces); a crate against the wall extends a run. Add
+    // it here if a line is seen crossing one
+    auto Holds = [&](const PfHit& h, float s) -> bool
+    {
+        const Vec3 vT(h.n.y, -h.n.x, 0.f);
+        const Vec3 vAt = h.wall + vT * s + h.n * h.gap;
+        GameTrace_t fit{};
+        TraceHull(vAt, vAt, vMins, Vec3(vMaxs.x, vMaxs.y, h.duck ? 62.f : 82.f),
+                  MASK_PLAYERSOLID, &filter, &fit);
+        if (fit.startsolid || fit.allsolid) return false;
+        const Vec3 vInto(-h.n.x, -h.n.y, 0.f);
+        Vec3 vIntoAngle = VectorAngles(vInto);
+        ClampAnglesMv(vIntoAngle);
+        const float flRot = DEG2RADF(vIntoAngle.y - pCmd->viewangles.y);
+        RestoreToFrame(nBasePredicted - 1);
+        g_fnSetAbsOrigin(pLocal, vAt);
+        EntSetV3(pLocal, g_offOrigin, vAt);
+        EntSetI(pLocal, g_offFlags, EntI(pLocal, g_offFlags) & ~FL_ONGROUND);
+        EntSetV3(pLocal, g_offVelocity, vInto * 10.f + Vec3(0.f, 0.f, -flHalfGrav));
+        pCmd->buttons = s_pfBaseButtons & ~IN_JUMP;
+        if (h.duck) pCmd->buttons |= IN_DUCK; else pCmd->buttons &= ~IN_DUCK;
+        pCmd->forwardmove = cosf(flRot) * 10.f;
+        pCmd->sidemove = -sinf(flRot) * 10.f;
+        for (int t = 0; t < 2; t++)
+        {
+            Pred_Simulate(pLocal, pCmd);
+            s_pfLenSims++;
+            if (EntI(pLocal, g_offFlags) & FL_ONGROUND) return false;
+            if (fabsf(EntV3(pLocal, g_offVelocity).z + flHalfGrav) >= flSurfTol) return false;
+            if (fabsf(EntV3(pLocal, g_offOrigin).z - h.wall.z) > 0.1f) return false;
+        }
+        return true;
+    };
+
+    const bool bWalk = s_pfNextI > s_pfSteps && !s_pfQuiet && g_psFinderLength
+                    && s_pfHits.size() == s_pfFound.size();
+    if (bWalk && s_pfLenI < 0)
+    {
+        s_pfLen.clear();
+        for (int i : PfDedupeIdx(s_pfFound)) s_pfLen.push_back(s_pfHits[i]);
+        s_pfLenI = 0; s_pfLenDir = 0; s_pfLenK = 1;
+        s_pfLenLost = 0;
+    }
+    while (bWalk && s_pfLenI < (int)s_pfLen.size() && ElapsedMs() < flBudgetMs)
+    {
+        PfHit& h = s_pfLen[s_pfLenI];
+        // the pin has to re-prove where it was found, or every step after it measures nothing
+        // (`lost=` on the scan line: if that is every pin, Holds is wrong, not the map)
+        if (s_pfLenDir == 0 && s_pfLenK == 1 && !Holds(h, 0.f))
+        {
+            s_pfLenLost++;
+            s_pfLenI++;
+            continue;
+        }
+        const float sgn = s_pfLenDir ? 1.f : -1.f;
+        if (s_pfLenK <= k_pfLenMax && Holds(h, sgn * k_pfLenStep * float(s_pfLenK)))
+        {
+            h.ext[s_pfLenDir] = sgn * k_pfLenStep * float(s_pfLenK);
+            s_pfLenK++;
+            continue;
+        }
+        // the run stops inside this step: bisect it to 1u
+        if (s_pfLenK <= k_pfLenMax)
+        {
+            float lo = k_pfLenStep * float(s_pfLenK - 1), hi = k_pfLenStep * float(s_pfLenK);
+            for (int b = 0; b < 3; b++)
+            {
+                const float mid = (lo + hi) * 0.5f;
+                if (Holds(h, sgn * mid)) lo = mid; else hi = mid;
+            }
+            h.ext[s_pfLenDir] = sgn * lo;
+        }
+        if (s_pfLenDir == 0) { s_pfLenDir = 1; s_pfLenK = 1; }
+        else                 { s_pfLenI++; s_pfLenDir = 0; s_pfLenK = 1; }
+    }
+    const bool bLenDone = !bWalk || s_pfLenI >= (int)s_pfLen.size();
+
     // restore everything the chunk touched
     pCmd->buttons = iBackupButtons;
     pCmd->forwardmove = flBackupForward;
@@ -785,11 +919,22 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
     {
         std::vector<Vec3> vPub = PfDedupe(s_pfFound);
         nFound = (int)vPub.size();
+        // runs publish as they grow, like the dots. Under 1u is the dot alone
+        std::vector<Vec3> vLines;
+        if (bWalk)
+            for (const PfHit& h : s_pfLen)
+            {
+                if (h.ext[1] - h.ext[0] < 1.f) continue;
+                const Vec3 vT(h.n.y, -h.n.x, 0.f);
+                vLines.push_back(h.wall + vT * h.ext[0]);
+                vLines.push_back(h.wall + vT * h.ext[1]);
+            }
         std::lock_guard<std::mutex> l(g_psLock);
         s_psFinderPts = std::move(vPub);
+        s_psFinderLines = std::move(vLines);
     }
 
-    if (s_pfNextI > s_pfSteps)
+    if (s_pfNextI > s_pfSteps && bLenDone)
     {
         s_pfBusy = false;
         if (s_pfQuiet)
@@ -797,14 +942,22 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
         // conf=N/M -- of M pins found, N are catchable by a FALL (TryFall). READ IT:
         // conf=0/M means every saved point on this wall only HOLDS a pin and the assist can
         // never jump onto one, however good the picker is
+        // unheld= pins that held one tick and not the next (dropped). len= walked runs, lost= pins
+        // the walk could not re-prove at their own spot, lensims= what the walk cost
+        float flLongest = 0.f;
+        for (const PfHit& h : s_pfLen) flLongest = std::max(flLongest, h.ext[1] - h.ext[0]);
         DebugLog("PF: scan z=%.1f..%.1f steps=%d margin=%.0f -> %d spot(s) | %d chunk(s) %.1f ms "
                  "cells=%d sims=%d pruned=%d nostand=%d conf=%d/%d sealed=%d clip=%d deep=%d "
-                 "prop=%d void=%d strict=%d budget=%.1f eff=%.1f",
+                 "prop=%d void=%d unheld=%d strict=%d budget=%.1f eff=%.1f | len=%d lost=%d "
+                 "longest=%.0fu lensims=%d",
                  s_pfLow, s_pfHigh, s_pfSteps, g_psFinderMargin, nFound,
                  s_pfChunks, s_pfMs, s_pfCells, s_pfProbes, s_pfPruned, s_pfNoStand,
                  s_pfConf, s_pfFalls, s_pfSealed, s_pfClipBlk, s_pfDeep, s_pfProp, s_pfVoid,
-                 (int)g_psFinderStrict, (double)g_psFinderBudget, flBudgetMs);
+                 s_pfUnheld, (int)g_psFinderStrict, (double)g_psFinderBudget, flBudgetMs,
+                 bWalk ? (int)s_pfLen.size() : -1, s_pfLenLost, flLongest, s_pfLenSims);
         s_pfFound.clear();
+        s_pfHits.clear();
+        s_pfLenI = -1;
     }
 }
 
@@ -1003,6 +1156,7 @@ static void PixelFinder(void* pLocal, UserCmd_t* pCmd)
         // first press: clear old results, anchor the scan column (ignore triggers/empty aim)
         std::lock_guard<std::mutex> l(g_psLock);
         s_psFinderPts.clear();
+        s_psFinderLines.clear();
         s_psTbPts.clear();
         s_psFinderFirst = false;
         // a prop anchor is refused outright. Aiming at a crate used to anchor the
@@ -1069,6 +1223,8 @@ static void PixelFinder(void* pLocal, UserCmd_t* pCmd)
     s_pfBaseButtons = pCmd->buttons;   // frozen for the whole scan, not re-read per cmd
 
     s_pfFound.clear();
+    s_pfHits.clear(); s_pfLen.clear(); s_pfLenI = -1;
+    s_pfUnheld = 0; s_pfLenSims = 0; s_pfLenLost = 0;
     { std::lock_guard<std::mutex> l(g_psLock); s_pfJumpPts.clear(); s_pfHeadbouncePts.clear(); }   // render copies them
     s_pfNextI = 0; s_pfNextLat = 0; s_pfHeightHit = false;
     s_pfMs = 0.0; s_pfChunks = 0; s_pfProbes = 0; s_pfPruned = 0;
@@ -1831,7 +1987,23 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                     if (flDist < flBest) { flBest = flDist; iErase = i; }
                 }
                 if (iErase >= 0)
+                {
+                    // ...and its run: the one line that passes through the dot at its height
+                    const Vec3 p = s_psFinderPts[iErase];
+                    for (size_t k = 0; k + 1 < s_psFinderLines.size(); k += 2)
+                    {
+                        const Vec3& a = s_psFinderLines[k];
+                        const Vec3& b = s_psFinderLines[k + 1];
+                        const float len = (b - a).Length2D();
+                        if (fabsf(a.z - p.z) > 0.01f || len < 0.01f) continue;
+                        if ((p - a).Length2D() + (b - p).Length2D() - len < 0.5f)
+                        {
+                            s_psFinderLines.erase(s_psFinderLines.begin() + k, s_psFinderLines.begin() + k + 2);
+                            break;
+                        }
+                    }
                     s_psFinderPts.erase(s_psFinderPts.begin() + iErase);
+                }
             }
         }
     }
@@ -2331,6 +2503,7 @@ void PS_GetDrawData(PsDrawData& out)
     out.finderPts = s_psFinderPts;
     out.tbPts = s_psTbPts;
     out.mapLines = s_psMapLines;
+    out.finderLines = s_psFinderLines;
     out.mapTbPts = s_psMapTbPts;
     out.assistPts.resize(s_psAssistPts.size());
     for (size_t i = 0; i < s_psAssistPts.size(); i++)

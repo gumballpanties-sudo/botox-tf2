@@ -29,6 +29,7 @@ add_library(botox SHARED
     src/hacks/visuals/visuals.cpp
     src/hacks/visuals/lagres.cpp
     src/render/render.cpp
+    src/render/dpi.cpp
     src/hacks/screen/colorcorrect.cpp
     src/hacks/screen/bloom.cpp
     src/hacks/screen/screenfx.cpp
@@ -277,6 +278,11 @@ target_compile_definitions(fbmath_test PRIVATE FB_SRC_DIR="${CMAKE_CURRENT_SOURC
 
 # Gate test for the aspect ratio overlay stretch math (src/hacks/screen/aspect_stretch_math.h).
 add_executable(aspect_stretch_test tests/aspect_stretch_test.cpp)
+
+# Gate test for the dpi scale math (src/render/dpi_math.h, botox render.cpp 1:1): pivot, shown <->
+# layout round trips a panel drag relies on, anchored edges, the 1:1 window slide.
+# Build + run: cmake --build build --config Release --target dpi_test && build\Release\dpi_test.exe
+add_executable(dpi_test tests/dpi_test.cpp)
 
 # Gate test for the strafe air-accel math (src/hacks/movement/airlean.h): the closed-form best-gain and
 # free-turn wish angles vs a brute-force sweep of the same AirAccelerate tick.

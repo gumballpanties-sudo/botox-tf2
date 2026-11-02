@@ -294,4 +294,12 @@ void BlurRect(ImDrawList* dl, ImVec2 min, ImVec2 max, float strength, float roun
     dl->AddCallback(&BlurRectCallback, &j);
 }
 
+void BlurRect_ScaleJob(const ImDrawCmd& cmd, ImVec2 pivot, float scale)
+{
+    if (cmd.UserCallback != &BlurRectCallback || !cmd.UserCallbackData) return;
+    BlurJob& j = *static_cast<BlurJob*>(cmd.UserCallbackData);   // s_jobs: ours, mutable
+    j.min = ImVec2(pivot.x + (j.min.x - pivot.x) * scale, pivot.y + (j.min.y - pivot.y) * scale);
+    j.max = ImVec2(pivot.x + (j.max.x - pivot.x) * scale, pivot.y + (j.max.y - pivot.y) * scale);
+}
+
 void BlurRect_NewFrame() { s_jobCount = 0; }
