@@ -8,6 +8,7 @@
 // faulting thread itself.
 
 void CrashLog_Install(void* hSelfModule);
+void CrashLog_Uninstall();   // eject: VEH off + file closed, before the dll unmaps
 
 // Breadcrumb. `tag` MUST be a string literal -- only the pointer is stored, nothing is copied.
 // The last 16 are printed with every record, so a fault that lands inside client.dll still

@@ -75,6 +75,19 @@ inline float BrakeWish(float xy, float airaccel, float ipt, float cap = 450.f)
     return std::min(cap, xy / a);
 }
 
+// cumidere misc_airstuck (tf2.dll FUN_1801cd900) accept: xy stopped AND |vz| on half gravity
+// ( FUN_1801cade0 = -0.5 * sv_gravity * interval ), either sign
+inline bool CumiStuck(float vz, float vxy, float half)
+{
+    return vxy < 0.1f && std::fabs(std::fabs(vz) - std::fabs(half)) < 0.1f;
+}
+
+// cumidere graze sign: yaw = wall_yaw + off * sign, AGAINST the along-wall drift
+inline float CumiSign(float vel_yaw, float wall_yaw)
+{
+    return std::remainder(vel_yaw - wall_yaw, 360.0f) < 0.0f ? 1.0f : -1.0f;
+}
+
 // botox pixel_surf `pinned`: vz on the pin AND still sliding ( xy < 1 = a wall hang, not a surf )
 inline bool SurfPinned(float vz, float vxy, float pin) { return std::fabs(vz - pin) < 0.01f && vxy >= 1.f; }
 

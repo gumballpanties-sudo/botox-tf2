@@ -7,6 +7,7 @@
 #include <chrono>
 #include <algorithm>
 #include <utility>
+#include <atomic>
 
 // botox csgo-sdk hacks/misc/boot_screen.cpp at e14be34 (dna particles flying out of the
 // centre, "injecting <step>" + 3 pulsing dots, bar + label centred as one block, step times
@@ -16,8 +17,9 @@
 //     config are already done (MainThread), so those stamp at once; "hooks" waits for
 //     PollThread (it installs the client/engine hooks after its own opening sleep), "fonts"
 //     is the atlas render.cpp builds synchronously before the first NewFrame.
-//   - no eject splash: h_Present returns at g_eject (render.cpp) and nothing draws after it,
-//     so a cover could only pop off, never fade the game back in.
+//   - eject splash: the request (g_ejectRequest) fades it in over the live overlay; under the
+//     full cover MainThread sets g_eject and the world restores, then h_Present draws the splash
+//     alone (RenderEjectFrame) while it fades the game back in.
 //   - boot_screen_active() (botox holds screen passes under the cover) not ported: no pass
 //     here stalls on a shader build.
 namespace
@@ -34,7 +36,9 @@ constexpr const char* k_times = "C:\\botox-tf2\\boot_times.txt";
 float     g_expected[k_count] = { 50.f, 30.f, 60.f, 20.f, 10.f, 300.f, 400.f, 150.f, 2500.f, 600.f };
 long long g_start = 0, g_stamp[k_count] = {};
 int       g_done  = 0;
-bool      g_finished = false;
+// MainThread waits on these, the render thread writes them
+std::atomic<bool>      g_finished{ false }, g_ejecting{ false }, g_ejectCover{ false }, g_ejectDone{ false };
+std::atomic<long long> g_lastDraw{ 0 };
 
 float g_reveal   = 0.f;   // rest of the overlay, 0 -> 1 once the splash is gone
 int   g_splashVtx = -1;
@@ -117,19 +121,57 @@ void Spawn(Particle& p, float dist)
     p.phase = (float)(rand() % 1000) * 0.01f;
     p.rate  = 0.6f + (float)(rand() % 40) / 100.f;
 }
+
+// MainThread: returns at flag, or at once when no frames come (minimised), 1.5s cap
+void WaitFor(const std::atomic<bool>& flag)
+{
+    for (int i = 0; i < 150 && !flag; ++i)
+    {
+        if (NowUs() - g_lastDraw > 250'000) return;
+        Sleep(10);
+    }
 }
+}
+
+void BootScreen_EjectBegin()
+{
+    g_ejecting = true;
+    WaitFor(g_ejectCover);
+}
+
+void BootScreen_EjectEnd()
+{
+    g_ejectDone = true;
+    WaitFor(g_finished);
+}
+
+bool BootScreen_EjectDrawing() { return g_ejecting && !g_finished; }
 
 void RenderBootScreen()
 {
     static float ramp = 0.f, shown = 0.f, clock_ = 0.f, hold = 0.f, warm = 0.f;
     static int   calm = 0;
-    static bool  started = false, saved = false;
+    static bool  started = false, saved = false, ejecting = false;
+
+    // every frame, finished too: eject's wait reads it as "frames are coming"
+    const long long now = NowUs();
+    g_lastDraw = now;
+
+    if (g_ejecting && !ejecting)
+    {
+        ejecting = true;
+        shown = clock_ = hold = 0.f;
+        g_finished = false;
+        DebugLog("BOOT: eject splash");
+    }
 
     const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.f, 1.f / 30.f);   // a hitch frame never skips the fade
-    if (g_finished) { g_reveal = (std::min)(g_reveal + dt / 0.4f, 1.f); g_splashVtx = -1; return; }
+    // rest of the overlay: in after the inject splash is gone, out while the eject splash comes in
+    if (ejecting)        g_reveal = (std::max)(g_reveal - dt / 0.35f, 0.f);
+    else if (g_finished) g_reveal = (std::min)(g_reveal + dt / 0.4f, 1.f);
     g_splashVtx = -1;
+    if (g_finished) return;
 
-    const long long now = NowUs();
     if (!started)
     {
         started = true;
@@ -139,31 +181,43 @@ void RenderBootScreen()
     }
     clock_ += dt;
 
-    if (g_done == k_hooks && PollThreadDone()) Step();
-    if (g_done == k_fonts - 1) Step();                    // render: this frame is it
-    if (g_done == k_fonts && g_menuBold) Step();          // atlas built before NewFrame
-    // warm = 15 frames in a row under 50 ms, 4s cap for slow pcs
-    if (g_done == k_effects)
+    float fraction = 1.f;
+    bool  done     = false;
+    if (!ejecting)
     {
-        warm += dt;
-        calm = ImGui::GetIO().DeltaTime < 0.05f ? calm + 1 : 0;
-        if (calm >= 15 || warm > 4.f) Step();
-    }
-    // a stuck step must never hide the overlay for good
-    while (clock_ > 20.f && g_done < k_count) Step();
+        if (g_done == k_hooks && PollThreadDone()) Step();
+        if (g_done == k_fonts - 1) Step();                    // render: this frame is it
+        if (g_done == k_fonts && g_menuBold) Step();          // atlas built before NewFrame
+        // warm = 15 frames in a row under 50 ms, 4s cap for slow pcs
+        if (g_done == k_effects)
+        {
+            warm += dt;
+            calm = ImGui::GetIO().DeltaTime < 0.05f ? calm + 1 : 0;
+            if (calm >= 15 || warm > 4.f) Step();
+        }
+        // a stuck step must never hide the overlay for good
+        while (clock_ > 20.f && g_done < k_count) Step();
 
-    const bool done = g_done >= k_count;
-    if (done && !std::exchange(saved, true))
-    {
-        SaveTimes();
-        DebugLog("BOOT: injected in %.0f ms (hooks step %.0f ms)", (float)(now - g_start) / 1000.f,
-                 (float)(g_stamp[k_hooks] - g_stamp[k_hooks - 1]) / 1000.f);
+        done = g_done >= k_count;
+        if (done && !std::exchange(saved, true))
+        {
+            SaveTimes();
+            DebugLog("BOOT: injected in %.0f ms (hooks step %.0f ms)", (float)(now - g_start) / 1000.f,
+                     (float)(g_stamp[k_hooks] - g_stamp[k_hooks - 1]) / 1000.f);
+        }
+        if (!done) fraction = Progress(now);
     }
-    const float fraction = done ? 1.f : Progress(now);
+    else
+    {
+        // no steps to weigh: creeps toward 90% until MainThread says the restore is done
+        done = g_ejectDone;
+        if (!done) fraction = 0.9f * (1.f - std::exp(-clock_ / 0.6f));
+    }
 
     if (done) hold += dt;
-    const bool show = !done || hold < 0.35f;
+    const bool show = !done || hold < (ejecting ? 0.25f : 0.35f);
     ramp = show ? (std::min)(ramp + dt / 0.35f, 1.f) : (std::max)(ramp - dt / 0.45f, 0.f);
+    if (ejecting && ramp >= 1.f) g_ejectCover = true;
     if (!show && ramp <= 0.f) { g_finished = true; return; }
 
     const float fade = ramp * ramp * (3.f - 2.f * ramp);
@@ -205,7 +259,12 @@ void RenderBootScreen()
     }
 
     char text[96];
-    if (done) snprintf(text, sizeof(text), "injected");
+    if (ejecting)
+    {
+        if (done) snprintf(text, sizeof(text), "ejected");
+        else      snprintf(text, sizeof(text), "ejecting   %d%%", (int)(shown * 100.f));
+    }
+    else if (done) snprintf(text, sizeof(text), "injected");
     else      snprintf(text, sizeof(text), "injecting %s   %d%%", k_steps[(std::min)(g_done, k_count - 1)], (int)(shown * 100.f));
 
     // menu "botox" label font, native size: monochrome verdana goes soft when scaled

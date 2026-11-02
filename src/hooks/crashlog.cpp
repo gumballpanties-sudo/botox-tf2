@@ -31,6 +31,7 @@ static bool      s_header   = false;       // session banner written
 static uintptr_t s_selfBase = 0;
 static uintptr_t s_selfEnd  = 0;
 static int       s_records  = 0;
+static PVOID     s_veh      = nullptr;
 
 static constexpr int  k_maxRecords = 64;       // a crash loop must not fill the disk
 static constexpr int  k_maxHitches = 32;
@@ -369,5 +370,17 @@ void CrashLog_Install(void* hSelfModule)
     }
     InitializeCriticalSection(&s_cs);
     s_csInit = true;
-    AddVectoredExceptionHandler(1, Veh);   // 1 = first in line, before anyone's __except
+    s_veh = AddVectoredExceptionHandler(1, Veh);   // 1 = first in line, before anyone's __except
+}
+
+// Eject, right before the dll unmaps: a VEH left registered would be the process's next
+// exception jumping into freed pages. The lock is NOT deleted (same reason as DebugLog_Shutdown).
+void CrashLog_Uninstall()
+{
+    if (s_veh) { RemoveVectoredExceptionHandler(s_veh); s_veh = nullptr; }
+    if (!s_csInit) return;
+    EnterCriticalSection(&s_cs);
+    if (s_hFile != INVALID_HANDLE_VALUE) { CloseHandle(s_hFile); s_hFile = INVALID_HANDLE_VALUE; }
+    s_fileTried = true;   // never reopen
+    LeaveCriticalSection(&s_cs);
 }

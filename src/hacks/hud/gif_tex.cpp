@@ -14,6 +14,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include "../../globals/pinned_thread.h"
 
 // GDI+ decode, same approach as botox's spectator_list.cpp (kamibebra_gif_data.h):
 // Bitmap::FromStream on an in-memory copy, SelectActiveFrame to walk the GIF's own frame
@@ -172,8 +173,8 @@ static std::string UrlPath(const std::string& setting)
     std::lock_guard<std::mutex> lock(s_urlMutex);
     if (s_urlStarted.insert(url).second)
     {
-        // soft eject keeps the dll mapped (thread.cpp), so a download still running then is harmless
-        std::thread([url, path = std::string(local)] {
+        // pinned: an eject mid-download delays the unmap until it ends (pinned_thread.h)
+        if (HANDLE h = CreatePinnedThread([url, path = std::string(local)] {
             CreateDirectoryA("C:\\botox-tf2", nullptr);
             CreateDirectoryA("C:\\botox-tf2\\images", nullptr);
             const std::string part = path + ".part";   // never decode a half-written file
@@ -181,7 +182,7 @@ static std::string UrlPath(const std::string& setting)
             if (SUCCEEDED(hr) && MoveFileExA(part.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
                 DebugLog("gif_tex: downloaded %s", url.c_str());
             else { DeleteFileA(part.c_str()); DebugLog("gif_tex: download failed 0x%08X %s", (unsigned)hr, url.c_str()); }
-        }).detach();
+        })) CloseHandle(h);
     }
     return {};
 }
@@ -266,7 +267,7 @@ void GifTex_PathInput(const char* label, const char* hint, char* buf, size_t buf
             s_pickResult.clear();
         }
         s_pickAlive = true;
-        if (HANDLE h = CreateThread(nullptr, 0, PickThread, nullptr, 0, nullptr)) CloseHandle(h);
+        if (HANDLE h = CreatePinnedThread([] { PickThread(nullptr); })) CloseHandle(h);
         else s_pickAlive = false;
     }
     ImGui::EndDisabled();

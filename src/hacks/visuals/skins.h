@@ -35,3 +35,9 @@ bool Skins_OnCreateRagdoll(void* pRagdoll);
 void Skins_SaveCfg(FILE* f);   // "skin_<def>_<field>=..." lines
 bool Skins_LoadCfg(const char* key, const char* val);  // true = key consumed
 // The tab body lives in menu.cpp with every other tab -- it needs that file's widgets.
+
+// Shared with the hat changer (hats.cpp) -- see the bottom of skins.cpp.
+int         Skins_ModelIndex(const char* path);          // precached or client-side dynamic, 0 = none
+bool        Skins_SetAttribute(void* pAttrList, unsigned int index, float value);
+const void* Skins_StudioHdr(const void* pModel);         // model_t* -> studiohdr_t* ("IDST" checked)
+const void* Skins_ModelPtr(int modelIndex);              // IVModelInfo::GetModel

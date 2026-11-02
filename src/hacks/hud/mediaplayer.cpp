@@ -56,6 +56,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "../../globals/pinned_thread.h"
 
 namespace wf  = winrt::Windows::Foundation;
 namespace wgi = winrt::Windows::Graphics::Imaging;
@@ -1222,9 +1223,9 @@ static DWORD WINAPI MediaThread(LPVOID)
 void MediaPlayer_Start()
 {
     if (s_thread) return;
-    s_thread       = CreateThread(nullptr, 0, MediaThread, nullptr, 0, nullptr);
-    s_visThread    = CreateThread(nullptr, 0, VisualizerThread, nullptr, 0, nullptr);
-    s_lyricsThread = CreateThread(nullptr, 0, LyricsThread, nullptr, 0, nullptr);
+    s_thread       = CreatePinnedThread([] { MediaThread(nullptr); });
+    s_visThread    = CreatePinnedThread([] { VisualizerThread(nullptr); });
+    s_lyricsThread = CreatePinnedThread([] { LyricsThread(nullptr); });
 }
 
 void MediaPlayer_Shutdown()

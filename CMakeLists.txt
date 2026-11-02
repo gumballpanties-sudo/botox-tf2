@@ -66,6 +66,8 @@ add_library(botox SHARED
     src/hacks/hud/scoreboard.cpp
     src/hooks/crashlog.cpp
     src/hacks/visuals/skins.cpp
+    src/hacks/visuals/hats.cpp
+    src/hacks/visuals/hats_inv.cpp
     src/hacks/visuals/flipworld.cpp
     src/hacks/movement/detections.cpp
     src/hacks/movement/recorder.cpp
@@ -502,3 +504,13 @@ add_executable(chams_layers_test tests/chams_layers_test.cpp)
 # resolve, url cache hash, eyes row layout.
 # Build + run: cmake --build build --config Release --target specpure_test && build\Release\specpure_test.exe
 add_executable(specpure_test tests/specpure_test.cpp)
+
+# Gate test for the hat changer (src/hacks/visuals/hats_pure.h) against the generated cosmetic table
+# (src/dependencies/data/hatdata.h, tools/gen_hatdata.py): model decode, bodygroup math, known items.
+# Build + run: cmake --build build --config Release --target hats_test && build\Release\hats_test.exe
+add_executable(hats_test tests/hats_test.cpp)
+
+# Gate test for the skinchanger's edit classifier (src/hacks/visuals/skins_pure.h): which edits
+# fire a cl_fullupdate at once, which wait for typing to settle, which show live with none.
+# Build + run: cmake --build build --config Release --target skins_test && build\Release\skins_test.exe
+add_executable(skins_test tests/skins_test.cpp)

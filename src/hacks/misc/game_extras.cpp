@@ -13,6 +13,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "../../globals/pinned_thread.h"
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -39,7 +40,7 @@ std::vector<HANDLE> s_threads;
 bool StartWorker(LPTHREAD_START_ROUTINE fn, void* arg)
 {
     if (s_stop) return false;
-    HANDLE h = CreateThread(nullptr, 0, fn, arg, 0, nullptr);
+    HANDLE h = CreatePinnedThread([fn, arg] { fn(arg); });
     if (!h) { DebugLog("game: CreateThread failed (err %lu)", GetLastError()); return false; }
     std::lock_guard<std::mutex> lock(s_threadLock);
     // reap the finished ones: a chat worker starts per burst of messages

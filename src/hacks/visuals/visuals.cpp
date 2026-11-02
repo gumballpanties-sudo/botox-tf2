@@ -2,6 +2,7 @@
 #include "../movement/prediction.h"   // Vec3, EntF/EntI/EntV3/EntAlive, g_globalVars, TickInterval
 #include "lagres.h"       // lag resolver: smoothed transform around the original SetupBones
 #include "skins.h"        // Skins_OnCreateRagdoll -- the gold statue flag, set before the original
+#include "hats.h"         // hat changer: our hats survive no hats, their bodygroups on the local body
 #include "../network/mmfix.h"        // MMFix_OnMatchmadeServer -- sv_cheats must not be forced on casual
 #include "../screen/screenfx.h"     // FrameBlend_CollectBones -- the gun's bones, taken at the draw
 #include "viewmodel_fps.h"          // g_vmFps.Apply -- low fps viewmodel, swaps the gun's bones
@@ -1266,7 +1267,13 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
     // OnFrame: OverrideView fed this frame's camera (world_fx.cpp). Without it the hold would freeze.
     const bool wantVmLowFps = g_vmLowFps && g_globalVars != nullptr && g_vmFps.OnFrame(g_globalVars->framecount);
 
-    if (g_eject || (!g_noHats && !wantVmAlpha && !wantFbBones && !wantChams && !wantVmLowFps)) {
+    const bool wantHatBody = Hats_WantBody();   // hats.cpp: our hats' bodygroups on the local player
+    if (pInfo) {
+        const int hatEnt = *reinterpret_cast<const int*>(reinterpret_cast<const uint8_t*>(pInfo) + 0x44);
+        Hats_NoteDraw(hatEnt);                 // diag: does a hat reach the renderer
+        if (Hats_SkipDraw(hatEnt)) return;     // the real hat one of ours replaced in the loadout
+    }
+    if (g_eject || (!g_noHats && !wantVmAlpha && !wantFbBones && !wantChams && !wantVmLowFps && !wantHatBody)) {
         o_DrawModelExecute(rcx, pState, pInfo, pBones);
         return;
     }
@@ -1287,8 +1294,9 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
     {
         const unsigned char kind = NoHatsModelKind(pMdl, nm);
 
-        // a model in a cosmetic item dir: never drawn.
-        if (kind & MK_HAT) return;
+        // a model in a cosmetic item dir: never drawn -- except the hat changer's own, so
+        // "no hats" + hats = only the hats you picked.
+        if ((kind & MK_HAT) && !Hats_IsOurs(entIdx)) return;
 
         // The player's base model: ModelRenderInfo_t::body (+0x4C) is what this call draws
         // with, so the write is exact per draw and never touches the entity's m_nBody.
@@ -1297,6 +1305,13 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
             int* pBody = reinterpret_cast<int*>(const_cast<uint8_t*>(pInfoB) + 0x4C);
             *pBody = CleanBody(entIdx, GetClassFromPlayerModelName(nm.Get()), *pBody);
         }
+    }
+
+    // Hat changer: the groups the worn hats hide (the player's own head hat, headphones, ...),
+    // on this draw's body only, same as no hats above. Hats_Body matches entity + model itself.
+    if (wantHatBody && pInfoB && pMdl) {
+        int* pBody = reinterpret_cast<int*>(const_cast<uint8_t*>(pInfoB) + 0x4C);
+        *pBody = Hats_Body(entIdx, pMdl, *pBody);
     }
 
     // Glow pass (aim/chams.cpp Glow_Render) drawing its silhouettes through CBaseEntity::DrawModel:
@@ -1470,6 +1485,19 @@ __declspec(noinline) static void Weather_UpdateChain(void* pNet, void* pEnt,
     }
 }
 
+// C_Precipitation::Render draws EVERY live particle in one mb.Begin(MATERIAL_QUADS, Count()), and
+// one dynamic mesh holds INDEX_BUFFER_SIZE 32768 indices = 5461 quads (imesh.h). Live count =
+// emit rate (radius^2 * m_flDensity 0.001, c_effects.cpp EmitParticles) * fall time (spawn at
+// player +512, dies on entering solid, so ~512u+ / r_rainspeed). Default snow (1500u, 80u/s)
+// is ~16k flakes -- 3x over, the crash. Rain at 600u/s is ~2k. 768u = 512 + slack for slopes
+// and displacements GetPointContents falls through; 5000 keeps headroom under 5461.
+// ponytail: estimate, not a count -- a deep pit under the player can still outlive it.
+static float Precip_RadiusCap(float radius, float speed)
+{
+    constexpr float kMaxLive = 5000.f, kFall = 768.f, kDensity = 0.001f;
+    return std::min(radius, sqrtf(kMaxLive * std::max(speed, 1.f) / (kDensity * kFall)));
+}
+
 static void Precip_ApplyConvars()
 {
     if (!g_cvar) return;
@@ -1489,7 +1517,7 @@ static void Precip_ApplyConvars()
         if (cv_speed)   cv_speed->ForceFloat(g_rainSpeed);
         if (cv_width)   cv_width->ForceFloat(g_rainWidth);
         if (cv_length)  cv_length->ForceFloat(g_rainLength);
-        if (cv_radius)  cv_radius->ForceFloat(g_rainRadius);
+        if (cv_radius)  cv_radius->ForceFloat(Precip_RadiusCap(g_rainRadius, g_rainSpeed));
         if (cv_sidevel) cv_sidevel->ForceFloat(g_rainSideVel);
     } else if (g_weatherMode == 2) {
         if (cv_alpha)   cv_alpha->ForceFloat(g_snowAlpha);
@@ -1501,7 +1529,7 @@ static void Precip_ApplyConvars()
         // Tracer_ComputeVerts bails on sqLength < 1e-3, and EVERY flake is dropped before the
         // mesh -- snow simulated fine and drew nothing at any slider setting. Short, not zero.
         if (cv_length)  cv_length->ForceFloat(g_snowLength);
-        if (cv_radius)  cv_radius->ForceFloat(g_snowRadius * std::max(0.1f, g_snowDensity));
+        if (cv_radius)  cv_radius->ForceFloat(Precip_RadiusCap(g_snowRadius * std::max(0.1f, g_snowDensity), g_snowSpeed));
         if (cv_sidevel) cv_sidevel->ForceFloat(g_snowSideVel);
     }
 }
@@ -1643,11 +1671,19 @@ void __fastcall h_EmitSound(void* rcx, void* filter, int entindex, const void* e
     h_EmitSound_impl(rcx, filter, entindex, epRaw);
 }
 
-// Called every frame from Present
+// Game thread: skins.cpp h_FrameStageNotify stage 5, BEFORE the original (hats' spot -- its
+// OnRenderStart delivers the OnDataChanged our update chain queues). It ran from h_Present
+// before, i.e. the RENDER thread under mat_queue_mode 2, so the rain->snow flip's Release()
+// freed the entity while the main thread was simulating it: "snow crashes the game".
 void Rain_Tick()
 {
-    if (g_eject || !g_entityList) return;
     constexpr int kSlot = 2047;
+    if (!g_entityList) return;
+    // Eject: Release here, on this thread. thread.cpp waits for Precip_IsLive() to drop.
+    if (g_eject) { if (Precip_IsLive()) Precip_TearDown(kSlot); return; }
+    // Out of game the engine owns the teardown (level change / disconnect deletes every client
+    // entity, ours too). Forget it, never Release it -- and never CreateFn in the main menu.
+    if (!IsInGame()) { if (Precip_IsLive() || s_lastAppliedMode != -99) Precip_OnLevelChange(); return; }
 
     // The checkbox is the on/off; the combo shows "rain" for anything that is not snow. A fresh
     // config (mode 0) or one saved by the old combo binding (0 = "rain" picked) means rain.

@@ -795,7 +795,8 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
     // the worker: no engine calls reach it (rs::Solver is pure), only this job's own atomics. It
     // never touches s_rcJob -- cancellation drops the game thread's reference, the thread's own
     // capture keeps the job alive until it exits
-    std::thread([job]
+    // pinned (pinned_thread.h): an eject mid-solve unmaps once the solver returns
+    HANDLE hWorker = CreatePinnedThread([job]
     {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         LARGE_INTEGER freq{}, t0{}, now{};
@@ -824,7 +825,8 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         // a cancelled job never reports done -- RcSolveCancel already dropped the game thread's
         // reference to it, so nothing would read the flag anyway, but DOES means never stale-finish
         if (!job->cancel.load(std::memory_order_relaxed)) job->done.store(true, std::memory_order_release);
-    }).detach();
+    });
+    if (hWorker) CloseHandle(hWorker);
 }
 
 // the wrap USED to live here, at 110 characters. A character count in a proportional

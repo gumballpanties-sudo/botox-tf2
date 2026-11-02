@@ -140,12 +140,28 @@ __declspec(noinline) static bool Shadow_Read(void* ent, int offDir, int offDist,
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-__declspec(noinline) static void Sun_Write(void* ent, int off, const Vec3& toSun)
+// The netvar alone moves nothing: C_Sun::OnDataChanged is the only place m_vDirection is copied
+// into m_Overlay / m_GlowOverlay, the two sprites that draw (c_sun.cpp:95/111). Re-callable --
+// it re-finds the same materials and CGlowOverlay::Activate skips an already-listed overlay.
+__declspec(noinline) static void Sun_Write(void* ent, int idx, int off, const float toSun[3])
 {
     __try {
         float* dir = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(ent) + off);
-        dir[0] = toSun.x; dir[1] = toSun.y; dir[2] = toSun.z;
+        dir[0] = toSun[0]; dir[1] = toSun[1]; dir[2] = toSun[2];
+        void* net = VCall<void*>(g_entityList, 0, idx);
+        if (net) VCall<void>(net, 5, 1);   // OnDataChanged(DATA_UPDATE_DATATABLE_CHANGED)
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// env_sun direction we changed: the map's own, put back when sun angle goes off
+struct SunHeld { void* ent; int idx; float dir[3]; float wrote[3]; };
+static SunHeld s_sunHeld = {};
+
+static void Sun_Release(int off)
+{
+    if (s_sunHeld.ent && off > 0 && GetClientEntity(s_sunHeld.idx) == s_sunHeld.ent)
+        Sun_Write(s_sunHeld.ent, s_sunHeld.idx, off, s_sunHeld.dir);
+    s_sunHeld = SunHeld{};
 }
 
 static void Shadow_Release(int offDir, int offDist)
@@ -163,9 +179,11 @@ static void SunAngle_Frame()
     if (!g_entityList) return;
     const int offShDir  = PropOff(s_offShDir, "DT_ShadowControl", "m_shadowDirection");
     const int offShDist = PropOff(s_offShDist, "DT_ShadowControl", "m_flShadowMaxDist");
+    const int offSun    = PropOff(s_offSun, "DT_Sun", "m_vDirection");
 
     if (!g_sunAngleEnable || g_eject || !IsInGame()) {
         if (s_shadow.ent) Shadow_Release(offShDir, offShDist);
+        if (s_sunHeld.ent) Sun_Release(offSun);
         s_drift = 0.f;
         return;
     }
@@ -177,10 +195,26 @@ static void SunAngle_Frame()
     Vec3 fwd;
     AngleVectors(Vec3(g_sunAnglePitch, fmodf(g_sunAngleYaw + s_drift, 360.f), 0.f), &fwd);
 
-    const int offSun = PropOff(s_offSun, "DT_Sun", "m_vDirection");
     if (offSun > 0) {
         const ClassEnt sun = FindByClass("CSun", s_sun);
-        if (sun.ent) Sun_Write(sun.ent, offSun, Vec3(-fwd.x, -fwd.y, -fwd.z));
+        if (sun.ent) {
+            if (s_sunHeld.ent != sun.ent) {   // first touch of this map's sun: keep its own value
+                s_sunHeld = SunHeld{};
+                float unused;   // Shadow_Read's dist slot, pointed at the same field
+                if (Shadow_Read(sun.ent, offSun, offSun, s_sunHeld.dir, unused)) {
+                    s_sunHeld.ent = sun.ent; s_sunHeld.idx = sun.idx;
+                    s_sunHeld.wrote[0] = s_sunHeld.wrote[1] = s_sunHeld.wrote[2] = 2.f;   // force first write
+                    DebugLog("sun angle: env_sun #%d held (dir %.2f %.2f %.2f)", sun.idx,
+                             s_sunHeld.dir[0], s_sunHeld.dir[1], s_sunHeld.dir[2]);
+                }
+            }
+            const float toSun[3] = { -fwd.x, -fwd.y, -fwd.z };
+            // only on change: OnDataChanged re-runs FindMaterial, no need for it every frame
+            if (s_sunHeld.ent && (s_sunHeld.wrote[0] != toSun[0] || s_sunHeld.wrote[1] != toSun[1] || s_sunHeld.wrote[2] != toSun[2])) {
+                Sun_Write(sun.ent, sun.idx, offSun, toSun);
+                s_sunHeld.wrote[0] = toSun[0]; s_sunHeld.wrote[1] = toSun[1]; s_sunHeld.wrote[2] = toSun[2];
+            }
+        }
     }
 
     if (offShDir <= 0 || offShDist <= 0) return;

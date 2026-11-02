@@ -3,6 +3,7 @@
 #include "../screen/colorcorrect.h"   // CcResetCurve -- a curve that fails to parse goes back to identity
 #include "../aim/aim.h"   // the aimbot's vars ride in this same file
 #include "../visuals/skins.h"     // and so does the skinchanger's per-weapon block
+#include "../visuals/hats.h"      // and the hat changer's slots
 #include "../movement/detections.h"    // unit B
 #include "../movement/ps_lines.h"      // unit B
 #include "../movement/recorder.h"      // unit B
@@ -502,6 +503,7 @@ static const CfgEntry kEntries[] = {
     { "airStuck",         CfgEntry::BOOL,   &g_airStuck, 0 },
     { "asExtraReach",     CfgEntry::FLOAT,  &g_asExtraReach, 0 },
     { "asBudget",         CfgEntry::FLOAT,  &g_asBudget, 0 },
+    { "asStyle",          CfgEntry::INT,    &g_asStyle, 0 },
     { "airStuckKey",      CfgEntry::INT,    &g_airStuckKey, 0 },
     { "airStuckMode",     CfgEntry::INT,    &g_airStuckMode, 0 },
 
@@ -1033,6 +1035,7 @@ void SaveConfig(const char* path, bool visuals)
         // Skinchanger: a variable number of "skin_<def>_<field>" lines, one block per weapon that
         // has an entry, so it cannot live in the flat kEntries table.
         Skins_SaveCfg(f);
+        Hats_SaveCfg(f);   // "hatsEnable" + "hat_<slot>=def style unusual paint"
 
         // Aimbot vars (src/hacks/aim/aim.cpp). Appended after dih's own entries;
         // they are keyed by their registered "Vars::..." name so they cannot collide with kEntries.
@@ -1155,6 +1158,7 @@ void LoadConfig(const char* path, bool visuals)
         if (Aim_LoadVar(key, val)) continue;
         // Same for the skinchanger's "enableSkins" / "skin_<def>_<field>" block.
         if (Skins_LoadCfg(key, val)) continue;
+        if (Hats_LoadCfg(key, val)) continue;
         if (Ind_LoadLegacy(key, val)) continue;
         // esp rows from before the botox players port: one box combo (0 off, 1 corner, 2 full)
         // and one "health" row that drew bar + number. Never written now, read once into the new rows

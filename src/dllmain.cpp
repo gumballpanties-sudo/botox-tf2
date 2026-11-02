@@ -18,6 +18,7 @@ HWND               g_hwnd             = nullptr;
 bool               g_imguiInit        = false;
 IDirect3DDevice9*  g_d3dDev           = nullptr;
 std::atomic<bool>  g_eject  {false};
+std::atomic<bool>  g_ejectRequest {false};
 std::atomic<int>   g_hookDepth     {0};
 std::atomic<int>   g_miscHookDepth {0};
 
@@ -53,7 +54,7 @@ ImFont* g_fontCucumberTahoma14 = nullptr, *g_fontCucumberVerdana14 = nullptr;
 ImFont* g_fontHowewewareMinecraft14 = nullptr, *g_fontGamesenseSfBold15 = nullptr;
 ImFont* g_fontHeroinArialBd16 = nullptr, *g_fontHeroinProggy13 = nullptr, *g_fontHeroinTahoma16 = nullptr;
 ImFont* g_fontHeroinTahomaBd14 = nullptr, *g_fontHeroinTahoma14 = nullptr;
-ImFont* g_fontMenuTahoma11 = nullptr, *g_fontMenuTahoma9 = nullptr, *g_fontMenuTahomaBd9 = nullptr;
+ImFont* g_fontMenuTahoma9 = nullptr, *g_fontMenuTahomaBd9 = nullptr;
 
 int   g_menuStyle      = 0;
 float g_accentColor[4] = { 160.f / 255.f, 170.f / 255.f, 220.f / 255.f, 1.f };   // matches render.cpp's old fixed kAccent
@@ -708,6 +709,7 @@ bool g_fmHeadSurfLedgeOnly = true;
 bool g_fmHeadSurfBottoms = true;
 float g_asExtraReach = 4.f;  // botox m_air_stuck_extra_reach
 float g_asBudget = 50.f;     // botox m_air_stuck_budget (percent of a tick)
+int g_asStyle = 0;           // 0 cumidere (TF2 dll port) / 1 botox (clarity + lumi)
 // wave 3 (Aletherium): pixel surf finder + assist
 bool g_psFinder = false;    int g_psFinderKey = 0;    int g_psFinderMode = 1;
 float g_psFinderMargin = 8.f;

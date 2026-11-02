@@ -18,6 +18,10 @@ extern HWND               g_hwnd;
 extern bool               g_imguiInit;
 extern IDirect3DDevice9*  g_d3dDev;   // live device, set in h_Present (blend state)
 extern std::atomic<bool>  g_eject;
+// menu "yes" / F11. MainThread plays the eject splash (boot_screen.cpp), THEN sets g_eject:
+// g_eject is the teardown flag every hook bails on, so setting it from a key press popped
+// the overlay off with no fade.
+extern std::atomic<bool>  g_ejectRequest;
 extern std::atomic<int>   g_hookDepth;
 extern std::atomic<int>   g_miscHookDepth;
 extern WNDPROC            g_origWndProc;
@@ -91,7 +95,6 @@ extern ImFont* g_fontHeroinTahomaBd14;   // tahoma bd 14  Monochrome|MonoHinting
 extern ImFont* g_fontHeroinTahoma14;     // tahoma 14  Monochrome|MonoHinting (heroin legacy list)
 
 // -- Menu style (settings > menu "style" dropdown) donor fonts not already covered above
-extern ImFont* g_fontMenuTahoma11;       // tahoma 11  Monochrome|MonoHinting (clarity v1 regular)
 extern ImFont* g_fontMenuTahoma9;        // tahoma 9   Monochrome|MonoHinting|Bitmap, cyrillic (lobotomy v1 regular)
 extern ImFont* g_fontMenuTahomaBd9;      // tahoma bd 9  Monochrome|MonoHinting|Bitmap, cyrillic (lobotomy v1 bold)
 
@@ -570,7 +573,6 @@ extern bool  g_equipRegionUnlock;
 // "Bat" also covers the Batsaber you are holding.
 extern bool g_enableSkins;
 extern bool g_skinNeedsUpdate;      // menu edited something -> re-resolve models + full update
-extern bool g_skinFestRefresh;      // festivizer switched on -> rebuild held weapon's lights, no full update
 extern std::unordered_map<int, SkinCfg> g_skinCfgs;
 
 void Skins_Install();               // FrameStageNotify + SetSequence hooks (thread.cpp)
@@ -764,6 +766,7 @@ void FakeMove_DemoTick();   // FrameStageNotify stage 3: replays fake jump anim/
 // botox air_stuck knobs (m_air_stuck_extra_reach / m_air_stuck_budget)
 extern float g_asExtraReach;       // wall scan reach past the hull, units (def 4, 0-32; > 2 arms the wide B scan)
 extern float g_asBudget;           // search clock, percent of one tick (def 50, 10-90)
+extern int g_asStyle;              // 0 cumidere (airstuck.inl AirStuckCumidere) / 1 botox
 // wave 3 (Aletherium): pixel surf finder + assist
 extern bool g_psFinder;    extern int g_psFinderKey;    extern int g_psFinderMode;
 extern float g_psFinderMargin;     // scan margin above/below the aimed column (def 8, 0-64)

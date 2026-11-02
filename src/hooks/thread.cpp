@@ -11,6 +11,7 @@
 #include "../hacks/network/mmfix.h"
 #include "../hacks/hud/scoreboard.h"
 #include "crashlog.h"
+#include "../globals/pinned_thread.h"
 #include "../hacks/screen/colorcorrect.h"
 #include "../hacks/screen/bloom.h"
 #include "../hacks/screen/screenfx.h"
@@ -18,12 +19,14 @@
 #include "../hacks/visuals/world_fx2.h"
 #include "../hacks/visuals/world_fx3.h"   // unit world: eject restore (ragdoll proxy, cvars, modulation)
 #include "../hacks/visuals/skins.h"
+#include "../hacks/visuals/hats.h"
 #include "../hacks/visuals/flipworld.h"
 #include "../hacks/hud/mediaplayer.h"
 #include "../hacks/misc/misc_overlays.h"   // unit misc: ConsoleTint_Install
 #include "../hacks/misc/discord_ex.h"   // unit E: discord rich presence, its own IPC thread
 #include "../hacks/misc/game_extras.h"  // unit game: bot names GetPlayerInfo hook + eject restore
 #include "../hacks/aim/aim.h"
+#include "../hacks/misc/boot_screen.h"   // eject splash: begin before g_eject, end before unhook
 
 // ==== sv_pure bypass ============================================================
 using CL_CheckForPureServerWhitelist_t = void(__fastcall*)(void** pFilesToReload);
@@ -425,10 +428,7 @@ static void MainThread()
     DebugLog("botox loaded, hooks installed");
     LogPresentHookOwner();
 
-    g_hPollThread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-        PollThread();
-        return 0;
-    }, nullptr, 0, nullptr);
+    g_hPollThread = CreatePinnedThread([] { PollThread(); });
 
     // Now-playing poll. Its own thread and not PollThread's: the winrt session calls block for
     // milliseconds, and PollThread is a one-shot installer that has already finished by then.
@@ -439,11 +439,14 @@ static void MainThread()
     // Discord rich presence: same idle-until-enabled shape, its own IPC thread, no hook.
     DiscordRpc_Start();
 
-    while (!g_eject) {
-        if (GetAsyncKeyState(VK_F11) & 1) g_eject.store(true);
+    while (!g_ejectRequest && !g_eject) {
+        if (GetAsyncKeyState(VK_F11) & 1) g_ejectRequest.store(true);
         Sleep(50);
     }
     DebugLog("eject triggered");
+    // botox main.cpp: splash covers the screen first, the teardown flag goes up under it
+    BootScreen_EjectBegin();
+    g_eject = true;
     ConsoleColorPrint((uint8_t)(g_consoleColor[0]*255.f), (uint8_t)(g_consoleColor[1]*255.f),
                        (uint8_t)(g_consoleColor[2]*255.f), "botox off\n");
 
@@ -467,17 +470,28 @@ static void MainThread()
         g_hPollThread = nullptr;
     }
 
-    // Media poll: touches no hook and no engine state, only winrt and its own buffers, so it
-    // joins here on its own. Drops the cover texture with it.
-    MediaPlayer_Shutdown();
-    DiscordRpc_Shutdown();
-
     // Flip world holds cl_flipviewmodels, m_yaw and a few HUD code bytes while it mirrors. Only the
     // game thread may put the hand back (the write sends userinfo), and FrameStageNotify does all of
     // it the frame after g_eject -- give it up to a second before the hooks come off. If no frame
     // comes, Release restores m_yaw and the HUD bytes from here and logs the hand it had to leave.
     for (int i = 0; i < 100 && FlipWorld_Holding(); ++i) Sleep(10);
     FlipWorld_Release();
+    // Client-side hats: FrameStageNotify Releases them on the game thread the frame after
+    // g_eject (hats.cpp). Never from here -- that is the weather entity's old crash. If no frame
+    // comes they stay up until the next level change, which deletes them like any entity.
+    for (int i = 0; i < 100 && Hats_AnyLive(); ++i) Sleep(10);
+    // Weather entity: same, Rain_Tick (FrameStageNotify) Releases it on the game thread.
+    for (int i = 0; i < 100 && Precip_IsLive(); ++i) Sleep(10);
+
+    // World is back under the cover: "ejected", the game fades back in (<= 1.5s). Present
+    // still draws the splash until here, so nothing below may touch d3d before it returns.
+    BootScreen_EjectEnd();
+
+    // Media poll: touches no hook and no engine state, only winrt and its own buffers, so it
+    // joins here on its own. Drops the cover texture with it -- after the splash, which is the
+    // render thread's last draw.
+    MediaPlayer_Shutdown();
+    DiscordRpc_Shutdown();
 
     // Aim subsystem: sets G::Unload (every aim hook early-outs on it), disables
     // its whitelisted hooks and restores the convars it unlocked. Before MH_DisableHook so the
@@ -492,6 +506,8 @@ static void MainThread()
     // the MH_Uninitialize note below for why that is no longer a use-after-free.
     for (int i = 0; i < 300 && g_hookDepth.load()     > 0; ++i) Sleep(10);
     for (int i = 0; i < 300 && g_miscHookDepth.load() > 0; ++i) Sleep(10);
+    // A hook still inside its body after 3s would run unmapped code -- such an eject stays soft.
+    const bool drained = g_hookDepth.load() == 0 && g_miscHookDepth.load() == 0;
     FlipWorld_Unload();   // flip world's owner token must not outlive this DLL
 
     // Safe here and not earlier: releases the D3D event query, and the render thread is
@@ -500,6 +516,7 @@ static void MainThread()
     GameExtras_Shutdown();   // unit game: knobs/pings back if no frame did it, http aborted, workers joined
     ScreenFx_RestoreQueueMode();   // hand mat_queue_mode back before the hooks come off
 
+    // Fallback only: no frame came during the wait above (e.g. alt-tabbed, FSN not running).
     // Tear down CPrecipitation before nulling entity list -- live slot-2047
     // entity crashes next map load otherwise
     if (g_entityList && Precip_IsLive())
@@ -514,8 +531,9 @@ static void MainThread()
     // hook drain above guarantees the last one finished.
 
     // MH_Uninitialize() DELETED, DO NOT RE-ADD. It is the only thing that frees MinHook's
-    // trampolines, and under a soft eject (the DLL stays loaded, see the bottom of this
-    // function) freeing them buys nothing and costs a use-after-free:
+    // trampolines, and they live in MinHook's own VirtualAlloc pages, not in our image -- so
+    // even the real unload at the bottom of this function leaves them valid. Freeing them buys
+    // nothing and costs a use-after-free:
     //   * MH_DisableHook already put the original bytes back, so no NEW call can reach us.
     //   * MinHook's thread freeze only fixes instruction pointers. A thread parked in a hook
     //     BODY still has a return address into the trampoline on its stack, and no counter
@@ -526,6 +544,10 @@ static void MainThread()
     // Keeping the trampoline pages mapped makes every one of those cases a harmless return
     // through dead-but-valid code. The cost is MinHook's own heap, leaked once, at eject.
     MH_DisableHook(MH_ALL_HOOKS);   // idempotent: catch anything armed after the first call
+
+    // Real unload unless something provably still runs in us: a hook that never drained, or
+    // hats the game thread never freed (FrameStageNotify did not tick). Then soft, as before.
+    const bool hard = drained && !Hats_AnyLive();
 
     if (g_showMenu) ShowCursor(FALSE);
     ClipCursor(nullptr);
@@ -543,10 +565,25 @@ static void MainThread()
         ImGui::DestroyContext();
     }
 
+    if (hard) DebugLog("eject: unloading dll");
+    else      DebugLog("eject: SOFT (hook depth %d/%d, hats live %d) -- dll stays mapped, restart game to rebuild",
+                       g_hookDepth.load(), g_miscHookDepth.load(), (int)Hats_AnyLive());
+
     DebugLog_Shutdown();   // last line written; hands C:otox-tf2\debug.log back to the user
 
-    // Soft eject: DLL stays loaded so engine-held stale pointers can't crash
-    ExitThread(0);
+    if (!hard) ExitThread(0);
+
+    CrashLog_Uninstall();  // VEH off before the pages it points at go away
+    // The aim hooks, WndProcHook and the ragdoll recv proxy bump no depth counter. Anything
+    // that entered them before the unhook/restore above returns well inside this.
+    Sleep(500);
+
+    // Drops the injector's ref. Workers (pinned_thread.h) hold their own, so the image unmaps
+    // when the last of them exits -- the build can overwrite botox.dll from then on.
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&g_eject), &self);
+    FreeLibraryAndExitThread(self, 0);
 }
 
 // ==== DllMain ====================================================================================

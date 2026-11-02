@@ -11,6 +11,7 @@
 #include "../visuals/lagres.h"
 #include "../movement/movement.h"   // RC_* marker access for the route calculator's marker list
 #include "../visuals/skins.h"      // skinchanger tab: weapon/warpaint/reskin tables + particle list
+#include "../visuals/hats.h"       // inventory tab "hats" page
 #include "../../dependencies/data/skindata.h"
 #include "../../dependencies/imgui/imgui_internal.h"
 #include "menu_chrome.h"  // the panels, the group box flow and every metric they use
@@ -472,21 +473,29 @@ static void SkyboxCombo()
             if (strcmp(kSkyList[i], g_skyName) == 0) { s_skySel = i; break; }
     }
 
-    const char* preview = (s_skySel >= 0) ? kSkyList[s_skySel] : "custom";
+    // botox k_skyboxes[0] = "off". g_skyEnable is what h_R_DrawSkyBox gates on -- nothing set it
+    // before, so picking a sky did nothing.
+    const char* preview = !g_skyEnable ? "off" : (s_skySel >= 0) ? kSkyList[s_skySel] : "custom";
     if (ImGui::BeginCombo("skybox", preview))
     {
+        if (ImGui::Selectable("off", !g_skyEnable))
+            g_skyEnable = false;
         for (int i = 0; i < kSkyCount; ++i)
-            if (ImGui::Selectable(kSkyList[i], s_skySel == i))
+            if (ImGui::Selectable(kSkyList[i], g_skyEnable && s_skySel == i))
             {
                 s_skySel = i;
+                g_skyEnable = true;
                 strncpy(g_skyName, kSkyList[i], sizeof(g_skyName) - 1);
                 g_skyName[sizeof(g_skyName) - 1] = '\0';
             }
-        if (ImGui::Selectable("custom", s_skySel == -1))
+        if (ImGui::Selectable("custom", g_skyEnable && s_skySel == -1))
+        {
             s_skySel = -1;
+            g_skyEnable = true;
+        }
         ImGui::EndCombo();
     }
-    if (s_skySel == -1)
+    if (g_skyEnable && s_skySel == -1)
         ImGui::InputText("##skyname", g_skyName, sizeof(g_skyName));
 }
 
@@ -1343,6 +1352,9 @@ static void Page_MovementMain()
             ImGui::OptionPopup("air stuck settings", [&]() {
                 ImGui::Label("air stuck keybind");
                 ImGui::Keybind("air stuck key", &g_airStuckKey, &g_airStuckMode);
+                ImGui::Combo("style##asstyle", &g_asStyle, "cumidere\0botox\0");
+                if (g_asStyle == 0)
+                    return;   // cumidere: engine numbers only, no knobs
                 SliderF("extra reach##as", &g_asExtraReach, 0.f, 32.f, "%.0f");
                 SliderF("search budget##as", &g_asBudget, 10.f, 90.f, "%.0f%% tick");
             }, ImVec2(220.f, -1));
@@ -2681,10 +2693,10 @@ static void Tab_MiscRoot()
 
 // ==== skins =========================================================================
 // Every widget here edits one SkinCfg in g_skinCfgs, keyed by the selected weapon's
-// REDIRECT index. Anything that changes which item the weapon reports (warpaint def,
-// reskin, festive) sets g_skinNeedsUpdate, which makes the FSN pass re-resolve the
-// models and ask the server for a full update -- a material override and a style skin
-// are only read off the item definition when the entity's data changes.
+// REDIRECT index. No widget asks for an update: the FSN pass diffs every SkinCfg each
+// frame (skins.cpp DiffSkinCfgs, skins_pure.h SkinPure_Classify) and asks the server for
+// a full update only when the edit needs the weapon rebuilt -- a material override and a
+// style skin are only read off the item definition when the entity is created.
 
 // Case-insensitive substring, for the two searchable combos below.
 static bool SkinFilterMatch(const char* haystack, const char* needle)
@@ -2797,7 +2809,6 @@ static void Tab_Skins()
                 if (i == 0)                 { cfg.paintKitId = 0;  cfg.weaponSkinDef = 0; }
                 else if (pk > 0 && pk <= 86){ cfg.paintKitId = 0;  cfg.weaponSkinDef = Skin_FindSpecificDef(selRedir, pk); }
                 else                        { cfg.paintKitId = pk; cfg.weaponSkinDef = 0; }
-                g_skinNeedsUpdate = true;
             }
             if (sel) ImGui::SetItemDefaultFocus();
         }
@@ -2818,7 +2829,6 @@ static void Tab_Skins()
             cfg.weaponSkinDef = 0;
         }
         SkinSyncWarpaintSel(cfg, s_warpSel);
-        g_skinNeedsUpdate = true;
     }
 
     // The band name alone is not a usable slider format: ImGui rounds the dragged value by
@@ -2844,7 +2854,7 @@ static void Tab_Skins()
         ImGui::Combo("tier##sktier", &cfg.ksTier, kTier, 4);
         if (cfg.ksTier >= 2) {
             ImGui::Combo("sheen##sksheen", &cfg.ksSheen, kSheen, 8);
-            if (ImGui::Checkbox("custom color", &cfg.ksCustomColor)) g_skinNeedsUpdate = true;
+            ImGui::Checkbox("custom color", &cfg.ksCustomColor);
             if (ImGui::IsItemHovered())
                 MenuTooltip("recolors BOTH the sheen and the eye glow: the two read one row of\n"
                             "the same table in client.dll, so the row the sheen above picks is\n"
@@ -2914,7 +2924,7 @@ static void Tab_Skins()
     Section("variant");
     {
         if (!we.canAustralia) ImGui::BeginDisabled();
-        if (ImGui::Checkbox("australium", &cfg.australium)) g_skinNeedsUpdate = true;
+        ImGui::Checkbox("australium", &cfg.australium);
         if (!we.canAustralia) ImGui::EndDisabled();
 
         // The lights belong to the def the weapon ends up WEARING (ResolveWeaponTarget's order),
@@ -2927,8 +2937,7 @@ static void Tab_Skins()
         if (!canFest) ImGui::BeginDisabled();
         // On = attr 2053 + one attachment rebuild, next frame (skins.cpp RefreshAttachmentModels).
         // Off still needs the full update: the attribute can't be taken back off the list.
-        if (ImGui::Checkbox("festivized", &cfg.festivized))
-            (cfg.festivized ? g_skinFestRefresh : g_skinNeedsUpdate) = true;
+        ImGui::Checkbox("festivized", &cfg.festivized);
         if (!canFest) ImGui::EndDisabled();
         if (!canFest && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             MenuTooltip(wornDef == we.redir
@@ -2938,7 +2947,7 @@ static void Tab_Skins()
 
         const bool hasFestive = (we.festiveIdx > 0);
         if (!hasFestive) ImGui::BeginDisabled();
-        if (ImGui::Checkbox("festive", &cfg.festive)) g_skinNeedsUpdate = true;
+        ImGui::Checkbox("festive", &cfg.festive);
         if (!hasFestive) ImGui::EndDisabled();
     }
 
@@ -2958,7 +2967,7 @@ static void Tab_Skins()
         {
             const bool noneSel = (cfg.reskinDef == 0);
             if (ImGui::Selectable("(none)", noneSel))
-                { cfg.reskinDef = 0; cfg.reskinStyle = 0; g_skinNeedsUpdate = true; }
+                { cfg.reskinDef = 0; cfg.reskinStyle = 0; }
             if (noneSel) ImGui::SetItemDefaultFocus();
             if (rg) for (int i = 0; i < rg->count; i++) {
                 const bool sel = (cfg.reskinDef   == rg->variants[i].defindex
@@ -2966,7 +2975,6 @@ static void Tab_Skins()
                 if (ImGui::Selectable(rg->variants[i].name, sel)) {
                     cfg.reskinDef   = rg->variants[i].defindex;
                     cfg.reskinStyle = rg->variants[i].style;
-                    g_skinNeedsUpdate = true;
                 }
                 if (sel) ImGui::SetItemDefaultFocus();
             }
@@ -3037,6 +3045,148 @@ static void Tab_Skins()
     if (ImGui::IsItemHovered())
         MenuTooltip("re-resolves the reskin models and asks the server for a full update.\n"
                     "only needed when something did not take on its own.");
+}
+
+// ---- inventory: hats page (hats.cpp) -------------------------------------------------------
+// lbox's Hats page shape: a searchable item list on the right ("Find item..."), the worn
+// slots with style / unusual / paint on the left.
+static void Page_Hats()
+{
+    static int  s_sel = 0;                 // worn slot being edited
+    static char s_find[64] = {};
+    static bool s_classOnly = true;
+    static char s_partFilter[64] = {};
+    static std::vector<int> s_list;        // k_hats indices passing the filter
+    static char s_lastFind[64] = { 1 };
+    static int  s_lastCls = -1;
+    static bool s_lastClassOnly = false;
+
+    const int cls = Hats_LocalClass();
+    const int filtCls = s_classOnly ? cls : 0;
+    if (strcmp(s_lastFind, s_find) != 0 || s_lastCls != filtCls || s_lastClassOnly != s_classOnly) {
+        strcpy_s(s_lastFind, s_find); s_lastCls = filtCls; s_lastClassOnly = s_classOnly;
+        s_list.clear();
+        for (int i = 0; i < Hats_Count(); ++i) {
+            const HatDef* d = Hats_At(i);
+            if (filtCls && !(d->classMask >> filtCls & 1)) continue;
+            if (Hat_NameMatch(d->name, s_find)) s_list.push_back(i);
+        }
+    }
+
+    menu_columns_begin();
+
+    if (menu_group_begin("hats"))
+    {
+        ImGui::Checkbox("enabled##hats", &g_hatsEnable);
+        if (ImGui::IsItemHovered())
+            MenuTooltip("client-side cosmetics on your own player. only you see them,\n"
+                        "and only in third person / demos, like your real hats.\n"
+                        "pick a slot, then click an item in the list to put it there.");
+        ImGui::Checkbox("show in backpack##hatsbp", &g_hatsBackpack);
+        if (ImGui::IsItemHovered())
+            MenuTooltip("each worn hat also appears as an item in tf2's own backpack and\n"
+                        "item lists (client-side only, the item server never hears of it).\n"
+                        "equip one in tf2's loadout screen and it is worn only on the classes\n"
+                        "you equipped it on; until then it is worn on every class.");
+        if (ImGui::BeginListBox("##hatslots", ImVec2(-1.f, 8 * ImGui::GetTextLineHeightWithSpacing() + 4.f)))
+        {
+            for (int i = 0; i < kHatSlots; ++i) {
+                const HatDef* d = Hats_Find(g_hatSlots[i].def);
+                char lbl[160];
+                snprintf(lbl, sizeof(lbl), "%d  %s##hs%d", i + 1, d ? d->name : "(empty)", i);
+                if (ImGui::Selectable(lbl, s_sel == i)) s_sel = i;
+            }
+            ImGui::EndListBox();
+        }
+
+        HatSlot& s = g_hatSlots[s_sel];
+        const HatDef* d = Hats_Find(s.def);
+        if (d) {
+            if (cls && !(d->classMask >> cls & 1)) ImGui::TextDisabled("(not for your current class)");
+            if (g_hatsBackpack && (s.eqMask & 1)) {
+                // equipped through tf2's loadout screen (hats_inv.cpp hook): worn only there
+                char on[96] = {};
+                for (int k = 1; k <= 9; ++k)
+                    if (s.eqMask >> k & 1) { strcat_s(on, on[0] ? ", " : ""); strcat_s(on, Hat_ClassName(k)); }
+                ImGui::TextDisabled("loadout: %s", on[0] ? on : "not equipped");
+                if (ImGui::Button("wear on all classes##hateqrst", ImVec2(-1.f, 15.f))) s.eqMask = 0;
+            }
+            if (d->nStyles > 1) {
+                if (s.style < 0 || s.style >= d->nStyles) s.style = 0;
+                if (ImGui::BeginCombo("style##hatstyle", d->styles[s.style].name)) {
+                    for (int k = 0; k < d->nStyles; ++k)
+                        if (ImGui::Selectable(d->styles[k].name, s.style == k)) s.style = k;
+                    ImGui::EndCombo();
+                }
+            }
+            char prev[96];
+            if (s.unusual < 0) snprintf(prev, sizeof(prev), "none");
+            else snprintf(prev, sizeof(prev), "%s (%d)", Particle_Name(s.unusual), s.unusual);
+            if (ImGui::BeginCombo("unusual effect##hatunu", prev)) {
+                ImGui::InputText("##hatpartfilter", s_partFilter, sizeof(s_partFilter));
+                ImGui::Separator();
+                if (ImGui::Selectable("none", s.unusual < 0)) s.unusual = -1;
+                for (int g = 0; g < k_particleGroupCount; ++g) {
+                    const ParticleGroup& pg = k_particleGroups[g];
+                    bool header = false;
+                    for (int i = 0; i < pg.count; ++i) {
+                        const ParticleEntry& pe = pg.items[i];
+                        if (pe.id < 0 || !Hat_NameMatch(pe.name, s_partFilter)) continue;
+                        if (!header) { ImGui::Separator(); ImGui::TextDisabled("%s", pg.name); header = true; }
+                        char lbl[96]; snprintf(lbl, sizeof(lbl), "%s (%d)##hp%d_%d", pe.name, pe.id, g, i);
+                        if (ImGui::Selectable(lbl, s.unusual == pe.id)) s.unusual = pe.id;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (!d->paintable) ImGui::BeginDisabled();
+            const HatPaint* cur = Hats_Paint(s.paint);
+            if (ImGui::BeginCombo("paint##hatpaint", cur ? cur->name : "none")) {
+                if (ImGui::Selectable("none", !cur)) s.paint = -1;
+                for (int i = 0; i < Hats_PaintCount(); ++i)
+                    if (ImGui::Selectable(Hats_Paint(i)->name, s.paint == i)) s.paint = i;
+                ImGui::EndCombo();
+            }
+            if (!d->paintable) { ImGui::EndDisabled(); ImGui::TextDisabled("(not paintable)"); }
+            if (ImGui::Button("remove##hatrm", ImVec2(-1.f, 15.f))) s = { 0, 0, -1, -1 };
+        } else {
+            ImGui::TextDisabled("empty slot -- pick an item on the right");
+        }
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("find item"))
+    {
+        ImGui::InputText("search##hatfind", s_find, sizeof(s_find));
+        ImGui::Checkbox("current class only", &s_classOnly);
+        ImGui::TextDisabled("%d items", (int)s_list.size());
+        if (ImGui::BeginListBox("##hatlist", ImVec2(-1.f, 300.f)))
+        {
+            ImGuiListClipper clip;
+            clip.Begin((int)s_list.size());
+            while (clip.Step())
+                for (int r = clip.DisplayStart; r < clip.DisplayEnd; ++r) {
+                    const HatDef* d = Hats_At(s_list[r]);
+                    char lbl[160]; snprintf(lbl, sizeof(lbl), "%s (%d)##hl%d", d->name, d->def, r);
+                    if (ImGui::Selectable(lbl, g_hatSlots[s_sel].def == d->def))
+                        g_hatSlots[s_sel] = { d->def, 0, g_hatSlots[s_sel].unusual, g_hatSlots[s_sel].paint };
+                }
+            ImGui::EndListBox();
+        }
+    }
+    menu_group_end();
+
+    menu_columns_end();
+}
+
+static const char* kInvSub[2] = { "weapons", "hats" };
+static int s_invSub = 0;
+static void Tab_InventoryRoot()
+{
+    if (s_invSub == 1) { Page_Hats(); return; }
+    Tab_Skins();
 }
 
 // botox tab_fonts: one page per face, "<face> font" settings | "font list". botox pages
@@ -3179,9 +3329,8 @@ static void ConfigPanel(const bool visuals)
     });
 }
 
-// ==== settings > menu: style dropdown ============================================
-// Look only -- colours, borders, rounding, fonts. Never layout, never animation. Picking a
-// style also sets the accent to that style's donor accent (accent alpha 0 = keep the user's).
+// ==== settings > menu: theme dropdown ============================================
+// Look only -- colours, borders, rounding, fonts. Never layout, never animation, never accent.
 struct MenuStyleRow
 {
     const char* name;
@@ -3189,46 +3338,27 @@ struct MenuStyleRow
     float windowRounding, frameRounding, popupRounding;
     ImFont* (*regFont)();    // nullptr = leave the chrome font alone (default style)
     ImFont* (*boldFont)();
-    ImU32 accent;             // alpha 0 = keep the user's current accent
 };
 
 static const MenuStyleRow k_menuStyles[] = {
     { "default", IM_COL32(10, 10, 10, 255), IM_COL32(25, 25, 25, 255), IM_COL32(15, 15, 15, 255), IM_COL32(25, 25, 25, 255),
       IM_COL32(50, 50, 50, 100), IM_COL32(50, 50, 50, 255), IM_COL32(20, 20, 20, 255), IM_COL32(255, 255, 255, 255),
-      IM_COL32(128, 128, 128, 255), 5.f, 2.f, 3.f, nullptr, nullptr, IM_COL32(160, 170, 220, 255) },
-    { "delusional", IM_COL32(13, 13, 13, 255), IM_COL32(13, 13, 13, 255), IM_COL32(20, 20, 20, 153), IM_COL32(13, 13, 13, 255),
-      IM_COL32(26, 26, 26, 178), IM_COL32(26, 26, 26, 178), IM_COL32(20, 20, 20, 255), IM_COL32(255, 255, 255, 255),
-      IM_COL32(77, 77, 77, 217), 4.f, 2.f, 4.f, []() -> ImFont* { return g_fontTahoma12; }, []() -> ImFont* { return g_fontTahomaBd12; },
-      IM_COL32(245, 40, 40, 255) },
+      IM_COL32(128, 128, 128, 255), 5.f, 2.f, 3.f, nullptr, nullptr },
     { "kamibebra", IM_COL32(13, 13, 13, 255), IM_COL32(16, 16, 16, 255), IM_COL32(13, 13, 13, 255), IM_COL32(16, 16, 16, 255),
       IM_COL32(33, 33, 33, 255), IM_COL32(11, 11, 11, 255), IM_COL32(13, 13, 13, 255), IM_COL32(200, 200, 200, 255),
-      IM_COL32(150, 150, 150, 255), 6.f, 4.f, 6.f, []() -> ImFont* { return g_fontKamibebra13; }, []() -> ImFont* { return g_fontKamibebraBold13; },
-      IM_COL32(252, 194, 255, 255) },
-    { "clarity v1", IM_COL32(40, 40, 40, 235), IM_COL32(45, 45, 45, 255), IM_COL32(40, 40, 40, 255), IM_COL32(35, 35, 35, 255),
-      IM_COL32(65, 65, 65, 255), IM_COL32(25, 25, 25, 255), IM_COL32(45, 45, 45, 255), IM_COL32(181, 181, 181, 255),
-      IM_COL32(120, 120, 120, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontMenuTahoma11; }, []() -> ImFont* { return g_fontAirplaneRows; },
-      IM_COL32(208, 128, 255, 255) },
-    // clarity v2 accent alpha 0 = keep the user's accent
+      IM_COL32(150, 150, 150, 255), 6.f, 4.f, 6.f, []() -> ImFont* { return g_fontKamibebra13; }, []() -> ImFont* { return g_fontKamibebraBold13; } },
     { "clarity v2", IM_COL32(23, 23, 23, 255), IM_COL32(28, 28, 28, 255), IM_COL32(23, 23, 23, 255), IM_COL32(28, 28, 28, 255),
       IM_COL32(55, 55, 55, 255), IM_COL32(7, 7, 7, 255), IM_COL32(23, 23, 23, 255), IM_COL32(255, 255, 255, 255),
-      IM_COL32(100, 100, 100, 255), 5.f, 5.f, 5.f, []() -> ImFont* { return g_fontClarityInter; }, []() -> ImFont* { return g_fontInterBold15; },
-      IM_COL32(0, 0, 0, 0) },
+      IM_COL32(100, 100, 100, 255), 5.f, 5.f, 5.f, []() -> ImFont* { return g_fontClarityInter; }, []() -> ImFont* { return g_fontInterBold15; } },
     { "lobotomy v1", IM_COL32(15, 15, 15, 255), IM_COL32(13, 13, 13, 255), IM_COL32(15, 15, 15, 255), IM_COL32(13, 13, 13, 255),
       IM_COL32(30, 30, 30, 255), IM_COL32(30, 30, 30, 255), IM_COL32(15, 15, 15, 255), IM_COL32(255, 255, 255, 255),
-      IM_COL32(200, 200, 200, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontMenuTahoma9; }, []() -> ImFont* { return g_fontMenuTahomaBd9; },
-      IM_COL32(87, 87, 87, 255) },
+      IM_COL32(200, 200, 200, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontMenuTahoma9; }, []() -> ImFont* { return g_fontMenuTahomaBd9; } },
     { "lobotomy v2", IM_COL32(7, 7, 7, 255), IM_COL32(10, 10, 10, 255), IM_COL32(10, 10, 10, 255), IM_COL32(25, 25, 25, 255),
       IM_COL32(25, 25, 25, 255), IM_COL32(25, 25, 25, 255), IM_COL32(7, 7, 7, 255), IM_COL32(255, 255, 255, 255),
-      IM_COL32(180, 180, 180, 255), 6.f, 2.f, 4.f, []() -> ImFont* { return g_fontLobotomy13; }, []() -> ImFont* { return g_fontLobotomyBold13; },
-      IM_COL32(129, 99, 251, 255) },
+      IM_COL32(180, 180, 180, 255), 6.f, 2.f, 4.f, []() -> ImFont* { return g_fontLobotomy13; }, []() -> ImFont* { return g_fontLobotomyBold13; } },
     { "dna", IM_COL32(9, 9, 9, 240), IM_COL32(9, 9, 9, 240), IM_COL32(20, 20, 20, 153), IM_COL32(13, 13, 13, 255),
       IM_COL32(26, 26, 26, 178), IM_COL32(255, 255, 255, 8), IM_COL32(20, 20, 20, 255), IM_COL32(242, 242, 242, 255),
-      IM_COL32(77, 77, 77, 217), 4.f, 2.f, 4.f, []() -> ImFont* { return g_fontDnaMontserrat15; }, []() -> ImFont* { return g_fontDnaPtRootBold15; },
-      IM_COL32(255, 165, 255, 255) },
-    { "interwebz", IM_COL32(50, 50, 50, 255), IM_COL32(35, 35, 35, 255), IM_COL32(50, 50, 50, 255), IM_COL32(60, 60, 60, 255),
-      IM_COL32(0, 0, 0, 255), IM_COL32(0, 0, 0, 255), IM_COL32(35, 35, 35, 255), IM_COL32(255, 255, 255, 255),
-      IM_COL32(140, 140, 140, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontInterwebzCalibri; }, []() -> ImFont* { return g_fontInterwebzCalibri; },
-      IM_COL32(140, 0, 0, 255) },
+      IM_COL32(77, 77, 77, 217), 4.f, 2.f, 4.f, []() -> ImFont* { return g_fontDnaMontserrat15; }, []() -> ImFont* { return g_fontDnaPtRootBold15; } },
 };
 static const int k_menuStyleCount = (int)(sizeof(k_menuStyles) / sizeof(k_menuStyles[0]));
 
@@ -3291,12 +3421,7 @@ static void Tab_Settings()
     {
         if (g_menuStyle < 0 || g_menuStyle >= k_menuStyleCount) g_menuStyle = 0;
         const auto styleName = [](void*, int index, const char** out) { *out = k_menuStyles[index].name; return true; };
-        if (ImGui::Combo("style", &g_menuStyle, styleName, nullptr, k_menuStyleCount) &&
-            ((k_menuStyles[g_menuStyle].accent >> IM_COL32_A_SHIFT) & 0xFF) > 0)
-        {
-            const ImVec4 accent = ImGui::ColorConvertU32ToFloat4(k_menuStyles[g_menuStyle].accent);
-            g_accentColor[0] = accent.x; g_accentColor[1] = accent.y; g_accentColor[2] = accent.z; g_accentColor[3] = accent.w;
-        }
+        ImGui::Combo("theme", &g_menuStyle, styleName, nullptr, k_menuStyleCount);
 
         ImGui::ColorRow("accent color##accent color", g_accentColor, kPickerNoAlpha);
 
@@ -3348,7 +3473,7 @@ static const SidebarTab kSidebar[TAB_COUNT] = {
     { kTabNames[TAB_VISUALS],   kVisualsSub, 3 },
     { kTabNames[TAB_MOVEMENT],  kMoveSub,    4 },
     { kTabNames[TAB_MISC],      kMiscSub,    2 },
-    { kTabNames[TAB_INVENTORY], nullptr,     0 },
+    { kTabNames[TAB_INVENTORY], kInvSub,     2 },
     { kTabNames[TAB_FONTS],     kFontsSub,   3 },
     { kTabNames[TAB_SETTINGS],  nullptr,     0 },
 };
@@ -3407,7 +3532,7 @@ static void EjectPopup()
         if (ImGui::Button("yes", ImVec2((ImGui::GetRowFrameWidth() - 14.f) * 0.5f, 15.f)))
         {
             s_ejectOpen = false;
-            g_eject = true;
+            g_ejectRequest = true;
         }
         ImGui::SameLine();
         if (ImGui::Button("no", ImVec2(-1.f, 15.f))) s_ejectOpen = false;
@@ -3511,7 +3636,7 @@ bool RenderMenuBlur()
     static float s_blurFade = 0.f;
     const float step = (std::min)(io.DeltaTime, 1.f / 30.f) / 0.12f;   // menu_anim_duration
     const bool want = g_showMenu && g_menuBlur;
-    s_blurFade = g_eject ? 0.f : ImClamp(s_blurFade + (want ? step : -step), 0.f, 1.f);
+    s_blurFade = (g_ejectRequest || g_eject) ? 0.f : ImClamp(s_blurFade + (want ? step : -step), 0.f, 1.f);
     if (s_blurFade <= 0.f) return false;
 
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
@@ -3538,7 +3663,7 @@ void RenderMenu()
     // 750 x (640 - (menu_band_height - menu_bottom_band_height)) = 750x627, centred once,
     // never resized by the user. m_anim_progress is the open/close fade (section 7); while
     // it has not reached 1 the window eats no input, same as botox's eject-safety gate.
-    if (g_eject) s_animProgress = 0.f;   // eject snaps shut, never fades under a release
+    if (g_ejectRequest || g_eject) s_animProgress = 0.f;   // eject snaps shut, never fades under a release
     else
     {
         const float step = (std::min)(io.DeltaTime, 1.f / 30.f) / 0.12f;   // menu_anim_duration
@@ -3655,6 +3780,7 @@ void RenderMenu()
                       : (i == (int)TAB_MOVEMENT) ? s_moveSub
                       : (i == (int)TAB_MISC)     ? s_miscSub
                       : (i == (int)TAB_FONTS)    ? s_fontsSub
+                      : (i == (int)TAB_INVENTORY) ? s_invSub
                       : s_noPage;
             if (SidebarTab_Draw(kSidebar[i], i, s_tab == i, page, sidebarX, tabY, io.DeltaTime))
                 s_tab = i;
@@ -3692,7 +3818,7 @@ void RenderMenu()
     case TAB_VISUALS:   Tab_VisualsRoot();    break;
     case TAB_MOVEMENT:  Tab_MovementRoot();   break;
     case TAB_MISC:      Tab_MiscRoot();       break;
-    case TAB_INVENTORY: Tab_Skins();          break;
+    case TAB_INVENTORY: Tab_InventoryRoot();  break;
     case TAB_FONTS:     Tab_Fonts();          break;
     case TAB_SETTINGS:  Tab_Settings();       break;
     }

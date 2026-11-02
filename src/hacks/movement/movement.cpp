@@ -1,4 +1,5 @@
 #include "../../globals/globals.h"
+#include "../../globals/pinned_thread.h"   // routecalc.inl solver worker
 #include "movement.h"
 #include "../hud/avatar_cache.h"   // unit E5: Avatar_Pump piggybacks this game-thread tick
 #include "prediction.h"   // engine prediction core (Pred_*, restore, sim pool, snapshots)

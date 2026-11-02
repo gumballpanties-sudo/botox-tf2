@@ -204,6 +204,103 @@ static void AS_Sync(void* pLocal, UserCmd_t* cmd, const bool armed)
     ok = 0;
 }
 
+// ============================================================================
+// AIR STUCK, cumidere style -- 1:1 port of Documents\!\cumidere tf2.dll misc_airstuck (bool
+// 0x49e36b), body FUN_1801cd900. Its createmove (FUN_1801f9b10) runs it right after its tb
+// (FUN_1801cbee0) on the pre-prediction state, same as our pipeline order (TB then AS), so it
+// works off the restore base. Same wall scan (FUN_1801cb3c0) and gap (FUN_1801cd340) as its tb
+// = TBC_FindWall / TBC_Gap (texturebug.inl). What differs from its tb:
+//   grid    10 forwards x graze 86.5..89.5 step 0.5 = 70 sims max (tb: 5 grazes, 50)
+//   accept  xy < 0.1 AND |vz| on half gravity = a dead stop (tb takes any pin, a ride too),
+//           else the flushest variant if its gap is under 0.2u, else the cmd untouched
+// Shims: its movement fix (FUN_18022c2e0) -> as::StampRotate, the rotation AS_FinalStamp re-applies
+// after the aimbot, so the bits the sim proved are the bits that go out. Last forward FLT_MAX ->
+// 450: wish dir is scale-free and the air cap clamps the wish to 30 either way, FLT_MAX only risks
+// inf/NaN in wishvel. Its first sim (plain cmd, vz read, never used) skipped.
+// ============================================================================
+static float s_ascScanStart = 0.f;   // DAT_1804d6f5c: direction the last wall was found at
+static int   s_ascDiagTick  = -1000;
+
+// entity on the restore base in and out
+static void AirStuckCumidere(void* pLocal, UserCmd_t* cmd)
+{
+    const int nBase = PredCommandsPredicted();
+    RestoreToFrame(nBase - 1);
+
+    const Vec3 org  = EntV3(pLocal, g_offOrigin);
+    const Vec3 mins = EntV3(pLocal, g_offMins);
+    const Vec3 maxs = EntV3(pLocal, g_offMaxs);
+    const Vec3 vel  = EntV3(pLocal, g_offVelocity);
+
+    GameTrace_t wall{};
+    float ang = 0.f;
+    if (!TBC_FindWall(pLocal, org, mins, maxs, s_ascScanStart, wall, ang)) { s_ascScanStart = 0.f; return; }
+    s_ascScanStart = ang;
+
+    const float wall_yaw = NormalizeAngle(RAD2DEGF(atan2f(-wall.plane.normal.y, -wall.plane.normal.x)));
+    const float sign     = as::CumiSign(RAD2DEGF(atan2f(vel.y, vel.x)), wall_yaw);
+    const float half     = TargetPredictZVel();   // FUN_1801cade0
+    const Vec3  view     = cmd->viewangles;
+
+    static constexpr float k_fwd[10] = { 1.f, 0.875f, 0.75f, 0.5f, 1.f, 2.125f, 2.875f, 5.f, 15.f, 450.f };
+    bool  found = false;
+    float best_gap = 1.f, out_yaw = view.y, out_fwd = 0.f, out_off = 0.f;
+    float last_vz = 0.f, last_xy = 0.f;
+    int   sims = 0;
+    for (int i = 0; i < 10 && !found; ++i)
+    {
+        for (float off = 86.5f; off < 90.f; off += 0.5f)
+        {
+            if (SimsLeft() <= 0) break;
+            const float yaw = wall_yaw + off * sign;
+            UserCmd_t fake = *cmd;
+            as::StampRotate(view.y, yaw, k_fwd[i], 0.f, fake.forwardmove, fake.sidemove);
+
+            RestoreToFrame(nBase - 1);
+            Pred_Simulate(pLocal, &fake);
+            ++sims;
+            const Vec3  v   = EntV3(pLocal, g_offVelocity);
+            const float gap = TBC_Gap(pLocal, wall);
+            last_vz = v.z;
+            last_xy = v.Length2D();
+
+            if (as::CumiStuck(v.z, last_xy, half))
+            {
+                found = true;
+                out_yaw = yaw; out_fwd = k_fwd[i]; out_off = off;
+                break;
+            }
+            if (gap < best_gap)
+            {
+                best_gap = gap;
+                out_yaw = yaw; out_fwd = k_fwd[i]; out_off = off;
+            }
+        }
+        if (SimsLeft() <= 0) break;
+    }
+    RestoreToFrame(nBase - 1);
+
+    const bool hug = !found && best_gap < 0.2f;
+    if (found || hug)
+    {
+        as::StampRotate(view.y, out_yaw, out_fwd, 0.f, cmd->forwardmove, cmd->sidemove);
+        // the botox stamp, delivery only: AS_FinalStamp re-rotates it into the view that goes out
+        s_asStampYaw     = out_yaw;
+        s_asStampForward = out_fwd;
+        s_asStampSide    = 0.f;
+        s_asStampPitch   = view.x;
+        s_asStampButtons = cmd->buttons;
+        s_asStampValid   = true;
+    }
+    s_asHolding = found;
+
+    if (g_debugLogEnable && DiagOk(s_ascDiagTick, found || hug))
+        DebugLog("ASC: stuck=%d hug=%d gap=%.3f off=%.1f fwd=%.3f yaw=%.1f sims=%d vz=%.2f xy=%.1f lvz=%.2f lxy=%.2f "
+                 "n=%.2f %.2f %.2f sign=%.0f ang=%.2f", (int)found, (int)hug, best_gap, out_off, out_fwd, out_yaw, sims,
+                 vel.z, vel.Length2D(), last_vz, last_xy, wall.plane.normal.x, wall.plane.normal.y, wall.plane.normal.z,
+                 sign, ang);
+}
+
 static void AirStuck(void* pLocal, UserCmd_t* cmd)
 {
     static float start_angle = 0.0f;
@@ -217,7 +314,8 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
     const bool feature = g_airStuck;
     const bool key     = MovementKeyOK(g_airStuckKey, g_airStuckMode);
     const bool alive   = EntAlive(pLocal);
-    AS_Sync(pLocal, cmd, feature && key && alive);
+    const bool cumi    = g_asStyle == 0;
+    AS_Sync(pLocal, cmd, feature && key && alive && !cumi);   // exact-pin sync is the botox style's
 
     if (!feature || !key || !alive || (EntI(pLocal, g_offFlags) & FL_ONGROUND)) {
         if (hold_armed)
@@ -231,6 +329,13 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
     if (move_type != MOVETYPE_WALK) {   // ladder / noclip / fly / observer ( TF2 has no ladders )
         was_stuck        = false;
         s_asExpect.valid = false;
+        return;
+    }
+    if (cumi) {
+        s_asHold.ticks   = 0;
+        was_stuck        = false;
+        s_asExpect.valid = false;
+        AirStuckCumidere(pLocal, cmd);
         return;
     }
 

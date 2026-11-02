@@ -1,6 +1,8 @@
 #include "../../globals/common.h"
 #include "../../globals/globals.h"
 #include "skins.h"
+#include "skins_pure.h"
+#include "hats.h"
 #include "visuals.h"
 #include "flipworld.h"
 #include "../hud/demostreak.h"
@@ -12,7 +14,6 @@
 // ==== state =====================================================================================
 bool g_enableSkins     = false;
 bool g_skinNeedsUpdate = false;
-bool g_skinFestRefresh = false;
 std::unordered_map<int, SkinCfg> g_skinCfgs;
 // True once Skins_Install has pre-created every key and the FSN hook can read the map from the
 // engine thread. No key may be ADDED after that -- an insert can rehash, and a rehash frees the
@@ -1635,9 +1636,8 @@ static void SweepAttachmentSkin(int teamNum)
 // ==== festivizer lights =========================================================================
 // The lights are attachment models, and CEconEntity::UpdateAttachmentModels (econ_entity.cpp:1079)
 // is the only thing that builds them: it runs from OnDataChanged and reads is_festivized (attr
-// 2053) off the attribute list AT THAT MOMENT. Toggling the box is a full update, so the weapon is
-// re-created and its CREATED rebuild runs while the age gate still holds Skin_Apply back -- no 2053
-// yet, no lights. After that only a networked change to the weapon rebuilds the list: a minigun,
+// 2053) off the attribute list AT THAT MOMENT. Toggling the box on is not a full update (SC_Fest),
+// so the weapon's CREATED rebuild is long gone and only a networked change rebuilds the list: a minigun,
 // a medigun or a sniper rifle churns netvars every few frames and lit up, a melee, a sapper or an
 // unfired shotgun sent nothing and stayed dark until the next weapon switch. That was "festivizer
 // works on some weapons".
@@ -1667,6 +1667,24 @@ __declspec(noinline) static void RefreshAttachmentModels(unsigned int hWeapon)
     }
 }
 
+// Every edit since the last call, from any widget or a config load, folded into SkinChange bits.
+// One place decides what an edit costs, so no menu widget can forget to ask for its update (wear,
+// pattern, unusual, stat clock and the spells never did) or ask for one it does not need. Engine
+// thread only; the menu only ever mutates values of keys that already exist (Skins_Install).
+static std::unordered_map<int, SkinCfg> s_seenCfgs;
+
+static unsigned DiffSkinCfgs()
+{
+    const bool first = s_seenCfgs.empty();
+    unsigned r = SC_None;
+    for (const auto& [key, c] : g_skinCfgs) {
+        SkinCfg& seen = s_seenCfgs[key];
+        if (!first) r |= SkinPure_Classify(seen, c);
+        seen = c;
+    }
+    return r;
+}
+
 static void __fastcall h_FrameStageNotify(int stage)
 {
     MiscHookGuard _g;
@@ -1682,6 +1700,11 @@ static void __fastcall h_FrameStageNotify(int stage)
     // Prediction is NOT inside OnRenderStart -- it has already run by this point -- so nothing
     // rewrites m_nSequence between here and the draw.
     if (stage == 5 && !g_eject && g_enableSkins) { SweepViewmodelSequence(); RestampStreak("before think"); }
+    // Hats are built here, before the original: its OnRenderStart runs ProcessOnDataChangedEvents,
+    // which is what delivers the OnDataChanged(CREATED) a new hat's PreDataUpdate queued.
+    Hats_FrameStage(stage);
+    // Weather entity, same reason and same spot as the hats (visuals.cpp Rain_Tick).
+    if (stage == 5) Rain_Tick();
 
     o_FrameStageNotify(stage);
     GameExtras_Frame(stage);   // unit game: chat translator print, bot ping, performance, cvar list (restores itself on g_eject)
@@ -1734,29 +1757,42 @@ static void __fastcall h_FrameStageNotify(int stage)
         if (!s_demo.active) ResetStreak("left server");
         memset(s_goldPending, 0, sizeof(s_goldPending));
         s_festRefreshedWpn    = nullptr;
+        s_fullUpdateTick      = 0;   // a join is not our full update -- keep its age gate
         ClearSeqRemap();
     }
     s_wasInGame = bInGame;
+    // Diffed out of a game too, so edits made in the main menu are not taken for fresh ones on
+    // join -- the weapons are built with them then anyway.
+    const unsigned chg = DiffSkinCfgs();
     if (!bInGame) return;
 
     const bool skinEnabling  = g_enableSkins && !s_skinWasEnabled;
     const bool skinDisabling = !g_enableSkins && s_skinWasEnabled;
     s_skinWasEnabled = g_enableSkins;
 
-    // One full update per burst of menu edits, not one per click: each one rebuilds every
-    // entity (debug.log 10-30 had four back to back). Fired 400 ms after the LAST request.
+    // A click (combo pick, checkbox) fires its full update this frame. A typed or dragged field
+    // waits until it has been still for 350 ms, so a slider drag or a pattern seed is one update,
+    // not one per frame / keystroke. And never two within 250 ms: the first one's snapshot has not
+    // even arrived yet (debug.log 10-30 had four back to back). Live edits (sheen, kill effect,
+    // clock count, spells on, custom color) need none -- Skin_Apply below writes them this frame.
     static bool  s_updPending = false;
-    static DWORD s_updReqTick = 0;
-    const bool updReq = skinEnabling || skinDisabling || (g_enableSkins && g_skinNeedsUpdate);
+    static DWORD s_updDue     = 0;
+    const bool updReq = skinEnabling || skinDisabling
+                     || (g_enableSkins && (g_skinNeedsUpdate || (chg & SC_Rebuild)));
     g_skinNeedsUpdate = false;
-    if (updReq) { s_updPending = true; s_updReqTick = GetTickCount(); }
-    if (s_updPending && GetTickCount() - s_updReqTick >= 400) {
+    const DWORD now = GetTickCount();
+    if (updReq) {
+        const DWORD due = now + ((chg & SC_Typed) ? 350 : 0);
+        if (!s_updPending || (int)(due - s_updDue) > 0) s_updDue = due;
+        s_updPending = true;
+    }
+    if (s_updPending && (int)(now - s_updDue) >= 0 && now - s_fullUpdateTick >= 250) {
         s_updPending = false;
         TriggerForceFullUpdate("skin changed");
     }
     // Festivizer switched on: Skin_Apply writes 2053 below, then the held weapon's lights get
-    // rebuilt by the refresh at the bottom -- same frame, no full update, no age gate.
-    if (g_skinFestRefresh) { g_skinFestRefresh = false; s_festRefreshedWpn = nullptr; }
+    // rebuilt by the refresh at the bottom -- same frame, no full update.
+    if (g_enableSkins && (chg & SC_Fest)) s_festRefreshedWpn = nullptr;
 
     if (!g_enableSkins && !skinDisabling) return;
 
@@ -1800,7 +1836,15 @@ static void __fastcall h_FrameStageNotify(int stage)
         s_activeNeedsRemap    = false;
         s_festRefreshedWpn    = nullptr;
         ClearSeqRemap();
-        return;
+        // Our own cl_fullupdate re-creates the local player too, and this is stage 3 of that
+        // full snapshot: every weapon is unpacked and its OnDataChanged(CREATED) -- the one pass
+        // that builds the paint material, the clock and the festivizer lights -- runs in THIS
+        // frame's stage 5. Waiting out the gate let that pass run with no attributes on the list,
+        // so a generic warpaint, a stat clock or the lights showed on some updates and not others.
+        // Applying now is what a respawn already does (stage 3, before CREATED); a null attribute
+        // manager is fine, SetRuntimeAttributeValue checks it (econ_item_view.cpp:1910).
+        if (GetTickCount() - s_fullUpdateTick > 5000) return;   // joined a server: keep the gate
+        s_entityChangeAge = 9;
     }
 
     UpdateViewmodelEnt(pLocal);
@@ -2275,12 +2319,7 @@ static int KsKickedStreak(int count)
 
 // A custom color needs a row to live in. With no sheen picked, attribute 2014 is never written
 // and nothing ever reads the table, so "custom color" on its own quietly means team shine.
-static int KsSheenIndexFor(const SkinCfg& c)
-{
-    if (c.ksTier < 2) return 0;
-    if (c.ksSheen > 0) return c.ksSheen;
-    return c.ksCustomColor ? 1 : 0;
-}
+static int KsSheenIndexFor(const SkinCfg& c) { return SkinPure_SheenIdx(c); }
 
 // Once a frame, off the held weapon's config: paint that weapon's sheen row and put every other
 // row back. Only one row can be custom at a time because the table is process-wide -- it is the
@@ -2538,6 +2577,8 @@ void Skins_Install()
     InstallPatternHook(hClient, "skins: TF_IsHolidayActive",
                        "48 83 EC ? 48 8B 05 ? ? ? ? 44 8B C9",
                        (void*)h_TF_IsHolidayActive, (void**)&o_TF_IsHolidayActive);
+
+    HatsInv_Install();   // hat changer: loadout screen equip for the backpack copies
 }
 
 // ==== config ====================================================================================
@@ -2619,3 +2660,31 @@ bool Skins_LoadCfg(const char* key, const char* val)
     else if (strcmp(field, "reskinStyle")   == 0) c.reskinStyle   = atoi(val);
     return true;
 }
+
+// ==== exports for the hat changer (hats.cpp) ====================================================
+// Same helpers the reskins use, so the hats get the same verified modelinfo slots and the same
+// SetRuntimeAttributeValue sig instead of a second copy of each.
+
+// A drawable index for path: precached (> 0) or registered client-side dynamic (< -1). 0 = none.
+int Skins_ModelIndex(const char* path)
+{
+    if (!path || !path[0]) return 0;
+    int idx = MI_GetModelIndex(path);
+    if (!ModelIdxIs(idx, path)) idx = MI_RegisterDynamic(path);
+    return (idx > 0 || idx < -1) ? idx : 0;
+}
+
+bool Skins_SetAttribute(void* pAttrList, unsigned int index, float value)
+{
+    ResolveSkinSigs();
+    return pAttrList && EngineSetAttribute(reinterpret_cast<CAttributeList*>(pAttrList), index, value);
+}
+
+// model_t* -> its studiohdr_t, or null unless it reads "IDST".
+const void* Skins_StudioHdr(const void* pModel)
+{
+    const void* h = MI_GetStudiomodel(pModel);
+    return HDR_IsStudio(h) ? h : nullptr;
+}
+
+const void* Skins_ModelPtr(int modelIndex) { return MI_GetModel(modelIndex); }

@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include "../../globals/pinned_thread.h"
 
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -295,13 +296,13 @@ static std::string UrlImagePath(const std::string& setting)
     std::lock_guard<std::mutex> lock(s_urlMutex);
     if (std::find(s_urlStarted.begin(), s_urlStarted.end(), url) == s_urlStarted.end()) {
         s_urlStarted.push_back(url);
-        // ponytail: detached, an eject mid-download (seconds) can outlive the dll; track it if ejects matter
-        std::thread([url, path = std::string(local)] {
+        // pinned: an eject mid-download delays the unmap until it ends (pinned_thread.h)
+        if (HANDLE h = CreatePinnedThread([url, path = std::string(local)] {
             CreateDirectoryA("C:\\botox-tf2", nullptr);
             CreateDirectoryA("C:\\botox-tf2\\images", nullptr);
             const HRESULT hr = URLDownloadToFileA(nullptr, url.c_str(), path.c_str(), 0, nullptr);
             DebugLog("spectator list: download %s -> %s hr=0x%08X", url.c_str(), path.c_str(), (unsigned)hr);
-        }).detach();
+        })) CloseHandle(h);
     }
     return {};
 }
@@ -368,8 +369,8 @@ void SpecList_PathInput(const char* label, const char* hint, char* buf, size_t s
             s_pickDone = false;
         }
         s_pickAlive = true;   // before the thread runs
-        // ponytail: an eject while the dialog is open outlives the dll; botox waits on the same flag
-        std::thread([] {
+        // pinned: an eject while the dialog is open unmaps once it closes (pinned_thread.h)
+        HANDLE h = CreatePinnedThread([] {
             const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             char path[MAX_PATH] = {};
             OPENFILENAMEA dlg = {};
@@ -387,7 +388,8 @@ void SpecList_PathInput(const char* label, const char* hint, char* buf, size_t s
             }
             if (SUCCEEDED(com)) CoUninitialize();
             s_pickAlive = false;
-        }).detach();
+        });
+        if (h) CloseHandle(h); else s_pickAlive = false;
     }
     ImGui::EndDisabled();
 

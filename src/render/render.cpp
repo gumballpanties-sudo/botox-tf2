@@ -1419,8 +1419,7 @@ static void BuildFontAtlas()
     g_fontTahomaBd12 = sys("tahomabd.ttf", 12.f, mono);                    orElse(g_fontTahomaBd12, g_fontBold);
     g_fontChillware13 = sys("verdanab.ttf", 13.f, flagged(ImGuiFreeTypeBuilderFlags_NoHinting)); orElse(g_fontChillware13, g_fontBold);
 
-    // menu style clarity v1 regular / lobotomy v1 pair -- same tahoma face, menu-only sizes
-    g_fontMenuTahoma11 = sys("tahoma.ttf", 11.f, mono); orElse(g_fontMenuTahoma11, g_fontReg);
+    // menu theme lobotomy v1 pair -- tahoma face, menu-only sizes
     g_fontMenuTahoma9  = sys("tahoma.ttf", 9.f, flagged(ImGuiFreeTypeBuilderFlags_Monochrome | ImGuiFreeTypeBuilderFlags_MonoHinting | ImGuiFreeTypeBuilderFlags_Bitmap), cyr);
     orElse(g_fontMenuTahoma9, g_fontReg);
     g_fontMenuTahomaBd9 = sys("tahomabd.ttf", 9.f, flagged(ImGuiFreeTypeBuilderFlags_Monochrome | ImGuiFreeTypeBuilderFlags_MonoHinting | ImGuiFreeTypeBuilderFlags_Bitmap), cyr);
@@ -2061,6 +2060,32 @@ static void Render_LogSettings(IDirect3DDevice9* dev)
              bd.Width, bd.Height, (int)bd.Format, (int)bd.MultiSampleType);
 }
 
+// Eject, between g_eject and the end of the splash: every other overlay, pass and hook is
+// already standing down, so the splash gets a frame of its own -- one NewFrame, one scene on
+// top of the finished game frame -- while it fades the game back in. MainThread waits for it
+// (BootScreen_EjectEnd) before the hooks come off, and this runs under g_hookDepth, so the
+// ImGui teardown can never overlap it.
+static void RenderEjectFrame(IDirect3DDevice9* dev)
+{
+    ImGui_ImplDX9_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    Dpi_BeginFrame();
+    ImGui::NewFrame();
+    Dpi_AfterNewFrame();
+    ImGui::GetIO().MouseDrawCursor = false;
+    RenderBootScreen();
+    ImGui::EndFrame();
+    Dpi_BeforeRender();
+    ImGui::Render();
+    Dpi_ScaleDrawData(ImGui::GetDrawData());
+    if (SUCCEEDED(dev->BeginScene()))
+    {
+        ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+        dev->EndScene();   // h_EndScene passes straight through at g_eject
+    }
+    BlurRect_NewFrame();
+}
+
 HRESULT __stdcall h_Present(IDirect3DDevice9* dev, const RECT* src, const RECT* dst, HWND win, const RGNDATA* dirty)
 {
     // Counter FIRST, before the eject test. Reading g_eject and then bumping leaves a window
@@ -2069,7 +2094,11 @@ HRESULT __stdcall h_Present(IDirect3DDevice9* dev, const RECT* src, const RECT* 
     ++g_hookDepth;
     struct Dec { ~Dec() { --g_hookDepth; } } _dec;
 
-    if (g_eject) return o_Present(dev, src, dst, win, dirty);
+    if (g_eject)
+    {
+        if (g_imguiInit && dev == s_imguiDev && BootScreen_EjectDrawing()) RenderEjectFrame(dev);
+        return o_Present(dev, src, dst, win, dirty);
+    }
 
     g_d3dDev = dev;   // blend-state switches in the crosshair draw need it
     s_presentTid = GetCurrentThreadId();   // the vgui pass checks against this
@@ -2131,16 +2160,15 @@ chain:
                 // pointer, so a recycled address would pair last map's bones with this map's
                 // skeleton. The camera history goes with it -- a map change is a teleport.
                 FrameBlend_Reset();
-                // ...and the same level change destroyed the slot-2047 precipitation entity.
-                // Without this, visuals.cpp keeps the previous map's pointers AND its "we own
-                // it" flag, and the next rain<->snow flip Releases an entity the map owns.
-                Precip_OnLevelChange();
+                // The slot-2047 precipitation reset lives in Rain_Tick now (game thread, its
+                // own !IsInGame edge) -- from here it raced the entity it was forgetting.
             }
             s_wasInGame = inGame;
         }
 
         UpdateFPS();
-        Rain_Tick();
+        // Rain_Tick: NOT here. Present is the render thread under mat_queue_mode 2, and it
+        // creates/frees a client entity -- skins.cpp h_FrameStageNotify(5) runs it instead.
         // Cover art upload. Here and not in the frame build: the build can run from the vgui
         // pass on the MAIN thread, and CreateTexture/LockRect there would race Present.
         MediaPlayer_Tick(dev);
@@ -2269,7 +2297,7 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             else            { ShowCursor(FALSE); }
             return 0;
         }
-        if (wParam == VK_F11) { g_eject = true; return 0; }
+        if (wParam == VK_F11) { g_ejectRequest = true; return 0; }
     }
 
     // ps point ENTER window: fresh ENTER (no autorepeat, bit 30) on a hovered point

@@ -4,6 +4,7 @@
 #include <ctime>
 #include <cstdint>
 #include <cstring>
+#include "../../globals/pinned_thread.h"
 
 // botox hacks/misc/discord_rpc.cpp 1:1 over the raw Discord IPC pipe. Frame = uint32 op +
 // uint32 len + JSON. Old version never showed anything: empty default app id (thread idled
@@ -178,7 +179,7 @@ DWORD WINAPI DiscordThread(LPVOID)
 void DiscordRpc_Start()
 {
     if (s_thread) return;
-    s_thread = CreateThread(nullptr, 0, DiscordThread, nullptr, 0, nullptr);
+    s_thread = CreatePinnedThread([] { DiscordThread(nullptr); });
     if (!s_thread) DebugLog("discord rpc: CreateThread failed (err %lu)", GetLastError());
 }
 
