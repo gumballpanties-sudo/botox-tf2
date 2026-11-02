@@ -660,7 +660,8 @@ bool g_bounceAssist = false; int g_bounceAssistKey = 0; int g_bounceAssistMode =
 float g_bounceReach = 48.f;
 float g_bounceMinSpeed = 150.f;
 bool g_psFinderHeadbounce = false;
-bool g_psFinderPixeljump = false;
+bool g_psFinderPixeljump = true;    // botox m_pixel_finder_pixeljumps default
+bool g_psFinderJumpSurf = false;
 bool g_psSurfFix = false;
 int  g_edgeBugStyle = 0;
 bool g_edgeBugMouseLock = false;

@@ -396,7 +396,7 @@ extern float g_showDepthMultiplier;
 
 // -- Unit D: world fx (hacks/visuals/world_fx.cpp) -------------------------------------------
 extern bool  g_fullbrightEnable;     // mat_fullbright poke, no hook
-extern bool  g_disableInterpEnable;  // cl_interp 0 poke, no hook
+extern bool  g_disableInterpEnable;  // CBaseAnimating::Interpolate skip, remote players (world_fx.cpp)
 extern bool  g_aspectRatioEnable;    // letterbox/pillarbox via the existing Present dest rect
 extern float g_aspectRatioValue;     // target width/height, e.g. 1.333 for 4:3
 
@@ -709,7 +709,8 @@ extern bool g_bounceAssist; extern int g_bounceAssistKey; extern int g_bounceAss
 extern float g_bounceReach;     // wall scan reach, units (def 48, 8-128)
 extern float g_bounceMinSpeed;  // min xy speed to bother redirecting (def 150, 0-600)
 extern bool g_psFinderHeadbounce; // PixelFinder: also probe for ceiling (ascent) pins
-extern bool g_psFinderPixeljump;  // PixelFinder: keep jump-only (no-fall) pins, own list
+extern bool g_psFinderPixeljump;  // PixelFinder: pixel jump LIPS (botox pf_pixel_jump), yellow
+extern bool g_psFinderJumpSurf;   // PixelFinder: keep jump-only (no-fall) pins, own list, orange
 extern bool g_psSurfFix;        // hold duck for a couple ticks into a ride so a flicker can't drop it
 extern int  g_edgeBugStyle;     // 0 botox search / 1 delusional donor / 2 dna donor
 extern bool g_edgeBugMouseLock; // scale mouse x in OverrideMouseInput while a plan flies

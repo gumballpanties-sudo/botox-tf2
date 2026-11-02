@@ -2,7 +2,7 @@
 //  ROUTE CALCULATOR -- every combination that completes the route, from TF2's own
 //  movement code.
 //
-//  Place markers in order (ground, pixelsurf, edgebug, headbang, texturebug), press calculate, read every
+//  Place markers in order (ground, pixelsurf, edgebug, headbang, texturebug, pixeljump), press calculate, read every
 //  press sequence that completes them: "walk off -> jumpbug -> pixelsurf (stand) -> longjump".
 //  Moves are only the replicable ones, each one of dih's own binds: jump, minijump, longjump,
 //  jumpbug, and off the start walk off / crouch walk off. You run the approach; this only answers
@@ -631,13 +631,15 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
             start.s.psAge = std::clamp(g_globalVars->tickcount - (s_pixelSurfTicks - 16) - 1, -32, 16);
         start.s.psRiding = s_psRidingNow;
         start.s.psPrevSurf = s_prevSurfVel;
+        // a lip's dot is ON the wall face: a hull settled there starts half in the wall, so a
+        // lip is never the check spot
         for (const RcPoint& p : pts)
-            if (rs::FloorLike(p.type)) { vCheckAt = p.pos; bCheck = true; break; }
+            if (rs::FloorLike(p.type) && p.type != rs::PT_PIXELJUMP) { vCheckAt = p.pos; bCheck = true; break; }
     }
     else
     {
         vCheckAt = bHere ? vLive : pts[0].pos;
-        bCheck = true;
+        bCheck = bHere || pts[0].type != rs::PT_PIXELJUMP;
         if (bHere && g_offGroundEntity > 0)
         {
             // standing on someone / a building: only the printed name changes ("jump off building")
@@ -652,6 +654,9 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         // the starting jump is its own row (botox "starting jump" + m_route_calc_start_styles),
         // wherever it leaves from. The pixel calculator has no start row: every move is its
         if (!bPixel) start.moves = (unsigned)g_rcStartMoves & (rs::kMovesPress | rs::kMovesStart);
+        // a lip as the start: hop off it (botox hop_only), nothing to walk off or wait on
+        if (!bHere && pts[0].type == rs::PT_PIXELJUMP)
+            start.moves &= rs::kMovesPress & ~(1u << rs::MB_DELAY);
     }
 
     // one Pred_Simulate flight from where you stand. Every hop pass of one pixel solve would
@@ -934,6 +939,12 @@ static void RcSolveFinish(RcJob& job)
                                        "between your feet and your head (a duck or unduck on that "
                                        "tick cancels it too) - come past it slower",
                          r.highest[dp]);
+            // a lip grounds only a hull that started rs::kPjCreepTicks ticks over it: the top of
+            // an arc that only grazes it is not enough to creep in
+            else if (type == rs::PT_PIXELJUMP)
+                snprintf(b, sizeof(b), "arcs get %.1fu over the lip, but not for %d ticks - the hull has to "
+                                       "stay over a pixeljump long enough to creep onto it",
+                         r.highest[dp], rs::kPjCreepTicks);
             else
                 snprintf(b, sizeof(b), "arcs get there (%.1fu over) but none arrive the way this marker needs",
                          r.highest[dp]);
@@ -1176,34 +1187,40 @@ void RC_RefreshLive()
 // (rs::AimTanTo) is what keeps the two sets apart when both are on the same wall -- the ring you
 // are actually centred on wins, and rc21's "nearest point of any kind by raw distance" is what
 // made a 0.4u-away seam beat the grey ring you aimed at.
-// bPsOnly keeps the pixel calculator on grey rings alone: its marker IS a pixelsurf by definition.
+//   * a yellow lip  (s_pfLipPts, finder "find pixeljumps") -> PIXELJUMP
+//   * an orange pin (s_pfJumpPts, finder "find jump surfs": a pin only a jump reaches) -> PIXELSURF
+//     (the solver flies every arc anyway; it only had no way to be aimed at)
+// bPixel keeps the pixel calculator on what it can answer: surfs and lips, no texturebug seam.
 // Ranking is by how centred the crosshair is on the ring. Gone with rc21's rule: the "not past the
 // surface the ray hit (+16u)" clause. It read a lip 200u in front of the wall as the end of the
 // ray and refused the point you were looking at (report 4: "it places it nowhere near that
 // point"). A ring is a thing you aim AT; what the ray bumps into on the way is not a vote.
-static bool RcPickFinder(const Vec3& vEye, const Vec3& vFwd, bool bPsOnly,
-                         Vec3& pos, bool& bTb, int& nSeen)
+// type out = rs::PT_SURF / PT_TEXTUREBUG / PT_PIXELJUMP; why = which ring, for the readout
+static bool RcPickFinder(const Vec3& vEye, const Vec3& vFwd, bool bPixel,
+                         Vec3& pos, int& type, const char*& why, int& nSeen)
 {
     std::lock_guard<std::mutex> l(g_psLock);
     float flBest = 1e9f;
     const Vec3* pPick = nullptr;
-    bool bPickTb = false;
-    auto test = [&](const Vec3& p, bool tb)
+    auto test = [&](const Vec3& p, int t, const char* w)
     {
         nSeen++;
         const float off = rs::AimTanTo(vEye, vFwd, p);
         if (off < 0.f || off >= flBest) return;
-        flBest = off; pPick = &p; bPickTb = tb;
+        flBest = off; pPick = &p; type = t; why = w;
     };
     nSeen = 0;
-    for (const Vec3& p : s_psFinderPts)       test(p, false);
-    for (const PsAssistPt& p : s_psAssistPts) test(p.pos, false);
-    if (!bPsOnly)
+    for (const Vec3& p : s_psFinderPts)       test(p, rs::PT_SURF, "green pinned pixel");
+    for (const PsAssistPt& p : s_psAssistPts) test(p.pos, rs::PT_SURF, "assist target");
+    // only what is on screen: the overlay hides these two lists with their checkboxes
+    if (g_psFinderJumpSurf)  for (const Vec3& p : s_pfJumpPts) test(p, rs::PT_SURF, "orange jump surf");
+    if (g_psFinderPixeljump) for (const Vec3& p : s_pfLipPts)  test(p, rs::PT_PIXELJUMP, "yellow pixeljump lip");
+    if (!bPixel)
     {
-        for (const Vec3& p : s_psTbPts)    test(p, true);
-        for (const Vec3& p : s_psMapTbPts) test(p, true);   // the whole-map walk's seams, same ring
+        for (const Vec3& p : s_psTbPts)    test(p, rs::PT_TEXTUREBUG, "cyan seam ring");
+        for (const Vec3& p : s_psMapTbPts) test(p, rs::PT_TEXTUREBUG, "cyan seam ring");   // the whole-map walk's seams
     }
-    if (pPick) { pos = *pPick; bTb = bPickTb; }
+    if (pPick) pos = *pPick;
     return pPick != nullptr;
 }
 
@@ -1218,16 +1235,18 @@ static void RcPlacePixel(void* pLocal, UserCmd_t* pCmd)
     Vec3 vForward; AngleVectors(pCmd->viewangles, &vForward);
     const Vec3 vEye = EntV3(pLocal, g_offOrigin) + EntV3(pLocal, g_offViewOffset);
 
+    // botox pixel_calc type pixelsurf / pixeljump: here the ring you aim at says which
     RcPoint pt;
     pt.type = rs::PT_SURF;
-    int nSeen = 0; bool bTb = false;
-    pt.snapped = RcPickFinder(vEye, vForward, true, pt.pos, bTb, nSeen);   // g_psLock, before g_rcLock
+    int nSeen = 0;
+    const char* why = "";
+    pt.snapped = RcPickFinder(vEye, vForward, true, pt.pos, pt.type, why, nSeen);   // g_psLock, before g_rcLock
 
     std::lock_guard<std::mutex> l(g_rcLock);
     s_rcPixelSolve = true;      // every message from here belongs to the pixel calculator's panel
     if (!pt.snapped)
     {
-        s_rcMessage = nSeen ? RC_ERR "aim at a pixel finder point (a grey ring) - a pixel is only exact where the finder pinned one"
+        s_rcMessage = nSeen ? RC_ERR "aim at a pixel finder point (a green / orange pixel or a yellow pixeljump) - a pixel is only exact where the finder found one"
                             : RC_ERR "no pixel finder points on this wall - run the pixel finder on it first";
         DebugLog("RC: pixel refused -- nothing aimed at (%d candidate(s))", nSeen);
         return;
@@ -1237,10 +1256,10 @@ static void RcPlacePixel(void* pLocal, UserCmd_t* pCmd)
     s_rcGen++;
     s_rcLines.clear(); s_rcPath.clear();
     char buf[160];
-    snprintf(buf, sizeof(buf), "pixel placed (z %.3f, finder point) - press calculate pixel", pt.pos.z);
+    snprintf(buf, sizeof(buf), "added %s point at %.2f - press calculate pixel", rs::PointTypeName(pt.type), pt.pos.z);
     s_rcMessage = buf;
-    DebugLog("RC: pixel placed at %.2f %.2f %.4f (finder point, %d candidate(s))",
-             pt.pos.x, pt.pos.y, pt.pos.z, nSeen);
+    DebugLog("RC: pixel placed at %.2f %.2f %.4f -- %s (%s, %d candidate(s))",
+             pt.pos.x, pt.pos.y, pt.pos.z, rs::PointTypeName(pt.type), why, nSeen);
 }
 
 // WHAT YOU AIM AT IS THE TYPE -- there is no 'place as' combo any more
@@ -1262,10 +1281,10 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
 
     // ---- a finder ring under the crosshair: that ring's kind IS the marker --------------------
     RcPoint sp;
-    int nSeen = 0; bool bTb = false;
-    if (RcPickFinder(vEye, vForward, false, sp.pos, bTb, nSeen))
+    int nSeen = 0;
+    const char* why = "";
+    if (RcPickFinder(vEye, vForward, false, sp.pos, sp.type, why, nSeen))
     {
-        sp.type = bTb ? rs::PT_TEXTUREBUG : rs::PT_SURF;
         sp.snapped = true;
         char b[160];
         {
@@ -1277,8 +1296,7 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
             s_rcLines.clear(); s_rcPath.clear();
             if (g_rcAdvanced)
                 snprintf(b, sizeof(b), "marker %d placed (%s, %s from the pixel finder, z %.3f)",
-                         (int)s_rcPoints.size(), rs::PointTypeName(sp.type),
-                         bTb ? "red seam ring" : "grey pinned pixel", sp.pos.z);
+                         (int)s_rcPoints.size(), rs::PointTypeName(sp.type), why, sp.pos.z);
             else   // botox's short readout: "added <type> point at <z>"
                 snprintf(b, sizeof(b), "added %s point at %.2f", rs::PointTypeName(sp.type), sp.pos.z);
             s_rcMessage = b;
@@ -1690,10 +1708,11 @@ void RC_GetDrawData(RcDrawData& out)
     out.pts.reserve(s_rcPoints.size());
     for (const RcPoint& p : s_rcPoints)
         out.pts.push_back({ p.pos, p.type, p.enabled,
-                            p.type == rs::PT_GROUND ? p.moves != rs::kMovesMarker : (!p.stand || !p.duck),
+                            rs::LandLike(p.type) ? p.moves != rs::kMovesMarker : (!p.stand || !p.duck),
                             p.player, p.stand, p.duck });
     out.hasPixel = s_pcHave;
     out.pixel    = s_pcPoint.pos;
+    out.pixelType = s_pcPoint.type;
     out.pixelSolve = s_rcPixelSolve;   // which of the two features owns the answer on screen
     out.path     = s_rcPath;           // the answer's own arc (empty = nothing solved yet)
     out.lines    = s_rcLines;
@@ -1737,7 +1756,8 @@ void RC_PointSet(int i, const RcPointInfo& in)
         // only where the pixel finder pinned one, so the menu combo cannot turn a surface marker
         // into one either. Place it by aiming at the ring instead
         // (botox: unless "allow selecting invalid pixels" is on)
-        if (rs::SeamLike(type) && !p.snapped && !g_rcAllowInvalid) type = p.type;
+        // a pixeljump too: its z is the lip top the finder traced
+        if (rs::FinderOnly(type) && !p.snapped && !g_rcAllowInvalid) type = p.type;
         p.type    = type;
         p.moves   = (in.moves & rs::kMovesMarker) ? (in.moves & rs::kMovesMarker) : rs::kMovesMarker;
         p.enabled = in.enabled;

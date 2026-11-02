@@ -268,7 +268,8 @@ struct PsDrawData
 };
 void PS_GetDrawData(PsDrawData& out);
 void PS_GetBox(PsDrawData& out);   // boxText/boxMs only -- no vector copies
-void PF_GetExtraPts(std::vector<Vec3>& jump, std::vector<Vec3>& headbounce);   // finder pixeljump / headbounce pins
+// finder extra kinds: jump surfs (pins only a jump reaches), headbounce pins, pixeljump lips
+void PF_GetExtraPts(std::vector<Vec3>& jump, std::vector<Vec3>& headbounce, std::vector<Vec3>& lip);
 
 // ==== whole-map pixel surf scan (psmap.inl) ====
 // The menu button toggles it; the scan itself lives on the movement thread, a slice per
@@ -302,6 +303,7 @@ struct RcDrawData
     std::vector<RcDrawPt>    pts;
     bool        hasPixel = false;      // pixel calculator marker
     Vec3        pixel;
+    int         pixelType = 1;         // rs::PointType of it: PT_SURF or PT_PIXELJUMP (label)
     bool        pixelSolve = false;    // the answer below came from the pixel calculator, not the route
     // the first printed combination flown again tick by tick : the arc the overlay draws
     // between the markers instead of a straight line. Empty until a solve lands

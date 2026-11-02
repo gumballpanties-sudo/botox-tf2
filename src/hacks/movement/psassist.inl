@@ -129,8 +129,35 @@ static std::vector<PfFallMemo> s_pfFallMemo;
 
 // Unit A3 port: PixelFinder's two MISSING detection sub-modes (gap.md). Own lists -- mixing
 // either into s_pfFound would read as a plain pixel-surf pin to the render side.
-static std::vector<Vec3> s_pfJumpPts;        // g_psFinderPixeljump: pins no FALL catches, kept instead of dropped
+static std::vector<Vec3> s_pfJumpPts;        // g_psFinderJumpSurf: pins no FALL catches, kept instead of dropped
 static std::vector<Vec3> s_pfHeadbouncePts;  // g_psFinderHeadbounce: ascent (ceiling) pins
+// g_psFinderPixeljump: botox pixel jump LIPS (pixel_finder.cpp pf_pixel_jump). An up face a hull
+// k_pfLipGap off the wall lands on and a hull k_pfLipFloor out does not reach: a ledge narrower
+// than 1u, landed on by pressing into the wall (routesim PT_PIXELJUMP). z = the feet on its top
+static std::vector<Vec3> s_pfLipPts;
+static int s_pfLips = 0;                     // lips found this scan (diag)
+// the lip pass has its own cursor, AFTER the pin column: a height ends on its first pin, so the
+// centre cell a lip is probed from would be skipped at every height a side cell pinned at
+static int s_pfLipI = 0;
+static constexpr float k_pfLipGap   = 0.001f;   // botox k_pf_gap_pj
+static constexpr float k_pfLipFloor = 1.f;      // botox k_pf_pj_floor
+static constexpr float k_pfLipRest  = 0.0325f;  // botox k_pf_gap_rest: where a hard push parks (log only)
+
+// botox pf_pj_taken / pf_pj_add: of lips within 2u of each other only the LOWEST is kept, and a
+// lip out of the scanned band is not this scan's
+static bool PfLipTaken(const std::vector<Vec3>& pts, float pz, float lo, float hi)
+{
+    if (pz < lo - 0.5f || pz > hi + 0.5f) return true;
+    for (const Vec3& q : pts)
+        if (q.z <= pz + 0.05f && pz <= q.z + 2.05f) return true;
+    return false;
+}
+static void PfLipAdd(std::vector<Vec3>& pts, const Vec3& dot)
+{
+    pts.erase(std::remove_if(pts.begin(), pts.end(),
+              [&](const Vec3& q) { return dot.z < q.z && q.z <= dot.z + 2.05f; }), pts.end());
+    pts.push_back(dot);
+}
 
 // ---- SURF LENGTH (g_psFinderLength, heroin finder_length / "draw pixelsurf length") -----------
 // heroin's finder (FUN_18007de00) walks every pin it finds along the wall, 10u a step, re-proving
@@ -175,16 +202,17 @@ static void PfCancelScan()
     s_pfNextI = 0; s_pfNextLat = 0; s_pfHeightHit = false;
     s_pfFound.clear();
     s_pfFallMemo.clear();
-    s_pfJumpPts.clear(); s_pfHeadbouncePts.clear();
+    s_pfJumpPts.clear(); s_pfHeadbouncePts.clear(); s_pfLipPts.clear();
     s_pfHits.clear(); s_pfLen.clear(); s_pfLenI = -1;
 }
 
-// Unit A3 port: publish the two new finder lists (copy under the render lock, same as PS_GetDrawData)
-void PF_GetExtraPts(std::vector<Vec3>& jump, std::vector<Vec3>& headbounce)
+// publish the extra finder lists (copy under the render lock, same as PS_GetDrawData)
+void PF_GetExtraPts(std::vector<Vec3>& jump, std::vector<Vec3>& headbounce, std::vector<Vec3>& lip)
 {
     std::lock_guard<std::mutex> l(g_psLock);
     jump = s_pfJumpPts;
     headbounce = s_pfHeadbouncePts;
+    lip = s_pfLipPts;
 }
 
 // IVEngineClient::GetLevelName = slot 51 (counted in the interface header against the
@@ -579,7 +607,8 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
     };
 
     // one (height, lateral offset) cell -- the indivisible unit of the budget
-    auto ScanCell = [&](float flZ, float flLat)
+    // bLipOnly: the lip pass (s_pfLipI) -- re-acquire the face here, probe for a lip, nothing else
+    auto ScanCell = [&](float flZ, float flLat, bool bLipOnly = false)
     {
         // re-trace the wall at THIS height/offset (short +/-12u ray; the lip protrudes
         // at its own height only, and a long ray skims run-up terrain on low surfs)
@@ -660,6 +689,53 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
         // those are the "surfs inside walls / out of bounds" on the overlay. One leaf lookup each,
         // ahead of ~24 sims, so it is a speed win on the cells it kills as well
         if (MV_PointUnusable(vTestOrigin + Vec3(0.f, 0.f, 8.f))) { s_pfVoid++; return; }
+
+        // ---- PIXELJUMP LIP (g_psFinderPixeljump, botox pf_pixel_jump "lip" probe) ---------------
+        // Centre column only (its own pass), on a face the ray really hit: a ducked hull k_pfLipGap
+        // off the face, swept from just over this height 2.5u down, lands on an up face (nz >= 0.7)
+        // = something to stand on right at the wall. If a hull k_pfLipFloor further out lands on
+        // the same plane too it is a floor, not a lip. Two traces, no sims
+        if (bLipOnly)
+        {
+            if (!bReacquired) return;
+            const Vec3 vLipMaxs(vMaxs.x, vMaxs.y, 62.f);
+            auto At = [&](float off) { return Vec3(vWallXY.x, vWallXY.y, 0.f) + vN * (flSupport + off); };
+            const Vec3 a = At(k_pfLipGap);
+            GameTrace_t lip{};
+            TraceHull(Vec3(a.x, a.y, flZ + 0.1f), Vec3(a.x, a.y, flZ - 2.5f), vMins, vLipMaxs,
+                      MASK_PLAYERSOLID, &filter, &lip);
+            if (!lip.startsolid && lip.fraction < 1.f && lip.plane.normal.z >= 0.7f
+                && !(g_psFinderNoProps && MV_TraceIsProp(lip)))
+            {
+                const float pz = lip.endpos.z;
+                const Vec3 ln = lip.plane.normal;
+                // the same plane `out` from the face: sloped lips drop with distance, so the probe
+                // height follows the plane (botox reaches())
+                auto Reaches = [&](float out)
+                {
+                    const Vec3 p = At(out);
+                    const float z = pz - (out - k_pfLipGap) * (ln.x * vN.x + ln.y * vN.y) / ln.z;
+                    GameTrace_t t{};
+                    TraceHull(Vec3(p.x, p.y, z + 0.1f), Vec3(p.x, p.y, z - 0.1f), vMins, vLipMaxs,
+                              MASK_PLAYERSOLID, &filter, &t);
+                    return !t.startsolid && t.fraction < 1.f && t.plane.normal.z >= 0.7f;
+                };
+                bool bTaken;
+                { std::lock_guard<std::mutex> l(g_psLock); bTaken = PfLipTaken(s_pfLipPts, pz, s_pfLow, s_pfHigh); }
+                if (!bTaken && !Reaches(k_pfLipFloor))
+                {
+                    const bool bNatural = Reaches(k_pfLipRest);
+                    {
+                        std::lock_guard<std::mutex> l(g_psLock);
+                        PfLipAdd(s_pfLipPts, Vec3(vWallXY.x, vWallXY.y, pz));
+                    }
+                    s_pfLips++;
+                    DebugLog("PF: pixeljump lip z=%.4f (probe %.1f) %s", pz, flZ,
+                             bNatural ? "natural (a hard press lands it)" : "tight (creep in to land it)");
+                }
+            }
+            return;
+        }
 
         // ---- THE FLAT-FACE PRUNE IS DELETED. FALSIFIED BY ITS OWN DIAG --------------
         // It swept three player hulls over the slabs a probe can reach and skipped the cell when
@@ -747,16 +823,25 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
                 // duck state gets its turn, which is where the extra real surfs come from
                 const bool bFall = FallCatches(vTestOrigin, vN, flPinZ, bDuck);
                 const bool bReach = Reachable(Vec3(vTestOrigin.x, vTestOrigin.y, flPinZ), vN, bDuck);
-                // g_psFinderPixeljump: a pin no FALL catches but the pocket is open is a real
+                // g_psFinderJumpSurf: a pin no FALL catches but the pocket is open is a real
                 // catch too -- just one a JUMP into the seam has to make, not a drop onto it.
-                // Own list, own marker: mixing it into s_pfFound would read as a plain surf
+                // Own list, own marker (orange): mixing it into s_pfFound would read as a plain
+                // surf. The route / pixel calculator place a pixelsurf on it and fly the jumps.
+                // Successive heights settle on ONE catch: kept once (same z within 0.02, 2u xy),
+                // which s_pfFound gets from PfDedupe and this list never had
                 // (not for the map scan: these lists are drawn as crosshair-finder dots)
-                if (!bFall && g_psFinderPixeljump && bReach && !s_pfQuiet)
+                if (!bFall && g_psFinderJumpSurf && bReach && !s_pfQuiet)
                 {
+                    const Vec3 vPin(vWallXY.x, vWallXY.y, flPinZ);
                     std::lock_guard<std::mutex> l(g_psLock);
-                    s_pfJumpPts.push_back(Vec3(vWallXY.x, vWallXY.y, flPinZ));
+                    const bool bDup = std::any_of(s_pfJumpPts.begin(), s_pfJumpPts.end(), [&](const Vec3& q)
+                        { return fabsf(q.z - vPin.z) < 0.02f && (q - vPin).Length2D() < 2.f; });
+                    if (!bDup)
+                    {
+                        s_pfJumpPts.push_back(vPin);
+                        DebugLog("PF: jump surf pin z=%.4f duck=%d", flPinZ, (int)bDuck);
+                    }
                     s_pfHeightHit = true;
-                    DebugLog("PF: pixeljump pin z=%.1f duck=%d", flPinZ, (int)bDuck);
                     continue;
                 }
                 // THE MAP SCAN IS ALWAYS STRICT. The checkbox is about a column you aimed at, where
@@ -901,6 +986,12 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
     }
     const bool bLenDone = !bWalk || s_pfLenI >= (int)s_pfLen.size();
 
+    // ---- LIP PASS: the column again, centre cell only, two traces a height (see s_pfLipI) -------
+    const bool bLips = s_pfNextI > s_pfSteps && !s_pfQuiet && g_psFinderPixeljump;
+    while (bLips && s_pfLipI <= s_pfSteps && ElapsedMs() < flBudgetMs)
+        ScanCell(s_pfLow + float(s_pfLipI++), 0.f, true);
+    const bool bLipDone = !bLips || s_pfLipI > s_pfSteps;
+
     // restore everything the chunk touched
     pCmd->buttons = iBackupButtons;
     pCmd->forwardmove = flBackupForward;
@@ -934,7 +1025,7 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
         s_psFinderLines = std::move(vLines);
     }
 
-    if (s_pfNextI > s_pfSteps && bLenDone)
+    if (s_pfNextI > s_pfSteps && bLenDone && bLipDone)
     {
         s_pfBusy = false;
         if (s_pfQuiet)
@@ -949,12 +1040,13 @@ static void PfScanChunk(void* pLocal, UserCmd_t* pCmd)
         DebugLog("PF: scan z=%.1f..%.1f steps=%d margin=%.0f -> %d spot(s) | %d chunk(s) %.1f ms "
                  "cells=%d sims=%d pruned=%d nostand=%d conf=%d/%d sealed=%d clip=%d deep=%d "
                  "prop=%d void=%d unheld=%d strict=%d budget=%.1f eff=%.1f | len=%d lost=%d "
-                 "longest=%.0fu lensims=%d",
+                 "longest=%.0fu lensims=%d | lips=%d kept=%d jumpsurfs=%d",
                  s_pfLow, s_pfHigh, s_pfSteps, g_psFinderMargin, nFound,
                  s_pfChunks, s_pfMs, s_pfCells, s_pfProbes, s_pfPruned, s_pfNoStand,
                  s_pfConf, s_pfFalls, s_pfSealed, s_pfClipBlk, s_pfDeep, s_pfProp, s_pfVoid,
                  s_pfUnheld, (int)g_psFinderStrict, (double)g_psFinderBudget, flBudgetMs,
-                 bWalk ? (int)s_pfLen.size() : -1, s_pfLenLost, flLongest, s_pfLenSims);
+                 bWalk ? (int)s_pfLen.size() : -1, s_pfLenLost, flLongest, s_pfLenSims,
+                 bLips ? s_pfLips : -1, (int)s_pfLipPts.size(), (int)s_pfJumpPts.size());
         s_pfFound.clear();
         s_pfHits.clear();
         s_pfLenI = -1;
@@ -1225,8 +1317,9 @@ static void PixelFinder(void* pLocal, UserCmd_t* pCmd)
     s_pfFound.clear();
     s_pfHits.clear(); s_pfLen.clear(); s_pfLenI = -1;
     s_pfUnheld = 0; s_pfLenSims = 0; s_pfLenLost = 0;
-    { std::lock_guard<std::mutex> l(g_psLock); s_pfJumpPts.clear(); s_pfHeadbouncePts.clear(); }   // render copies them
+    { std::lock_guard<std::mutex> l(g_psLock); s_pfJumpPts.clear(); s_pfHeadbouncePts.clear(); s_pfLipPts.clear(); }   // render copies them
     s_pfNextI = 0; s_pfNextLat = 0; s_pfHeightHit = false;
+    s_pfLipI = 0; s_pfLips = 0;
     s_pfMs = 0.0; s_pfChunks = 0; s_pfProbes = 0; s_pfPruned = 0;
     s_pfCells = 0; s_pfFalls = 0; s_pfConf = 0; s_pfNoStand = 0;
     s_pfSealed = 0; s_pfClipBlk = 0; s_pfDeep = 0; s_pfProp = 0; s_pfVoid = 0;

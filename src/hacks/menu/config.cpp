@@ -545,6 +545,7 @@ static const CfgEntry kEntries[] = {
     { "bounceMinSpeed",    CfgEntry::FLOAT, &g_bounceMinSpeed, 0 },
     { "psFinderHeadbounce",CfgEntry::BOOL,  &g_psFinderHeadbounce, 0 },
     { "psFinderPixeljump", CfgEntry::BOOL,  &g_psFinderPixeljump, 0 },
+    { "psFinderJumpSurf",  CfgEntry::BOOL,  &g_psFinderJumpSurf, 0 },
     { "psSurfFix",         CfgEntry::BOOL,  &g_psSurfFix, 0 },
     { "edgeBugStyle",      CfgEntry::INT,   &g_edgeBugStyle, 0 },
     { "edgeBugMouseLock",  CfgEntry::BOOL,  &g_edgeBugMouseLock, 0 },

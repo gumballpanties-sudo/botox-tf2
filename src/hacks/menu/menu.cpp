@@ -1531,6 +1531,7 @@ static void Page_MovementMain()
                 ImGui::Checkbox("find texturebugs##pf", &g_psFinderTb);
                 ImGui::Checkbox("find headbounces##pf", &g_psFinderHeadbounce);
                 ImGui::Checkbox("find pixeljumps##pf", &g_psFinderPixeljump);
+                ImGui::Checkbox("find jump surfs##pf", &g_psFinderJumpSurf);
                 ImGui::Checkbox("ignore props##pf", &g_psFinderNoProps);
                 ImGui::Checkbox("draw pixelsurf length##pf", &g_psFinderLength);
                 ImGui::Checkbox("surf fix (hold duck into a ride)##pf", &g_psSurfFix);
@@ -1626,7 +1627,8 @@ static void Page_MovementCalculator()
 {
     // botox menu_tab_movement.cpp route_calc_page 1:1: "route calculator" + "keys" | "points".
     // TF2 has no ducked ground jump (tf_gamemovement.cpp:1220 "Cannot jump while ducked"), so the
-    // point list has no "jump (ducked)" row; pixeljump / headbounce point types are not modelled
+    // point list has no "jump (ducked)" row; headbounce is not modelled. pixeljump = botox's lip
+    // (routesim PT_PIXELJUMP), placed on a yellow finder dot
     menu_columns_begin();
 
     if (menu_group_begin("route calculator"))
@@ -1741,15 +1743,16 @@ static void Page_MovementCalculator()
                     // order = rs::PointType, so the combo index IS the type. RC_PointSet refuses
                     // pixelsurf / texturebug on a marker no finder pinned (botox: "a pixelsurf
                     // point must be placed on a finder dot"), unless invalid pixels are allowed
-                    static const char* kTypeItems = "ground\0pixelsurf\0edgebug\0headbang\0texturebug\0";
+                    static const char* kTypeItems = "ground\0pixelsurf\0edgebug\0headbang\0texturebug\0pixeljump\0";
                     const int was = edit.type;
                     if (ImGui::Combo("point type", &edit.type, kTypeItems) && edit.type != was)
                         changed = true;
                     if (!edit.snapped && !g_rcAllowInvalid)
-                        ImGui::TextDisabled("pixelsurf / texturebug: place it on a finder dot");
+                        ImGui::TextDisabled("pixelsurf / texturebug / pixeljump: place it on a finder dot");
 
                     ImGui::Label("types to calculate");
-                    if (edit.type == 0)
+                    // a pixel jump is PRESSED off like a floor, so it keeps its list (botox route_calc)
+                    if (edit.type == 0 || edit.type == 5)
                     {
                         int mask = (int)edit.moves;
                         if (RcMoveMaskCombo("##types to calculate", mask, RC_MarkerMoves()))

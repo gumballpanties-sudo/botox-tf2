@@ -84,9 +84,10 @@ static unsigned long long s_psPointWinOpenMs = 0; // debounce: opening ENTER mus
 namespace {
 
 // ---- finder dots: botox points_ui.cpp pf_render_dots, 1:1 ---------------------------------
-// Four lists, botox's lists[] order: headbounce (red), pixeljump (yellow), surf (green),
-// texturebug (cyan). Dots of different types on one spot share ONE ring split into arcs.
-constexpr int   kPfTypes     = 4;
+// botox's lists[] order: headbounce (red), pixeljump lip (yellow), surf (green), texturebug
+// (cyan), then ours: jump surf (orange, a pin only a jump reaches). Dots of different types on one
+// spot share ONE ring split into arcs.
+constexpr int   kPfTypes     = 5;
 constexpr float kPfDotSize   = 9.f;
 constexpr float kPfHoverSize = 12.f;
 constexpr float kPfFadeTime  = 0.5f;
@@ -94,7 +95,7 @@ constexpr float kPfTop       = -3.14159265f * 0.5f;
 constexpr float kPfTurn      = 6.2831853f;
 constexpr float kPfSameXY    = 2.f;
 constexpr float kPfSameZ     = 0.5f;
-constexpr int   kPfRgb[kPfTypes][3] = { { 255, 0, 0 }, { 255, 220, 0 }, { 0, 255, 0 }, { 0, 200, 255 } };
+constexpr int   kPfRgb[kPfTypes][3] = { { 255, 0, 0 }, { 255, 220, 0 }, { 0, 255, 0 }, { 0, 200, 255 }, { 255, 130, 0 } };
 
 // ---- RenderPoints: saved targets (assist.cpp:2318-2395) --------------------------
 constexpr float kPtNear       = 300.f;  // full size out to here
@@ -315,16 +316,17 @@ static void RenderPsOverlay()
     // top in list order. Hovered ring (nearest live one within 9px of the crosshair) grows 9 -> 12.
     // Map-scan seams ride the texturebug list: botox has no map scan, they are the same mark.
     {
-        static std::vector<Vec3> hb, pj, tb;
+        static std::vector<Vec3> hb, pj, tb, js;
         static const std::vector<Vec3> none;
-        hb.clear(); pj.clear(); tb.clear();
-        if (bFinder) PF_GetExtraPts(pj, hb);
+        hb.clear(); pj.clear(); tb.clear(); js.clear();
+        if (bFinder) PF_GetExtraPts(js, hb, pj);
         if (!g_psFinderHeadbounce) hb.clear();
         if (!g_psFinderPixeljump)  pj.clear();
+        if (!g_psFinderJumpSurf)   js.clear();
         if (bFinder && g_psFinderTb) tb = d.tbPts;
         if (g_psMapLines) tb.insert(tb.end(), d.mapTbPts.begin(), d.mapTbPts.end());
 
-        const std::vector<Vec3>* live[kPfTypes] = { &hb, &pj, bFinder ? &d.finderPts : &none, &tb };
+        const std::vector<Vec3>* live[kPfTypes] = { &hb, &pj, bFinder ? &d.finderPts : &none, &tb, &js };
         for (int t = 0; t < kPfTypes; t++) PfFade(s_fndAnim[t], *live[t], dt);
 
         struct Group
@@ -845,7 +847,7 @@ static void RenderRouteOverlay()
             // pixel calculator marker: the same ring, a "p" in it instead of a number (it is not
             // part of the numbered route)
             ImVec2 s;
-            if (bPixelPt && W2S(d.pixel, s)) Ring(s, "p", "pixel");
+            if (bPixelPt && W2S(d.pixel, s)) Ring(s, "p", d.pixelType == 5 ? "pixeljump" : "pixel");
         }
     }
 

@@ -503,17 +503,27 @@ inline bool JumpbugWillHit(State s, const World& w, const Params& p, bool jumpHe
 //  the same state share every continuation, so they merge and nothing is lost: counts add up
 //  along edges (every combination is counted) and each node keeps its K cheapest paths.
 // ================================================================================================
-// PT_TEXTUREBUG is LAST on purpose: 0..3 are the numbers every saved marker file already holds
-enum PointType { PT_GROUND = 0, PT_SURF, PT_EDGEBUG, PT_HEADBANG, PT_TEXTUREBUG, PT_COUNT };
+// new types go LAST: 0..3 are the numbers every saved marker file already holds
+//    pixeljump  botox route_pt_pixeljump: a LIP on the wall face (an up face a hull pressed into
+//               the wall lands on and a hull 1u out misses). A floor, but only for a hull that
+//               has been over it kPjCreepTicks ticks (time to creep in over it), and hop only
+//               off it: no delay, no walk off                          "pixeljump (stand)"
+enum PointType { PT_GROUND = 0, PT_SURF, PT_EDGEBUG, PT_HEADBANG, PT_TEXTUREBUG, PT_PIXELJUMP, PT_COUNT };
 
 inline const char* PointTypeName(int t)
 {
-    static const char* k[PT_COUNT] = { "ground", "pixelsurf", "edgebug", "headbang", "texturebug" };
+    static const char* k[PT_COUNT] = { "ground", "pixelsurf", "edgebug", "headbang", "texturebug", "pixeljump" };
     return (t >= 0 && t < PT_COUNT) ? k[t] : "ground";
 }
 // the marker's z is a wall line the hull is held against, not a floor or a ceiling
 inline bool SeamLike(int t) { return t == PT_SURF || t == PT_TEXTUREBUG; }
-inline bool FloorLike(int t) { return t == PT_GROUND || t == PT_EDGEBUG; }
+inline bool FloorLike(int t) { return t == PT_GROUND || t == PT_EDGEBUG || t == PT_PIXELJUMP; }
+// a floor you land on and press off (its move list means something)
+inline bool LandLike(int t) { return t == PT_GROUND || t == PT_PIXELJUMP; }
+// exists only where the pixel finder found one: its z is a finder measurement, not a click
+inline bool FinderOnly(int t) { return SeamLike(t) || t == PT_PIXELJUMP; }
+// botox route_engine.cpp k_pj_creep_ticks: ticks the feet must be over a lip before it is a floor
+constexpr int kPjCreepTicks = 3;
 
 // ---- AIMING AT A DRAWN POINT -------------------------------------------------------
 // The pixel finder draws its results as rings, so "am I aiming at that ring" is an ANGLE
@@ -808,6 +818,8 @@ private:
         bool psDuck = false;    // PixelSurf latched through its duck pass (s_psShouldDuck)...
         int  psPinI = 0;        // ...for the pin on this cmd index
         int  tbSeen = 0;        // texturebug: straddling ticks this leg has already offered
+        int  creep = 0;         // pixeljump: ticks the feet started over the lip (- DIST_EPSILON)
+        bool lipIn = false;     // ...enough of them: the hull has crept in over it, it is a floor
     };
     // edges out of a just-caught pixelsurf, gathered over every ride length before they are added
     struct Pending { State s; std::string dep, arr; int cost; float margin; int ride; int sc; bool jb; bool duckApex; };
@@ -960,9 +972,11 @@ private:
             // off a landing or a jumpbug you are over that floor; off a surf, edgebug or headbang
             // there is nothing under you
             const Point& src = m_pts[layer - 1];
-            L.depFloor = src.type == PT_GROUND;
+            L.depFloor = LandLike(src.type);
             L.depFloorEff = src.z; L.depPlayer = src.player; L.depOn = OnName(src.player, src.building);
-            if (pAllowed) *pAllowed = m_o.moves & src.moves & kMovesPress;
+            // off a lip you hop on the landing tick: no delay hop (botox hop_only = bhop timing)
+            if (pAllowed) *pAllowed = m_o.moves & src.moves & kMovesPress
+                                    & (src.type == PT_PIXELJUMP ? ~(1u << MB_DELAY) : ~0u);
         }
         return L;
     }
@@ -977,15 +991,17 @@ private:
         // a ground marker is touched by landing on it (then a press: its press bits) or by a
         // jumpbug off it; a last ground marker lands if any press bit is left on it
         bool land = true, jb = false;
-        if (L.T->type == PT_GROUND)
+        if (LandLike(L.T->type))
         {
             const unsigned tm = m_o.moves & L.T->moves;
             land = (tm & kMovesPress) != 0;
             jb   = (tm & (1u << MB_JUMPBUG)) != 0;
         }
         // last ground marker only, and only once the plain arc has had its try: never a silent
-        // duck when the standing one already lands (CS:GO's own rule, proj-rc-jb-crouch-1007)
-        const bool tryDuckApex = L.last && L.T->type == PT_GROUND && !m_collect;
+        // duck when the standing one already lands (CS:GO's own rule, proj-rc-jb-crouch-1007).
+        // A lip anywhere in the route (botox duck_air_here: a pixeljump the plain arc missed tries
+        // the air duck mid-route too)
+        const bool tryDuckApex = (L.last ? LandLike(L.T->type) : L.T->type == PT_PIXELJUMP) && !m_collect;
         auto plans = [&](const State& s)
         {
             for (int v = 0; v < 2; v++)
@@ -1092,7 +1108,8 @@ private:
     World WorldFor(const Leg& L, const Fs& f) const
     {
         World w;
-        const bool tFloor = FloorLike(L.T->type);
+        // a lip catches only a hull that has crept in over it (Fly counts f.creep)
+        const bool tFloor = FloorLike(L.T->type) && (L.T->type != PT_PIXELJUMP || f.lipIn);
         bool any = false, player = false; float best = 0.f;
         if (!f.leftDep && L.depFloor) { any = true; best = L.depFloorEff; player = L.depPlayer; }
         if (tFloor && (f.falling || f.aboveT) && (!any || L.T->z > best))
@@ -1236,6 +1253,26 @@ private:
             const int i = f.i;
             State& s = f.s;
             if (tFloor && s.z >= T.z - 0.001f) f.aboveT = true;
+            // ---- PIXELJUMP: the lip is a floor only once the hull is over it -----------------
+            // botox route_engine.cpp point_step: a tick that STARTS with the feet at or over the
+            // lip (- DIST_EPSILON) is one tick of pressing in over it; kPjCreepTicks of them and it
+            // grounds you. The tick it turns solid must clear it on its own (the move flown with no
+            // lip under it ends on or over the top), else that tick passes and the next one tries
+            if (T.type == PT_PIXELJUMP)
+            {
+                const bool pushed = s.z >= T.z - kDistEps;
+                if (pushed) f.creep++;
+                f.lipIn = f.creep >= kPjCreepTicks;
+                if (f.lipIn && pushed && f.creep == kPjCreepTicks)
+                {
+                    Fs g = f; g.lipIn = false;
+                    const World wr = WorldFor(L, g);
+                    ScriptMem m = f.mem; State r = s;
+                    const Cmd rc = ScriptCmd(pl.sc, i, r, m, wr, p);
+                    Tick(r, rc, wr, p); m_res.ticks++;
+                    f.lipIn = r.z >= T.z;
+                }
+            }
             World w = WorldFor(L, f);
             const bool walkTick = walk && i == 0 && L.srcGround;
             if (walkTick) w.floor = false;
@@ -1329,6 +1366,8 @@ private:
 
             // ---- give up: nothing below can raise the hull again ----
             if (s.ground) return;                                  // landed on something else
+            // botox lip_missed (passed down by the lip with the hull still outside it) is the floor
+            // give-up below: falling under a FloorLike z ends the leg, crept in or not
             if (f.falling)
             {
                 if (T.type == PT_HEADBANG) return;
@@ -1388,6 +1427,7 @@ private:
             if (stanceOk) AddEdge(L, s, dep, "headbang" + Stance(s.ducked), cost, kInf);
             return true;
         case PT_GROUND:
+        case PT_PIXELJUMP:
         {
             if (!onT) return false;
             if (pl.jb) return true;                                 // landed: the jumpbug never fired
@@ -1395,7 +1435,11 @@ private:
             if ((pl.sc == SC_WALKOFF || pl.sc == SC_WALKOFFDUCK) && L.srcGround
                 && std::fabs(s.z - L.depFloorEff) < 0.01f)
                 return true;
-            AddEdge(L, s, dep, L.last ? "land" + Stance(s.ducked) : std::string(), cost, kInf);
+            // a lip is named wherever it is in the route: the press after it is a hop off a wall,
+            // not off a floor you can walk around on (botox "(pixeljump) jump")
+            const bool lip = T.type == PT_PIXELJUMP;
+            AddEdge(L, s, dep, lip ? "pixeljump" + Stance(s.ducked) : L.last ? "land" + Stance(s.ducked) : std::string(),
+                    cost, kInf);
             return true;
         }
         case PT_EDGEBUG:
