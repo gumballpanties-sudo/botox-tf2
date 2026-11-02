@@ -302,7 +302,6 @@ namespace ImGui
 	bool Keybind(const char* label, int* key, int* mode, bool has_style = true);
 }
 void UnitF_Menu_aimbot_config();   // unitF_menu.cpp
-void UnitF_Menu_aimbot_lob();      // unitF_menu.cpp
 
 // Rest of dih's menu is all lowercase, so every label the var metadata hands us gets folded
 // here rather than in the declarations -- the vars keep their own capitalisation.
@@ -566,8 +565,6 @@ void Aim_RenderMenuTab()
 			}, ImVec2(220.f, -1));
 	}
 	menu_group_end();
-
-	UnitF_Menu_aimbot_lob();
 
 	menu_columns_end();
 }

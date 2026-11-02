@@ -474,19 +474,6 @@ namespace Vars
 			CVar(ScattergunFOV, "Scattergun FOV", 30.f, SLIDER_CLAMP | SLIDER_PRECISION, 0.f, 180.f);
 		SUBNAMESPACE_END(WeaponTuning);
 
-		// Grenade lob-to-point (gap.md Unit F) -- the non-target-seeking half of the CS:GO
-		// grenade aimbot: bend the throw angle so an arc lands on the crosshair's world point,
-		// and draw the predicted path. See grenade_lob.h.
-		SUBNAMESPACE_BEGIN(GrenadeLob, Aimbot)
-			CVar(Enabled, "Grenade lob assist", false);
-			CVar(Key, "Lob key", 0, NOBIND);
-			CVarEnum(KeyMode, "Lob key mode", 1, NOBIND, nullptr,
-				VA_LIST("Always on", "On hotkey", "Toggle"),
-				AlwaysOn, OnHotkey, Toggle);
-			CVar(DrawPath, "Draw lob path", true);
-			CVar(PathColor, "Lob path color", Color_t(255, 200, 0, 255), VISUAL);
-		SUBNAMESPACE_END(GrenadeLob);
-
 	NAMESPACE_END(Aimbot);
 	
 	NAMESPACE_BEGIN(CritHack, Crit Hack)

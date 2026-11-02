@@ -12,7 +12,6 @@
 #include "nospread_hitscan.h"
 #include "movesim.h"
 #include "esp.h"
-#include "grenade_lob.h"
 #include "scope_fov.h"
 #include "hud_aim.h"   // unit hud: botox hud group data, collected in IEngineVGui_Paint
 
@@ -740,7 +739,6 @@ MAKE_HOOK(CHLClient_CreateMove, U::Memory.GetVirtual(I::Client, 21), void,
 	F::Ticks.Start(pLocal, pCmd);
 
 		F::Aimbot.Run(pLocal, pWeapon, pCmd);
-		F::GrenadeLob.Run(pLocal, pWeapon, pCmd);
 	F::Ticks.End(pLocal, pCmd);
 		F::CritHack.Run(pLocal, pWeapon, pCmd);
 		F::NoSpread.Run(pLocal, pWeapon, pCmd);

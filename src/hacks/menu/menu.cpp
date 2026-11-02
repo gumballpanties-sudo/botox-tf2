@@ -1880,8 +1880,10 @@ static bool IconButton(const char* id, const int icon, const float height)
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (icon == 2)
     {
-        dl->AddLine(ImVec2(cx - 3.f, cy - 3.f), ImVec2(cx + 3.5f, cy + 3.5f), col);
-        dl->AddLine(ImVec2(cx + 3.f, cy - 3.f), ImVec2(cx - 3.5f, cy + 3.5f), col);
+        // close-small svg: 24 box, arms +-4.32 from center, stroke 2, square ends
+        const float s = height / 24.f, arm = 4.32f * s;
+        dl->AddLine(ImVec2(cx - arm, cy - arm), ImVec2(cx + arm, cy + arm), col, 2.f * s);
+        dl->AddLine(ImVec2(cx + arm, cy - arm), ImVec2(cx - arm, cy + arm), col, 2.f * s);
     }
     else
     {

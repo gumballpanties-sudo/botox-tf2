@@ -296,10 +296,6 @@ add_executable(airlean_test tests/airlean_test.cpp)
 # Build + run: cmake --build build --config Release --target vmfps_test && build\Release\vmfps_test.exe
 add_executable(vmfps_test tests/vmfps_test.cpp)
 
-# Gate test for the grenade lob pitch solver (src/hacks/aim/lob_solve.h): the secant
-# root-finder against a closed-form parabola, independent of F::ProjSim.
-# Build + run: cmake --build build --config Release --target lob_solve_test && build\Release\lob_solve_test.exe
-add_executable(lob_solve_test tests/lob_solve_test.cpp)
 # Gate test for Unit A's pure decisions (src/hacks/movement/movement_ex_pure.h): hsw sign,
 # delay hop's tick gate, long jump's adaptive-cancel reasons.
 # Build + run: cmake --build build --config Release --target movementex_test && build\Release\movementex_test.exe

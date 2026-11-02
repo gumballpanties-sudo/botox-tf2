@@ -69,24 +69,3 @@ void UnitF_Menu_aimbot_config()
 	}
 	menu_group_end();
 }
-
-void UnitF_Menu_aimbot_lob()
-{
-	using namespace Vars::Aimbot;
-
-	if (menu_group_begin("grenade lob"))
-	{
-		VarCheckbox(GrenadeLob::Enabled, "grenade lob assist");
-		ImGui::Keybind("grenade lob key", &GrenadeLob::Key.Value, &GrenadeLob::KeyMode.Value);
-		GrenadeLob::Key.Map[DEFAULT_BIND] = GrenadeLob::Key.Value;
-		GrenadeLob::KeyMode.Map[DEFAULT_BIND] = GrenadeLob::KeyMode.Value;
-
-		VarCheckbox(GrenadeLob::DrawPath, "draw lob path");
-		if (GrenadeLob::DrawPath.Value)
-			ImGui::OptionPopup("grenade lob path settings", [&]()
-			{
-				VarColor(GrenadeLob::PathColor, "path##lobcolor");
-			}, ImVec2(200.f, -1));
-	}
-	menu_group_end();
-}
