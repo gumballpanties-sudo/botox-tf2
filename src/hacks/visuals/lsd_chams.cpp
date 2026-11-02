@@ -25,6 +25,8 @@
 #include "../screen/shaders/fx_twotone_ps0.h" // k_fxTwoTonePs0Bytes (no normal map)
 #include "../screen/shaders/fx_twotone_ps1.h" // k_fxTwoTonePs1Bytes (normal map s1)
 #include "../screen/shaders/fx_twotone_ps2.h" // k_fxTwoTonePs2Bytes (normal map s3)
+#include "../screen/shaders/fx_sheen_ps2.h"   // k_fxSheenPs2Bytes (engine sheen pass ps_2_b)
+#include "../screen/shaders/fx_sheen_ps3.h"   // k_fxSheenPs3Bytes (engine sheen pass ps_3_0)
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -37,7 +39,7 @@ namespace
 {
 	using DIP_t = HRESULT(__stdcall*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
 	DIP_t o_DIP = nullptr;
-	bool  s_hookTried = false;
+	std::atomic<bool> s_hookTried{ false };
 
 	std::atomic<bool> s_armed{ false };
 	float s_params[2] = {};                 // render thread only: time, alpha
@@ -389,22 +391,126 @@ namespace
 		return hr;
 	}
 
+	// ---- normal blend weapon sheen (fx_sheen_ps.hlsl) ----
+	IDirect3DPixelShader9* s_shPs[2] = {};   // ps_2_b, ps_3_0: the engine pass is either, ours must pair with its vs
+	Defs s_shPsDefs;
+	bool s_shGpuFailed = false;
+	// ponytail: same never-cleared shader pointer cache as s_bumpSamplers
+	std::unordered_map<IDirect3DPixelShader9*, int> s_sheenShaders;   // 0 not the sheen pass, 2 ps_2_x, 3 ps_3_0
+
+	bool SheenGpuReady(IDirect3DDevice9* dev)
+	{
+		if (s_shPs[0]) return true;
+		if (s_shGpuFailed) return false;
+		const std::vector<DWORD> ps[2] = { Code(k_fxSheenPs2Bytes), Code(k_fxSheenPs3Bytes) };
+		bool ok = true;
+		for (int i = 0; i < 2 && ok; i++)
+			if ((ok = SUCCEEDED(dev->CreatePixelShader(ps[i].data(), &s_shPs[i]))))
+				CollectDefs(ps[i].data(), s_shPsDefs);   // union of both variants' defs
+		if (ok)
+		{
+			DebugLog("SHEEN: normal blend shaders ready (%d ps defs)", int(s_shPsDefs.size()));
+			return true;
+		}
+		DebugLog("SHEEN: normal blend gpu FAILED -- the stock additive sheen draws");
+		for (auto*& p : s_shPs) if (p) { p->Release(); p = nullptr; }
+		s_shPsDefs.clear();
+		s_shGpuFailed = true;
+		return false;
+	}
+
+	// TF2 weapon_sheen_pass_ps2x.fxc is the only engine ps binding both g_tRefractionSampler s0 and
+	// EnvmapMaskSampler s3 (lightmappedgeneric_ps11 has the mask at s3, no refraction, and is ps_1_1)
+	int SheenPassModel(IDirect3DPixelShader9* shader)
+	{
+		if (!shader) return 0;
+		if (const auto found = s_sheenShaders.find(shader); found != s_sheenShaders.end())
+			return found->second;
+		int result = 0;
+		UINT size = 0;
+		if (SUCCEEDED(shader->GetFunction(nullptr, &size)) && size)
+		{
+			std::vector<DWORD> code((size + 3) / 4);
+			static const char* const kMask[1] = { "EnvmapMaskSampler" };
+			static const char* const kRefract[1] = { "g_tRefractionSampler" };
+			if (SUCCEEDED(shader->GetFunction(code.data(), &size)))
+			{
+				const int mask = CtabSampler(code.data(), code.size(), kMask, 1);
+				if (mask == 3 && CtabSampler(code.data(), code.size(), kRefract, 1) == 0)
+				{
+					result = ((code[0] >> 8) & 0xFF) >= 3 ? 3 : 2;   // version token: 0xFFFF0300 = ps_3_0
+					DebugLog("SHEEN: weapon sheen pass ps %p (ps_%d)", (void*)shader, result);
+				}
+				static bool s_noCtabLogged = false;
+				if (mask == -2 && !s_noCtabLogged)
+				{
+					s_noCtabLogged = true;
+					DebugLog("SHEEN: engine ps %p has no constant table -- if every one is like this, normal blend sheen never finds the pass", (void*)shader);
+				}
+			}
+		}
+		s_sheenShaders.emplace(shader, result);
+		return result;
+	}
+
+	HRESULT DrawSheenNormal(IDirect3DDevice9* dev, IDirect3DPixelShader9* enginePs, int model,
+	                        D3DPRIMITIVETYPE type, INT base, UINT minV, UINT nV, UINT start, UINT prims)
+	{
+		// no shader = the stock additive sheen
+		if (!SheenGpuReady(dev))
+			return o_DIP(dev, type, base, minV, nV, start, prims);
+
+		DWORD oldSrgb = 0;
+		float oldK[4] = {};
+		static std::vector<Saved> savedPs;   // render thread only
+		savedPs.clear();
+		dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &oldSrgb);
+		dev->GetPixelShaderConstantF(10, oldK, 1);
+		SaveConsts(dev, false, s_shPsDefs, savedPs);
+
+		// the pass's own state stays: srcalpha / invsrcalpha, no alpha writes, engine vs + mask in s3.
+		// the tint is a picked display colour: no linear -> srgb on write
+		const float k[4] = { std::clamp(g_sheenNormalAlpha, 0.f, 1.f), 0.f, 0.f, 0.f };
+		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+		dev->SetPixelShader(s_shPs[model == 3 ? 1 : 0]);
+		dev->SetPixelShaderConstantF(10, k, 1);
+
+		const HRESULT hr = o_DIP(dev, type, base, minV, nV, start, prims);
+
+		// constants before shaders: the engine shader's own defs must win their slots
+		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, oldSrgb);
+		dev->SetPixelShaderConstantF(10, oldK, 1);
+		RestoreConsts(dev, false, savedPs);
+		dev->SetPixelShader(enginePs);
+		return hr;
+	}
+
 	HRESULT __stdcall h_DIP(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT minV, UINT nV, UINT start, UINT prims)
 	{
 		// every draw in the game lands here: one guard (eject drains it before freeing trampolines,
-		// globals.h) and two relaxed loads unless armed
+		// globals.h) and two relaxed loads unless armed (plus one GetPixelShader with normal sheen on)
 		MiscHookGuard _g;
 		if (s_ttArmed.load(std::memory_order_relaxed))
 			return DrawTwoTone(dev, type, base, minV, nV, start, prims);
-		if (!s_armed.load(std::memory_order_relaxed))
+		if (s_armed.load(std::memory_order_relaxed))
+			return DrawLsd(dev, type, base, minV, nV, start, prims);
+		if (!g_sheenNormal)
 			return o_DIP(dev, type, base, minV, nV, start, prims);
-		return DrawLsd(dev, type, base, minV, nV, start, prims);
+
+		IDirect3DPixelShader9* ps = nullptr;
+		dev->GetPixelShader(&ps);
+		const int model = SheenPassModel(ps);
+		const HRESULT hr = model ? DrawSheenNormal(dev, ps, model, type, base, minV, nV, start, prims)
+		                         : o_DIP(dev, type, base, minV, nV, start, prims);
+		if (ps) ps->Release();
+		return hr;
 	}
 
 	void EnsureHook()
 	{
-		if (s_hookTried || !g_d3dDev) return;
-		s_hookTried = true;
+		// main thread (lsd / two tone begin) and render thread (SheenNormal_Tick) both get here:
+		// one winner, or the loser's MH_CreateHook fails and nulls o_DIP under a live hook
+		if (!g_d3dDev || s_hookTried.exchange(true)) return;
 		void** vt = *reinterpret_cast<void***>(g_d3dDev);
 		if (MH_CreateHook(vt[82], (LPVOID)&h_DIP, (LPVOID*)&o_DIP) == MH_OK && MH_EnableHook(vt[82]) == MH_OK)
 			DebugLog("LSD: DrawIndexedPrimitive hook installed (slot 82)");
@@ -456,6 +562,11 @@ namespace
 	TtFunctor s_ttArms[1024];
 	unsigned  s_ttArmNext = 0;
 	TtFunctor s_ttDisarm = { s_ttDisarmVt };
+}
+
+void SheenNormal_Tick()
+{
+	if (g_sheenNormal) EnsureHook();
 }
 
 void TwoToneChams_Begin(const float light[4], const float dark[4], float threshold, float edge, bool ignorez)

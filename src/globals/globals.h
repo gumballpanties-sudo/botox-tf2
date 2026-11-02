@@ -396,7 +396,7 @@ extern float g_showDepthMultiplier;
 
 // -- Unit D: world fx (hacks/visuals/world_fx.cpp) -------------------------------------------
 extern bool  g_fullbrightEnable;     // mat_fullbright poke, no hook
-extern bool  g_disableInterpEnable;  // CBaseAnimating::Interpolate skip, remote players (world_fx.cpp)
+extern bool  g_disableInterpEnable;  // aim G::RemoveInterp: Interpolate/anim hooks, remote players (aim/hooks.cpp)
 extern bool  g_aspectRatioEnable;    // letterbox/pillarbox via the existing Present dest rect
 extern float g_aspectRatioValue;     // target width/height, e.g. 1.333 for 4:3
 
@@ -462,6 +462,8 @@ extern float g_snowDensity;
 // -- No hats -------------------------------------------------------------------------------
 extern bool g_noHats;
 extern bool g_noUnusual;
+extern bool  g_sheenNormal;
+extern float g_sheenNormalAlpha;
 
 // -- Killfeed --------------------------------------------------------------------------------
 extern bool g_selfKillfeedOnly;

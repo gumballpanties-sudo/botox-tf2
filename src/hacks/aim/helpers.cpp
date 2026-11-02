@@ -778,8 +778,8 @@ void CEntities::Store()
 			m_mChokes[n] = I::GlobalVars->tickcount - m_mSetTicks[n];
 		}
 	}
-	// No per-tick animation catch-up here: it only ever mattered for angle resolving and for
-	// interpolation removal, neither of which this build does.
+	// Per-tick animation catch-up for interpolation removal: hooks.cpp RemoveInterpAnims, run
+	// right after Store (needs the UpdateClientSideAnimation sig that lives there).
 }
 
 void CEntities::Clear(bool bShutdown)

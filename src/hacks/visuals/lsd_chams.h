@@ -13,5 +13,10 @@ void LsdChams_End();
 // (no override, so its normal maps + lighting constants stay bound); while armed the same DIP
 // detour swaps in a lit-side / shadow-side cut shader (fx_twotone_*.hlsl). Colours 0..1 display,
 // alpha pre-scaled. Same queue rules as lsd. No DIP hook = the own materials draw as is.
+// "normal blend" killstreak sheen (g_sheenNormal): the same DIP detour spots TF2's weapon_sheen_pass
+// ps by its constant table and swaps in fx_sheen_ps (flat tint, sheen mask = alpha). No arming: the
+// pass is its own draw. Render thread, once a frame: installs the hook the first frame it is on.
+void SheenNormal_Tick();
+
 void TwoToneChams_Begin(const float light[4], const float dark[4], float threshold, float edge, bool ignorez);
 void TwoToneChams_End();

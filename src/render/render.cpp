@@ -29,6 +29,7 @@
 #include "../hacks/hud/spectator_list.h"
 #include "../hacks/esp/esp_queue.h"  // botox m_draw_data: esp recorded on the game thread, replayed in RenderEspQueue
 #include "../hacks/visuals/player_stencil.h"  // PlayerStencil_ReleaseTargets in h_Reset
+#include "../hacks/visuals/lsd_chams.h"       // SheenNormal_Tick
 #include "../hacks/menu/debugmenu.h"
 #include "../hacks/menu/fonts.h"          // fonts tab: indicator face picked at runtime
 #include "../dependencies/imgui/freetype/imgui_freetype.h"
@@ -2137,6 +2138,7 @@ chain:
         // pass on the MAIN thread, and CreateTexture/LockRect there would race Present.
         MediaPlayer_Tick(dev);
         Avatar_Tick(dev);   // unit E5: uploads any avatar pixels Avatar_Pump fetched on the game thread
+        SheenNormal_Tick(); // normal blend sheen: lazy DIP hook the first frame it is on
 
         // No unusual: suppression sweep on the 100ms tick, restore on the off-transition.
         // (No hats bodygroups are computed on the game thread, skins.cpp FrameStageNotify.)

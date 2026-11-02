@@ -363,6 +363,8 @@ static const CfgEntry kEntries[] = {
 
     { "noHats",           CfgEntry::BOOL,   &g_noHats, 0 },
     { "noUnusual",        CfgEntry::BOOL,   &g_noUnusual, 0 },
+    { "sheenNormal",      CfgEntry::BOOL,   &g_sheenNormal, 0 },
+    { "sheenNormalAlpha", CfgEntry::FLOAT,  &g_sheenNormalAlpha, 0 },
     { "selfKillfeedOnly", CfgEntry::BOOL,   &g_selfKillfeedOnly, 0 },
     { "revealScoreboard", CfgEntry::BOOL,   &g_revealScoreboard, 0 },
     { "steamHistory",     CfgEntry::BOOL,   &g_steamHistory, 0 },

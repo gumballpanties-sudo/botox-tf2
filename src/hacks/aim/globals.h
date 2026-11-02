@@ -4,6 +4,8 @@
 
 MAKE_SIGNATURE(RandomSeed, "client.dll", "0F B6 1D ? ? ? ? 89 9D", 0x0);
 
+extern bool g_disableInterpEnable;   // dllmain.cpp -- menu "disable interp"
+
 struct DrawLine_t
 {
 	std::pair<Vec3, Vec3> m_paOrigin;
@@ -110,6 +112,10 @@ namespace G
 
 	inline bool UpdatingAnims = false;
 	inline bool FlipViewmodels = false;
+
+	// Remove interpolation: dih's "disable interp" checkbox drives Amalgam's
+	// Removals::Interpolation path (hooks.cpp + helpers.cpp Store). Remote players only.
+	inline bool RemoveInterp() { return ::g_disableInterpEnable; }
 
 	// Flip world (Visuals > World > Flip world): set true each command tick by CMisc::RunPre while the
 	// feature is on and the local player is alive. Read by CFlipWorld::Render (the horizontal

@@ -393,6 +393,10 @@ float g_snowDensity   = 1.f;
 bool g_noHats          = false;
 bool g_noUnusual       = false;
 
+// -- Weapon sheen blend (lsd_chams.cpp DrawSheenNormal) -------------------------------------
+bool  g_sheenNormal      = false;   // killstreak sheen: flat tint masked by the sheen texture, normal blend
+float g_sheenNormalAlpha = 1.f;
+
 // -- Killfeed ------------------------------------------------------------------------------------
 bool g_selfKillfeedOnly = false;
 

@@ -636,6 +636,17 @@ static void Page_VisualsWorld()
                 ImGui::SliderFloat("fov##viewmodel", &g_wdVmFov, 1.f, 179.f, "%.1f");
             }, ImVec2(220.f, -1.f));
 
+        // ours: blend mode for that native sheen. off = stock additive envmap pass
+        ImGui::Checkbox("normal blend sheen", &g_sheenNormal);
+        if (ImGui::IsItemHovered())
+            MenuTooltip("killstreak sheen paints its color flat, with the sheen texture as\n"
+                        "the mask (normal blending), instead of adding a lit envmap on top.\n"
+                        "sheen + color come from the skins tab, per weapon.");
+        if (g_sheenNormal)
+            ImGui::OptionPopup("normal blend sheen settings", [&]() {
+                SliderF("opacity##sheennormal", &g_sheenNormalAlpha, 0.f, 1.f, "%.2f");
+            }, ImVec2(220.f, -1.f));
+
         ImGui::Checkbox("weapon sway", &g_vmSwayEnable);
         if (g_vmSwayEnable)
             ImGui::OptionPopup("weapon sway settings", [&]() {

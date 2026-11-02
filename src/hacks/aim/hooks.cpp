@@ -16,6 +16,16 @@
 #include "scope_fov.h"
 #include "hud_aim.h"   // unit hud: botox hud group data, collected in IEngineVGui_Paint
 
+// Remove interp targets: remote players + the viewmodel. Amalgam hits every non-local entity;
+// projectiles / props / the local player model stay smooth here.
+static bool RemoveInterpTarget(void* rcx)
+{
+	if (!G::RemoveInterp() || rcx == H::Entities.GetLocal())
+		return false;
+	auto pEntity = reinterpret_cast<CBaseEntity*>(rcx);
+	return pEntity->IsPlayer() || pEntity->GetClassID() == ETFClassID::CTFViewModel;
+}
+
 // ================ CBaseAnimating_Interpolate.cpp ================
 MAKE_SIGNATURE(CBaseAnimating_Interpolate, "client.dll", "48 8B C4 48 89 70 ? F3 0F 11 48", 0x0);
 
@@ -23,7 +33,7 @@ MAKE_HOOK(CBaseAnimating_Interpolate, S::CBaseAnimating_Interpolate(), bool,
 	void* rcx, float currentTime)
 {
 
-	if (rcx == H::Entities.GetLocal() ? F::Ticks.m_bRecharge : Vars::Visuals::Removals::Interpolation.Value)
+	if (rcx == H::Entities.GetLocal() ? F::Ticks.m_bRecharge : RemoveInterpTarget(rcx))
 		return true;
 
 	// fixes weird stupid flickering with the resolver, but completely disables interpolation
@@ -48,11 +58,32 @@ MAKE_HOOK(CBaseAnimating_MaintainSequenceTransitions, S::CBaseAnimating_Maintain
 	// even with nothing enabled. Only drop the transition blend when interpolation removal is actually
 	// requested; otherwise run the engine's vanilla sequence-transition blending so anims look
 	// non-injected when idle. (The engine itself already early-returns this during prediction, so the
-	// local player's predicted pose is unaffected either way.)
-	if (Vars::Visuals::Removals::Interpolation.Value)
+	// local player's predicted pose is unaffected either way.) Same targets as Interpolate.
+	if (RemoveInterpTarget(rcx))
 		return;
 
 	CALL_ORIGINAL(rcx, boneSetup, flCycle, pos, q);
+}
+
+// ================ C_BaseViewModel::Interpolate (not in Amalgam) ================
+// sdk c_baseviewmodel.cpp:166. After the base Interpolate it re-derives the cycle from
+// GetFinalPredictedTime() + interpolation_amount * TICK_INTERVAL every frame, so skipping the base
+// alone leaves the gun animating smoothly. interpolation_amount = 0 for the call -> the cycle comes
+// from the tick-aligned predicted time only and steps once per tick. client.dll+0x1f7ab0, found as
+// the one direct caller of CBaseAnimating::Interpolate that reads gpGlobals +0x20 * +0x1c.
+MAKE_SIGNATURE(CBaseViewModel_Interpolate, "client.dll", "48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 56 48 83 EC ? 0F 29 70 ? 33 FF 48 8B D9 0F 29 78 ? 0F 28 F9", 0x0);
+
+MAKE_HOOK(CBaseViewModel_Interpolate, S::CBaseViewModel_Interpolate(), bool,
+	void* rcx, float currentTime)
+{
+	if (!G::RemoveInterp())
+		return CALL_ORIGINAL(rcx, currentTime);
+
+	const float flOldAmount = I::GlobalVars->interpolation_amount;
+	I::GlobalVars->interpolation_amount = 0.f;
+	const bool bRet = CALL_ORIGINAL(rcx, currentTime);
+	I::GlobalVars->interpolation_amount = flOldAmount;
+	return bRet;
 }
 
 // ================ CBaseAnimating_SetSequence.cpp ================
@@ -87,11 +118,42 @@ MAKE_HOOK(CBaseAnimating_UpdateClientSideAnimation, S::CBaseAnimating_UpdateClie
 	// The local-player skip is what hands its animation over to the custom LocalAnimations() path in
 	// CreateMove. Only do that when a feature actually needs it - otherwise let the engine advance the
 	// local model per frame (vanilla, smooth). Demo playback already never skips, hence stays smooth.
-	if (Vars::Visuals::Removals::Interpolation.Value && !G::UpdatingAnims
+	// Remove interp: remote players animate only from H::Entities.Store's per-tick loop
+	// (G::UpdatingAnims). Local excluded -- LocalAnimations only steps it when a tick feature needs it.
+	if (G::RemoveInterp() && !G::UpdatingAnims && pPlayer != pLocal && pPlayer->IsPlayer()
 		|| pPlayer == pLocal && !pLocal->InCond(TF_COND_HALLOWEEN_KART) && !I::EngineClient->IsPlayingDemo() && F::Ticks.NeedsLocalAnimationFix())
 		return;
 
 	CALL_ORIGINAL(rcx);
+}
+
+// Amalgam Entities.cpp per-tick animation catch-up (resolver half dropped). The hook above blocks
+// remote players' per-frame update, so their anims advance once per received server tick here.
+// Calling the sig address runs through the detour; G::UpdatingAnims lets it pass.
+static void RemoveInterpAnims()
+{
+	if (!G::RemoveInterp())
+		return;
+	for (auto pEntity : H::Entities.GetGroup(EntityEnum::PlayerAll))
+	{
+		auto pPlayer = pEntity->As<CTFPlayer>();
+		if (!pPlayer->IsAlive() || pPlayer->entindex() == I::EngineClient->GetLocalPlayer())
+			continue;
+
+		int iDeltaTicks = TIME_TO_TICKS(H::Entities.GetDeltaTime(pPlayer->entindex()));
+		if (!iDeltaTicks)
+			continue;
+
+		float flOldFrameTime = I::GlobalVars->frametime;
+		I::GlobalVars->frametime = I::Prediction->m_bEnginePaused ? 0.f : TICK_INTERVAL;
+		for (int i = 0; i < iDeltaTicks; i++)
+		{
+			G::UpdatingAnims = true;
+			S::CBaseAnimating_UpdateClientSideAnimation.Call<void>(pPlayer);
+			G::UpdatingAnims = false;
+		}
+		I::GlobalVars->frametime = flOldFrameTime;
+	}
 }
 
 // ================ CBaseEntity_BaseInterpolatePart1.cpp ================
@@ -126,7 +188,7 @@ MAKE_HOOK(CBaseEntity_EstimateAbsVelocity, S::CBaseEntity_EstimateAbsVelocity(),
 		return;
 	}
 
-	if (!Vars::Visuals::Removals::Interpolation.Value)
+	if (!G::RemoveInterp())
 	{
 		CALL_ORIGINAL(rcx, vel);
 		vel.z = pPlayer->m_vecVelocity().z;
@@ -768,6 +830,7 @@ MAKE_HOOK(CHLClient_FrameStageNotify, U::Memory.GetVirtual(I::Client, 35), void,
 		break;
 	case FRAME_NET_UPDATE_END:
 		H::Entities.Store();
+		RemoveInterpAnims();
 		F::AimbotMelee.StoreBackstabSnapshots();   // raw records: must run before render-start interpolation
 
 		F::MoveSim.Store();

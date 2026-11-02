@@ -78,6 +78,7 @@ static const std::vector<std::string> s_vHookWhitelist =
 	"CBaseAnimating_UpdateClientSideAnimation",
 	"CBaseAnimating_MaintainSequenceTransitions",
 	"CBaseAnimating_Interpolate",
+	"CBaseViewModel_Interpolate",   // remove interp: viewmodel cycle steps per tick
 	"CBaseAnimating_SetSequence",
 	"CBaseEntity_BaseInterpolatePart1",
 	"CBaseEntity_ResetLatched",

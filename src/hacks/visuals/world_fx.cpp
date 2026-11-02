@@ -26,7 +26,7 @@ void WorldFx_Tick()
         s_fbWas = false;
     }
 
-    // disable interp = h_AnimInterpolate below (cl_interp poke was clamped by server, did nothing)
+    // disable interp = aim/hooks.cpp Interpolate + anim hooks via G::RemoveInterp (cl_interp poke did nothing)
 
     // ==== aspect ratio: botox screen.cpp aspect_ratio() 1:1 -- r_aspectratio ====
     // engine.dll registers r_aspectratio (string checked in TF2 x64 engine.dll); its
@@ -298,47 +298,8 @@ static void __fastcall h_DrawPanelIn3D(void* rcx, uintptr_t vpanel, const void* 
     o_DrawPanelIn3D(rcx, vpanel, mat, pw, ph, ww, wh);
 }
 
-// ==== disable interp: Amalgam CBaseAnimating_Interpolate 1:1 ====
-// Returning true skips the interp-history blend -> other players draw at last networked
-// origin/angles/anims. Amalgam skips every non-local entity; here players only, so
-// viewmodel + props stay smooth. Player ptrs cached once a frame (called per entity).
-using AnimInterpolateFn = bool(__fastcall*)(void*, float);
-static AnimInterpolateFn o_AnimInterpolate = nullptr;
-
-static bool IsRemotePlayer(void* ent)
-{
-    constexpr int kMaxPlayers = 101;   // TF2 x64 MAX_PLAYERS (aim/defs.h)
-    static void* s_players[kMaxPlayers] = {};
-    static int   s_count = 0, s_frame = -1;
-    if (!g_globalVars) return false;
-    if (s_frame != g_globalVars->framecount) {
-        s_frame = g_globalVars->framecount;
-        s_count = 0;
-        const int local = GetLocalPlayerIndex();
-        int maxCl = g_globalVars->maxClients;
-        if (maxCl > kMaxPlayers) maxCl = kMaxPlayers;
-        for (int i = 1; i <= maxCl; ++i)
-            if (i != local)
-                if (void* p = GetClientEntity(i)) s_players[s_count++] = p;
-    }
-    for (int i = 0; i < s_count; ++i)
-        if (s_players[i] == ent) return true;
-    return false;
-}
-
-static bool __fastcall h_AnimInterpolate(void* rcx, float currentTime)
-{
-    if (g_disableInterpEnable && !g_eject && IsRemotePlayer(rcx))
-        return true;
-    return o_AnimInterpolate(rcx, currentTime);
-}
-
 void WorldFx_InstallViewHook()
 {
-    InstallPatternHook(GetModuleHandleA("client.dll"), "worldfx: CBaseAnimating::Interpolate",
-                       "48 8B C4 48 89 70 ? F3 0F 11 48",
-                       (void*)h_AnimInterpolate, (void**)&o_AnimInterpolate);
-
     static bool s_panelTried = false;
     if (!s_panelTried) {
         s_panelTried = true;
