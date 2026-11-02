@@ -396,6 +396,7 @@ bool g_noUnusual       = false;
 // -- Weapon sheen blend (lsd_chams.cpp DrawSheenNormal) -------------------------------------
 bool  g_sheenNormal      = false;   // killstreak sheen: flat tint masked by the sheen texture, normal blend
 float g_sheenNormalAlpha = 1.f;
+float g_sheenNormalEnv   = 3.f;     // envmap strength (stock pass = 10, blown out)
 
 // -- Killfeed ------------------------------------------------------------------------------------
 bool g_selfKillfeedOnly = false;

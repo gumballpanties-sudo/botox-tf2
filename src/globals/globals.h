@@ -464,6 +464,7 @@ extern bool g_noHats;
 extern bool g_noUnusual;
 extern bool  g_sheenNormal;
 extern float g_sheenNormalAlpha;
+extern float g_sheenNormalEnv;
 
 // -- Killfeed --------------------------------------------------------------------------------
 extern bool g_selfKillfeedOnly;

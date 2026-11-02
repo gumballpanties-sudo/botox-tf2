@@ -419,8 +419,10 @@ namespace
 		return false;
 	}
 
-	// TF2 weapon_sheen_pass_ps2x.fxc is the only engine ps binding both g_tRefractionSampler s0 and
-	// EnvmapMaskSampler s3 (lightmappedgeneric_ps11 has the mask at s3, no refraction, and is ps_1_1)
+	// TF2 weapon_sheen_pass_ps2x.fxc: EnvmapSampler s2 + EnvmapMaskSampler s3. Matched on those two
+	// because they are SAMPLED: fxc drops unused samplers from the constant table, and the pass's
+	// g_tRefractionSampler s0 / g_tBumpSampler s1 are declared but never read. Every other ps2x with
+	// the mask has it at s4/s5; lightmappedgeneric_ps11 has it at s3 but is ps_1_1 (major < 2)
 	int SheenPassModel(IDirect3DPixelShader9* shader)
 	{
 		if (!shader) return 0;
@@ -432,14 +434,22 @@ namespace
 		{
 			std::vector<DWORD> code((size + 3) / 4);
 			static const char* const kMask[1] = { "EnvmapMaskSampler" };
-			static const char* const kRefract[1] = { "g_tRefractionSampler" };
+			static const char* const kEnv[1] = { "EnvmapSampler" };
 			if (SUCCEEDED(shader->GetFunction(code.data(), &size)))
 			{
+				const int major = int((code[0] >> 8) & 0xFF);   // version token: 0xFFFF0300 = ps_3_0
 				const int mask = CtabSampler(code.data(), code.size(), kMask, 1);
-				if (mask == 3 && CtabSampler(code.data(), code.size(), kRefract, 1) == 0)
+				const int env = mask >= 0 ? CtabSampler(code.data(), code.size(), kEnv, 1) : -1;
+				if (mask == 3 && env == 2 && major >= 2)
 				{
-					result = ((code[0] >> 8) & 0xFF) >= 3 ? 3 : 2;   // version token: 0xFFFF0300 = ps_3_0
+					result = major >= 3 ? 3 : 2;
 					DebugLog("SHEEN: weapon sheen pass ps %p (ps_%d)", (void*)shader, result);
+				}
+				static int s_maskLogged = 0;
+				if (mask >= 0 && !result && s_maskLogged < 16)
+				{
+					s_maskLogged++;
+					DebugLog("SHEEN: ps %p ps_%d mask s%d env s%d -- not the sheen pass", (void*)shader, major, mask, env);
 				}
 				static bool s_noCtabLogged = false;
 				if (mask == -2 && !s_noCtabLogged)
@@ -460,25 +470,21 @@ namespace
 		if (!SheenGpuReady(dev))
 			return o_DIP(dev, type, base, minV, nV, start, prims);
 
-		DWORD oldSrgb = 0;
 		float oldK[4] = {};
 		static std::vector<Saved> savedPs;   // render thread only
 		savedPs.clear();
-		dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &oldSrgb);
 		dev->GetPixelShaderConstantF(10, oldK, 1);
 		SaveConsts(dev, false, s_shPsDefs, savedPs);
 
-		// the pass's own state stays: srcalpha / invsrcalpha, no alpha writes, engine vs + mask in s3.
-		// the tint is a picked display colour: no linear -> srgb on write
-		const float k[4] = { std::clamp(g_sheenNormalAlpha, 0.f, 1.f), 0.f, 0.f, 0.f };
-		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+		// the pass's own state stays: srcalpha / invsrcalpha, no alpha writes, srgb write (the envmap
+		// colour is linear, as stock), engine vs, cube in s2 + mask in s3, c6..c8 + c30
+		const float k[4] = { std::clamp(g_sheenNormalAlpha, 0.f, 1.f), std::clamp(g_sheenNormalEnv, 0.f, 10.f), 0.f, 0.f };
 		dev->SetPixelShader(s_shPs[model == 3 ? 1 : 0]);
 		dev->SetPixelShaderConstantF(10, k, 1);
 
 		const HRESULT hr = o_DIP(dev, type, base, minV, nV, start, prims);
 
 		// constants before shaders: the engine shader's own defs must win their slots
-		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, oldSrgb);
 		dev->SetPixelShaderConstantF(10, oldK, 1);
 		RestoreConsts(dev, false, savedPs);
 		dev->SetPixelShader(enginePs);
@@ -566,7 +572,14 @@ namespace
 
 void SheenNormal_Tick()
 {
-	if (g_sheenNormal) EnsureHook();
+	static bool s_logged = false;
+	if (!g_sheenNormal) return;
+	EnsureHook();
+	if (!s_logged)
+	{
+		s_logged = true;
+		DebugLog("SHEEN: normal blend on, DIP hook %s", o_DIP ? "live" : "MISSING");
+	}
 }
 
 void TwoToneChams_Begin(const float light[4], const float dark[4], float threshold, float edge, bool ignorez)
