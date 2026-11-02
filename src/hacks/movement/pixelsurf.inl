@@ -10,7 +10,7 @@
 //   n_tick::ticks / cmd_clock_left                        -> as::TicksScaled / TbBudgetExpired
 //   g_air_stuck_holding || owns_cmd                       -> s_airStuckHit (AS runs before this now, as botox)
 //   g_texturebug.m_hit / m_acted                          -> s_textureBugHit / s_tbOwnsCmd
-//   g_wall_climb.active / caught                          -> s_wallClimbHit
+//   g_wall_climb.active / caught                          -> s_wallClimbActive / s_wallClimbHit
 //   m_auto_bounce_data.m_owns_cmd / fireman               -> none: tf2's AutoBounce has no owns flag, TF2 has no ladders
 //   sv_air_max_wishspeed                                  -> CvarFloat(.., 30) (TF2 has no such cvar: AirAccelerate caps at 30)
 // Readers elsewhere keep their names: s_shouldPixelSurf (latched either way), s_psShouldDuck /
@@ -134,7 +134,7 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
     const bool latched = s_psShouldSurf || s_psShouldUnduck;
     const bool as_owns = s_airStuckHit;
     const bool tb_owns = s_textureBugHit || s_tbOwnsCmd;
-    if (as_owns || tb_owns || s_wallClimbHit) {
+    if (as_owns || tb_owns || s_wallClimbHit || s_wallClimbActive) {
         if (latched)
             DebugLog("PSU: yield by=%s", as_owns ? "as" : tb_owns ? "tb" : "wc");
         s_psShouldSurf = s_psShouldUnduck = false;
@@ -334,7 +334,7 @@ static int PsPark(void* pLocal, UserCmd_t* cmd, int& end_out)
         return 0;
     if (!EntAlive(pLocal) || EntMoveType(pLocal) != MOVETYPE_WALK || (s_prePredFlags & FL_ONGROUND))
         return 0;
-    if (s_airStuckHit || s_textureBugHit || s_tbOwnsCmd || s_wallClimbHit)
+    if (s_airStuckHit || s_textureBugHit || s_tbOwnsCmd || s_wallClimbHit || s_wallClimbActive)
         return 0;
     const float pin = TargetPredictZVel();
     const Vec3  v0  = s_prePredVel;

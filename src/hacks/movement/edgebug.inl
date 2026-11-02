@@ -868,7 +868,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         int contactTick = -1;
         const float g = EbHalfGravTick(grav);
         const int probeEvery = std::clamp(EbTicks(2), 1, 8);
-        int tailCut = 0, nJumpChecks = 0, nBlocked = 0, nStance = 0, nRejSurf = 0;
+        int tailCut = 0, nJumpChecks = 0, nBlocked = 0, nStance = 0, nRejSurf = 0, nSlow = 0;
         constexpr float k_ebTurn = 4.f;
         const float ebCap = std::clamp(g_edgeBugStrafeAngleMax, 15.f, 180.f);
         const bool userMoveDead = fabsf(userFwd) < 0.1f && fabsf(userSide) < 0.1f
@@ -983,6 +983,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
             {
                 runFound = true;
                 if (!MV_EbStanceOk(stance, ducked)) { nStance++; return; }
+                if (!MV_EbSpeedOk(liveVel.Length2D(), EntV3(pLocal, g_offVelocity).Length2D())) { nSlow++; return; }
                 // same variant landing within 4u of a kept plan = same path, not an alternative
                 for (int p = 0; p < s_ebPlanCount; p++)
                     if (s_ebPlans[p].variant == v && s_ebPlans[p].end.DistTo(endPos) < 4.f) return;
@@ -1306,10 +1307,11 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         // scrapes refused (face nz < 0.7), duck = latched hull,
         // pre = prefix snapshots saved / runs resumed / sim ticks skipped, snap = their copy cost us,
         // bre = bend runs resumed / ticks skipped, deep = 1 full / 0 half share for bend + ebanat,
-        // bc = bend order start (-1 = pass skipped), brk / bis = brake ladder / bisect runs, bk = picked plan's brake tick
+        // bc = bend order start (-1 = pass skipped), brk / bis = brake ladder / bisect runs, bk = picked plan's brake tick,
+        // slow = finds refused for bleeding 2D speed (MV_EbSpeedOk)
         DebugLog("EB: mode=%d win=%d run=%d reach=%d edge=%d vars=%d base=%d sw=%d rel=%d brk=%d bis=%d bnd=%d ebv=%d sims=%d/%d cut=%d "
                  "us=%lld/%lld con=%d vz=%.2f found=%d var=%d bk=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d surf=%d duck=%d fb=%d "
-                 "pre=%d/%d/%d snap=%lld bre=%d/%d deep=%d bc=%d",
+                 "pre=%d/%d/%d snap=%lld bre=%d/%d deep=%d bc=%d slow=%d",
                  mode, maxTicks, runTicks, reachTick, s_ebEdgeTargetValid ? 1 : 0, searchCount, baseRuns, sweepRuns,
                  releaseRuns, brakeRuns, bisectRuns, bendRuns, ebRuns, totalPredictions, maxPredictions, tailCut, budget.UsedUs(), budget.capUs,
                  bestContact, s_ebVelBackup.z, s_ebDetected ? 1 : 0, s_ebLastVariant,
@@ -1317,7 +1319,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                  s_ebPlanCount, wantPaths, nJumpChecks, nBlocked, nStance, nRejSurf,
                  sel >= 0 ? (s_ebPlans[sel].ducked ? 1 : 0) : -1, s_ebFollowBlocked ? 1 : 0,
                  famSaves, famResumes, famSkipped, Pred_SnapUs() - snapUs0,
-                 bendResumes, bendSkipped, deepFull ? 1 : 0, bendStart);
+                 bendResumes, bendSkipped, deepFull ? 1 : 0, bendStart, nSlow);
     } while (false);
 
     if (s_ebDetected)

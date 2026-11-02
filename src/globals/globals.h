@@ -684,6 +684,11 @@ extern bool  g_tbPredict;          // predictive intercept: catch ledges the liv
 extern int   g_tbPredictTicks;     // ticks of flight the prediction rolls (def 40, 8-128)
 extern float g_tbPredictReach;     // sideways reach of the predicted-path scan (def 24, 1-96)
 extern bool g_wallClimb;   extern int g_wallClimbKey;   extern int g_wallClimbMode;
+extern bool g_wcPreventSlow;   // botox m_wall_climb_prevent_slow: no catch that halves xy > 200
+extern bool g_wcDuck;          // botox m_wall_climb_duck: crouch catches (other stance tried)
+extern int  g_wcSpotReach;     // botox m_wall_climb_spot_reach: ground spot scan along the wall, u (0-32)
+extern bool g_wcViz;           // botox m_wall_climb_visualize
+extern float g_wcVizColor[4];
 extern bool g_airStuck;    extern int g_airStuckKey;    extern int g_airStuckMode;
 
 // -- Unit A port (movement_ex.inl): small tricks from botox csgo-sdk, defaults OFF ---------------
@@ -695,9 +700,12 @@ extern bool g_hswAllowAD;        // apply while holding A/D on the ground
 extern bool g_hswPreGround;      // allow the grounded half at all
 extern bool g_delayHop;    extern int g_delayHopKey;    extern int g_delayHopMode;
 extern int  g_delayHopTicks;    // air ticks to wait before pressing jump (def 6)
+extern bool g_goomba;      extern int g_goombaKey;      extern int g_goombaMode;
+extern int  g_goombaHow;       // auto goomba type: 0 sticky jump, 1 rocket jump, 2 regular jump
+extern int  g_goombaLead;      // auto goomba extra lead ticks (ping/rocket flight are automatic)
 extern bool g_autoCrouch;  extern int g_autoCrouchKey;  extern int g_autoCrouchMode;
 extern int  g_autoCrouchTicks;  // look-ahead ticks for the landing trace (def 6)
-extern bool g_jumpbugKangaroo;  // alt duck-timing variant of jumpbug, see JumpbugKangaroo
+extern bool g_djStrafe;    extern int g_djStrafeKey;    extern int g_djStrafeMode;   // scout double jump keeps velocity dir
 extern bool g_silentView;       // smooth demo view: lock recorded viewangles during demo playback
 extern bool g_jumpstats;        // count clean bhop/lj/mj/wallclimb takeoffs
 void MV_GetJumpstats(int& bhop, int& longjump, int& minijump, int& wallclimb);
@@ -766,7 +774,10 @@ void FakeMove_DemoTick();   // FrameStageNotify stage 3: replays fake jump anim/
 // botox air_stuck knobs (m_air_stuck_extra_reach / m_air_stuck_budget)
 extern float g_asExtraReach;       // wall scan reach past the hull, units (def 4, 0-32; > 2 arms the wide B scan)
 extern float g_asBudget;           // search clock, percent of one tick (def 50, 10-90)
-extern int g_asStyle;              // 0 cumidere (airstuck.inl AirStuckCumidere) / 1 botox
+extern int g_asStyle;              // 0 cumidere (airstuck.inl AirStuckCumidere) / 1 botox / 2 aletherium (AirStuckAletherium)
+// Aletherium AirStuckCore knobs
+extern float g_asaCatchEps, g_asaReach, g_asaFlushTol, g_asaDriftGain;
+extern int   g_asaSimBudget;
 // wave 3 (Aletherium): pixel surf finder + assist
 extern bool g_psFinder;    extern int g_psFinderKey;    extern int g_psFinderMode;
 extern float g_psFinderMargin;     // scan margin above/below the aimed column (def 8, 0-64)

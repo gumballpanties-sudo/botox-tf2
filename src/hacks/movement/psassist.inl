@@ -27,7 +27,12 @@
 // (3-field lines from old files load as mask 127 = all types allowed).
 // ============================================================================
 
-enum { JT_NONE = 0, JT_REGULAR, JT_CROUCH, JT_MINI, JT_MINIDUCK, JT_LONG, JT_LONGDUCK, JT_AIRDASH };
+#include "psdash.h"
+
+// JT_DASHAIM = the dash again, wish toward the seam (psdash.h). Same mask bit as JT_AIRDASH
+enum { JT_NONE = 0, JT_REGULAR, JT_CROUCH, JT_MINI, JT_MINIDUCK, JT_LONG, JT_LONGDUCK, JT_AIRDASH,
+       JT_DASHAIM, JT_COUNT };
+static bool PsIsDash(int iType) { return iType == JT_AIRDASH || iType == JT_DASHAIM; }
 
 // per-point allowed-jump bits, Aletherium readout order (ENTER window edits these)
 static int PsTypeBit(int iType)
@@ -41,6 +46,7 @@ static int PsTypeBit(int iType)
     case JT_LONG:     return 4;
     case JT_LONGDUCK: return 5;
     case JT_AIRDASH:  return 6;
+    case JT_DASHAIM:  return 6;
     }
     return -1;
 }
@@ -49,9 +55,9 @@ static const char* PsTypeName(int iType)
 {
     static const char* kNames[] = {
         "", "regular jump", "crouch jump", "minijump", "minijump (duck)",
-        "longjump", "longjump (duck)", "double jump",
+        "longjump", "longjump (duck)", "double jump", "double jump (aim)",
     };
-    return (iType >= JT_REGULAR && iType <= JT_AIRDASH) ? kNames[iType] : "jump";
+    return (iType >= JT_REGULAR && iType < JT_COUNT) ? kNames[iType] : "jump";
 }
 
 // saved assist target + per-point settings (edited via on-point ENTER window)
@@ -1452,7 +1458,8 @@ struct PsInputs_t
 static constexpr float k_psJumpPress = 25.f;
 
 static PsInputs_t PsHopInputs(int iType, int iSince, const Vec3& vOrigin, const Vec3& vVel,
-                              const Vec3& vTarget, float flHullReachXY, const Vec3* pWallN = nullptr)
+                              const Vec3& vTarget, float flHullReachXY, float flGravity,
+                              const Vec3* pWallN = nullptr)
 {
     PsInputs_t o;
     if (iSince < 0)
@@ -1462,6 +1469,31 @@ static PsInputs_t PsHopInputs(int iType, int iSince, const Vec3& vOrigin, const 
         o.wish = true;
         o.wishDir = Vec3(-pWallN->x, -pWallN->y, 0.f);
         o.wishMag = k_psJumpPress;
+    }
+
+    // THE DASH CMD WRITES THE HULL'S VELOCITY (psdash.h): AirDash sets m_vecVelocity = wish.
+    // A zero wish, or the 25 u/s wall press, is a hull stopping dead in the air -- which is
+    // what every dash this assist ever flew did. KEEP = the speed it has; AIM = toward the
+    // seam at the speed that arrives over it as the arc falls back through its height
+    if (PsIsDash(iType) && iSince == 0)
+    {
+        o.jump = true;
+        o.wish = true;
+        const Vec3 vFlatVel(vVel.x, vVel.y, 0.f);
+        if (iType == JT_AIRDASH)
+        {
+            o.wishDir = vFlatVel;
+            o.wishMag = vFlatVel.Length2D();
+        }
+        else
+        {
+            const Vec3 vFlat(vTarget.x - vOrigin.x, vTarget.y - vOrigin.y, 0.f);
+            o.wishDir = vFlat;
+            o.wishMag = psd::AimSpeed(vTarget.z - vOrigin.z, vFlat.Length2D(), vVel.z, flGravity);
+            if (o.wishMag < 0.f)
+                o.wishMag = vFlatVel.Length2D();   // out of reach as aimed: fly KEEP, the sim says no
+        }
+        return o;
     }
 
     const bool bMini = iType == JT_MINI || iType == JT_MINIDUCK;
@@ -1582,7 +1614,7 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
         if (iLaunch < 0)
         {
             const bool bGroundedNow = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
-            if ((iType == JT_AIRDASH || bGroundedNow)
+            if ((PsIsDash(iType) || bGroundedNow)
                 && iPressTick != t - 1 && iTries < k_psLaunchTries)
             {
                 bPressNow  = true;
@@ -1596,7 +1628,8 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
         }
 
         const int iSince = iLaunch >= 0 ? t - iLaunch : (bPressNow ? 0 : -1);
-        const PsInputs_t in = PsHopInputs(iType, iSince, vNowPre, vVelPre, vTarget, flHullReachXY, pWallN);
+        const PsInputs_t in = PsHopInputs(iType, iSince, vNowPre, vVelPre, vTarget, flHullReachXY,
+                                          flGravity, pWallN);
         if (in.jump) pCmd->buttons |= IN_JUMP;
         if (in.duck) pCmd->buttons |= IN_DUCK;
         if (in.wish) MV_WriteWishWorld(pCmd, in.wishDir, in.wishMag);
@@ -1614,7 +1647,11 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
             {
                 const bool  bAirNow = (EntI(pLocal, g_offFlags) & FL_ONGROUND) == 0;
                 const float flVzNow = EntV3(pLocal, g_offVelocity).z;
-                if (bAirNow && flVzNow > k_psLaunchVz && flVzNow > flPressVz)
+                // a dash ADDS 268 to vz (AirDash: m_vecVelocity.z += flDashZ), so one pressed
+                // falling at -200 reads +56 -- under the ground bar, and it was being logged as
+                // refused. The dash's proof is the jump in vz, not where vz ends up
+                const float flBar = PsIsDash(iType) ? flPressVz + k_psLaunchVz : k_psLaunchVz;
+                if (bAirNow && flVzNow > flBar && flVzNow > flPressVz)
                 {
                     iLaunch = t;
                     vLaunch = vPress;
@@ -1753,6 +1790,7 @@ static float s_asPendingLaunchZ = 0.f;  // feet height the sim proved this arc f
 static bool  s_asRideHold = false;
 static Vec3  s_asRideTarget = {};
 static int   s_asRideTicks = 0, s_asRideMiss = 0;
+static int   s_asDuckMiss = 0;                 // pinless ticks since hop/ride, for the catch duck
 static constexpr int k_psRideHoldMax = 400;   // ~6s; a ride longer than that holds itself
 static constexpr int k_psRideMissMax = 8;     // pinless ticks that mean the ride is over
 
@@ -1860,7 +1898,7 @@ static void PsStampJumpBox(int iType, float flTargetZ)
     s_renderAfter = now + 500;
     const char* szLaunch = iType == JT_MINI || iType == JT_MINIDUCK ? "mj"
                          : iType == JT_LONG || iType == JT_LONGDUCK ? "lj"
-                         : iType == JT_AIRDASH                      ? "double jump" : "jump";
+                         : PsIsDash(iType)                          ? "double jump" : "jump";
     const bool bCrouch = iType == JT_CROUCH || iType == JT_MINIDUCK || iType == JT_LONGDUCK;
     char sz[96];
     snprintf(sz, sizeof(sz), "%s to surf at %f with %f%s", szLaunch, flTargetZ, s_prePredOrigin.z,
@@ -1897,6 +1935,10 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     const bool bAssistOn = On(g_psAssist, g_psAssistKey, g_psAssistMode);
     const bool bAlive    = EntAlive(pLocal);
     const float flHullReachXY = g_offMaxs > 0 ? EntV3(pLocal, g_offMaxs).Length2D() : 34.6f;
+    const float flGravity = CvarFloat("sv_gravity", 800.f);
+    // this cmd's IN_JUMP as it arrived here (the player's, or a feature's that ran before us)
+    const bool bEntryJump = (pCmd->buttons & IN_JUMP) != 0;
+    const bool bDashNow   = !bOnGround && CanAirDashNow(pLocal);   // a dash is on the table
 
     // ---- hop bookkeeping, UNCONDITIONAL and before any early return ----------------------
     if (s_asJumpType != JT_NONE)
@@ -1914,7 +1956,13 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             s_asJumpType = JT_NONE;
         }
         else if ((bOnGround && s_asHopTick > 0) || !bAssistOn || !bAlive
-                 || s_asHopTick > k_psMaxHopTicks + 40)
+                 || s_asHopTick > k_psMaxHopTicks + 40
+                 // fell past the seam: PsSimHop stopped flying this arc right here (k_psPastZ),
+                 // so the hop is over the same tick for the live hull. Holding it to the floor
+                 // kept the picker shut for the whole fall -- a scout's recovery dash back up to
+                 // the seam was never even simmed
+                 || (s_asHopTick > 0 && s_prePredVel.z < 0.f
+                     && s_prePredOrigin.z < s_asHopTarget.z - k_psPastZ))
             s_asJumpType = JT_NONE;
     }
     if (s_asRideHold)
@@ -1940,10 +1988,13 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     // bHold's crouch is the duck the sim flew all the way to the seam. The hop is cleared on
     // the very tick the surf is caught, so without this the crouch stops there, airborne
     // FinishUnDuck drops the origin 20u and the seam is gone -- "catches the ps with a crouch,
-    // then uncrouches and falls off", exactly. Only ground, death or the feature ends it
+    // then uncrouches and falls off", exactly. Ground, death, the feature, or the RIDE ending
+    // ends it: off the seam for k_psRideMissMax ticks = left the ps, stop ducking the fall.
+    // Own counter, not s_asRideHold -- that one quits at k_psRideHoldMax mid-ride
     if (s_psAssistDuckHeld)
     {
-        if (bOnGround || !g_psAssist || !bAlive)
+        s_asDuckMiss = (s_asJumpType != JT_NONE || s_psRidingNow) ? 0 : s_asDuckMiss + 1;
+        if (bOnGround || !g_psAssist || !bAlive || s_asDuckMiss > k_psRideMissMax)
             s_psAssistDuckHeld = false;
         else
             pCmd->buttons |= IN_DUCK;
@@ -2193,6 +2244,35 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         }
     }
 
+    // ---- A HELD SPACE BAR LATCHES THE DASH OFF --------------------------------------------
+    // Everyone holds jump through the air after a jump. m_nOldButtons keeps IN_JUMP, so the
+    // sim's dash press at t0 is refused, its retry lands at t2, bDashLate throws the plan
+    // away, and the dash never fires while the key is down -- for a seam that needs it. A held
+    // jump in the air does nothing in vanilla (that same latch), so eating it costs nothing
+    // and clears the latch for the press that matters. The streak then runs until the key is
+    // RELEASED, floor included: the first cmd after a strip reads as a fresh press to the
+    // engine, which is a surprise dash in the air and a surprise hop on landing.
+    // AutoJump (g_bhop) already does exactly this in the air and owns the key on the ground, so
+    // it is left alone -- stripping under it would eat the bhop's landing press
+    {
+        static bool s_asEntryJumpPrev = false, s_asJumpStrip = false;
+        if (!bEntryJump)
+            s_asJumpStrip = false;
+        else if (!g_bhop && bAssistOn && s_asEntryJumpPrev)
+        {
+            bool bDashPoint = false;
+            for (int i = 0; i < nTargets; i++)
+                if (aTargets[i].mask & (1 << PsTypeBit(JT_AIRDASH))) bDashPoint = true;
+            if (s_asJumpStrip || (bDashNow && bDashPoint && s_asJumpType == JT_NONE
+                                  && s_asPendingType == JT_NONE && !s_asRideHold))
+            {
+                s_asJumpStrip = true;
+                pCmd->buttons &= ~IN_JUMP;
+            }
+        }
+        s_asEntryJumpPrev = bEntryJump;
+    }
+
     // ---- the live choreography, run at the very end so a hop fired THIS cmd gets tick 0 ---
     // Declared here as a lambda because both the early-out path and the normal path have to
     // reach it: a hop already in flight must keep flying even on a cmd where the picker never
@@ -2206,7 +2286,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         if (s_asJumpType != JT_NONE)
         {
             const PsInputs_t in = PsHopInputs(s_asJumpType, s_asHopTick, vAt, s_prePredVel,
-                                              s_asHopTarget, flHullReachXY,
+                                              s_asHopTarget, flHullReachXY, flGravity,
                                               s_asHopHasN ? &s_asHopN : nullptr);
             // ---- THE HOP OWNS THESE TWO BITS, SET *AND* CLEAR ---------------------------
             // PsSimHop starts every simulated tick from `buttons & ~(IN_JUMP|IN_DUCK)` and then
@@ -2237,7 +2317,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             if (s_asJumpType == JT_CROUCH || s_asJumpType == JT_LONGDUCK
                 || s_asJumpType == JT_MINIDUCK)
             {
-                if (in.duck) s_psAssistDuckHeld = true;
+                if (in.duck) { s_psAssistDuckHeld = true; s_asDuckMiss = 0; }
             }
         }
         else if (s_asPendingType != JT_NONE)
@@ -2345,7 +2425,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     // decides the ORDER the candidates are simmed in, so the arc whose reach matches the seam
     // is tried first and the break-on-catch below usually pays for one or two arcs instead of
     // seven. A stale entry costs order, never a decision
-    static float s_apexSeen[JT_AIRDASH + 1] = {};
+    static float s_apexSeen[JT_COUNT] = {};
 
     for (int iT = 0; iT < nTargets; iT++)
     {
@@ -2379,7 +2459,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             nPlanned++;
 
         struct Cand_t { int type; bool allowed; PsHop_t res; };
-        Cand_t aCands[7] =
+        static constexpr int k_nCands = 8;
+        Cand_t aCands[k_nCands] =
         {
             { JT_MINI,     false, {} },
             { JT_REGULAR,  false, {} },
@@ -2388,29 +2469,35 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             { JT_LONG,     false, {} },
             { JT_LONGDUCK, false, {} },
             { JT_AIRDASH,  false, {} },
+            { JT_DASHAIM,  false, {} },   // mask bit 6 too (PsTypeBit)
         };
-        for (int k = 0; k < 7; k++)
-            aCands[k].allowed = (iTargetMask & (1 << k)) != 0;
+        for (int k = 0; k < k_nCands; k++)
+            aCands[k].allowed = (iTargetMask & (1 << PsTypeBit(aCands[k].type))) != 0;
         // the dash is an AIR press and costs a jump charge -- offer it only where it exists
-        if (aCands[6].allowed && !(!bOnGround && CanAirDashNow(pLocal)))
-            aCands[6].allowed = false;
+        if (!bDashNow)
+            aCands[6].allowed = aCands[7].allowed = false;
 
-        // sim order: closest remembered apex to the height actually needed, first
+        // sim order: closest remembered apex to the height actually needed, first. Airborne, the
+        // dashes go FIRST regardless: they are the only arcs that can fire on this cmd, and the
+        // six ground types each burn up to k_psApproachTicks sims waiting for a floor before the
+        // clock ever reached the dash
         const float flNeedNow = vDelta.z;
-        int aOrder[7] = { 0, 1, 2, 3, 4, 5, 6 };
-        for (int a = 0; a < 7; a++)
-            for (int b = a + 1; b < 7; b++)
-            {
-                const float flA = fabsf(s_apexSeen[aCands[aOrder[a]].type] - flNeedNow);
-                const float flB = fabsf(s_apexSeen[aCands[aOrder[b]].type] - flNeedNow);
-                if (flB < flA) { const int t = aOrder[a]; aOrder[a] = aOrder[b]; aOrder[b] = t; }
-            }
+        auto OrderKey = [&](int k) -> float
+        {
+            if (bDashNow && PsIsDash(aCands[k].type)) return -1.f;
+            return fabsf(s_apexSeen[aCands[k].type] - flNeedNow);
+        };
+        int aOrder[k_nCands] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+        for (int a = 0; a < k_nCands; a++)
+            for (int b = a + 1; b < k_nCands; b++)
+                if (OrderKey(aOrder[b]) < OrderKey(aOrder[a]))
+                    { const int t = aOrder[a]; aOrder[a] = aOrder[b]; aOrder[b] = t; }
 
         int iPick = JT_NONE;
         const PsHop_t* pPick = nullptr;
         if (bWorthSimming)
         {
-            for (int o = 0; o < 7; o++)
+            for (int o = 0; o < k_nCands; o++)
             {
                 const int k = aOrder[o];
                 if (!aCands[k].allowed)
@@ -2432,9 +2519,12 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                 const PsHop_t& c = aCands[k].res;
                 // the dash is an AIR press with no ground contact to arm against, so a dash plan
                 // that cannot fire on this very cmd is not a plan -- re-planned next cmd instead
-                const bool bDashLate = aCands[k].type == JT_AIRDASH && c.launchDelay > 0;
+                const bool bIsDash = PsIsDash(aCands[k].type);
+                const bool bDashLate = bIsDash && c.launchDelay > 0;
+                // the apex floor is a GROUND launch's proof (a refused press = a 0u "hop"). A dash
+                // was proved by its vz jump, and a late one in a fall legitimately peaks 2u up
                 if (c.caught && !c.truncated && !bDashLate
-                    && c.launchDelay >= 0 && c.apexGain >= k_psMinApex)
+                    && c.launchDelay >= 0 && (bIsDash || c.apexGain >= k_psMinApex))
                 {
                     iPick = aCands[k].type;
                     pPick = &aCands[k].res;
@@ -2447,8 +2537,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         // ---- one diag line per decision ---------------------------------------------------
         {
             char szCands[720]; int nC = 0; szCands[0] = 0;
-            static const char* kShort[] = { "mini", "reg", "mnid", "crch", "long", "lngd", "dash" };
-            for (int k = 0; k < 7 && nC < (int)sizeof(szCands) - 110; k++)
+            static const char* kShort[k_nCands] = { "mini", "reg", "mnid", "crch", "long", "lngd", "dash", "dasa" };
+            for (int k = 0; k < k_nCands && nC < (int)sizeof(szCands) - 110; k++)
             {
                 const PsHop_t& c = aCands[k].res;
                 if (!aCands[k].allowed)
@@ -2522,7 +2612,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         s_asPromCatch = pPick->catchSince;
 
         const int iDelay = pPick->launchDelay;
-        const bool bDash = iPick == JT_AIRDASH;
+        const bool bDash = PsIsDash(iPick);
         const bool bFireNow = iDelay <= 0 && (bOnGround || bDash);
 
         // the live commit needs the same clear latch the sim flew. With m_nOldButtons

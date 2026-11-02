@@ -158,6 +158,18 @@ static void ImGui_ImplDX9_SetupRenderState(ImDrawData* draw_data)
     }
 }
 
+// Steam overlay (gameoverlayrenderer64 rva 0x8cd80 / 0x8ce70) detours SetRenderState +
+// SetSamplerState, keeps own copy of D3DRS_SRGBWRITEENABLE + sampler 0 D3DSAMP_SRGBTEXTURE,
+// puts copy back after each overlay draw. State block Apply() skips those detours -> copy
+// stale (our FALSE) -> overlay open = game renders with wrong srgb. Re-set real values
+// through hooked setters so copy matches device.
+static void ImGui_ImplDX9_SyncSteamSrgb(IDirect3DDevice9* dev)
+{
+    DWORD v = 0;
+    if (dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &v) == D3D_OK) dev->SetRenderState(D3DRS_SRGBWRITEENABLE, v);
+    if (dev->GetSamplerState(0, D3DSAMP_SRGBTEXTURE, &v) == D3D_OK) dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, v);
+}
+
 // Render function.
 void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
 {
@@ -298,6 +310,7 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
     // Restore the DX9 state
     d3d9_state_block->Apply();
     d3d9_state_block->Release();
+    ImGui_ImplDX9_SyncSteamSrgb(bd->pd3dDevice);
 }
 
 // botox imgui_impl_dx9.cpp: draw into an offscreen layer, composite the whole layer at `alpha`,
@@ -428,6 +441,7 @@ void ImGui_ImplDX9_RenderDrawDataFaded(ImDrawData* draw_data, float alpha)
     dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, old_texture_transform);
     state->Apply();
     state->Release();
+    ImGui_ImplDX9_SyncSteamSrgb(dev);
 
     IUnknown* const held[] = { old_declaration, old_vertex_shader, old_stream, old_texture, old_depth, layer, old_target };
     for (IUnknown* r : held) if (r) r->Release();

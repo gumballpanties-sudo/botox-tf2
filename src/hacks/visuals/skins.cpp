@@ -3,6 +3,8 @@
 #include "skins.h"
 #include "skins_pure.h"
 #include "hats.h"
+#include "skinshare.h"   // peers' loadouts: applied to THEIR weapons below, same passes as ours
+#include "../../hooks/crashlog.h"   // CrashSpan: stutter probe per FSN module
 #include "visuals.h"
 #include "flipworld.h"
 #include "../hud/demostreak.h"
@@ -1137,12 +1139,8 @@ static const int k_ksEffectIds[] = { 0, 2002, 2003, 2004, 2005, 2006, 2007, 2008
 // that no CPaintKitDefinition answers for (the real ones stop around 400), so nothing paints.
 static constexpr int k_noPaintKit = 30000;
 
-__declspec(noinline) static void Skin_Apply(void* pWeapon, int configKey)
+__declspec(noinline) static void Skin_ApplyCfg(void* pWeapon, const SkinCfg& c)
 {
-    auto it = g_skinCfgs.find(configKey);
-    if (it == g_skinCfgs.end() || !it->second.enabled) return;
-    const SkinCfg& c = it->second;
-
     CAttributeList* pList = reinterpret_cast<CAttributeList*>(
         reinterpret_cast<uintptr_t>(pWeapon) + s_offAttrList);
 
@@ -1230,6 +1228,12 @@ __declspec(noinline) static void Skin_Apply(void* pWeapon, int configKey)
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+static void Skin_Apply(void* pWeapon, int configKey)
+{
+    auto it = g_skinCfgs.find(configKey);
+    if (it != g_skinCfgs.end() && it->second.enabled) Skin_ApplyCfg(pWeapon, it->second);
+}
+
 // The skin index a reskin wants for the team we are on. -1 = leave the engine's own value,
 // which is already right for every item whose style block is the plain 0/1 team pair.
 static int ReskinSkinFor(const SkinCfg& c, int teamNum)
@@ -1289,13 +1293,16 @@ struct RevEntry { int targetDef; int configKey; };
 static RevEntry s_rev[64];
 static int      s_revCount = 0;
 
-static void RebuildReverseMap()
+using SkinMap = std::unordered_map<int, SkinCfg>;
+
+// Fills `out` from any config map (ours, or a peer's). Returns the count; anyKs = some killstreak on.
+static int BuildReverseMap(const SkinMap& m, RevEntry* out, int cap, bool* anyKs)
 {
-    s_revCount      = 0;
-    s_anyKillstreak = false;
-    for (const auto& [key, c] : g_skinCfgs) {
+    int n = 0;
+    if (anyKs) *anyKs = false;
+    for (const auto& [key, c] : m) {
         if (!c.enabled) continue;
-        if (c.ksTier > 0) s_anyKillstreak = true;
+        if (c.ksTier > 0 && anyKs) *anyKs = true;
         int t = 0;
         if      (c.festive)            t = Skin_GetFestiveIdx(key);
         else if (c.reskinDef > 0)      t = c.reskinDef;
@@ -1303,14 +1310,16 @@ static void RebuildReverseMap()
         else if (c.statClock)          t = Skin_FirstSkinDefFor(key);   // the clock's carrier def
         // The "wear the upgradeable twin" case needs no entry: redirecting that def index
         // lands on itself, so the direct lookup already finds the config.
-        if (t > 0 && t != key && s_revCount < 64)
-            s_rev[s_revCount++] = { t, key };
+        if (t > 0 && t != key && n < cap)
+            out[n++] = { t, key };
     }
+    return n;
 }
 
-static WeaponTarget ResolveWeaponTarget(void* pWeapon, int origDefIdx)
+static void RebuildReverseMap() { s_revCount = BuildReverseMap(g_skinCfgs, s_rev, 64, &s_anyKillstreak); }
+
+static WeaponTarget ResolveWeaponTargetIn(const SkinMap& m, const RevEntry* rev, int nRev, int origDefIdx)
 {
-    (void)pWeapon;
     WeaponTarget wt{ 0, 0, nullptr };
 
     int configKey = origDefIdx;
@@ -1322,15 +1331,15 @@ static WeaponTarget ResolveWeaponTarget(void* pWeapon, int origDefIdx)
         if (redir > 0) configKey = redir;
     }
 
-    auto it = g_skinCfgs.find(configKey);
-    if (it == g_skinCfgs.end() || !it->second.enabled) {
+    auto it = m.find(configKey);
+    if (it == m.end() || !it->second.enabled) {
         // Not a def index the schema redirects -- is it one WE wrote last pass?
-        for (int i = 0; i < s_revCount; ++i) {
-            if (s_rev[i].targetDef != origDefIdx) continue;
-            it = g_skinCfgs.find(s_rev[i].configKey);
-            if (it != g_skinCfgs.end() && it->second.enabled) { configKey = s_rev[i].configKey; break; }
+        for (int i = 0; i < nRev; ++i) {
+            if (rev[i].targetDef != origDefIdx) continue;
+            it = m.find(rev[i].configKey);
+            if (it != m.end() && it->second.enabled) { configKey = rev[i].configKey; break; }
         }
-        if (it == g_skinCfgs.end() || !it->second.enabled) return wt;
+        if (it == m.end() || !it->second.enabled) return wt;
     }
     const SkinCfg& sc = it->second;
 
@@ -1359,6 +1368,57 @@ static WeaponTarget ResolveWeaponTarget(void* pWeapon, int origDefIdx)
     wt.targetDef = targetDef;
     wt.cfg       = &sc;
     return wt;
+}
+
+static WeaponTarget ResolveWeaponTarget(void* pWeapon, int origDefIdx)
+{
+    (void)pWeapon;
+    return ResolveWeaponTargetIn(g_skinCfgs, s_rev, s_revCount, origDefIdx);
+}
+
+// ==== peers' weapons ============================================================================
+// A peer's loadout (skinshare.cpp) goes onto the weapons in THAT player's m_hMyWeapons -- the array
+// is in DT_BaseCombatCharacter proper, not the local-exclusive block (basecombatcharacter.cpp:204),
+// so every player in the PVS carries it. Same two passes as ours: def index before the unpack
+// (stage 2, material override / style skin) and def + m_nSkin + attributes after it. The viewmodel
+// work (sequence remap, attachment refresh, streak counters) is ours alone and is not repeated.
+// Gated on BOTH skinchangers being on: ours, because the passes are ours, and "show shared".
+__declspec(noinline) static void ApplyPeerWeapons(bool preWrite)
+{
+    if (!g_shareNet || !g_shareRecv) return;
+    if (s_offMyWeapons <= 0 || s_offItemDefIndex <= 0 || (!preWrite && s_offAttrList <= 0)) return;
+    __try {
+        for (int p = 0; p < kShareMaxPeers; ++p) {
+            const SharePeer* peer = SkinShare_Peer(p);
+            if (!peer || !peer->hasLoadout || peer->playerIdx <= 0 || peer->lo.skins.empty()) continue;
+            void* pPlayer = GetClientEntity(peer->playerIdx);
+            if (!pPlayer || !SEH_VtableSane(pPlayer)) continue;
+            RevEntry rev[64];
+            const int nRev = BuildReverseMap(peer->lo.skins, rev, 64, nullptr);
+            const int teamNum = (!preWrite && s_offTeamNum > 0) ? SEH_ReadInt(pPlayer, s_offTeamNum) : 0;
+
+            for (int i = 0; i < 48; i++) {
+                const unsigned int hWeapon = SEH_ReadHandle(pPlayer, s_offMyWeapons, i);
+                if (hWeapon == 0xFFFFFFFF || hWeapon == 0) continue;
+                void* pWeapon = SEH_EntFromHandle(hWeapon);
+                if (!pWeapon || !SEH_VtableSane(pWeapon)) continue;
+
+                const int origDefIdx = SEH_ReadInt(pWeapon, s_offItemDefIndex);
+                const WeaponTarget wt = ResolveWeaponTargetIn(peer->lo.skins, rev, nRev, origDefIdx);
+                if (!wt.cfg) continue;
+                if (wt.targetDef > 0 && wt.targetDef != origDefIdx)
+                    SEH_WriteInt(pWeapon, s_offItemDefIndex, wt.targetDef);
+                if (preWrite) continue;
+                if (wt.cfg->reskinDef > 0) {
+                    const int skin = ReskinSkinFor(*wt.cfg, teamNum);
+                    if (skin >= 0 && s_offSkin > 0) SEH_WriteInt(pWeapon, s_offSkin, skin);
+                }
+                Skin_ApplyCfg(pWeapon, *wt.cfg);
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        DebugLog("skins: SEH in peer pass");
+    }
 }
 
 // NOTHING WRITES A MODEL INDEX ONTO THE WEAPON. dih-sk1 wrote three fields and every reskin
@@ -1482,6 +1542,7 @@ __declspec(noinline) static void PreWriteDefIndexes()
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         DebugLog("skins: SEH in pre-write");
     }
+    ApplyPeerWeapons(true);
 }
 
 // ==== FrameStageNotify ==========================================================================
@@ -1702,12 +1763,15 @@ static void __fastcall h_FrameStageNotify(int stage)
     if (stage == 5 && !g_eject && g_enableSkins) { SweepViewmodelSequence(); RestampStreak("before think"); }
     // Hats are built here, before the original: its OnRenderStart runs ProcessOnDataChangedEvents,
     // which is what delivers the OnDataChanged(CREATED) a new hat's PreDataUpdate queued.
-    Hats_FrameStage(stage);
+    { CrashSpan _s("fsn/hats"); Hats_FrameStage(stage); }
     // Weather entity, same reason and same spot as the hats (visuals.cpp Rain_Tick).
-    if (stage == 5) Rain_Tick();
+    if (stage == 5) { CrashSpan _s("fsn/rain"); Rain_Tick(); }
 
     o_FrameStageNotify(stage);
-    GameExtras_Frame(stage);   // unit game: chat translator print, bot ping, performance, cvar list (restores itself on g_eject)
+    { CrashSpan _s("fsn/extras"); GameExtras_Frame(stage); }   // unit game: chat translator print, bot ping, performance, cvar list (restores itself on g_eject)
+    // Skin sharing: steam p2p probes / receive, player list. Game thread, in or out of a match
+    // (it closes its sessions itself on leave and on eject).
+    if (stage == 5) { CrashSpan _s("fsn/share"); SkinShare_Tick(); }
     // The killstreak color table is a write into the game's own data, so it has to go back
     // before this hook stops running -- nothing else would ever undo it. Same for flip world's
     // cl_flipviewmodels: its SetValue sends userinfo, so it goes back from this thread (eject
@@ -1732,11 +1796,13 @@ static void __fastcall h_FrameStageNotify(int stage)
 
     // stage 2: the snapshot has arrived and nothing has been unpacked yet.
     if (stage == 2) {
+        CrashSpan _s("fsn/skins-pre");
         if (g_enableSkins && s_preWriteCallSite != 0 && s_entityChangeAge >= 9)
             PreWriteDefIndexes();
         return;
     }
     if (stage != 3 && stage != 5) return;
+    CrashSpan _spanSkins("fsn/skins");   // the rest of this function: local + peer weapon passes
 
     static bool s_wasInGame = false;
     const bool bInGame = IsInGame();
@@ -1777,8 +1843,14 @@ static void __fastcall h_FrameStageNotify(int stage)
     // clock count, spells on, custom color) need none -- Skin_Apply below writes them this frame.
     static bool  s_updPending = false;
     static DWORD s_updDue     = 0;
+    // A peer's loadout arrived / changed / left: its weapons were built off the old def index,
+    // and only a full update rebuilds them -- same reason ours needs one.
+    static uint32_t s_peerGen = 0;
+    const uint32_t  peerGen   = SkinShare_LoadoutGen();
+    const bool peerChanged = g_shareNet && g_shareRecv && peerGen != s_peerGen;
+    s_peerGen = peerGen;
     const bool updReq = skinEnabling || skinDisabling
-                     || (g_enableSkins && (g_skinNeedsUpdate || (chg & SC_Rebuild)));
+                     || (g_enableSkins && (g_skinNeedsUpdate || (chg & SC_Rebuild) || peerChanged));
     g_skinNeedsUpdate = false;
     const DWORD now = GetTickCount();
     if (updReq) {
@@ -1878,6 +1950,8 @@ static void __fastcall h_FrameStageNotify(int stage)
     SkinsDiag(pLocal);
 
     if (s_offMyWeapons <= 0 || s_offItemDefIndex <= 0 || s_offAttrList <= 0) return;
+
+    ApplyPeerWeapons(false);
 
     const int teamNum = (s_offTeamNum > 0) ? SEH_ReadInt(pLocal, s_offTeamNum) : 0;
     const unsigned int hActive = (s_offActiveWeapon > 0) ? SEH_ReadHandle(pLocal, s_offActiveWeapon, 0) : 0;
@@ -2587,29 +2661,9 @@ void Skins_Install()
 void Skins_SaveCfg(FILE* f)
 {
     fprintf(f, "enableSkins=%d\n", g_enableSkins ? 1 : 0);
+    char buf[1024];   // one weapon's block is ~500 bytes; same text the wire carries (skinshare_pure.h)
     for (const auto& [id, c] : g_skinCfgs)
-    {
-        fprintf(f, "skin_%d_enabled=%d\n",       id, c.enabled ? 1 : 0);
-        fprintf(f, "skin_%d_paintKitId=%d\n",    id, c.paintKitId);
-        fprintf(f, "skin_%d_pattern=%llu\n",     id, (unsigned long long)c.pattern);
-        fprintf(f, "skin_%d_wear=%.4f\n",        id, c.wear);
-        fprintf(f, "skin_%d_ksTier=%d\n",        id, c.ksTier);
-        fprintf(f, "skin_%d_ksSheen=%d\n",       id, c.ksSheen);
-        fprintf(f, "skin_%d_ksEffect=%d\n",      id, c.ksEffect);
-        fprintf(f, "skin_%d_ksCustomColor=%d\n", id, c.ksCustomColor ? 1 : 0);
-        fprintf(f, "skin_%d_ksColor=%.4f %.4f %.4f\n", id,
-                c.ksColor[0], c.ksColor[1], c.ksColor[2]);
-        fprintf(f, "skin_%d_unusual=%d\n",       id, c.unusual);
-        fprintf(f, "skin_%d_australium=%d\n",    id, c.australium ? 1 : 0);
-        fprintf(f, "skin_%d_festivized=%d\n",    id, c.festivized ? 1 : 0);
-        fprintf(f, "skin_%d_festive=%d\n",       id, c.festive ? 1 : 0);
-        fprintf(f, "skin_%d_statClock=%d\n",     id, c.statClock ? 1 : 0);
-        fprintf(f, "skin_%d_statKills=%d\n",     id, c.statKills);
-        fprintf(f, "skin_%d_spellFlags=%d\n",    id, (int)c.spellFlags);
-        fprintf(f, "skin_%d_weaponSkinDef=%d\n", id, c.weaponSkinDef);
-        fprintf(f, "skin_%d_reskinDef=%d\n",     id, c.reskinDef);
-        fprintf(f, "skin_%d_reskinStyle=%d\n",   id, c.reskinStyle);
-    }
+        if (SkinPure_Format(buf, sizeof(buf), id, c)) fputs(buf, f);
 }
 
 bool Skins_LoadCfg(const char* key, const char* val)
@@ -2635,29 +2689,7 @@ bool Skins_LoadCfg(const char* key, const char* val)
         return true;
     }
 
-    SkinCfg& c = g_skinCfgs[(int)defIdx];
-    const bool b = (atoi(val) != 0);
-
-    if      (strcmp(field, "enabled")       == 0) c.enabled       = b;
-    else if (strcmp(field, "paintKitId")    == 0) c.paintKitId    = atoi(val);
-    else if (strcmp(field, "pattern")       == 0) c.pattern       = strtoull(val, nullptr, 10);
-    else if (strcmp(field, "wear")          == 0) c.wear          = (float)atof(val);
-    else if (strcmp(field, "ksTier")        == 0) c.ksTier        = atoi(val);
-    else if (strcmp(field, "ksSheen")       == 0) c.ksSheen       = atoi(val);
-    else if (strcmp(field, "ksEffect")      == 0) c.ksEffect      = atoi(val);
-    else if (strcmp(field, "ksCustomColor") == 0) c.ksCustomColor = b;
-    else if (strcmp(field, "ksColor")       == 0)
-        sscanf(val, "%f %f %f", &c.ksColor[0], &c.ksColor[1], &c.ksColor[2]);
-    else if (strcmp(field, "unusual")       == 0) c.unusual       = atoi(val);
-    else if (strcmp(field, "australium")    == 0) c.australium    = b;
-    else if (strcmp(field, "festivized")    == 0) c.festivized    = b;
-    else if (strcmp(field, "festive")       == 0) c.festive       = b;
-    else if (strcmp(field, "statClock")     == 0) c.statClock     = b;
-    else if (strcmp(field, "statKills")     == 0) c.statKills     = atoi(val);
-    else if (strcmp(field, "spellFlags")    == 0) c.spellFlags    = (uint8_t)atoi(val);
-    else if (strcmp(field, "weaponSkinDef") == 0) c.weaponSkinDef = atoi(val);
-    else if (strcmp(field, "reskinDef")     == 0) c.reskinDef     = atoi(val);
-    else if (strcmp(field, "reskinStyle")   == 0) c.reskinStyle   = atoi(val);
+    SkinPure_SetField(g_skinCfgs[(int)defIdx], field, val);
     return true;
 }
 

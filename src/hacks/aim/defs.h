@@ -10708,6 +10708,7 @@ class CTFPlayer : public CBasePlayer
 public:
 	NETVAR(m_nWaterLevel, byte, "CTFPlayer", "m_nWaterLevel");
 	NETVAR(m_iClass, int, "CTFPlayer", "m_iClass");
+	NETVAR(m_flDuckTimer, float, "CTFPlayer", "m_flDuckTimer");   // Amalgam CTFPlayer.h:38, auto rocket jump duck gate
 	NETVAR(m_nPlayerCond, int, "CTFPlayer", "m_nPlayerCond");
 	NETVAR(m_bJumping, bool, "CTFPlayer", "m_bJumping");
 	NETVAR(m_iCritMult, int, "CTFPlayer", "m_iCritMult");

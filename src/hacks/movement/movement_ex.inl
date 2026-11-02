@@ -1,7 +1,7 @@
 // Unit A port: small movement tricks from botox csgo-sdk, adapted to TF2's gamemovement.
 // Textually included by movement.cpp (same convention as edgebug.inl/texturebug.inl) --
 // shares every helper/static in that TU (On, EntV3/EntI/EntF, TraceHull, IN_*, FL_*...).
-// Ported: nulls, hsw, delay hop, auto crouch, jumpbug kangaroo, smooth demo
+// Ported: nulls, hsw, delay hop, auto crouch, smooth demo
 // view (reuses engIsPlayingDemo=76, same confirmed vtable slot as fakemove.inl), jumpstats.
 // edge skip + blockbot: movement_edge.inl. tung/bounce/pf modes/eb presets/ps fix:
 // movement_tricks2.inl. No ladder tricks: TF2 has no ladders.
@@ -68,7 +68,7 @@ static void Hsw(void* pLocal, UserCmd_t* pCmd)
     }
 }
 
-// ==== delay hop: hold N ticks of air time before pressing jump (botox movement.cpp:617) ====
+// ==== delay hop: space held → wait N ticks after landing, then jump (botox movement.cpp:623) ====
 static void DelayHop(void* pLocal, UserCmd_t* pCmd)
 {
     if (!On(g_delayHop, g_delayHopKey, g_delayHopMode) || !g_globalVars) return;
@@ -78,8 +78,13 @@ static void DelayHop(void* pLocal, UserCmd_t* pCmd)
     static int s_lastAirTick = 0;
     if (EntGround(pLocal))
     {
+        // only on real space: no hold = no auto hop (air tick still tracked below)
+        if (!s_rawJumpHeld) return;
         if (DelayHopShouldJump(pCmd->tick_count, s_lastAirTick, g_delayHopTicks))
+        {
             pCmd->buttons |= IN_JUMP;
+            s_lastAirTick = pCmd->tick_count;   // botox: reset on press
+        }
         else
             pCmd->buttons &= ~IN_JUMP;
     }
@@ -87,6 +92,195 @@ static void DelayHop(void* pLocal, UserCmd_t* pCmd)
     {
         s_lastAirTick = pCmd->tick_count;
     }
+}
+
+// ==== auto goomba: launch under a falling player so they touch our head the tick after we
+// leave -- they inherit our vz there (why: goomba_pure.h). Types: 0 sticky jump (det,
+// IN_ATTACK2), 1 rocket jump (aim tree: autorocketjump.cpp, Amalgam ARJ port, picks the
+// floor spot + ctap; this side only publishes the contact tick), 2 regular jump.
+// Their velocity is the client's own simtime-delta estimate (C_BasePlayer::PostDataUpdate,
+// c_baseplayer.cpp:853, refined by the aim tree's SetAbsVelocity velfix). Their origin is the
+// snapshot origin (the m_vecOrigin netvar IS m_vecNetworkOrigin, c_baseentity.cpp:441), so
+// it is pushed forward by (our tickbase time - their simtime): the server time our cmd runs at ====
+#include "goomba_pure.h"
+
+// IClientNetworkable::IsDormant = slot 8 (same read as world_fx3.cpp Dormant)
+static bool Gmb_Dormant(int idx)
+{
+    void* net = g_entityList ? VCall<void*>(g_entityList, 0, idx) : nullptr;
+    if (!net) return true;
+    bool d = true;
+    __try { d = VCall<bool>(net, 8); } __except (EXCEPTION_EXECUTE_HANDLER) { d = true; }
+    return d;
+}
+
+static bool s_goombaFired = false;   // this cmd fired (bind indicator flash; publish clears it)
+static int  s_goombaRocketK = -1;    // rocket type: best contact tick this cmd, aim ARJ reads it
+
+// aim tree (autorocketjump.cpp) runs after the movement pipeline in the same cmd. Take = read
+// and clear, so a cmd the pipeline skipped can never replay an old contact
+int Movement_TakeGoombaRocketContact()
+{
+    const int k = s_goombaRocketK;
+    s_goombaRocketK = -1;
+    return k;
+}
+// m_flSimulationTime (DT_BaseEntity); -1 = not in this build
+static int Gmb_SimOff()
+{
+    static int s_off = 0;
+    if (s_off == 0)
+    {
+        RecvTable* t = FindNetworkTable("DT_BaseEntity");
+        const int off = t ? FindPropOffset(t, "m_flSimulationTime") : -1;
+        s_off = off > 0 ? off : -1;
+    }
+    return s_off;
+}
+static float Gmb_SimTime(void* p) { const int o = Gmb_SimOff(); return o > 0 ? *reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(p) + o) : 0.f; }
+
+// ---- outcome tracker: after every fire, watch the target 40 cmds and log what it did. The fire
+// is a guess, this is the measurement: maxVz = the boost they actually got, land = server ticks
+// from our fire cmd to the snapshot that shows them standing (on us) ----
+struct GmbTrack { int idx = 0, left = 0, type = 0, pred = 0, lead = 0, fireTick = 0, landTick = -1; float vzFire = 0.f, maxVz = -1e9f, myMaxVz = -1e9f; };
+static GmbTrack s_gmbTrk;
+static int   s_gmbBestIdx = 0, s_gmbBestK = -1, s_gmbMyTick = 0;   // this cmd's scan
+static float s_gmbBestVz = 0.f;
+
+static void Gmb_TrackStart(int type)
+{
+    if (s_gmbBestIdx <= 0) return;
+    if (s_gmbTrk.left > 0)   // a fire before the last one finished: log what it had
+        DebugLog("GOOMBA: result type=%d pred=%d lead=%d land=%d vzFire=%.0f maxVz=%.0f myMaxVz=%.0f (cut short)",
+                 s_gmbTrk.type, s_gmbTrk.pred, s_gmbTrk.lead,
+                 s_gmbTrk.landTick >= 0 ? s_gmbTrk.landTick - s_gmbTrk.fireTick : -99, s_gmbTrk.vzFire, s_gmbTrk.maxVz, s_gmbTrk.myMaxVz);
+    s_gmbTrk = { s_gmbBestIdx, 40, type, s_gmbBestK, (std::max)(g_goombaLead, 0), s_gmbMyTick, -1, s_gmbBestVz, -1e9f, -1e9f };
+}
+
+static void Gmb_TrackTick(void* pLocal, float dt)
+{
+    GmbTrack& t = s_gmbTrk;
+    if (t.left <= 0) return;
+    // ours: what the landing could hand them (their gain ~= this when the transfer lands clean)
+    t.myMaxVz = (std::max)(t.myMaxVz, EntV3(pLocal, g_offVelocity).z);
+    void* p = GetClientEntity(t.idx);
+    const bool ok = p && EntAlive(p) && !Gmb_Dormant(t.idx);
+    if (ok)
+    {
+        t.maxVz = (std::max)(t.maxVz, EntV3(p, g_offVelocity).z);
+        if (t.landTick < 0 && (EntI(p, g_offFlags) & FL_ONGROUND))
+            t.landTick = (int)(Gmb_SimTime(p) / dt + 0.5f);
+    }
+    if (!ok || --t.left == 0)
+    {
+        DebugLog("GOOMBA: result type=%d pred=%d lead=%d land=%d vzFire=%.0f maxVz=%.0f myMaxVz=%.0f%s",
+                 t.type, t.pred, t.lead, t.landTick >= 0 ? t.landTick - t.fireTick : -99,
+                 t.vzFire, t.maxVz, t.myMaxVz, ok ? "" : " (target lost)");
+        t.left = 0;
+    }
+}
+
+void Movement_GoombaFired() { s_goombaFired = true; Gmb_TrackStart(1); }
+int  Movement_GoombaTarget() { return s_gmbBestIdx; }   // this cmd's best target (0 = none), for the rocket plan
+
+static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
+{
+    static float s_latchUntil = 0.f;   // one fire per drop: back-to-back cmds see the same contact
+    s_goombaRocketK = -1;
+    s_gmbBestIdx = 0; s_gmbBestK = -1;
+    if (!g_goomba || !g_globalVars || !g_entityList) return;
+    if (g_offOrigin <= 0 || g_offMins <= 0 || g_offMaxs <= 0 || g_offVelocity <= 0
+        || g_offTeamNum <= 0 || g_offFlags <= 0) return;
+    const float dtT = g_globalVars->interval_per_tick > 0.f ? g_globalVars->interval_per_tick : 0.015f;
+    Gmb_TrackTick(pLocal, dtT);   // before the key gate: the outcome keeps playing after the key is let go
+    s_gmbMyTick = g_offTickBase > 0 ? EntI(pLocal, g_offTickBase) : 0;
+    if (!MovementKeyOK(g_goombaKey, g_goombaMode)) return;
+
+    const float rt = g_globalVars->realtime;
+    const float dt = g_globalVars->interval_per_tick > 0.f ? g_globalVars->interval_per_tick : 0.015f;
+    const int   n  = (std::min)(g_globalVars->maxClients > 0 ? g_globalVars->maxClients : 101, 101);
+    const int   lead = (std::max)(g_goombaLead, 0);
+    const bool  rocket = g_goombaHow == 1;
+    const bool  onGround = EntGround(pLocal);
+    if (!rocket && rt < s_latchUntil) return;
+    if (g_goombaHow == 2 && !onGround) return;   // a regular jump only leaves the floor
+
+    const float myTime = (float)s_gmbMyTick * dt;
+
+    const float g = CvarFloat("sv_gravity", 800.f);
+    const bool  teamSolid = CvarFloat("tf_avoidteammates", 1.f) == 0.f;   // 1 = teammates pass through
+
+    const Vec3  me = EntV3(pLocal, g_offOrigin), myVel = EntV3(pLocal, g_offVelocity);
+    const Vec3  myMaxs = EntV3(pLocal, g_offMaxs);
+    const float myHead = me.z + myMaxs.z;
+    const int   myTeam = EntI(pLocal, g_offTeamNum);
+    // jump = 289 set (tf_gamemovement.cpp:1315) then ballistic; a blast lands later, so until
+    // then our head stands still on the floor or keeps its own air arc
+    const bool  myFalls = g_goombaHow == 2 || !onGround;
+    const float myVz0 = g_goombaHow == 2 ? 289.f : (onGround ? 0.f : myVel.z);
+    // rocket: the ARJ decides against its own rocket flight time (up to ~10 ticks), so look further
+    const int   maxK = rocket ? 14 + lead : 2 + lead;
+
+    int best = -1;
+    for (int i = 1; i <= n; ++i)
+    {
+        void* p = GetClientEntity(i);
+        if (!p || p == pLocal || !EntAlive(p) || Gmb_Dormant(i)) continue;
+        if (!teamSolid && EntI(p, g_offTeamNum) == myTeam) continue;
+        if (EntI(p, g_offFlags) & FL_ONGROUND) continue;   // standing on us / anything: not falling
+
+        // snapshot -> the server time our cmd lands at. Clamp: a stale simtime is a lag spike, not physics
+        float t0 = 0.f;
+        if (Gmb_SimOff() > 0 && myTime > 0.f)
+            t0 = std::clamp(myTime - Gmb_SimTime(p), 0.f, 0.5f);
+
+        const Vec3  org = EntV3(p, g_offOrigin);
+        const Vec3  v = EntV3(p, g_offVelocity);
+        const float vz = v.z - g * t0;
+        if (vz >= -10.f) continue;   // only a drop (heroin goomba assist FUN_180075a10: vz < -10)
+        const float gap = org.z + gmb::Rise(v.z, g, t0) + EntV3(p, g_offMins).z - myHead;
+        if (gap <= 0.f || gap > 400.f) continue;
+
+        const int k = gmb::ContactTick(gap, vz, myVz0, myFalls, g, dt, maxK);
+        if (k < 0) continue;
+
+        // still over our head at contact
+        const float tk = t0 + dt * (float)k, tm = dt * (float)k;
+        const float reach = myMaxs.x + EntV3(p, g_offMaxs).x - 1.f;
+        if (fabsf(org.x + v.x * tk - (me.x + myVel.x * tm)) >= reach
+            || fabsf(org.y + v.y * tk - (me.y + myVel.y * tm)) >= reach) continue;
+        if (best < 0 || k < best) { best = k; s_gmbBestIdx = i; s_gmbBestVz = vz; }
+    }
+    s_gmbBestK = best;
+    if (best < 0) return;
+    if (rocket) { s_goombaRocketK = best; return; }
+
+    // a held jump the tick before would make the fire tick's press a refusal
+    if (gmb::ShouldPrime(best, lead)) { pCmd->buttons &= ~IN_JUMP; return; }
+    if (!gmb::ShouldFire(best, lead)) return;
+
+    // sticky = heroin's 0x806: det + jump + duck in one cmd off the floor (ctap sticky jump)
+    if (g_goombaHow == 0) pCmd->buttons |= IN_ATTACK2 | (onGround ? IN_JUMP | IN_DUCK : 0);
+    else                  pCmd->buttons |= IN_JUMP;
+    s_goombaFired = true;
+    s_latchUntil = rt + 0.3f;
+    Gmb_TrackStart(g_goombaHow);
+    DebugLog("GOOMBA: fire type=%d contact=%d lead=%d tick=%d", g_goombaHow, best, lead, s_gmbMyTick);
+}
+
+// ==== double jump strafe: scout AirDash writes velocity = wish vector (tf_gamemovement.cpp:1043,
+// psdash.h), so the keys held on the dash tick DECIDE the new direction. Rewrite that one cmd's
+// wish to the direction the hull already moves -> keys only pick speed, never turn. Dash tick =
+// fresh IN_JUMP in the air with a dash in pocket; held jump is a pogo refusal (:1235) ====
+static void DoubleJumpStrafe(void* pLocal, UserCmd_t* pCmd)
+{
+    if (!On(g_djStrafe, g_djStrafeKey, g_djStrafeMode) || g_offVelocity <= 0) return;
+    if (!(pCmd->buttons & IN_JUMP) || s_prevCmdJump) return;
+    if (EntGround(pLocal) || !CanAirDashNow(pLocal)) return;
+    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+    if (vel.Length2D() < 1.f) return;   // no heading to keep
+    // 450 = cl_forwardspeed: one key's worth, engine clamps to maxspeed anyway. No key = full too
+    MV_WriteWishWorld(pCmd, vel, 450.f);
 }
 
 // ==== auto crouch: duck ahead of a landing too low to stand in (simplified from botox
@@ -126,45 +320,6 @@ static void AutoCrouch(void* pLocal, UserCmd_t* pCmd)
               MASK_PLAYERSOLID, &filter, &headTr);
     if (headTr.DidHit() && headTr.fraction < 0.98f)
         pCmd->buttons |= IN_DUCK;
-}
-
-// ==== jumpbug kangaroo: alt duck-timing variant, standalone so AutoJumpbug (working) is
-// never touched. Ported from botox movement.cpp:1816 kangaroo(), re-read against TF2 FL_*
-// (confirmed FL_ONGROUND=1<<0 above) rather than CS:GO's enum ====
-static void JumpbugKangaroo(void* pLocal, UserCmd_t* pCmd)
-{
-    static bool  s_ducked = false;
-    static float s_armUntil = 0.f;
-    if (!On(g_jumpbug, g_jumpbugKey, g_jumpbugMode) || !g_jumpbugKangaroo || !g_globalVars) return;
-    if (g_offFlags <= 0 || g_offVelocity <= 0) return;
-
-    const int   flags    = EntI(pLocal, g_offFlags);
-    const bool  onGround = (flags & FL_ONGROUND) != 0;
-    const bool  wasGround = (s_prePredFlags & FL_ONGROUND) != 0;
-    const float vz = EntV3(pLocal, g_offVelocity).z;
-    const float now = g_globalVars->curtime;
-
-    if (onGround && vz >= 0.f) s_armUntil = now + 0.2f;
-
-    if (!(pCmd->buttons & IN_JUMP))
-    {
-        if (onGround && !wasGround && !s_ducked)
-        {
-            pCmd->buttons |= IN_DUCK;
-            s_ducked = true;
-        }
-        else
-        {
-            s_ducked = false;
-        }
-    }
-    else
-    {
-        if (onGround && !wasGround)
-            pCmd->buttons |= IN_DUCK;
-        if (onGround)
-            pCmd->buttons &= ~IN_JUMP;
-    }
 }
 
 // ==== smooth demo view: lock the OUTGOING cmd's viewangles to the last sent angle while

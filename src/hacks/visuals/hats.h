@@ -31,6 +31,9 @@ int             Hats_LocalClass();   // 0 when not in a game
 // on g_eject it frees them on the game thread, and thread.cpp waits on Hats_AnyLive for that.
 void Hats_FrameStage(int stage);
 bool Hats_AnyLive();
+// killfeed.cpp FireEvent hook. TF2 rule: a loadout change shows at the next spawn or resupply
+// (post_inventory_application), never mid-life -- the worn set is a snapshot taken on those events.
+void Hats_OnGameEvent(void* pEvent);
 // hats_inv.cpp: fake CEconItems in the local SO cache, one per used slot. `want` false = remove ours.
 void HatsInv_Tick(bool want);
 bool HatsInv_AnyLive();

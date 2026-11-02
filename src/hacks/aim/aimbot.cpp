@@ -5,6 +5,7 @@
 #include "aim_melee.h"
 #include "autodetonate.h"
 #include "autoairblast.h"
+#include "autorocketjump.h"
 
 // activation bind -- the same three modes dih's own movement features
 // use (MovementKeyOK). Mode 0 = always on, 1 = while the key is held, 2 = the key toggles it.
@@ -118,6 +119,7 @@ void CAimbot::RunMain(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 	if (pCmd->weaponselect)
 		return;
 
+	F::AutoRocketJump.Run(pLocal, pWeapon, pCmd);   // Amalgam RunMain slot; driven by the auto goomba
 	if (!ShouldRun(pLocal, pWeapon))
 		return;
 

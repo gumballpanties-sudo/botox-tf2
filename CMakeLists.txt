@@ -68,6 +68,7 @@ add_library(botox SHARED
     src/hacks/visuals/skins.cpp
     src/hacks/visuals/hats.cpp
     src/hacks/visuals/hats_inv.cpp
+    src/hacks/visuals/skinshare.cpp
     src/hacks/visuals/flipworld.cpp
     src/hacks/movement/detections.cpp
     src/hacks/movement/recorder.cpp
@@ -222,6 +223,11 @@ add_executable(ebstance_test tests/ebstance_test.cpp)
 # Build + run: cmake --build build --config Release --target jbpredict_test && build\Release\jbpredict_test.exe
 add_executable(jbpredict_test tests/jbpredict_test.cpp)
 
+# Gate test for the PS assist's double jump aim (psdash.h psd::AimSpeed): the horizontal speed
+# the dash cmd writes so the hull is over the seam when the arc falls back through its height.
+# Build + run: cmake --build build --config Release --target psdash_test && build\Release\psdash_test.exe
+add_executable(psdash_test tests/psdash_test.cpp)
+
 # Gate test for the media player's cover art geometry (src/hacks/hud/mp_art.h): the scale +
 # centre crop handed to winrt's BitmapTransform, including the rect-out-of-bounds case that
 # would throw inside the decode and silently kill the art.
@@ -301,6 +307,11 @@ add_executable(vmfps_test tests/vmfps_test.cpp)
 # Build + run: cmake --build build --config Release --target movementex_test && build\Release\movementex_test.exe
 add_executable(movementex_test tests/movementex_test.cpp)
 
+# Gate test for auto goomba timing (src/hacks/movement/goomba_pure.h): rise closed form, contact
+# tick, fire/prime gate, never-miss sweep.
+# Build + run: cmake --build build --config Release --target goomba_test && build\Release\goomba_test.exe
+add_executable(goomba_test tests/goomba_test.cpp)
+
 # Gate test for Unit A3's pure decisions (src/hacks/movement/movement_tricks2_pure.h): bounce tangent
 # flip, tung surf's widened ramp band, edge bug style preset bundles.
 # Build + run: cmake --build build --config Release --target movementtricks2_test && build\Release\movementtricks2_test.exe
@@ -323,6 +334,11 @@ add_executable(pssurf_test tests/pssurf_test.cpp)
 # step, the along-wall strafe yaw and the surf-pin test.
 # Build + run: cmake --build build --config Release --target airstuck_test && build\Release\airstuck_test.exe
 add_executable(airstuck_test tests/airstuck_test.cpp)
+
+# Gate test for the botox wall climb pure math (src/hacks/movement/wallclimb_pure.h): the yaw fix every
+# wc wish is built with, the "you leave the wall" test, the ground spot order and the fine ladder.
+# Build + run: cmake --build build --config Release --target wallclimb_test && build\Release\wallclimb_test.exe
+add_executable(wallclimb_test tests/wallclimb_test.cpp)
 
 # Gate test for the whole-map pixel surf candidates (src/hacks/movement/ps_map.h): a brush wall face's
 # top edge and its real ends, wedges/ramps refused, and the merge that turns a row of brushes
@@ -510,3 +526,8 @@ add_executable(hats_test tests/hats_test.cpp)
 # fire a cl_fullupdate at once, which wait for typing to settle, which show live with none.
 # Build + run: cmake --build build --config Release --target skins_test && build\Release\skins_test.exe
 add_executable(skins_test tests/skins_test.cpp)
+
+# Gate test for peer-to-peer skin sharing's wire format (src/hacks/visuals/skinshare_pure.h):
+# round trip, probe vs loadout, header fields, hostile input clamped / dropped.
+# Build + run: cmake --build build --config Release --target skinshare_test && build\Release\skinshare_test.exe
+add_executable(skinshare_test tests/skinshare_test.cpp)

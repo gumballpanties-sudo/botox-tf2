@@ -1327,6 +1327,8 @@ static void keybind_indicators(const MvInd_t& s)
         if (!custom_of(LBL_HSW))
             pending.back().m_text += g_hswSide == 0 ? "r" : "l";   // TF2 side 0 = right (botox 0 = left, "l")
     }
+    if (g_goomba && shown(KI_GOOMBA))
+        add_hit(LBL_GOOMBA, s.gmbHit, s.gmbOn);
 
     float       fs         = 0.f;
     ImFont*     font       = IndicatorFont(g_kiScale, fs);

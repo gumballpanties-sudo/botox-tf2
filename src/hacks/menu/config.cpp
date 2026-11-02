@@ -4,6 +4,7 @@
 #include "../aim/aim.h"   // the aimbot's vars ride in this same file
 #include "../visuals/skins.h"     // and so does the skinchanger's per-weapon block
 #include "../visuals/hats.h"      // and the hat changer's slots
+#include "../visuals/skinshare.h" // and the sharing toggles
 #include "../movement/detections.h"    // unit B
 #include "../movement/ps_lines.h"      // unit B
 #include "../movement/recorder.h"      // unit B
@@ -500,10 +501,20 @@ static const CfgEntry kEntries[] = {
     { "wallClimb",        CfgEntry::BOOL,   &g_wallClimb, 0 },
     { "wallClimbKey",     CfgEntry::INT,    &g_wallClimbKey, 0 },
     { "wallClimbMode",    CfgEntry::INT,    &g_wallClimbMode, 0 },
+    { "wallClimbPreventSlow", CfgEntry::BOOL, &g_wcPreventSlow, 0 },
+    { "wallClimbDuck",    CfgEntry::BOOL,   &g_wcDuck, 0 },
+    { "wallClimbSpotReach", CfgEntry::INT,  &g_wcSpotReach, 0 },
+    { "wallClimbViz",     CfgEntry::BOOL,   &g_wcViz, 0 },
+    { "wallClimbVizColor", CfgEntry::FLOAT4, g_wcVizColor, 0 },
     { "airStuck",         CfgEntry::BOOL,   &g_airStuck, 0 },
     { "asExtraReach",     CfgEntry::FLOAT,  &g_asExtraReach, 0 },
     { "asBudget",         CfgEntry::FLOAT,  &g_asBudget, 0 },
     { "asStyle",          CfgEntry::INT,    &g_asStyle, 0 },
+    { "asaCatchEps",      CfgEntry::FLOAT,  &g_asaCatchEps, 0 },
+    { "asaReach",         CfgEntry::FLOAT,  &g_asaReach, 0 },
+    { "asaFlushTol",      CfgEntry::FLOAT,  &g_asaFlushTol, 0 },
+    { "asaDriftGain",     CfgEntry::FLOAT,  &g_asaDriftGain, 0 },
+    { "asaSimBudget",     CfgEntry::INT,    &g_asaSimBudget, 0 },
     { "airStuckKey",      CfgEntry::INT,    &g_airStuckKey, 0 },
     { "airStuckMode",     CfgEntry::INT,    &g_airStuckMode, 0 },
 
@@ -520,11 +531,18 @@ static const CfgEntry kEntries[] = {
     { "delayHopKey",       CfgEntry::INT,   &g_delayHopKey, 0 },
     { "delayHopMode",      CfgEntry::INT,   &g_delayHopMode, 0 },
     { "delayHopTicks",     CfgEntry::INT,   &g_delayHopTicks, 0 },
+    { "goomba",            CfgEntry::BOOL,  &g_goomba, 0 },
+    { "goombaKey",         CfgEntry::INT,   &g_goombaKey, 0 },
+    { "goombaMode",        CfgEntry::INT,   &g_goombaMode, 0 },
+    { "goombaHow",         CfgEntry::INT,   &g_goombaHow, 0 },
+    { "goombaLead",        CfgEntry::INT,   &g_goombaLead, 0 },
     { "autoCrouch",        CfgEntry::BOOL,  &g_autoCrouch, 0 },
     { "autoCrouchKey",     CfgEntry::INT,   &g_autoCrouchKey, 0 },
     { "autoCrouchMode",    CfgEntry::INT,   &g_autoCrouchMode, 0 },
     { "autoCrouchTicks",   CfgEntry::INT,   &g_autoCrouchTicks, 0 },
-    { "jumpbugKangaroo",   CfgEntry::BOOL,  &g_jumpbugKangaroo, 0 },
+    { "djStrafe",          CfgEntry::BOOL,  &g_djStrafe, 0 },
+    { "djStrafeKey",       CfgEntry::INT,   &g_djStrafeKey, 0 },
+    { "djStrafeMode",      CfgEntry::INT,   &g_djStrafeMode, 0 },
     { "silentView",        CfgEntry::BOOL,  &g_silentView, 0 },
     { "jumpstats",         CfgEntry::BOOL,  &g_jumpstats, 0 },
 
@@ -1036,6 +1054,7 @@ void SaveConfig(const char* path, bool visuals)
         // has an entry, so it cannot live in the flat kEntries table.
         Skins_SaveCfg(f);
         Hats_SaveCfg(f);   // "hatsEnable" + "hat_<slot>=def style unusual paint"
+        SkinShare_SaveCfg(f);   // shareNet / shareSend / shareRecv
 
         // Aimbot vars (src/hacks/aim/aim.cpp). Appended after dih's own entries;
         // they are keyed by their registered "Vars::..." name so they cannot collide with kEntries.
@@ -1159,6 +1178,7 @@ void LoadConfig(const char* path, bool visuals)
         // Same for the skinchanger's "enableSkins" / "skin_<def>_<field>" block.
         if (Skins_LoadCfg(key, val)) continue;
         if (Hats_LoadCfg(key, val)) continue;
+        if (SkinShare_LoadCfg(key, val)) continue;
         if (Ind_LoadLegacy(key, val)) continue;
         // esp rows from before the botox players port: one box combo (0 off, 1 corner, 2 full)
         // and one "health" row that drew bar + number. Never written now, read once into the new rows

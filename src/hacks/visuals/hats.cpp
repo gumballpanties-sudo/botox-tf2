@@ -2,6 +2,7 @@
 #include "../../globals/globals.h"
 #include "hats.h"
 #include "skins.h"
+#include "skinshare.h"   // peers' hats go on THEIR players, same lifecycle, slots after ours
 #include "../../dependencies/data/hatdata.h"
 
 // ==== hat changer ===============================================================================
@@ -51,9 +52,14 @@ const HatDef* Hats_Find(int def)
     return nullptr;
 }
 
-// Entity indices 2032..2039. The weather entity owns 2047 (visuals.cpp); servers fill from the
-// bottom, and a TF2 map that reaches 2032 networked entities is already at the edict limit.
-static constexpr int kFirstIndex = 2032;
+// Entity indices 2000..2039: ours at 2000..2007, then 4 per shared peer (skinshare.cpp, 8 peers).
+// The weather entity owns 2047 (visuals.cpp); servers fill from the bottom, and a TF2 map that
+// reaches 2000 networked entities is already at the edict limit.
+// ponytail: 4 hats per peer, 8 peers -- the index budget under 2047; raise kShareMaxPeers with it.
+static constexpr int kFirstIndex   = 2000;
+static constexpr int kPeerHatsEach = 4;
+static constexpr int kTotalSlots   = kHatSlots + kShareMaxPeers * kPeerHatsEach;
+static_assert(kFirstIndex + kTotalSlots < 2047, "hat slots run into the weather entity");
 static constexpr int kMarker     = 0xFADED;   // m_iItemIDLow, lbox's own marker; High = our index
 
 // Netvar offsets off DT_TFWearable (FindPropOffset walks the base tables, so the base entity
@@ -154,10 +160,10 @@ struct LiveHat {
     unsigned owner;
     uint32_t bornFrame;
 };
-static LiveHat  s_live[kHatSlots];
+static LiveHat  s_live[kTotalSlots];
 // Each hat's IClientNetworkable, for the dormancy hook below. Written before the hat is told
 // it is transmitted, cleared before it is Released.
-static void* volatile s_liveNet[kHatSlots];
+static void* volatile s_liveNet[kTotalSlots];
 
 // ---- dormancy -----------------------------------------------------------------------------------
 // The engine's CL_MarkEntitiesOutOfPVS walks EVERY entity in the client list after each packet and
@@ -174,7 +180,7 @@ static void __fastcall h_NotifyShouldTransmit(void* net, int state)
 {
     MiscHookGuard _g;
     if (state == 1 /* SHOULDTRANSMIT_END */ && !g_eject)
-        for (int i = 0; i < kHatSlots; ++i)
+        for (int i = 0; i < kTotalSlots; ++i)
             if (s_liveNet[i] == net) return;
     o_NotifyShouldTransmit(net, state);
 }
@@ -189,7 +195,7 @@ static void HookNotifyShouldTransmit(void* pNet)
         DebugLog("hats: NotifyShouldTransmit hook failed -- hats will stay dormant (invisible)");
 }
 static uint32_t s_frame = 0;
-static uint32_t s_freedFrame[kHatSlots];   // a slot released this frame is not rebuilt until the next
+static uint32_t s_freedFrame[kTotalSlots];   // a slot released this frame is not rebuilt until the next
 
 static bool StillOurs(int i)
 {
@@ -324,7 +330,7 @@ static void UpdateBody(int localIdx, void* pLocal)
 }
 
 bool Hats_WantBody() { return s_bodyOpCount > 0 && !g_eject; }
-bool Hats_IsOurs(int entIdx) { return entIdx >= kFirstIndex && entIdx < kFirstIndex + kHatSlots; }
+bool Hats_IsOurs(int entIdx) { return entIdx >= kFirstIndex && entIdx < kFirstIndex + kTotalSlots; }
 
 int Hats_Body(int entIdx, const void* pModel, int body)
 {
@@ -337,10 +343,10 @@ int Hats_Body(int entIdx, const void* pModel, int body)
 
 // ---- diag ---------------------------------------------------------------------------------------
 // "hat exists, nothing on screen": the state every draw gate reads, a few lines per spawn.
-static volatile long s_drawCount[kHatSlots];
+static volatile long s_drawCount[kTotalSlots];
 void Hats_NoteDraw(int entIdx)
 {
-    if (entIdx >= kFirstIndex && entIdx < kFirstIndex + kHatSlots) ++s_drawCount[entIdx - kFirstIndex];
+    if (entIdx >= kFirstIndex && entIdx < kFirstIndex + kTotalSlots) ++s_drawCount[entIdx - kFirstIndex];
 }
 
 __declspec(noinline) static void Diag(int i, void* pLocal)
@@ -456,6 +462,109 @@ bool Hats_AnyLive()
     return HatsInv_AnyLive();
 }
 
+// One slot, one frame: keep / release / spawn against what it should be wearing now. `wear` false
+// with a live hat releases it; `c` is read only when spawning.
+static void TickSlot(int i, const HatSlot& c, const HatDef* d, bool wear, int cls, int team, unsigned owner)
+{
+    LiveHat& L = s_live[i];
+    if (L.ent) {
+        if (L.bornFrame == s_frame) return;   // its OnDataChanged is still queued
+        if (!wear || !SameCfg(L.cfg, c) || L.cls != cls || L.owner != owner || L.team != team)
+            Release(i, !wear ? "not wearable" : "changed");
+        return;
+    }
+    if (!wear || s_freedFrame[i] == s_frame) return;
+
+    char path[260];
+    if (!Hat_ModelFor(d->styles[ClampStyle(d, c.style)].mdl, cls, path, sizeof(path))) return;
+    // Registered before the entity exists, so Spawn's own SetModel(path) finds it too.
+    static int s_badDef[kTotalSlots] = {};
+    const int mdlIdx = Skins_ModelIndex(path);
+    if (!mdlIdx) {
+        if (s_badDef[i] != c.def) { s_badDef[i] = c.def; DebugLog("hats: no model index for '%s' (def %d)", path, c.def); }
+        return;
+    }
+    s_badDef[i] = 0;
+    Spawn(i, c, d, cls, team, owner, mdlIdx);
+}
+
+// Can `d` be worn by a player of this class on a playing team?
+static bool Wearable(const HatDef* d, int cls, int team)
+{
+    return d && cls >= 1 && cls <= 9 && (d->classMask >> cls & 1) && (team == 2 || team == 3);
+}
+
+// m_lifeState == LIFE_ALIVE. A dead player is EF_NODRAW while its entity sits where it died, but
+// CTFWearable::ShouldDrawWhenPlayerIsDead is true (tf_item_wearable.h:61), so a hat left on it
+// hung in the air over the corpse. TF2's real hats go onto the ragdoll (server-side follow); ours
+// come off at death and back on at spawn. ponytail: no ragdoll copy -- CEconEntity::
+// ValidateEntityAttachedToPlayer wants the owner in the move-parent chain, which a ragdoll is not.
+__declspec(noinline) static bool Alive(void* pEnt)
+{
+    if (!pEnt || g_offLifeState <= 0) return false;
+    __try { return *reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(pEnt) + g_offLifeState) == 0; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// ---- the worn snapshot --------------------------------------------------------------------------
+// TF2 applies a loadout at spawn and at the resupply locker (both fire post_inventory_application
+// for the player), not the moment you click. So the world hats are built from s_applied, a copy of
+// g_hatSlots taken on those events; the menu and the backpack copy (hats_inv.cpp) stay live, like
+// TF2's own loadout screen does.
+static HatSlot s_applied[kHatSlots];
+static bool    s_appliedOnce = false;
+
+static void ApplySnapshot(const char* why)
+{
+    bool changed = !s_appliedOnce;
+    for (int i = 0; i < kHatSlots; ++i)
+        if (memcmp(&s_applied[i], &g_hatSlots[i], sizeof(HatSlot)) != 0) { s_applied[i] = g_hatSlots[i]; changed = true; }
+    s_appliedOnce = true;
+    if (changed) DebugLog("hats: loadout applied (%s)", why);
+}
+
+void Hats_OnGameEvent(void* pEvent)
+{
+    if (!pEvent || g_eject) return;
+    __try {
+        const char* name = IGameEventVtbl::GetName(pEvent);
+        if (!name) return;
+        if (strcmp(name, "post_inventory_application") != 0 && strcmp(name, "player_spawn") != 0) return;
+        const int localIdx = GetLocalPlayerIndex();
+        const int uid = IGameEventVtbl::GetInt(pEvent, "userid", 0);
+        if (localIdx < 1 || uid <= 0 || GetPlayerForUserID(uid) != localIdx) return;
+        ApplySnapshot(name);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Shared peers (skinshare.cpp): the first kPeerHatsEach hats of each peer's loadout, on that
+// player, slots kHatSlots + peer*kPeerHatsEach.. . A peer slot that is empty, gone, or out of the
+// PVS releases what it wore. Bodygroup hiding (UpdateBody) is ours only: their real hats draw too.
+static void TickPeers()
+{
+    const bool show = g_shareNet && g_shareRecv;
+    for (int p = 0; p < kShareMaxPeers; ++p) {
+        const SharePeer* peer = show ? SkinShare_Peer(p) : nullptr;
+        void* pPlayer = (peer && peer->hasLoadout && peer->playerIdx > 0) ? GetClientEntity(peer->playerIdx) : nullptr;
+        if (pPlayer && !Alive(pPlayer)) pPlayer = nullptr;
+        const int cls  = pPlayer ? GetPlayerClass(peer->playerIdx) : 0;
+        const int team = pPlayer ? RdI(pPlayer, s_off.teamNum) : 0;
+        unsigned owner = pPlayer ? RefHandle(pPlayer) : 0;
+        if (pPlayer && (owner & 0xFFF) != (unsigned)peer->playerIdx) pPlayer = nullptr;
+
+        int k = 0;
+        for (int h = 0; h < kHatSlots && k < kPeerHatsEach; ++h) {
+            const HatSlot c = pPlayer ? peer->lo.hats[h] : HatSlot{ 0, 0, -1, -1 };
+            if (c.def <= 0) continue;
+            const HatDef* d = Hats_Find(c.def);
+            if (!d) continue;
+            TickSlot(kHatSlots + p * kPeerHatsEach + k++, c, d, Wearable(d, cls, team), cls, team, owner);
+        }
+        for (; k < kPeerHatsEach; ++k)   // the rest of this peer's slots wear nothing
+            TickSlot(kHatSlots + p * kPeerHatsEach + k, HatSlot{ 0, 0, -1, -1 }, nullptr, false, 0, 0, 0);
+    }
+}
+
 void Hats_FrameStage(int stage)
 {
     if (stage != 5) return;
@@ -466,7 +575,7 @@ void Hats_FrameStage(int stage)
 
     // The engine may have destroyed ours (level change, disconnect, full update) or put its own
     // entity at the index. Forget it, never Release it.
-    for (int i = 0; i < kHatSlots; ++i)
+    for (int i = 0; i < kTotalSlots; ++i)
         if (s_live[i].ent && !StillOurs(i)) {
             DebugLog("hats: slot %d def %d gone (engine destroyed or replaced it)", i, s_live[i].cfg.def);
             s_liveNet[i] = nullptr;   // that address may be some other entity's by now
@@ -475,10 +584,11 @@ void Hats_FrameStage(int stage)
         }
 
     if (g_eject || !g_hatsEnable || !IsInGame()) {
-        for (int i = 0; i < kHatSlots; ++i)
+        for (int i = 0; i < kTotalSlots; ++i)
             if (s_live[i].ent) Release(i, g_eject ? "eject" : "off");
         if (s_bodyOpCount) s_bodyOpCount = 0;
         s_hideCount = 0;
+        s_appliedOnce = false;   // the next spawn applies whatever the menu holds by then
         return;
     }
 
@@ -491,44 +601,31 @@ void Hats_FrameStage(int stage)
     const int team = RdI(pLocal, s_off.teamNum);
     const unsigned owner = RefHandle(pLocal);
     if ((owner & 0xFFF) != (unsigned)localIdx) return;   // not the handle we think it is
+    const bool alive = Alive(pLocal);
+
+    // The first snapshot: whatever the menu holds when the hats come on (a respawn applies the
+    // rest). A dead local player keeps the old one until it spawns -- the TF2 order.
+    if (!s_appliedOnce) ApplySnapshot("first frame");
 
     for (int i = 0; i < kHatSlots; ++i) {
-        const HatSlot c = g_hatSlots[i];
+        const HatSlot c = s_applied[i];
         const HatDef* d = c.def > 0 ? Hats_Find(c.def) : nullptr;
-        const bool managed = g_hatsBackpack && (c.eqMask & 1);   // equipped through the loadout screen
-        const bool wear = d && cls >= 1 && cls <= 9 && (d->classMask >> cls & 1) && (team == 2 || team == 3)
-                       && (!managed || (c.eqMask >> cls & 1));
-        LiveHat& L = s_live[i];
-
-        if (L.ent) {
-            if (L.bornFrame == s_frame) continue;   // its OnDataChanged is still queued
-            if (!wear || !SameCfg(L.cfg, c) || L.cls != cls || L.owner != owner || L.team != team) {
-                Release(i, !wear ? "not wearable" : "changed");
-            }
-            continue;
-        }
-        if (!wear || s_freedFrame[i] == s_frame) continue;
-
-        char path[260];
-        if (!Hat_ModelFor(d->styles[ClampStyle(d, c.style)].mdl, cls, path, sizeof(path))) continue;
-        // Registered before the entity exists, so Spawn's own SetModel(path) finds it too.
-        static int s_badDef[kHatSlots] = {};
-        const int mdlIdx = Skins_ModelIndex(path);
-        if (!mdlIdx) {
-            if (s_badDef[i] != c.def) { s_badDef[i] = c.def; DebugLog("hats: no model index for '%s' (def %d)", path, c.def); }
-            continue;
-        }
-        s_badDef[i] = 0;
-        Spawn(i, c, d, cls, team, owner, mdlIdx);
+        // TF2's rule when the hat is a backpack item: worn only on the classes it is equipped on
+        // in the loadout screen (bit 0 = the screen touched it, bit cls = equipped there). With no
+        // backpack copy there is nothing to equip, so the slot is worn on every class that can.
+        const bool wear = alive && Wearable(d, cls, team)
+                       && (!g_hatsBackpack || ((c.eqMask & 1) && (c.eqMask >> cls & 1)));
+        TickSlot(i, c, d, wear, cls, team, owner);
     }
+    TickPeers();
 
     UpdateBody(localIdx, pLocal);
-    for (int i = 0; i < kHatSlots; ++i) SyncVisibility(i);
+    for (int i = 0; i < kTotalSlots; ++i) SyncVisibility(i);
     if (s_frame % 30 == 0) UpdateHide(localIdx, cls);
 
     // diag: 1 s, 3 s, then every 10 s after a spawn, 8 lines max per spawn
-    static uint32_t s_diagLines[kHatSlots];
-    for (int i = 0; i < kHatSlots; ++i) {
+    static uint32_t s_diagLines[kTotalSlots];
+    for (int i = 0; i < kTotalSlots; ++i) {
         const LiveHat& L = s_live[i];
         if (!L.ent) { s_diagLines[i] = 0; continue; }
         const uint32_t age = s_frame - L.bornFrame;

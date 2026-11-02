@@ -295,6 +295,17 @@ inline bool MV_EbJumpCheck(int iStance, bool bDucked)
     return iStance == 0 && bDucked;
 }
 
+// speed gate (TF2, not botox): a plan that bleeds 2D speed into the bug is a dead stop, not a bug.
+// The brake pass (air accel takes the full 450 wish against velocity, ~45-60 u/s a tick) held over
+// its window, a backward wish or a lip-side clip all find a "bug" at near-zero speed.
+// v0 = search start, v1 = after the confirm tick, keep = 0..1 share that must survive.
+// 0.7: a single brake tick at 600 u/s keeps ~0.9, a held brake ends well under half
+static constexpr float k_mvEbKeepSpeed = 0.7f;
+inline bool MV_EbSpeedOk(float v0, float v1, float keep = k_mvEbKeepSpeed)
+{
+    return v0 < 1.f || v1 >= v0 * keep;
+}
+
 // ================= plan pick (botox edgebug.cpp:1132-1155 + TF2 stance) =======================
 // err = heading error vs where the mouse turns (botox eb_aim_err). A plan that eats the jump is
 // picked only when no other plan exists; between equals, lowest err wins with botox's 0.5 margin.

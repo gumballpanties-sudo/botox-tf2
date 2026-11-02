@@ -25,6 +25,7 @@
 #include "../hacks/misc/misc_overlays.h"   // unit misc: ConsoleTint_Install
 #include "../hacks/misc/discord_ex.h"   // unit E: discord rich presence, its own IPC thread
 #include "../hacks/misc/game_extras.h"  // unit game: bot names GetPlayerInfo hook + eject restore
+#include "../hacks/visuals/skinshare.h" // SkinShare_Shutdown: steam networking worker joined at eject
 #include "../hacks/aim/aim.h"
 #include "../hacks/misc/boot_screen.h"   // eject splash: begin before g_eject, end before unhook
 
@@ -514,6 +515,7 @@ static void MainThread()
     // provably out of h_Present by this point.
     Perf_Shutdown();
     GameExtras_Shutdown();   // unit game: knobs/pings back if no frame did it, http aborted, workers joined
+    SkinShare_Shutdown();    // skin sharing: the steam networking worker stopped + joined
     ScreenFx_RestoreQueueMode();   // hand mat_queue_mode back before the hooks come off
 
     // Fallback only: no frame came during the wait above (e.g. alt-tabbed, FSN not running).

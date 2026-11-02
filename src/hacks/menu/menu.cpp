@@ -12,6 +12,7 @@
 #include "../movement/movement.h"   // RC_* marker access for the route calculator's marker list
 #include "../visuals/skins.h"      // skinchanger tab: weapon/warpaint/reskin tables + particle list
 #include "../visuals/hats.h"       // inventory tab "hats" page
+#include "../visuals/skinshare.h"  // skinchanger tab "networking" box
 #include "../../dependencies/data/skindata.h"
 #include "../../dependencies/imgui/imgui_internal.h"
 #include "menu_chrome.h"  // the panels, the group box flow and every metric they use
@@ -1204,7 +1205,6 @@ static void Page_MovementMain()
                 ImGui::Keybind("jumpbug key", &g_jumpbugKey, &g_jumpbugMode);
                 ImGui::Checkbox("predict the hit##jb", &g_jbPredict);
                 ImGui::Checkbox("yield to pixel surf##jb", &g_jbYieldSurf);
-                ImGui::Checkbox("kangaroo", &g_jumpbugKangaroo);
             }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("edge bug", &g_edgeBug);
@@ -1352,9 +1352,18 @@ static void Page_MovementMain()
             ImGui::OptionPopup("air stuck settings", [&]() {
                 ImGui::Label("air stuck keybind");
                 ImGui::Keybind("air stuck key", &g_airStuckKey, &g_airStuckMode);
-                ImGui::Combo("style##asstyle", &g_asStyle, "cumidere\0botox\0");
+                ImGui::Combo("style##asstyle", &g_asStyle, "cumidere\0botox\0aletherium\0");
                 if (g_asStyle == 0)
                     return;   // cumidere: engine numbers only, no knobs
+                if (g_asStyle == 2)
+                {
+                    SliderF("catch tolerance##asa", &g_asaCatchEps, 0.05f, 8.f, "%.2f");
+                    SliderF("reach##asa", &g_asaReach, 16.f, 128.f, "%.0f");
+                    SliderF("flush tolerance##asa", &g_asaFlushTol, 8.f, 96.f, "%.0f");
+                    SliderF("drift gain##asa", &g_asaDriftGain, 4.f, 40.f, "%.0f");
+                    ImGui::SliderInt("sim budget##asa", &g_asaSimBudget, 16, 128);
+                    return;
+                }
                 SliderF("extra reach##as", &g_asExtraReach, 0.f, 32.f, "%.0f");
                 SliderF("search budget##as", &g_asBudget, 10.f, 90.f, "%.0f%% tick");
             }, ImVec2(220.f, -1));
@@ -1400,6 +1409,14 @@ static void Page_MovementMain()
             ImGui::OptionPopup("wall climb settings", [&]() {
                 ImGui::Label("wall climb keybind");
                 ImGui::Keybind("wall climb key", &g_wallClimbKey, &g_wallClimbMode);
+                ImGui::Checkbox("prevent slow", &g_wcPreventSlow);
+                ImGui::Checkbox("crouch catches", &g_wcDuck);
+                SliderI("spot reach", &g_wcSpotReach, 0, 32, "%d u");
+                ImGui::Checkbox("visualize##wcviz", &g_wcViz);
+                ImGui::ColorEdit4("visualize color##wcvizcolor", g_wcVizColor,
+                    ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_NoOptions |
+                    ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip |
+                    ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoBorder);
             }, ImVec2(200.f, -1));
 
         ImGui::Checkbox("blockbot", &g_blockBot);
@@ -3047,6 +3064,21 @@ static void Tab_Skins()
     if (ImGui::IsItemHovered())
         MenuTooltip("re-resolves the reskin models and asks the server for a full update.\n"
                     "only needed when something did not take on its own.");
+
+    // ---- networking (skinshare.cpp) -- Nikogram's page: share / show, steam p2p, no backend --
+    Section("networking");
+    ImGui::Checkbox("enabled##shnet", &g_shareNet);
+    if (ImGui::IsItemHovered())
+        MenuTooltip("peer to peer over steam, between botox users on this server. probes every\n"
+                    "player every 10 s; only ready, consenting peers exchange cosmetics.\n"
+                    "no server, no account, nothing leaves your steam connection.");
+    ImGui::Checkbox("share my cosmetics", &g_shareSend);
+    if (ImGui::IsItemHovered())
+        MenuTooltip("peers that want them get your skinchanger + hats loadout.");
+    ImGui::Checkbox("show shared cosmetics", &g_shareRecv);
+    if (ImGui::IsItemHovered())
+        MenuTooltip("peers' loadouts are drawn on their players (skinchanger and hats must be on).");
+    ImGui::TextDisabled("%s", SkinShare_Status());
 }
 
 // ---- inventory: hats page (hats.cpp) -------------------------------------------------------
@@ -3083,13 +3115,17 @@ static void Page_Hats()
         if (ImGui::IsItemHovered())
             MenuTooltip("client-side cosmetics on your own player. only you see them,\n"
                         "and only in third person / demos, like your real hats.\n"
-                        "pick a slot, then click an item in the list to put it there.");
+                        "pick a slot, then click an item in the list to put it there.\n"
+                        "tf2 rules: a change shows at your next spawn or resupply, and with\n"
+                        "'show in backpack' the hat is worn only where you equipped it.");
         ImGui::Checkbox("show in backpack##hatsbp", &g_hatsBackpack);
         if (ImGui::IsItemHovered())
-            MenuTooltip("each worn hat also appears as an item in tf2's own backpack and\n"
-                        "item lists (client-side only, the item server never hears of it).\n"
-                        "equip one in tf2's loadout screen and it is worn only on the classes\n"
-                        "you equipped it on; until then it is worn on every class.");
+            MenuTooltip("each slot's hat is an item in tf2's own backpack and item lists\n"
+                        "(client-side only, the item server never hears of it). equip it in\n"
+                        "tf2's loadout screen like any hat: worn only on the classes you\n"
+                        "equipped it on, the real hat in that slot is unequipped, equip\n"
+                        "regions conflict as usual. off = no backpack copy, worn on every\n"
+                        "class that can wear it.");
         if (ImGui::BeginListBox("##hatslots", ImVec2(-1.f, 8 * ImGui::GetTextLineHeightWithSpacing() + 4.f)))
         {
             for (int i = 0; i < kHatSlots; ++i) {
@@ -3105,13 +3141,12 @@ static void Page_Hats()
         const HatDef* d = Hats_Find(s.def);
         if (d) {
             if (cls && !(d->classMask >> cls & 1)) ImGui::TextDisabled("(not for your current class)");
-            if (g_hatsBackpack && (s.eqMask & 1)) {
-                // equipped through tf2's loadout screen (hats_inv.cpp hook): worn only there
+            if (g_hatsBackpack) {
+                // worn only where tf2's loadout screen equipped it (hats_inv.cpp hook), like a real hat
                 char on[96] = {};
                 for (int k = 1; k <= 9; ++k)
-                    if (s.eqMask >> k & 1) { strcat_s(on, on[0] ? ", " : ""); strcat_s(on, Hat_ClassName(k)); }
-                ImGui::TextDisabled("loadout: %s", on[0] ? on : "not equipped");
-                if (ImGui::Button("wear on all classes##hateqrst", ImVec2(-1.f, 15.f))) s.eqMask = 0;
+                    if ((s.eqMask & 1) && (s.eqMask >> k & 1)) { strcat_s(on, on[0] ? ", " : ""); strcat_s(on, Hat_ClassName(k)); }
+                ImGui::TextDisabled("loadout: %s", on[0] ? on : "not equipped (equip it in tf2's loadout)");
             }
             if (d->nStyles > 1) {
                 if (s.style < 0 || s.style >= d->nStyles) s.style = 0;
@@ -3361,6 +3396,13 @@ static const MenuStyleRow k_menuStyles[] = {
     { "dna", IM_COL32(9, 9, 9, 240), IM_COL32(9, 9, 9, 240), IM_COL32(20, 20, 20, 153), IM_COL32(13, 13, 13, 255),
       IM_COL32(26, 26, 26, 178), IM_COL32(255, 255, 255, 8), IM_COL32(20, 20, 20, 255), IM_COL32(242, 242, 242, 255),
       IM_COL32(77, 77, 77, 217), 4.f, 2.f, 4.f, []() -> ImFont* { return g_fontDnaMontserrat15; }, []() -> ImFont* { return g_fontDnaPtRootBold15; } },
+    // heroin dll c_menu::render FUN_18004ce90 + style apply FUN_18004ea40, fresh-inject cfg (.data):
+    // window = inner_color, "outer" child = outer_color, frame = inner (checkbox grad outer->inner),
+    // Border = menu_color @ .25, main window border = menu_color, tab text 120 idle. Stock style = no rounding.
+    // One font for everything: io default arialbd 16.
+    { "heroin", IM_COL32(37, 39, 48, 255), IM_COL32(42, 44, 56, 255), IM_COL32(42, 44, 56, 255), IM_COL32(37, 39, 48, 255),
+      IM_COL32(82, 161, 148, 64), IM_COL32(82, 161, 148, 255), IM_COL32(37, 39, 48, 255), IM_COL32(255, 255, 255, 255),
+      IM_COL32(120, 120, 120, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontHeroinArialBd16; }, []() -> ImFont* { return g_fontHeroinArialBd16; } },
 };
 static const int k_menuStyleCount = (int)(sizeof(k_menuStyles) / sizeof(k_menuStyles[0]));
 

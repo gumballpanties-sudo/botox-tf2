@@ -23,3 +23,15 @@ void CrashLog_Frame();
 // One timestamped line, no debug-log toggle needed. For rare diagnostics a feature wants to
 // see from a user's session (a draw path silently falling back) -- callers rate-limit it.
 void CrashLog_Note(const char* fmt, ...);
+
+// Stutter probe -- the half of "it keeps stuttering" that sits UNDER the HITCH floor. A module
+// reports how long its slice of a frame took (`tag` a literal, 16 distinct tags max); every 10 s
+// one STUTTER line counts the main-thread frames >= 33 ms and names the spans with the worst
+// single run and the biggest total, so a 40 ms frame has a suspect instead of a shrug. Silent
+// while nothing stutters and no span ever passes 4 ms.
+void CrashLog_Span(const char* tag, double ms);
+struct CrashSpan {
+    const char* tag; long long t0;
+    explicit CrashSpan(const char* t);
+    ~CrashSpan();
+};

@@ -323,21 +323,91 @@ static LONG CALLBACK Veh(EXCEPTION_POINTERS* ep)
 }
 
 // ---- hitch trace ------------------------------------------------------------------------------
+// ---- spans ---------------------------------------------------------------------------------
+// Per-tag max / sum / count since the last summary. Written from the game thread and the render
+// thread without a lock: a torn number costs one odd figure in a diagnostic line.
+struct Span { const char* tag; double maxMs, sumMs; long n; };
+static Span s_span[16];
+static int  s_spanCount = 0;
+static LARGE_INTEGER s_spanFreq{};
+
+void CrashLog_Span(const char* tag, double ms)
+{
+    if (!tag) return;
+    int i = 0;
+    for (; i < s_spanCount; ++i) if (s_span[i].tag == tag) break;
+    if (i == s_spanCount) { if (i >= 16) return; s_span[i] = { tag, 0, 0, 0 }; ++s_spanCount; }
+    if (ms > s_span[i].maxMs) s_span[i].maxMs = ms;
+    s_span[i].sumMs += ms; ++s_span[i].n;
+}
+CrashSpan::CrashSpan(const char* t) : tag(t), t0(0)
+{
+    if (!s_spanFreq.QuadPart) QueryPerformanceFrequency(&s_spanFreq);
+    LARGE_INTEGER c{}; QueryPerformanceCounter(&c); t0 = c.QuadPart;
+}
+CrashSpan::~CrashSpan()
+{
+    LARGE_INTEGER c{}; QueryPerformanceCounter(&c);
+    if (s_spanFreq.QuadPart) CrashLog_Span(tag, double(c.QuadPart - t0) * 1000.0 / double(s_spanFreq.QuadPart));
+}
+
+static constexpr double k_stutterMs   = 33.0;    // one frame of 30 fps
+static constexpr double k_spanNoteMs  = 4.0;     // a span worth naming even in a smooth window
+static constexpr int    k_maxSummaries = 180;    // 30 minutes of 10 s windows
+
+// Every 10 s: the window's stutter frames + the spans that stood out. Caller holds nothing.
+static void StutterSummary(double worstFrameMs, int stutterFrames, double windowMs)
+{
+    static int s_summaries = 0;
+    double worstMax = 0; int iMax = -1; double worstSum = 0; int iSum = -1;
+    for (int i = 0; i < s_spanCount; ++i) {
+        if (s_span[i].maxMs > worstMax) { worstMax = s_span[i].maxMs; iMax = i; }
+        if (s_span[i].sumMs > worstSum) { worstSum = s_span[i].sumMs; iSum = i; }
+    }
+    const bool say = (stutterFrames > 0 || worstMax >= k_spanNoteMs) && s_summaries < k_maxSummaries;
+    if (say) {
+        ++s_summaries;
+        EnterCriticalSection(&s_cs);
+        Banner();
+        SYSTEMTIME t{}; GetLocalTime(&t);
+        Out("[%02d:%02d:%02d] STUTTER %d frame(s) >= %.0f ms in %.0f s, worst %.0f ms | worst span %s %.1f ms"
+            " (x%ld, %.0f ms total) | busiest %s %.0f ms total (x%ld, %.1f avg)",
+            t.wHour, t.wMinute, t.wSecond, stutterFrames, k_stutterMs, windowMs / 1000.0, worstFrameMs,
+            iMax >= 0 ? s_span[iMax].tag : "-", worstMax, iMax >= 0 ? s_span[iMax].n : 0L, iMax >= 0 ? s_span[iMax].sumMs : 0.0,
+            iSum >= 0 ? s_span[iSum].tag : "-", worstSum, iSum >= 0 ? s_span[iSum].n : 0L,
+            (iSum >= 0 && s_span[iSum].n) ? s_span[iSum].sumMs / s_span[iSum].n : 0.0);
+        if (s_summaries == k_maxSummaries) Out("   (stutter summary cap reached -- no further lines)");
+        LeaveCriticalSection(&s_cs);
+    }
+    for (int i = 0; i < s_spanCount; ++i) { s_span[i].maxMs = 0; s_span[i].sumMs = 0; s_span[i].n = 0; }
+}
+
 void CrashLog_Frame()
 {
     if (!s_csInit) return;
     static LARGE_INTEGER s_freq{};
     static LARGE_INTEGER s_last{};
-    static int s_hitches = 0;
+    static LARGE_INTEGER s_window{};
+    static int    s_hitches = 0;
+    static int    s_stutterFrames = 0;
+    static double s_worstFrame = 0;
     if (!s_freq.QuadPart) { QueryPerformanceFrequency(&s_freq); if (!s_freq.QuadPart) return; }
 
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     const LONGLONG prev = s_last.QuadPart;
     s_last = now;
-    if (!prev || s_hitches >= k_maxHitches) return;
+    if (!prev) { s_window = now; return; }
 
     const double ms = double(now.QuadPart - prev) * 1000.0 / double(s_freq.QuadPart);
+    if (ms >= k_stutterMs) { ++s_stutterFrames; if (ms > s_worstFrame) s_worstFrame = ms; }
+    const double windowMs = double(now.QuadPart - s_window.QuadPart) * 1000.0 / double(s_freq.QuadPart);
+    if (windowMs >= 10000.0) {
+        StutterSummary(s_worstFrame, s_stutterFrames, windowMs);
+        s_window = now; s_stutterFrames = 0; s_worstFrame = 0;
+    }
+
+    if (s_hitches >= k_maxHitches) return;
     if (ms < (double)k_hitchMs) return;
     ++s_hitches;
 

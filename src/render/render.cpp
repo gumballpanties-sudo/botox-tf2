@@ -1,4 +1,5 @@
 #include "render.h"
+#include "../hooks/crashlog.h"   // CrashSpan: stutter probe
 #include "../hacks/visuals/visuals.h"
 #include "../hacks/hud/watermark.h"
 #include "../hacks/misc/boot_screen.h"
@@ -660,6 +661,104 @@ static void RenderAutoBounceOverlay()
         line(centre + dir * kRad, tip);
         line(tip, tip - dir * 6.f + side * 4.f);
         line(tip, tip - dir * 6.f - side * 4.f);
+    }
+}
+
+// ==== wall climb overlay (botox wall_climb render) ===============================================
+// face wc reads, where the sent cmd takes you ( green end = a land over your jump floor ), on ground the spot scan along
+// the wall: green = climbed off that spot, red = nothing / sticky, grey = blocked or not run yet, big = where you get walked
+static void RenderWallClimbOverlay()
+{
+    if (!g_wallClimb || !g_wcViz) return;
+    if (!g_engine || !IsInGame()) return;
+
+    static WcDrawData d;
+    WC_GetDrawData(d);
+    if (!d.valid || GetTickCount64() - d.ms > 250ull) return;   // wc stopped running (key up / no wall / dead)
+
+    const float(*m)[4] = PsW2SMatrix();
+    if (!m) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    auto W2S = [&](const Vec3& v, ImVec2& out) -> bool
+    {
+        const float w = m[3][0] * v.x + m[3][1] * v.y + m[3][2] * v.z + m[3][3];
+        if (w <= 0.001f) return false;
+        const float inv = 1.f / w;
+        out.x = W * 0.5f + (m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z + m[0][3]) * inv * W * 0.5f;
+        out.y = H * 0.5f - (m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z + m[1][3]) * inv * H * 0.5f;
+        return true;
+    };
+    const float* c = g_wcVizColor;
+    const ImU32 color = ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3]));
+    const ImU32 fill  = ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3] * 0.18f));
+    const ImU32 green = IM_COL32(90, 255, 120, 255);
+    const ImU32 red   = IM_COL32(255, 80, 80, 255);
+    const ImU32 grey  = IM_COL32(160, 160, 160, 170);
+    ImFont* font = g_menuReg ? g_menuReg : ImGui::GetFont();   // botox verdana 11
+
+    auto line = [&](const Vec3& a, const Vec3& b, ImU32 col, float w) {
+        ImVec2 sa, sb;
+        if (W2S(a, sa) && W2S(b, sb)) dl->AddLine(sa, sb, col, w);
+    };
+    auto dot = [&](const Vec3& p, float r, ImU32 col) {
+        ImVec2 s;
+        if (W2S(p, s)) dl->AddCircleFilled(s, r, col, 12);
+    };
+    auto label = [&](const Vec3& p, const char* str, ImU32 col) {
+        ImVec2 s;
+        if (!W2S(p, s)) return;
+        const float fs = font->FontSize;
+        const ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, str);
+        const ImVec2 at(floorf(s.x - sz.x * 0.5f), floorf(s.y - fs));
+        dl->AddText(font, fs, ImVec2(at.x + 1.f, at.y + 1.f), IM_COL32(0, 0, 0, 200), str);   // botox text_flag_dropshadow
+        dl->AddText(font, fs, at, col, str);
+    };
+
+    const Vec3& n = d.n;
+    const float nl = sqrtf(n.x * n.x + n.y * n.y);
+    const Vec3 t   = nl > 1e-3f ? Vec3(n.y / nl, -n.x / nl, 0.f) : Vec3(1.f, 0.f, 0.f);
+    const Vec3 up(0.f, 0.f, d.height * 0.5f);
+    const Vec3 side = t * d.half;
+    const Vec3 face[4] = { d.wall - side - up, d.wall + side - up, d.wall + side + up, d.wall - side + up };
+    ImVec2 sp[4];
+    bool onScreen = true;
+    for (int i = 0; i < 4 && onScreen; i++) onScreen = W2S(face[i], sp[i]);
+    if (onScreen) dl->AddConvexPolyFilled(sp, 4, fill);
+    for (int i = 0; i < 4; i++) line(face[i], face[(i + 1) % 4], color, 1.f);
+    line(d.wall, d.wall + n * 8.f, color, 1.f);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "wc %s %d", d.branch ? d.branch : "-", d.sims);
+    label(d.wall + up + Vec3(0.f, 0.f, 4.f), buf, color);
+
+    if (!d.ground) {
+        for (int i = 0; i + 1 < d.pathN; i++) line(d.path[i], d.path[i + 1], color, 1.5f);
+        if (d.pathN > 1) dot(d.path[d.pathN - 1], d.lands ? 5.f : 3.f, d.lands ? green : color);
+        if (d.lands) {
+            snprintf(buf, sizeof(buf), "+%.0f", d.land.z - d.groundZ);
+            label(d.land + Vec3(0.f, 0.f, 8.f), buf, green);
+        }
+        return;
+    }
+
+    if (!d.spotValid) return;
+    const Vec3 st(d.spotN.y, -d.spotN.x, 0.f);
+    const auto at_idx = [](int i) { return (i & 1 ? 1.f : -1.f) * 2.f * (float)((i + 1) / 2); };   // wallclimb.inl wc::AtIdx
+    int best = -1;
+    for (int i = 0; i < d.spotIdx; ++i)
+        if (d.spotScore[i] > 0 && (best < 0 || d.spotScore[i] > d.spotScore[best])) best = i;
+    for (int i = 0; i < d.spotCount; ++i) {
+        const Vec3 p = d.spotBase + st * at_idx(i) + Vec3(0.f, 0.f, 1.f);
+        const int s  = i < d.spotIdx ? d.spotScore[i] : -2;
+        dot(p, i == best ? 5.f : 2.5f, s > 0 ? green : s == 0 ? red : grey);
+    }
+    if (best >= 0) {
+        const Vec3 p = d.spotBase + st * at_idx(best) + Vec3(0.f, 0.f, 1.f);
+        line(d.origin + Vec3(0.f, 0.f, 1.f), p, green, 1.5f);
+        snprintf(buf, sizeof(buf), "+%.0f", (float)(d.spotScore[best] - 1000));
+        label(p + Vec3(0.f, 0.f, 10.f), buf, green);
     }
 }
 
@@ -1701,6 +1800,7 @@ static void BuildImGuiFrame()
 {
     if (s_frameBuilt) return;
     s_frameBuilt = true;
+    CrashSpan _span("overlay/build");   // stutter probe: every overlay + menu + esp replay, per frame
 
     const bool psWinOpen = s_psPointWin >= 0 || Recorder_EditorOpen();   // recorder clip editor = same input handoff
     const bool menuUp    = g_showMenu || psWinOpen;
@@ -1744,6 +1844,7 @@ static void BuildImGuiFrame()
     RenderRouteOverlay();
     RenderEdgeBugOverlay();
     RenderAutoBounceOverlay();
+    RenderWallClimbOverlay();
     // unit screen: AspectStretch_Run = botox aspect ratio "stretch cheat overlays" / "stretch
     // crosshair" (screen-space panels only; draws straight through while those are off)
     AspectStretch_Run(RenderWatermark, AsPanel);

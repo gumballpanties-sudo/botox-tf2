@@ -208,6 +208,7 @@ struct MvInd_t
     bool  dhOn = false, acOn = false, abOn = false, tungOn = false, hswOn = false;
     bool  bastOn = false, bastHit = false;   // bounce assist: hit = its catch jump went out (botox HITGODA2)
     bool  esOn = false, esHit = false;       // edge skip: hit = a plan is flying (botox g_edge_skip.active())
+    bool  gmbOn = false, gmbHit = false;     // auto goomba: hit = it fired in the last 0.2 s
     bool  onGround = false;
     float speed = 0.f;
     int   tick = 0;        // globals tickcount / curtime after Pred_End (real, not a sim's)
@@ -242,6 +243,21 @@ struct AbDrawData
     bool active = false;
 };
 void AB_GetDrawData(AbDrawData& out);
+
+// ==== wall climb visualize (movement thread -> render thread), botox wall_climb viz_t + spot job ====
+// last wall tick: the face wc read, where the sent cmd takes you ( lands = over your jump floor ), on ground the spot scan
+struct WcDrawData
+{
+    bool valid = false, ground = false, lands = false, spotValid = false;
+    unsigned long long ms = 0;   // GetTickCount64 of the publish: stale = wc stopped running
+    const char* branch = "-";    // string literal
+    Vec3 wall{}, n{}, land{}, origin{}, spotBase{}, spotN{};
+    Vec3 path[17]{};
+    int pathN = 0, sims = 0, spotCount = 0, spotIdx = 0;
+    int spotScore[33]{};
+    float half = 24.f, height = 82.f, groundZ = 0.f;
+};
+void WC_GetDrawData(WcDrawData& out);
 
 // ==== PS finder/assist draw snapshot (movement thread -> render thread) ====
 // Render copies under the movement-side mutex; stale when aliveMs is old

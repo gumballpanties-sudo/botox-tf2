@@ -154,7 +154,7 @@ static void AS_SyncArm(const bool on)
 
 static void AS_Sync(void* pLocal, UserCmd_t* cmd, const bool armed)
 {
-    AS_SyncArm(armed);
+    AS_SyncArm(armed || s_wcSyncWant);   // botox sync_arm owners: as + wc ( wall climb's flush parks are sub-ulp too )
 
     struct rec_t {
         int cmd = -1, tick_base = 0;
@@ -301,6 +301,202 @@ static void AirStuckCumidere(void* pLocal, UserCmd_t* cmd)
                  sign, ang);
 }
 
+// ============================================================================
+// AIR STUCK, aletherium style -- 1:1 port of Aletherium Misc.cpp CMisc::AirStuckCore
+// (bSlantedOnly = false). Three phases a tick:
+//   detect   TB_DetectWall: 16 hull traces `reach` out (72u), |nz| <= 0.10, no triggers, cached
+//            angle re-tested first = ~1 trace steady state
+//   hold     live vz already on the pin (+- catch eps): replay last tick's winning move, 0 sims
+//   approach gap > flush tol: drive straight in, forward = gap * gain in [120, 650], 0 sims
+//   catch    near flush: 5 near-tangent yaws (88..89.9, side flips per tick) x 5 forwards
+//            (2..650), 2-sim confirm per candidate, capped at sim budget; no catch = the
+//            flushest candidate goes out as a hug
+// Shims: CorrectMovement -> as::StampRotate (+ the 450 clamp), IsTargetPredictZVelocity ->
+// IsTargetVz, get_align -> TBC_Gap (same ray: 32u along -n at the hit z minus the support),
+// StateGuard -> RestoreToFrame(nBase - 1) on every exit, tickcount -> cmd->tick_count.
+// The 3 TB yield flags are ours (s_textureBugHit / s_headSurfHit / s_tbOwnsCmd). Sims also stop
+// on the shared pool (SimsLeft) so a long sweep cannot starve the features after it.
+// ============================================================================
+static struct {
+    int   hold_ticks = 0;
+    float last_yaw   = FLT_MAX;   // FLT_MAX = no committed move yet
+    float last_move  = FLT_MAX;
+    float last_side  = 0.f;
+    float cached_angle = -1.f;    // last tick's winning sweep angle, -1 = none
+} s_asa;
+static int s_asaDiagTick = -1000;
+
+// Aletherium TB_DetectWall: nearest near-vertical world/brush face within `reach` of the centre
+static bool AsA_DetectWall(void* pLocal, const Vec3& org, const Vec3& mins, const Vec3& maxs, float reach,
+                           GameTrace_t& out, float& out_angle, float cached)
+{
+    TraceFilterWorldBrush fil; fil.Setup(pLocal);
+    const auto test = [&](float c, float s, GameTrace_t& tr) {
+        TraceHull(org, Vec3(org.x + c * reach, org.y + s * reach, org.z), mins, maxs, MASK_PLAYERSOLID, &fil, &tr);
+        return tr.fraction < 1.f && fabsf(tr.plane.normal.z) <= 0.10f && !(tr.surface.flags & SURF_TRIGGER_MV);
+    };
+    if (cached >= 0.f)
+    {
+        GameTrace_t tr{};
+        if (test(cosf(cached), sinf(cached), tr)) { out = tr; out_angle = cached; return true; }
+    }
+    constexpr float step = as::k_pi * 2.f / 16.f;
+    float best = 1.f;
+    bool hit = false;
+    for (int k = 0; k < 16; ++k)
+    {
+        const float a = (float)k * step;
+        GameTrace_t tr{};
+        if (!test(cosf(a), sinf(a), tr) || tr.fraction >= best) continue;
+        best = tr.fraction; out = tr; out_angle = a; hit = true;
+    }
+    return hit;
+}
+
+// entity on the restore base in and out
+static void AirStuckAletherium(void* pLocal, UserCmd_t* cmd)
+{
+    if (s_textureBugHit || s_headSurfHit || s_tbOwnsCmd) { s_asa = {}; return; }
+
+    const float k_eps    = std::clamp(g_asaCatchEps, 0.05f, 8.f);
+    const float k_reach  = std::clamp(g_asaReach, 16.f, 128.f);
+    const float k_flush  = std::clamp(g_asaFlushTol, 8.f, 96.f);
+    const float k_gain   = std::clamp(g_asaDriftGain, 4.f, 40.f);
+    const int   k_budget = std::clamp(g_asaSimBudget, 16, 128);
+
+    const int nBase = PredCommandsPredicted();
+    RestoreToFrame(nBase - 1);
+
+    const Vec3 org  = EntV3(pLocal, g_offOrigin);
+    const Vec3 vel  = EntV3(pLocal, g_offVelocity);
+    const Vec3 mins = EntV3(pLocal, g_offMins);
+    const Vec3 maxs = EntV3(pLocal, g_offMaxs);
+    const Vec3 view = cmd->viewangles;
+
+    GameTrace_t wall{};
+    float ang = s_asa.cached_angle;
+    if (!AsA_DetectWall(pLocal, org, mins, maxs, k_reach, wall, ang, s_asa.cached_angle))
+    {
+        s_asa.cached_angle = -1.f;
+        s_asa.hold_ticks   = 0;
+        return;   // not engaged: cmd untouched
+    }
+    s_asa.cached_angle = ang;
+
+    const float wall_yaw = NormalizeAngle(RAD2DEGF(atan2f(-wall.plane.normal.y, -wall.plane.normal.x)));
+
+    // CorrectMovement: a move in the wall frame, sent in the live view frame (view never moves)
+    const auto apply_move = [&](float yaw, float fwd, float side) {
+        float f = 0.f, s = 0.f;
+        as::StampRotate(view.y, yaw, fwd, side, f, s);
+        cmd->viewangles  = view;
+        cmd->forwardmove = std::clamp(f, -450.f, 450.f);
+        cmd->sidemove    = std::clamp(s, -450.f, 450.f);
+    };
+    const auto stamp = [&](float yaw, float fwd, float side) {
+        s_asStampYaw = yaw; s_asStampForward = fwd; s_asStampSide = side;
+        s_asStampPitch = view.x; s_asStampButtons = cmd->buttons; s_asStampValid = true;
+    };
+    const auto restore = [&]() {
+        RestoreToFrame(nBase - 1);
+        AsSetOrigin(pLocal, org);
+        EntSetV3(pLocal, g_offVelocity, vel);
+    };
+
+    // hold: live vz already pinned = last tick's winner again, checked before any approach.
+    // Aletherium replays it blind; 1 sim proves it (botox: never send a cmd that falls), a break
+    // falls through to the search from this still-pinned START
+    if (IsTargetVz(vel.z, k_eps))
+    {
+        const float yaw  = s_asa.last_yaw  != FLT_MAX ? s_asa.last_yaw  : wall_yaw;
+        const float move = s_asa.last_move != FLT_MAX ? s_asa.last_move : 5.f;
+        restore();
+        apply_move(yaw, move, s_asa.last_side);
+        Pred_Simulate(pLocal, cmd);
+        const bool held = !(EntI(pLocal, g_offFlags) & FL_ONGROUND) && IsTargetVz(EntV3(pLocal, g_offVelocity).z, k_eps);
+        restore();
+        if (held)
+        {
+            apply_move(yaw, move, s_asa.last_side);
+            stamp(yaw, move, s_asa.last_side);
+            s_asHolding = true;
+            if (s_asa.hold_ticks++ == 0)
+                DebugLog("ASA: hold yaw=%.1f fwd=%.1f vz=%.2f", yaw, move, vel.z);
+            return;
+        }
+        DebugLog("ASA: hold break t=%d yaw=%.1f fwd=%.1f", s_asa.hold_ticks, yaw, move);
+    }
+    s_asa.hold_ticks = 0;
+
+    // approach: still gapped, drive in hard (0 sims). A catch needs the hull ON the wall after one
+    // tick, so past one tick of reach (speed into the wall + the 30 u/s air wish + 1u slack) the
+    // sweep can only ever return its drive-in fallback -- skip the 25-50 sims and drive outright.
+    // k_flush stays the user's upper bound on that band
+    const float align = TBC_Gap(pLocal, wall);
+    const float v_in  = -(vel.x * wall.plane.normal.x + vel.y * wall.plane.normal.y);
+    const float tick_reach = (fmaxf(v_in, 0.f) + 30.f) * TickInterval() + 1.f;
+    if (align > fminf(k_flush, tick_reach))
+    {
+        const float drive = fminf(fmaxf(align * k_gain, 120.f), 650.f);
+        apply_move(wall_yaw, drive, 0.f);
+        cmd->buttons &= ~IN_DUCK;
+        stamp(wall_yaw, drive, 0.f);
+        if (g_debugLogEnable && DiagOk(s_asaDiagTick, false))
+            DebugLog("ASA: drive gap=%.1f fwd=%.0f yaw=%.1f", align, drive, wall_yaw);
+        return;
+    }
+
+    // near flush: budgeted near-tangent catch sweep
+    const float side_sign = (cmd->tick_count % 2 == 0) ? 1.f : -1.f;
+    static constexpr float k_yaws[] = { 88.0f, 88.5f, 89.0f, 89.5f, 89.9f };
+    static constexpr float k_fwds[] = { 2.f, 10.f, 60.f, 250.f, 650.f };
+
+    int   sims = 0;
+    bool  found = false, fallback = false;
+    float best_yaw = wall_yaw, best_fwd = 2.f, best_align = FLT_MAX;
+    const auto budget_out = [&]() { return sims >= k_budget || SimsLeft() <= 0; };
+
+    for (const float rel : k_yaws)
+    {
+        if (found || budget_out()) break;
+        for (const float fwd : k_fwds)
+        {
+            if (budget_out()) break;
+            restore();
+            const float yaw = NormalizeAngle(wall_yaw + rel * side_sign);
+            apply_move(yaw, fwd, 0.f);
+            cmd->buttons &= ~IN_DUCK;   // catch is proven standing
+            Pred_Simulate(pLocal, cmd); ++sims;
+            if (IsTargetVz(EntV3(pLocal, g_offVelocity).z, k_eps))
+            {
+                Pred_Simulate(pLocal, cmd); ++sims;   // confirm: a real catch pins a 2nd tick
+                if (IsTargetVz(EntV3(pLocal, g_offVelocity).z, k_eps))
+                {
+                    best_yaw = yaw; best_fwd = fwd; found = true;
+                    break;
+                }
+                continue;   // one-tick blip
+            }
+            const float a = TBC_Gap(pLocal, wall);
+            if (!fallback || a < best_align) { best_align = a; best_yaw = yaw; best_fwd = fwd; fallback = true; }
+        }
+    }
+    restore();
+
+    apply_move(best_yaw, best_fwd, 0.f);
+    cmd->buttons &= ~IN_DUCK;
+    stamp(best_yaw, best_fwd, 0.f);
+    if (found)
+    {
+        s_asHolding    = true;
+        s_asa.last_yaw = best_yaw; s_asa.last_move = best_fwd; s_asa.last_side = 0.f;
+    }
+    if (g_debugLogEnable && DiagOk(s_asaDiagTick, found))
+        DebugLog("ASA: %s gap=%.2f yaw=%.1f fwd=%.0f sims=%d vz=%.2f n=%.2f %.2f side=%.0f",
+                 found ? "catch" : "hug", found ? align : best_align, best_yaw, best_fwd, sims, vel.z,
+                 wall.plane.normal.x, wall.plane.normal.y, side_sign);
+}
+
 static void AirStuck(void* pLocal, UserCmd_t* cmd)
 {
     static float start_angle = 0.0f;
@@ -315,7 +511,8 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
     const bool key     = MovementKeyOK(g_airStuckKey, g_airStuckMode);
     const bool alive   = EntAlive(pLocal);
     const bool cumi    = g_asStyle == 0;
-    AS_Sync(pLocal, cmd, feature && key && alive && !cumi);   // exact-pin sync is the botox style's
+    const bool aleth   = g_asStyle == 2;
+    AS_Sync(pLocal, cmd, feature && key && alive && !cumi && !aleth);   // exact-pin sync is the botox style's
 
     if (!feature || !key || !alive || (EntI(pLocal, g_offFlags) & FL_ONGROUND)) {
         if (hold_armed)
@@ -323,12 +520,21 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         s_asHold.ticks  = 0;
         was_stuck       = false;
         s_asExpect.valid = false;
+        s_asa = {};
         return;
     }
     const int move_type = EntMoveType(pLocal);
     if (move_type != MOVETYPE_WALK) {   // ladder / noclip / fly / observer ( TF2 has no ladders )
         was_stuck        = false;
         s_asExpect.valid = false;
+        s_asa = {};
+        return;
+    }
+    if (aleth) {
+        s_asHold.ticks   = 0;
+        was_stuck        = false;
+        s_asExpect.valid = false;
+        AirStuckAletherium(pLocal, cmd);
         return;
     }
     if (cumi) {

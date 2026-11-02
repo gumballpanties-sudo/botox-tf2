@@ -335,6 +335,16 @@ static void __fastcall h_UpdateEquipped(void* mgr, void* inv, uint64_t id, uint1
 
     const bool ours = (id >> 32) == kIdHigh;
     const int  mine = ours ? (int)(id & 0xFFFF) - 0x1000 : -1;
+    // The GC's half of an equip, done here and now, in the order the GC would: the screen rebuilds
+    // its model preview and its equip-region conflict masks off m_LoadoutItems the moment this call
+    // returns (class_loadout_panel.cpp), so the equipped lists + SOUpdated cannot wait for the tick.
+    InvCtx c{};
+    const bool ctx = GetCtx(c);
+    auto syncNow = [&](int slot) {
+        if (!ctx) { s_dirty = true; return; }
+        if (void* it = FindOurs(c, slot))
+            if (SyncEquips(it, g_hatSlots[slot])) VCall<void>(c.inv, 2, c.owner, it, 4);   // SOUpdated
+    };
     // Whatever goes into (class, position) now, none of ours stays there.
     bool hadOurs = false;
     for (int i = 0; i < kHatSlots; ++i) {
@@ -342,13 +352,24 @@ static void __fastcall h_UpdateEquipped(void* mgr, void* inv, uint64_t id, uint1
         if ((s.eqMask & 1) && (s.eqMask >> cls & 1) && s.eqPos[cls] == pos) {
             s.eqMask &= (uint16_t)~(1u << cls);
             hadOurs = true;
+            syncNow(i);
         }
     }
     if (ours) {
         if (mine >= 0 && mine < kHatSlots && g_hatSlots[mine].def > 0) {
             HatSlot& s = g_hatSlots[mine];
+            // The real item in that position is displaced for real -- the GC's own "clear this
+            // slot" message (INVALID_ITEM_ID, econ_item_inventory.cpp:776), the same thing
+            // equipping any other hat over it does. The server stops dressing you in it at the
+            // next spawn / resupply; until then Hats_SkipDraw hides its world model.
+            const uint64_t real = ctx ? RealAtSEH(c, cls, pos) : 0;
+            if (real) {
+                o_UpdateEquipped(mgr, inv, ~0ull, cls, pos);
+                DebugLog("hats inv: slot %d displaces real item %llx at class %d pos %d", mine, (unsigned long long)real, cls, pos);
+            }
             s.eqMask |= (uint16_t)(1u | (1u << cls));
             s.eqPos[cls] = (uint8_t)pos;
+            syncNow(mine);
             DebugLog("hats inv: loadout equip slot %d -> class %d pos %d", mine, cls, pos);
         }
         s_dirty = true;

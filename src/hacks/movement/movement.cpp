@@ -32,6 +32,7 @@ static constexpr int IN_FORWARD   = 1 << 3;
 static constexpr int IN_BACK      = 1 << 4;
 static constexpr int IN_MOVELEFT  = 1 << 9;
 static constexpr int IN_MOVERIGHT = 1 << 10;
+static constexpr int IN_ATTACK2   = 1 << 11;
 
 static constexpr int FL_ONGROUND = 1 << 0;
 static constexpr int FL_DUCKING  = 1 << 1;
@@ -887,6 +888,7 @@ static bool s_rawJumpHeld = false;   // real IN_JUMP before AutoJump strips it
 // written buttons, so pCmd there answers "what will the server run", never "what did he press".
 // The route calculator's live recorder needs the second question and nothing else does.
 static int  s_rawButtons = 0;
+static float s_rawFwd = 0.f, s_rawSide = 0.f;   // botox m_user_*_move_raw: the keys before any feature (wall climb's "you leave")
 // IN_JUMP of the cmd we actually SENT last tick = the engine's m_nOldButtons bit, mirrored.
 // CheckJumpButton refuses a jump while that bit is set (tf_gamemovement.cpp:1235) and ONLY a
 // jumpless cmd clears it (gamemovement.cpp:1441), so this is the one honest answer to "will
@@ -1649,7 +1651,10 @@ static bool s_tbOwnsCmd = false;     // TB steered pCmd this tick WITHOUT a hit 
 static int  s_tbRideHold = 0;
 static bool s_headSurfHit = false;
 static bool s_headBounceHit = false; // HB clipped a crease this tick (one-tick catch, no hold)
-static bool s_wallClimbHit = false;
+static bool s_wallClimbHit = false;    // botox g_wall_climb.caught(): wc's catch (land / hold / jump fix) is this cmd
+static bool s_wallClimbActive = false; // botox g_wall_climb.active(): wc ran an air wall tick this cmd (pixel surf yields)
+static bool s_wcLanded = false;        // botox g_wall_climb.m_hit: a land went out (indicator + detection)
+static bool s_wcSyncWant = false;      // wc key held: AS_Sync keeps cl_pred_optimize armed for it too
 static bool s_airStuckHit = false;
 // s_shouldPixelSurf / s_psRidingNow / s_psAssistHopActive moved ABOVE AutoJumpbug --
 // jumpbug is a PRE-prediction feature and has to read the ride state too
@@ -1965,360 +1970,12 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
 #include "texturebug.inl"
 
 
-// ---- Wall climb (2026-07-12 pt2 remake on creator base: sweep silent into-wall
-// moves, win = FL_ONGROUND after 1 sim tick. Displacement walls = bumpy faces with
-// normal.z up to ~0.7 below standable -- detect takes 0.65 (old 0.35 missed most),
-// support creep from base hugs the face so next tick grounds) ----
-// ---- THE CLIMB WAS MISSING ITS JUMP -------------------------------------------------
-// A wall climb is ground -> hop -> sweep -> ground, repeated. This function only ever did the
-// sweep: it hunted the into-wall variant that GROUNDS the hull on a seam and then sat on it.
-// Nothing here has ever written IN_JUMP, so a "win" parked the player on the seam, friction ate
-// the speed and they slid off -- coldtires texturebug.cpp:2613 arms the hop on an airborne win
-// and stamps the jump on the real GROUNDED tick (its 98th/123rd passes). Three more of its
-// findings land with it, all of them things this sweep was paying for and not getting:
-//   * vz > 140 => CategorizePosition nulls the ground entity outright, so while rising fast
-//     EVERY sweep variant is a provable miss. 54 sims a tick, spent to be told no.
-//   * THE FWD LIST WAS A DEAD AXIS. AirAccelerate adds accel * wishspeed * dt, so in the ONE
-//     simulated tick fwd=15 moves the hull 12*15*0.015 = 0.04u and fwd=0.25 moves it 0.0007u:
-//     all 81 old variants sat inside a rounding error of each other while the player fell 2-6u
-//     per tick. It re-simmed one position 81 times. fwd=450 spends the whole addspeed cap in
-//     that tick (~0.45u) and DUCK teleports the origin 20u in air (Duck() finishes the same
-//     tick when airborne) -- 400x the axis, at 54 sims instead of 81.
-//   * the player's OWN move is the baseline. If it already grounds them, the sweep's "win" was
-//     going to happen anyway, and a hop armed off it fires on whatever they happened to land on
-// ---- PROVE IT OR KEEP YOUR HANDS OFF THE CMD ---------------------------------------
-// Report: "it fucks up my movement on normal surfaces and jumping off ledges." Every writer in
-// here was reachable without proof that a climb was even possible:
-//   * the cfg runs wallClimbMode=0, and mode 0 in MovementKeyOK is ALWAYS ON -- no key is held,
-//     this ran on every tick of every jump on every map.
-//   * the scan takes any face with |n.z| <= 0.65 out to 16u. On an ordinary map that is doorway
-//     jambs, crates, and the lip of the ledge you just jumped off.
-//   * the HUG then committed an into-wall move on that face every tick, having grounded nothing.
-//   * the IN_JUMP strip opened its 8-tick window off the same scan.
-// Three gates now stand between the scan and any write, and all three are engine facts, not
-// heuristics: GATE 1 the face is a DISPLACEMENT (trace.dispFlags -- a brush face is one plane
-// and cannot hand a hull a standable facet); GATE 2 the hull is within 8u of it; GATE 3 a
-// simulated variant ends the tick FL_ONGROUND *and* flush (<= 2u) to that same face. The hug is
-// deleted outright. No win = no write, and the player keeps his own cmd
-static void WallClimb(void* pLocal, UserCmd_t* pCmd)
-{
-    s_wallClimbHit = false;
-
-    static float wall_scan_start = 0.f;
-    static int   s_wcJumpPending = 0;      // ticks left on an armed hop (air win -> ground press)
-    static bool  s_wcJumpedLast  = false;  // pressed last tick and STILL grounded = engine refused
-    static int   s_wcWallTick    = -100000; // last tick the scan saw a face (the engage window)
-    constexpr int k_wcJumpPendingTicks = 4; // sim base is one tick stale -- give the ground time
-    constexpr int k_wcEngageTicks      = 8; // "a face recently" -- the strip below needs a wall
-    // the three PROOFS. Nothing in this function touches the cmd until all three hold:
-    //   DISP    the scanned face is a displacement surface (trace.dispFlags, engine-filled)
-    //   NEAR    the hull face is within k_wcEngageSupport of it (not "a wall exists 16u away")
-    //   GROUND  a swept variant put FL_ONGROUND on the hull AND left it flush to THAT face
-    constexpr float k_wcEngageSupport = 8.f;  // hull face -> disp face, live, before any sim
-    constexpr float k_wcLandSupport   = 2.f;  // post-sim: grounded ON the face, not near it
-    constexpr float k_wcMinInput      = 0.01f;// hands off the keys = hands off the cmd
-
-    if (!On(g_wallClimb, g_wallClimbKey, g_wallClimbMode))
-        { wall_scan_start = 0.f; s_wcJumpPending = 0; s_wcJumpedLast = false; return; }
-    if (!EntAlive(pLocal)) { s_wcJumpPending = 0; s_wcJumpedLast = false; return; }
-
-    const int  iTickNow   = g_globalVars->tickcount;
-    if (s_wcWallTick > iTickNow) s_wcWallTick = -100000;   // map change rewound the clock
-    // the ground state CheckJumpButton reads is the one the cmd STARTS on, not the one it ends
-    // on: gating the launch on the post-move flag spends the press while still airborne, which
-    // latches m_nOldButtons |= IN_JUMP, and the real grounded tick is then refused as a pogo
-    const bool bGroundPre  = (s_prePredFlags & FL_ONGROUND) != 0;
-    const bool bGroundPost = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
-    const bool bLeftGround = bGroundPre && !bGroundPost;   // ej/lj/mj author exactly this tick
-    const bool bLanding    = !bGroundPre && bGroundPost;
-
-    // armed-hop clock, ticked before every yield below: a hop armed in the air must survive the
-    // ticks TB/AS own or it never reaches the landing it was armed for
-    bool armed_hop = false;
-    if (s_wcJumpPending > 0)
-    {
-        --s_wcJumpPending;
-        if (bGroundPre) { s_wcJumpPending = 0; armed_hop = true; }
-    }
-
-    // UNLATCH. FinishMove copies this cmd's buttons into m_nOldButtons and a grounded jump is
-    // refused while IN_JUMP is set there -- only a jumpless cmd clears it. Held space therefore
-    // blocks the very seam jump the climb exists to make. Airborne only, only beside a face WC
-    // has actually scanned (a blanket strip eats bunnyhop on open ground), never on the tick
-    // the ground is left or regained (ej/lj/mj own those), never while jumpbug wants the bit.
-    // s_wcWallTick is now stamped ONLY for a displacement face the hull is within
-    // k_wcEngageSupport of, so this window no longer opens beside doorway jambs and crates
-    const bool bWcEngaged = s_wcJumpPending > 0 || (iTickNow - s_wcWallTick) <= k_wcEngageTicks;
-    if (!bGroundPre && !bLeftGround && !bLanding && s_rawJumpHeld && bWcEngaged
-        && !s_jumpbugHit && !On(g_jumpbug, g_jumpbugKey, g_jumpbugMode)
-        && !s_psAssistHopActive)   // PS assist runs first and its scout dash is an AIR press
-        pCmd->buttons &= ~IN_JUMP;
-
-    if (s_textureBugHit || s_headSurfHit || s_headBounceHit) return; // TB/HS/HB owns the move
-    if (s_airStuckHit) return;                    // AS outranks WC (coldtires priority order)
-    if (s_tbOwnsCmd) return;                      // TB creep = band setup, hands off
-    // TB ride between pins: the free-fall ticks of a pin/miss/pin cycle carry no TB flag, and WC
-    // shares the TB key in most cfgs -- its win commits buttons wholesale and broke the ride
-    // (coldtires wall_climb yields to a running tb ride)
-    if (On(g_textureBug, g_textureBugKey, g_textureBugMode) && s_tbRideHold > 0) return;
-    // WC RUNS LAST AND COMMITS pCmd->buttons WHOLESALE, so it was the final word on
-    // every bit PS assist and PixelSurf had already written. AirStuck has yielded to both since
-    // (the bail("ps") above it) and WC never got the same line: a fired assist arc spends
-    // its whole flight beside the very wall the sweep scans, the hug commits every tick
-    // best_support drops under 0.2, and the catch duck / steer lock the arc was validated with
-    // were overwritten on the way down. That is "ps assist doesn't catch, especially walking" --
-    // walking into a seam is exactly the case where the hug is armed the entire approach
-    // same line for the guide: it is a deliberate steer at a wall WC is about to sweep
-    // and the RIDE itself. s_shouldPixelSurf is only this dll's hunt owning the cmd; a
-    // surf caught by the assist, or by hand, or on a face the hunt refuses (its probe rejects every
-    // displacement and anything off-upright) reads s_psRidingNow and nothing else. WC's win path
-    // commits best_buttons = original & ~IN_DUCK wholesale, so it was free to strip the very crouch
-    // holding the player on the seam -- airborne that unduck is a 20u origin lift, i.e. the surf.
-    // (botox pixel_surf yields to WC the other way round too: a caught climb clears its latch)
-    if (s_psAssistHopActive || s_shouldPixelSurf
-        || s_psRidingNow || s_psAssistDuckHeld) return;
-    if (EntMoveType(pLocal) != MOVETYPE_WALK) { s_wcJumpPending = 0; return; }
-
-    // ---- THE LAUNCH ----
-    // WC never jumps on its own initiative (coldtires 98th): s_rawJumpHeld is the real space
-    // bar before AutoJump rewrites the cmd, and without it held nothing fires here
-    if (bGroundPre)
-    {
-        if (!armed_hop || !s_rawJumpHeld) { s_wcJumpedLast = false; return; }
-        // pressed last tick and still grounded = the engine refused it (duck transition, or our
-        // own bit is the latch). Release for one tick so m_nOldButtons clears, then press
-        if (s_wcJumpedLast || s_prevCmdJump)
-            { pCmd->buttons &= ~IN_JUMP; s_wcJumpedLast = false; return; }
-        pCmd->buttons |= IN_JUMP;
-        pCmd->buttons &= ~IN_DUCK;   // FL_DUCKING is a flat refusal in CheckJumpButton
-        s_wcJumpedLast = true;
-        s_wallClimbHit = true;
-        return;
-    }
-    s_wcJumpedLast = false;
-
-    // airborne at the cmd's start but grounded at its end = the player's own move already lands
-    // them. The first variant tried then grounds trivially and the "win" means nothing
-    if (bGroundPost) return;
-
-    // provable skip: CategorizePosition nulls the ground entity when end-of-tick vz > 140, so
-    // no sweep variant can ground while rising that fast. The whole sweep is unspendable here
-    if (EntV3(pLocal, g_offVelocity).z + TargetPredictZVel() * 2.f > 140.f)
-        return;
-
-    // A CLIMB IS SOMETHING THE PLAYER DOES. Hands off the movement keys and this
-    // function has no business rewriting the cmd: the old no-input case was in fact one of the
-    // two things that ARMED the hug (`|fwd|<0.01 && |side|<0.01` -> wc_want_hug), so simply
-    // falling past a wall with nothing held was enough to have the move overwritten every tick.
-    // Free here as well as correct: it skips a 120-230 trace scan on every such tick
-    if (fabsf(pCmd->forwardmove) < k_wcMinInput && fabsf(pCmd->sidemove) < k_wcMinInput)
-        return;
-
-    const Vec3 start_pos = EntV3(pLocal, g_offOrigin);
-    const Vec3 mins = EntV3(pLocal, g_offMins);
-    const Vec3 maxs = EntV3(pLocal, g_offMaxs);
-
-    GameTrace_t primary{};
-    float found_angle = 0.f;
-    // reach 2 -> 16: coldtires' 100th measured a 2u reach throwing away 43% of the airborne
-    // ticks ("no wall") before a single sim ran. The sweep still has to GROUND the player to
-    // win, so a looser scan cannot invent a catch -- it only stops declaring the face missing
-    if (!MV_DetectWallLines(pLocal, start_pos, mins, maxs, wall_scan_start,
-                            primary, found_angle, 0.65f, 16.f))
-    {
-        wall_scan_start = 0.f;
-        return;
-    }
-
-    // ---- GATE 1: DISPLACEMENT OR NOTHING ------------------------------------------
-    // A wall climb is a displacement trick. The seam that takes the hull is a triangle of a disp
-    // whose facet normal crosses 0.7 while the surface as a whole reads as a wall -- a brush face
-    // is ONE plane, it is either standable or it is not, and no sweep of ours changes that.
-    // Everything this function did on brush geometry was therefore cost with no possible win:
-    // the scan takes |n.z| <= 0.65 out to 16u, which on ordinary maps is every doorway jamb,
-    // every crate, every ledge lip you jump off -- and each of those armed the engage window
-    // (the IN_JUMP strip below) and the hug (the move+stance overwrite at the bottom).
-    // trace.dispFlags is the engine's own answer (public/trace.h: IsDispSurface(), set per
-    // triangle in dispcoll_common.cpp), so this is not a heuristic: no disp, no wall climb, and
-    // s_wcWallTick is NOT stamped, so the jump-bit strip stays out of it too.
-    if (!(primary.dispFlags & DISPSURF_SURFACE))
-    {
-        wall_scan_start = 0.f;               // start the next scan fresh, do not pin on a brush
-        return;
-    }
-
-    // ---- GATE 2: NEAR IT, NOT MERELY NEAR-ISH -------------------------------------
-    // the scan reaches 16u past the hull (coldtires' 100th) so it stops declaring faces missing.
-    // That is the right reach for DETECTION and the wrong one for COMMITTING: one simulated tick
-    // of fwd=450 buys ~0.45u of closing, so from 16u out no variant can reach the face and the
-    // sweep can only spend the cmd. Measured live off the real origin, before any sim runs
-    const float live_support = MV_SupportDistance(pLocal, primary, &start_pos);
-    if (live_support > k_wcEngageSupport)
-    {
-        wall_scan_start = found_angle;
-        return;
-    }
-
-    wall_scan_start = found_angle;
-    s_wcWallTick = iTickNow;
-
-    // seamless leave (auto align style): steering off wall = user keeps cmd this tick
-    if (TB_SteeringAwayFromWall(pCmd, primary.plane.normal, pCmd->forwardmove, pCmd->sidemove))
-        return;
-
-    const Vec3 approach_normal = primary.plane.normal * -1.f;
-    Vec3 angle_wall = VectorAngles(approach_normal);
-    angle_wall.y = NormalizeAngle(angle_wall.y);
-
-    const Vec3  original_view = pCmd->viewangles;
-    const float original_forward = pCmd->forwardmove;
-    const float original_side = pCmd->sidemove;
-    const int   original_buttons = pCmd->buttons;
-
-    const int nBase = PredCommandsPredicted();
-    const auto Restore = [&]() { RestoreToFrame(nBase - 1); };
-
-    // base sign, verbatim
-    const Vec3 velocity = EntV3(pLocal, g_offVelocity);
-    const float velocity_yaw = RAD2DEGF(atan2f(velocity.y, velocity.x));
-    const float relative_yaw = NormalizeAngle(velocity_yaw - angle_wall.y);
-    const float sign = (relative_yaw >= 0.f) ? -1.f : 1.f;
-
-    // ONE SIM, and it decides whether the rest may run: the player's own move is the baseline.
-    // If it already grounds them the sweep has nothing to buy (its first variant would ground
-    // trivially and arm a hop off a landing that was happening anyway), and the support it
-    // reaches is the number every variant below now has to BEAT -- an into-wall hug that is no
-    // flusher than what the player asked for is pure speed loss: AirAccelerate caps wishspeed
-    // at 30, so every hugged tick trades away up to 2.8 u/s of strafe gain
-    float own_support = 1.f;
-    bool  own_grounds = false;
-    if (SimsLeft() > 0)
-    {
-        UserCmd_t own = *pCmd;
-        Restore();
-        Pred_Simulate(pLocal, &own);
-        own_grounds = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
-        own_support = MV_SupportDistance(pLocal, primary);
-    }
-    if (own_grounds) { Restore(); return; }
-
-    float best_forward = original_forward;
-    float best_side = original_side;
-    int   best_buttons = original_buttons;
-    bool  found = false;
-    float land_support = 0.f;   // diag: how flush the winning variant left the hull
-
-    // the three fwd values that are actually distinguishable in ONE simulated tick (see the
-    // header note): 450 spends the whole air addspeed cap, 30 is the cap itself, 5 is a crawl
-    static constexpr float forward_values[] = { 450.f, 30.f, 5.f };
-    const bool bDuckNow = (original_buttons & IN_DUCK) != 0;
-
-    // ...and the axis that really moves the hull: the duck. Airborne, Duck() finishes the same
-    // tick, so the origin teleports 20u and CategorizePosition re-runs on the spot. Stance 0 is
-    // the player's own, so a catch the old sweep would have made is still the first one tried
-    for (int stance = 0; stance < 2 && !found && SimsLeft() > 0; stance++)
-    for (const float forward : forward_values)
-    {
-        if (found || SimsLeft() <= 0) break;
-        // straight in + skew: grounds on the bumpy face
-        for (float offset = 0.f; offset < 45.f && SimsLeft() > 0; offset += 5.f)
-        {
-            UserCmd_t fake = *pCmd;
-            fake.buttons = original_buttons;
-            if (stance == 1)
-            {
-                if (bDuckNow) fake.buttons &= ~IN_DUCK;
-                else          fake.buttons |= IN_DUCK;
-            }
-            fake.viewangles = original_view;
-            fake.forwardmove = forward;
-            fake.sidemove = 0.f;
-            Vec3 wish = original_view;
-            wish.y = angle_wall.y + offset * sign;
-            CorrectMovement(&fake, wish, original_view); // silent
-
-            Restore();
-            Pred_Simulate(pLocal, &fake);
-
-            if (!(EntI(pLocal, g_offFlags) & FL_ONGROUND))
-                continue;
-
-            // ---- GATE 3: GROUNDED **ON THAT FACE** --------------------------------
-            // FL_ONGROUND alone says "the hull ended this tick standing on something", and on a
-            // displacement map the something is very often the floor you were going to land on
-            // anyway -- run off a disp ledge, the sweep grounds on the ground, `found` fires and
-            // WC commits fwd=450 into the wall plus a stance flip and arms a hop. That is the
-            // "jumping off ledges" report, and it is the same class of mistake found in
-            // the PS assist: a win measured on the wrong quantity. Measure it on the RIGHT one:
-            // a climb ends flush against the face that was scanned, so read the support distance
-            // while the entity still holds this variant's predicted state. Grounded 8u out from
-            // the seam is a landing, not a climb
-            const float support = MV_SupportDistance(pLocal, primary);
-            if (support > k_wcLandSupport)
-                continue;
-
-            found = true;
-            land_support = support;
-            best_forward = fake.forwardmove;
-            best_side = fake.sidemove;
-            best_buttons = fake.buttons;
-            break;
-        }
-    }
-
-    Restore();
-    pCmd->viewangles = original_view;
-
-    // THE HOP. A sweep that grounds the hull in the air has proved this face will take the
-    // player -- it cannot press the jump on THIS cmd (the move that grounds them has not run
-    // yet, and CheckJumpButton reads the ground state at the START of a cmd), so it marks the
-    // ground tick it just bought and the launch above stamps it when that tick really arrives
-    if (found)
-        s_wcJumpPending = k_wcJumpPendingTicks;
-
-    // ---- THE HUG IS GONE -----------------------------------------------------------
-    // gave the hug a gate and took its stance flip away, and both were repairs to a
-    // path that never had a claim to make. Two things used to commit here:
-    //   found            -- a sim GROUNDED the hull flush on this face. That ends the fall. It is
-    //                       the entire feature, and it is the only thing that proves anything.
-    //   best_support hug -- NO variant grounded, so it committed the flushest into-wall micro
-    //                       move anyway, "to keep closing on the face". It proved nothing, and it
-    //                       ran on the ordinary case: airborne + any face within 16u. That is the
-    //                       "wall climb fucks up my movement on normal surfaces" report in full.
-    // an earlier build's own gate already forbade it on every displacement (wc_ramp_face included disp), so
-    // under GATE 1 the hug is dead by construction -- there is no face left that both passes the
-    // disp test and passes the hug test. Deleting it removes the last writer that could touch
-    // pCmd without a grounded sim behind it, and with it the whole per-variant support tracking:
-    // best_* is now only ever the winning variant, never a consolation prize.
-    // NO WIN = NO WRITE. The player's cmd is not restored here because it was never modified
-
-    if (g_debugLogEnable)
-    {
-        static int s_wc_ticks = 0, s_wc_sec = -1;
-        ++s_wc_ticks;
-        const int sec = g_globalVars ? (int)g_globalVars->curtime : 0;
-        if (sec != s_wc_sec)
-        {
-            s_wc_sec = sec;
-            DebugLog("WC: found=%d nz=%.3f disp=1 live=%.2f land=%.2f own=%.2f "
-                     "ticks=%d xy=%.0f vz=%.1f",
-                     (int)found, primary.plane.normal.z, live_support, land_support, own_support,
-                     s_wc_ticks, velocity.Length2D(), velocity.z);
-            s_wc_ticks = 0;
-        }
-    }
-
-    if (found)
-    {
-        pCmd->forwardmove = best_forward;
-        pCmd->sidemove = best_side;
-        pCmd->buttons = best_buttons;
-        s_wallClimbHit = true;
-    }
-}
-
 // ---- Air stuck: botox air_stuck.cpp 1:1 (airstuck.inl) ----
 #include "airstuck.inl"
+
+// ---- Wall climb: botox wall_climb.cpp 1:1 (wallclimb.inl). After airstuck.inl: it takes the cmd from AS on a
+// catch (s_asStamp* / AsClock / AsSetOrigin live there)
+#include "wallclimb.inl"
 
 // the whole pixel finder + pixel surf assist moved OUT of movement.cpp into
 // psassist.inl (user: "seperate the ps assist function into a different file"). Same
@@ -2344,7 +2001,7 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
 // bot on a player's HEAD instead of inside him.
 #include "practice.inl"
 
-// Unit A port: small tricks (nulls/hsw/delay hop/auto crouch/kangaroo/smooth
+// Unit A port: small tricks (nulls/hsw/delay hop/auto crouch/smooth
 // demo view/jumpstats). After everything else -- it only reads helpers already defined above.
 #include "movement_ex.inl"
 
@@ -2418,6 +2075,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     // ---- pre-prediction ----
     s_rawJumpHeld = (pCmd->buttons & IN_JUMP) != 0;   // real press, before AutoJump strips it
     s_rawButtons  = pCmd->buttons;                    // ...and the rest of it
+    s_rawFwd      = pCmd->forwardmove;
+    s_rawSide     = pCmd->sidemove;
     s_edgeJumpFired = false;   // per-cmd: only the post-pred EdgeJump call sets it
     if (!bMoveBlocked)   // movement features only. The raw button reads above are shared
     {
@@ -2428,15 +2087,16 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         EdgeBugSoundPre(pLocal);   // real-state reset check, not tied to the search
         AutoJump(pLocal, pCmd);
         EdgeJump(pLocal, pCmd, false);
-        if (g_jumpbugKangaroo) JumpbugKangaroo(pLocal, pCmd);
-        else AutoJumpbug(pLocal, pCmd);
+        AutoJumpbug(pLocal, pCmd);
         AutoStrafe(pLocal, pCmd);
         StrafeOptimizer(pLocal, pCmd);
         // Unit A port -- pure usercmd math/traces, same tier as the calls above
         Nulls(pLocal, pCmd);
         Hsw(pLocal, pCmd);
         DelayHop(pLocal, pCmd);
+        AutoGoomba(pLocal, pCmd);   // after the jump owners: its press/release is the last word
         AutoCrouch(pLocal, pCmd);
+        DoubleJumpStrafe(pLocal, pCmd);   // after AutoStrafe: owns the wish on the dash tick
         SmoothDemoView(pLocal, pCmd);
         JumpstatsTick(pLocal, pCmd);
     }
@@ -2527,7 +2187,14 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         {
             PsRideDetect();   // this cmd's ride bit, for every reader below
             // botox on_create_move_pre:415 -- last cmd's pixel_surf latch is the crouch this cmd
-            // flies with, applied before auto_align / air_stuck get the cmd
+            // flies with, applied before auto_align / air_stuck get the cmd.
+            // botox movement.cpp:525 -- ground drops the latch. PixelSurfImpl returns on ground
+            // without clearing it, so a low ps landed inside the 16-tick window ducked forever
+            if ((s_prePredFlags & FL_ONGROUND) && (s_psShouldSurf || s_psShouldUnduck))
+            {
+                DebugLog("PSU: ground drop %s", s_psShouldSurf ? "duck" : "stand");
+                s_psShouldSurf = s_psShouldUnduck = false;
+            }
             if (s_psShouldSurf)        pCmd->buttons |= IN_DUCK;
             else if (s_psShouldUnduck) pCmd->buttons &= ~IN_DUCK;
             PsSurfFixTick(pLocal, pCmd);   // Unit A3: hold duck a couple ticks into a fresh ride
@@ -2558,7 +2225,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s_tbOwnsCmd = false;
         s_headSurfHit = false;
         s_headBounceHit = false;
-        s_wallClimbHit = false;
+        s_wallClimbHit = s_wallClimbActive = s_wcLanded = s_wcSyncWant = false;
         s_airStuckHit = false;
         s_asHolding = false;
         s_shouldPixelSurf = false;
@@ -2626,7 +2293,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s.asOn     = On(g_airStuck, g_airStuckKey, g_airStuckMode);
         s.asHit    = s_airStuckHit;
         s.wcOn     = On(g_wallClimb, g_wallClimbKey, g_wallClimbMode);
-        s.wcHit    = s_wallClimbHit;
+        s.wcHit    = s_wcLanded;   // botox m_wall_climb_now = m_hit
         s.psOn     = On(g_pixelSurf, g_pixelSurfKey, g_pixelSurfMode);
         // (user: "light up even if it didnt auto crouch when on a surf"). psHit used to
         // be the AUTO-CROUCH flag, so a standing surf -- a real ride, just one the hull already
@@ -2677,6 +2344,12 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s.bastHit  = s_bastHitMs && s.ms - s_bastHitMs < 200;
         s.esOn     = On(g_edgeSkip, g_edgeSkipKey, g_edgeSkipMode);
         s.esHit    = s_esActive;
+        s.gmbOn    = On(g_goomba, g_goombaKey, g_goombaMode);
+        // one-tick fire, held 0.2 s like jb so the frame sampling sees it
+        static unsigned long long s_gmbHitMs = 0;
+        if (s_goombaFired) s_gmbHitMs = s.ms;
+        s_goombaFired = false;
+        s.gmbHit   = s_gmbHitMs && s.ms - s_gmbHitMs < 200;
         s.buttons  = pCmd->buttons;
         s.mouseDx  = pCmd->mousedx;
         s.mouseDy  = pCmd->mousedy;
@@ -2692,7 +2365,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         d.gravity     = CvarFloat("sv_gravity", 800.f);
         d.interval    = TickInterval();
         d.tick        = s_prePredTick;
-        d.tb = s_textureBugHit; d.as = s_airStuckHit; d.ps = s.psHit; d.wc = s_wallClimbHit;
+        d.tb = s_textureBugHit; d.as = s_airStuckHit; d.ps = s.psHit; d.wc = s_wcLanded;
         Detections_Tick(d);
     }
 }

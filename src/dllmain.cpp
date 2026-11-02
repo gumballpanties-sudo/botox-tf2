@@ -634,6 +634,8 @@ bool  g_tbPredict = true;      // roll the flight forward, close the gap BEFORE 
 int   g_tbPredictTicks = 40;   // how many ticks of flight the scan rolls (40 = 0.6s)
 float g_tbPredictReach = 24.f; // how far to the side of the flight a face still counts
 bool g_wallClimb = false;   int g_wallClimbKey = 0;   int g_wallClimbMode = 1;
+bool g_wcPreventSlow = true;  bool g_wcDuck = true;  int g_wcSpotReach = 16;   // botox wall climb defaults
+bool g_wcViz = false;  float g_wcVizColor[4] = { 1.f, 190 / 255.f, 90 / 255.f, 1.f };
 bool g_airStuck = false;    int g_airStuckKey = 0;    int g_airStuckMode = 1;
 
 // -- Unit A port (movement_ex.inl): small tricks from botox csgo-sdk, defaults OFF ---------------
@@ -645,9 +647,11 @@ bool g_hswAllowAD = true;
 bool g_hswPreGround = true;
 bool g_delayHop = false;   int g_delayHopKey = 0;   int g_delayHopMode = 1;
 int  g_delayHopTicks = 6;
+bool g_goomba = false;     int g_goombaKey = 0;     int g_goombaMode = 1;
+int  g_goombaHow = 2;      int g_goombaLead = 0;
 bool g_autoCrouch = false; int g_autoCrouchKey = 0; int g_autoCrouchMode = 1;
 int  g_autoCrouchTicks = 6;
-bool g_jumpbugKangaroo = false;
+bool g_djStrafe = false;   int g_djStrafeKey = 0;   int g_djStrafeMode = 1;
 bool g_silentView = false;
 bool g_jumpstats = false;
 
@@ -709,7 +713,13 @@ bool g_fmHeadSurfLedgeOnly = true;
 bool g_fmHeadSurfBottoms = true;
 float g_asExtraReach = 4.f;  // botox m_air_stuck_extra_reach
 float g_asBudget = 50.f;     // botox m_air_stuck_budget (percent of a tick)
-int g_asStyle = 0;           // 0 cumidere (TF2 dll port) / 1 botox (clarity + lumi)
+int g_asStyle = 2;           // 0 cumidere (TF2 dll port) / 1 botox (clarity + lumi) / 2 aletherium
+// Aletherium AirStuckCore knobs (Vars::Misc::Movement::AirStuck*), same defaults + ranges
+float g_asaCatchEps  = 0.5f;  // catch tolerance around the pin vz (0.05-8; Aletherium 4.5 = every jump apex reads pinned for a tick)
+float g_asaReach     = 72.f;  // hull sweep reach, engage walls this far out (16-128)
+float g_asaFlushTol  = 56.f;  // gap > this = drive in, <= = catch sweep (8-96)
+float g_asaDriftGain = 18.f;  // drive-in forwardmove = gap * gain (4-40)
+int   g_asaSimBudget = 64;    // sims per catch sweep (16-128)
 // wave 3 (Aletherium): pixel surf finder + assist
 bool g_psFinder = false;    int g_psFinderKey = 0;    int g_psFinderMode = 1;
 float g_psFinderMargin = 8.f;
