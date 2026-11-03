@@ -9793,6 +9793,9 @@ class CInterpolatedVar : public CInterpolatedVarArrayBase< Type, false >
 MAKE_SIGNATURE(CBaseEntity_SetAbsOrigin, "client.dll", "48 89 5C 24 ? 57 48 83 EC ? 48 8B FA 48 8B D9 E8 ? ? ? ? F3 0F 10 83", 0x0);
 MAKE_SIGNATURE(CBaseEntity_SetAbsVelocity, "client.dll", "48 89 5C 24 ? 57 48 83 EC ? F3 0F 10 81 ? ? ? ? 48 8B DA 0F 2E 02", 0x0);
 MAKE_SIGNATURE(CBaseEntity_EstimateAbsVelocity, "client.dll", "48 89 5C 24 ? 57 48 83 EC ? 48 8B FA 48 8B D9 E8 ? ? ? ? 48 3B D8", 0x0);
+// Amalgam CBaseEntity.h sig, unique in x64 client.dll (file off 0x1d01f0): m_iMostRecentModelBoneCounter
+// = g_iModelBoneCounter - 1, m_flLastBoneSetupTime = -FLT_MAX. backtrack.cpp record capture.
+MAKE_SIGNATURE(CBaseEntity_InvalidateBoneCache, "client.dll", "8B 05 ? ? ? ? FF C8 C7 81", 0x0);
 
 typedef CHandle<CBaseEntity> EHANDLE;
 
@@ -9874,6 +9877,7 @@ public:
 	VIRTUAL(EyeAngles, Vec3&, 143, this);
 
 	SIGNATURE_ARGS(SetAbsOrigin, void, CBaseEntity, (const Vec3& vOrigin), this, std::ref(vOrigin));
+	SIGNATURE(InvalidateBoneCache, void, CBaseEntity, this);
 	SIGNATURE_ARGS(EstimateAbsVelocity, void, CBaseEntity, (Vec3& vVelocity), this, std::ref(vVelocity));
 	inline Vec3 GetAbsVelocity()
 	{

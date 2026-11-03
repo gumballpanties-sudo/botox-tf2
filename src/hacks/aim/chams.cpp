@@ -19,6 +19,8 @@
 #include "../visuals/lsd_chams.h"   // LsdChams_Begin/End: the "lsd" layer
 #include "../visuals/player_stencil.h"   // botox player stencil / internal glow / full-res glow (d3d9 pass)
 #include "../menu/cfg/u_esp.h"            // g_esx* stencil + inner glow vars (primitives only)
+#include "../menu/cfg/u_btchams.h"   // g_chamsBacktrack*
+#include "backtrack.h"
 #include "../esp/esp_fx.h"   // EspFx_NowMs: one clock for the sound stamp (game thread) and the draw
 #include <cmath>
 
@@ -414,11 +416,76 @@ namespace
 			return list;
 		}
 	};
-	CfgList s_visible{ g_chamsVisibleCfg }, s_occluded{ g_chamsOccludedCfg },
+	CfgList s_visible{ g_chamsVisibleCfg }, s_occluded{ g_chamsOccludedCfg }, s_backtrack{ g_chamsBacktrackCfg },
 	        s_sound{ g_chamsSoundCfg }, s_teamVisible{ g_chamsTeamVisibleCfg }, s_teamOccluded{ g_chamsTeamOccludedCfg },
 	        s_weapon{ g_chamsWeaponCfg }, s_arms{ g_chamsArmsCfg }, s_sleeve{ g_chamsSleeveCfg },
 	        s_uber{ g_chamsUberCfg }, s_cloak{ g_chamsCloakCfg },
 	        s_teamUber{ g_chamsTeamUberCfg }, s_teamCloak{ g_chamsTeamCloakCfg };
+
+	// ---- backtrack ghosts: botox draw_model_execute.cpp:240-340 draw_backtrack_records ----
+	float s_btFade[65] = {};   // botox ImAnimationHelper per model + entity: 0..1, 2 * dt * (+-2)
+
+	bool HasSlot(const ChamsLayers::List& l, int index)
+	{
+		for (int i = 0; i < l.used; ++i)
+			if (l.slots[i] == index) return true;
+		return false;
+	}
+
+	void DrawBacktrack(CTFPlayer* pPlayer, int entIdx, const ChamsLayers::List& l, const DrawCtx& ctx)
+	{
+		if (entIdx <= 0 || entIdx > 64)
+			return;
+
+		float& flFade = s_btFade[entIdx];
+		auto Animate = [&](bool bIn) { flFade = std::clamp(flFade + 2.f * I::GlobalVars->absoluteframetime * (bIn ? 2.f : -2.f), 0.f, 1.f); return flFade; };
+		auto DrawRecord = [&](const TickRecord* r, float flAlpha) { if (r && flAlpha > 0.f) DrawLayers(l, g_chamsBacktrackXqz, flAlpha, ctx, r->m_aBones); };
+
+		// records are network pose, the model is interpolated behind it: newer ones would draw in front
+		const float flModel = F::Backtrack.ModelTime();
+		const Vec3 vLive = pPlayer->GetAbsOrigin();
+
+		switch (g_chamsBacktrackType)
+		{
+		case 0:
+			if (auto pOldest = F::Backtrack.OldestRecord(pPlayer); pOldest && pOldest->m_flSimTime <= flModel)
+				DrawRecord(pOldest, Animate(pOldest->m_vOrigin.DistToSqr(vLive) > 9.f));
+			break;
+		case 1:
+		{
+			auto pOldest = F::Backtrack.OldestRecord(pPlayer);
+			auto pList = F::Backtrack.GetRecords(entIdx);
+			if (!pOldest || !pList)
+				break;
+
+			const float flAlpha = Animate(pOldest->m_vOrigin.DistToSqr(vLive) > 9.f);
+
+			static const TickRecord* aRanked[CBacktrack::kMaxRecords];
+			int nRanked = 0;
+			for (int i = 0; i < F::Backtrack.Count(); i++)
+				if (pList[i].m_flSimTime <= flModel && F::Backtrack.Usable(pPlayer, pList[i].m_flSimTime))
+					aRanked[nRanked++] = &pList[i];
+			std::sort(aRanked, aRanked + nRanked, [](const TickRecord* a, const TickRecord* b) { return a->m_flSimTime > b->m_flSimTime; });
+
+			// ghost cap thins, never shortens: newest + oldest always, rest evenly spaced, oldest drawn first
+			const int iMax = std::clamp(g_chamsBacktrackMaxGhosts, 2, CBacktrack::kMaxRecords);
+			const int iDrawn = nRanked < iMax ? nRanked : iMax;
+			for (int pick = iDrawn - 1; pick >= 0; --pick)
+			{
+				const int i = iDrawn > 1 ? int(float(pick) * float(nRanked - 1) / float(iDrawn - 1) + 0.5f) : 0;
+				const float flTick = g_chamsBacktrackGradient && nRanked > 1 ? 1.f - float(i) / float(nRanked - 1) : 1.f;
+				DrawRecord(aRanked[i], flAlpha * flTick);
+			}
+			break;
+		}
+		case 2:
+			// botox draws g_ctx.m_record on every enemy model (other models on the target's bones);
+			// here only on the player that owns it. Fades in while attack is held.
+			if (F::Backtrack.m_pTarget && F::Backtrack.Owns(entIdx, F::Backtrack.m_pTarget) && G::LastUserCmd)
+				DrawRecord(F::Backtrack.m_pTarget, Animate(G::LastUserCmd->buttons & IN_ATTACK));
+			break;
+		}
+	}
 
 	// set while Chams_RenderCloaked force-draws a fully cloaked spy (m_flInvisibility zeroed for the draw)
 	CBaseEntity* s_cloakForced = nullptr;
@@ -548,10 +615,15 @@ void Chams_OnSound(int entindex, float volume, const float* origin)
 	s_soundMs[entindex] = EspFx_NowMs();
 }
 
+bool Chams_BacktrackActive()
+{
+	return g_chamsEnable && s_backtrack.Get().used;
+}
+
 bool Chams_AnyActive()
 {
 	if (g_glowEnable) return true;
-	if (g_chamsEnable && (s_visible.Get().used || s_occluded.Get().used || s_sound.Get().used)) return true;
+	if (g_chamsEnable && (s_visible.Get().used || s_occluded.Get().used || s_backtrack.Get().used || s_sound.Get().used)) return true;
 	if (g_chamsTeam && (s_teamVisible.Get().used || s_teamOccluded.Get().used)) return true;
 	if (g_chamsEnable && (s_uber.Get().used || s_cloak.Get().used)) return true;
 	if (g_chamsTeam && (s_teamUber.Get().used || s_teamCloak.Get().used)) return true;
@@ -668,12 +740,16 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 	const float flSound = bChams && bEnemy && bLivePlayer && s_sound.Get().used ? SoundAlphaFor(entIdx, pLocal->m_vecOrigin()) : 0.f;
 	const bool bDrawVisible = bChams && lVisible.used;
 	const bool bDrawOccluded = bChams && lOccluded.used;
+	const bool bBacktrack = bChams && bEnemy && bLivePlayer && s_backtrack.Get().used;
+	// botox: translucent two tone ghosts lay depth, so they draw after the live model (blend over it, not cut it)
+	const bool bBacktrackLate = bBacktrack && !g_chamsBacktrackXqz && HasSlot(s_backtrack.Get(), ChamsLayers::TwoTone);
 
-	if (!bDrawVisible && !bDrawOccluded && flSound <= 0.f)
+	if (!bDrawVisible && !bDrawOccluded && !bBacktrack && flSound <= 0.f)
 		return bForced;   // forced: true = draw nothing, false would let the hook reveal the spy
 
-	// botox order: sound, occluded (all ignorez first), then the model itself
+	// botox order: sound, backtrack, occluded (all ignorez first), then the model itself
 	if (flSound > 0.f)  DrawLayers(s_sound.Get(), true, flSound, ctx);
+	if (bBacktrack && !bBacktrackLate) DrawBacktrack(pPlayer, entIdx, s_backtrack.Get(), ctx);
 	if (bDrawOccluded)  DrawLayers(lOccluded, true, 1.f, ctx);
 
 	bool bDrewModel = false;
@@ -684,6 +760,8 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 		Restore();
 		ctx.Draw();
 	}
+
+	if (bBacktrackLate) DrawBacktrack(pPlayer, entIdx, s_backtrack.Get(), ctx);
 
 	Restore();
 

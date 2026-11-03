@@ -1,4 +1,5 @@
 #include "aim.h"
+#include "backtrack.h"
 
 #include "sdk.h"
 #include "events.h"
@@ -151,6 +152,7 @@ void Aim_Unload()
 	G::Unload = true;
 	HudAim_Restore();   // unit hud: net_graphtext back to the player's value
 	U::Hooks.Unload();
+	F::Backtrack.Release();   // after the hooks: no FSN / CreateMove writes into the rings
 	H::Events.Unload();
 	H::ConVars.Restore();
 	s_bActive = false;
@@ -454,6 +456,14 @@ void Aim_RenderMenuTab()
 			VarSlider(Aimbot::General::AssistStrength);
 		VarToggle(Aimbot::General::AutoShoot);
 		VarToggle(Aimbot::General::NoSpread);
+		// botox menu.cpp aimbot group: backtrack row + cog (extended / extend amount not ported)
+		VarToggle(Aimbot::Backtrack::Enabled);
+		if (Aimbot::Backtrack::Enabled.Value)
+			ImGui::OptionPopup("backtrack settings", [&]()
+			{
+				VarToggle(Aimbot::Backtrack::AimAt);
+				VarSlider(Aimbot::Backtrack::TimeLimit);
+			}, ImVec2(220.f, -1));
 
 		VarMulti(Aimbot::General::Target);
 		VarMulti(Aimbot::General::Ignore);

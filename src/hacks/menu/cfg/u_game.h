@@ -14,6 +14,23 @@ inline int  g_botNamesLength   = 8;
 inline bool g_botNamesNoPrefix = true;
 inline bool g_botNamesPing     = false;
 
+// custom names, fpsoverlay names.cpp 1:1 (hacks/misc/names.cpp; same cfg keys). Streamer mode
+// 0 off, 1 others as class, 2 team / enemy label, 3 one label -- never masks you. Cycle lists
+// (names.h NameList) + per-player aliases live in names.cpp's own cfg block. Trigger 0 timer
+// (interval s, game time), 1 on your kill; shared by every cycle.
+inline int   g_streamerMode              = 0;
+inline char  g_streamerTeamLabel[64]     = "teammate";
+inline char  g_streamerEnemyLabel[64]    = "enemy";
+inline char  g_streamerEveryoneLabel[64] = "player";
+inline bool  g_useCustomUsername         = false;
+inline char  g_customUsername[64]        = "";
+inline bool  g_enableNameCycle           = false;
+inline bool  g_enableTeamLabelCycle      = false;
+inline bool  g_enableEnemyLabelCycle     = false;
+inline bool  g_enableEveryoneLabelCycle  = false;
+inline int   g_nameTrigger               = 0;
+inline float g_nameInterval              = 5.f;
+
 // botox m_performance_* rows (master = g_perfEnable, dllmain). skip unused bone records: no
 // tick records in this build (backtrack removed 11-01), not ported.
 inline bool g_perfThreadedBones = true;

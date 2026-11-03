@@ -199,6 +199,7 @@ struct MvInd_t
     bool  psOn = false, psHit = false;
     // ps assist ("ast"): on = the assist bind is live, hit = it owns the arc right now
     bool  astOn = false, astHit = false;
+    bool  pjOn = false, pjHit = false;   // pixeljump: same hop flag, hop planned under the pj key
     bool  ebOn = false, ebHit = false;
     bool  strafeOn = false, ejOn = false, ljOn = false, mjOn = false;
     bool  mjHit = false;                 // mini jump: hit = the takeoff duck went out this tick
@@ -267,6 +268,8 @@ struct PsDrawData
     std::vector<Vec3> finderPts;   // finder-found surf spots (current map)
     std::vector<Vec3> tbPts;       // finder-found texturebug seams (drawn with a red ring)
     std::vector<Vec3> assistPts;   // saved assist targets (current map)
+    std::vector<float> assistRadius;   // per assistPts: engage radius (override or g_psAssistRadius)
+    std::vector<Vec3>  assistNormal;   // per assistPts: cached wall normal, zero = not resolved yet
     // whole-map scan (psmap.inl): confirmed surf segments, A then B, one pair per line
     std::vector<Vec3> mapLines;
     // finder surf lengths (g_psFinderLength): how far each found pin holds along its wall, A then B
@@ -275,6 +278,8 @@ struct PsDrawData
     // scan's switch, not the finder's: a scan is minutes of work and its marks outlive the aim
     std::vector<Vec3> mapTbPts;
     int  assistActive = -1;        // assistPts index the assist works toward (-1 = none)
+    std::vector<Vec3> pjPts;       // pixeljump's own saved points (current map)
+    int  pjActive = -1;            // pjPts index pixeljump works toward (-1 = none)
     bool lineActive = false;       // finder scan column being stretched
     Vec3 lineA, lineB;
     Vec3 localOrigin;              // for the distance fade

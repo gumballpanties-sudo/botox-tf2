@@ -66,6 +66,13 @@ static void AsSetOrigin(void* pLocal, const Vec3& o)
     EntSetV3(pLocal, g_offOrigin, o);
 }
 
+// botox local->get_velocity( ) = v. TF2 sims read the ABS velocity: the netvar alone is a no-op
+static void AsSetVelocity(void* pLocal, const Vec3& v)
+{
+    if (g_fnSetAbsVelocity) g_fnSetAbsVelocity(pLocal, v);
+    EntSetV3(pLocal, g_offVelocity, v);
+}
+
 // CInput::m_pCommands[seq % 90], the sent cmd for a command number (log only)
 static const UserCmd_t* AsUserCmd(int seq)
 {

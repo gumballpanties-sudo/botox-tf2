@@ -38,7 +38,7 @@ void UnitA_Menu_movement_main()
             ImGui::Keybind("auto goomba key", &g_goombaKey, &g_goombaMode);
             ImGui::Combo("type##goomba", &g_goombaHow, "sticky jump\0rocket jump\0regular jump\0");
             // ping + interp come from their simtime and rocket flight from the ARJ sim; this is extra slack
-            ImGui::SliderInt("lead ticks##goomba", &g_goombaLead, 0, 8);
+            ImGui::SliderInt("lead ticks##goomba", &g_goombaLead, 0, 64);
         }, ImVec2(220.f, -1));
 
     ImGui::Checkbox("auto crouch", &g_autoCrouch);

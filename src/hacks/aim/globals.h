@@ -96,13 +96,8 @@ namespace G
 	inline bool SilentAngles = false;
 	inline bool PSilentAngles = false;
 
-	// Clean POV demos (primary fix): latest real engine view angle, stashed each CreateMove. The
-	// CPrediction::GetLocalViewAngles hook hands this back while a demo records so the demo cmdinfo /
-	// first-person camera follows the real view instead of the silent/backstab angle.
-	inline Vec3 RealViewAngles = {};
-
 	// Fake POV (Movement > FAKE POV): smoothed demo-camera angle offset (x = pitch, y = yaw), published
-	// each frame by F::FakePOV and added on top of RealViewAngles by the CPrediction::GetLocalViewAngles
+	// each frame by F::FakePOV and added on top of the engine view by the CPrediction::GetLocalViewAngles
 	// hook while a demo records. Active = the feature is on OR the offset is still easing back to rest.
 	inline Vec3 FakePOVOffset = {};
 	inline bool FakePOVActive = false;

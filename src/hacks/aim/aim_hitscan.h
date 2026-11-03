@@ -17,6 +17,9 @@ private:
 	bool ShouldFire(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd, const Target_t& tTarget);
 
 	Vec3 m_vEyePos = {};
+	// botox scan_t m_live / m_records: pass 0 = live (+ records with aim at backtrack),
+	// pass 1 = records only, run when pass 0 found nothing (backtrack on, aim at off)
+	int m_iBtPass = 0;
 
 public:
 	void Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd);

@@ -14,6 +14,9 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 // Fast gate for the hook's cheap path: any chams/glow option that can draw anything.
 bool Chams_AnyActive();
 
+// enemy chams on + a backtrack material picked: aim/backtrack.cpp builds records (full bones) for it
+bool Chams_BacktrackActive();
+
 // CSoundEmitterSystem::EmitSound peek (visuals.cpp h_EmitSound): sound chams timestamps.
 void Chams_OnSound(int entindex, float volume, const float* origin);
 

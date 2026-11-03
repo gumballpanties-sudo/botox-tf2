@@ -183,18 +183,29 @@ static void Gmb_TrackTick(void* pLocal, float dt)
 void Movement_GoombaFired() { s_goombaFired = true; Gmb_TrackStart(1); }
 int  Movement_GoombaTarget() { return s_gmbBestIdx; }   // this cmd's best target (0 = none), for the rocket plan
 
+// ---- scan summary: one "GOOMBA S:" line per bind hold. Each count = cmds where at least one
+// player got past that filter, in filter order, so the first big drop names the filter ----
+static struct GmbScan { int cmds = 0, air = 0, fall = 0, gap = 0, contact = 0, over = 0; } s_gmbScan;
+static void Gmb_ScanFlush()
+{
+    const GmbScan& s = s_gmbScan;
+    if (s.cmds)
+        DebugLog("GOOMBA S: type=%d cmds=%d air=%d fall=%d gap=%d contact=%d over=%d", g_goombaHow, s.cmds, s.air, s.fall, s.gap, s.contact, s.over);
+    s_gmbScan = {};
+}
+
 static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
 {
     static float s_latchUntil = 0.f;   // one fire per drop: back-to-back cmds see the same contact
     s_goombaRocketK = -1;
     s_gmbBestIdx = 0; s_gmbBestK = -1;
-    if (!g_goomba || !g_globalVars || !g_entityList) return;
+    if (!g_goomba || !g_globalVars || !g_entityList) { Gmb_ScanFlush(); return; }
     if (g_offOrigin <= 0 || g_offMins <= 0 || g_offMaxs <= 0 || g_offVelocity <= 0
         || g_offTeamNum <= 0 || g_offFlags <= 0) return;
     const float dtT = g_globalVars->interval_per_tick > 0.f ? g_globalVars->interval_per_tick : 0.015f;
     Gmb_TrackTick(pLocal, dtT);   // before the key gate: the outcome keeps playing after the key is let go
     s_gmbMyTick = g_offTickBase > 0 ? EntI(pLocal, g_offTickBase) : 0;
-    if (!MovementKeyOK(g_goombaKey, g_goombaMode)) return;
+    if (!MovementKeyOK(g_goombaKey, g_goombaMode)) { Gmb_ScanFlush(); return; }
 
     const float rt = g_globalVars->realtime;
     const float dt = g_globalVars->interval_per_tick > 0.f ? g_globalVars->interval_per_tick : 0.015f;
@@ -218,16 +229,20 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
     // then our head stands still on the floor or keeps its own air arc
     const bool  myFalls = g_goombaHow == 2 || !onGround;
     const float myVz0 = g_goombaHow == 2 ? 289.f : (onGround ? 0.f : myVel.z);
-    // rocket: the ARJ decides against its own rocket flight time (up to ~10 ticks), so look further
-    const int   maxK = rocket ? 14 + lead : 2 + lead;
+    // rocket: the ARJ decides against its own rocket flight time (up to 12 ticks for a shallow
+    // pitch) plus one, and a -1500 drop covers ~22u a tick, so look well past that
+    const int   maxK = rocket ? 24 + lead : 2 + lead;
 
     int best = -1;
+    bool sAir = false, sFall = false, sGap = false, sContact = false;
+    s_gmbScan.cmds++;
     for (int i = 1; i <= n; ++i)
     {
         void* p = GetClientEntity(i);
         if (!p || p == pLocal || !EntAlive(p) || Gmb_Dormant(i)) continue;
         if (!teamSolid && EntI(p, g_offTeamNum) == myTeam) continue;
         if (EntI(p, g_offFlags) & FL_ONGROUND) continue;   // standing on us / anything: not falling
+        sAir = true;
 
         // snapshot -> the server time our cmd lands at. Clamp: a stale simtime is a lag spike, not physics
         float t0 = 0.f;
@@ -238,11 +253,14 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
         const Vec3  v = EntV3(p, g_offVelocity);
         const float vz = v.z - g * t0;
         if (vz >= -10.f) continue;   // only a drop (heroin goomba assist FUN_180075a10: vz < -10)
+        sFall = true;
         const float gap = org.z + gmb::Rise(v.z, g, t0) + EntV3(p, g_offMins).z - myHead;
         if (gap <= 0.f || gap > 400.f) continue;
+        sGap = true;
 
         const int k = gmb::ContactTick(gap, vz, myVz0, myFalls, g, dt, maxK);
         if (k < 0) continue;
+        sContact = true;
 
         // still over our head at contact
         const float tk = t0 + dt * (float)k, tm = dt * (float)k;
@@ -251,6 +269,8 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
             || fabsf(org.y + v.y * tk - (me.y + myVel.y * tm)) >= reach) continue;
         if (best < 0 || k < best) { best = k; s_gmbBestIdx = i; s_gmbBestVz = vz; }
     }
+    s_gmbScan.air += sAir; s_gmbScan.fall += sFall; s_gmbScan.gap += sGap; s_gmbScan.contact += sContact;
+    s_gmbScan.over += best >= 0;
     s_gmbBestK = best;
     if (best < 0) return;
     if (rocket) { s_goombaRocketK = best; return; }

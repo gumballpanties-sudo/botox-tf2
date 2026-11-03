@@ -11,8 +11,11 @@
 //   g_air_stuck_holding / _owns_cmd          -> s_asHolding / s_airStuckHit
 //   HITGODA (ps assist plan live)            -> s_psAssistHopActive || s_psAssistDuckHeld. HITGODA2/3: run after wc here / not ported
 //   g_texturebug.m_hit / m_hs_hit            -> s_textureBugHit / s_headSurfHit; g_edgebug.m_found -> s_ebDetected
-//   + TF2 runs TB / HS / HB BEFORE wc (botox: after, and tb steps aside for caught()). So wc also yields to s_headBounceHit,
-//     s_tbOwnsCmd and a running tb ride (s_tbRideHold): their cmd already went into this one
+//   + TF2 runs TB / HS / HB BEFORE wc (botox: after, and tb steps aside for caught()). So wc also yields to s_headBounceHit
+//     and a running tb ride (s_tbRideHold); tb's non-catch cmd (s_tbOwnsCmd hug / creep) is dropped on an air wall tick and wc
+//     starts from s_wcPreTb* = botox texturebug.cpp:159 ( tb keeps only a real catch on a wc tick )
+//   + 11-03 botox fixes: robust = into-face VELOCITY nudge only ( via AsSetVelocity: TF2 sims read abs velocity ), exit_pin side
+//     from your raw wish when slow. Not ported: steer to seam ( botox default off ), wig / stomp diag
 //   fireman yield                            -> none, TF2 has no ladders
 //   0.34 ducked wish crop                    -> none: HandleDuckingSpeedCrop is ground only (gamemovement.cpp:4308), every
 //                                               wish here is simmed in the air
@@ -41,6 +44,10 @@ static bool  s_wcHolding = false;
 static int   s_wcHoldButtons = 0; /* stance the hold plan was proven in */
 static int   s_wcFreeCmd = -1;    /* cmd wc sent off a sim that ended unpinned */
 static bool  s_wcParkOff = false;
+/* botox m_pred_*: END wc simmed for the cmd it sent ( debug log only ), checked against the next START = div */
+static int   s_wcPredCmd = -1;
+static Vec3  s_wcPredOrg{}, s_wcPredVel{};
+static int   s_wcDivLogged = 0;
 
 /* ground: one wc hop replayed from each spot along the wall within reach, sliced over ticks, best one walked to */
 static struct WcSpotJob {
@@ -72,11 +79,12 @@ static void WallClimb(void* pLocal, UserCmd_t* cmd)
         s_wcLogNext = now + 1000ull;
         int* const n = s_wcCount;
         if (n[c_ticks] || n[c_yield] || n[c_ramp] || n[c_skip])
-            DebugLog("WC: land=%d flip=%d pinc=%d hold=%d park=%d keys=%d along=%d own=%d leave=%d aa=%d exit=%d/%d far=%d rise=%d scut=%d cut=%d yield=%d ramp=%d skip=%d jump back=%d strip=%d as=%d miss=%d np=%d pk=%d away=%d robust=%d spot=%d/%d hland=%d low=%d lhang=%d seam=%d/%d pflip=%d ticks=%d sims=%d us=%lld worst=%lld",
+            DebugLog("WC: land=%d flip=%d pinc=%d hold=%d park=%d keys=%d along=%d own=%d leave=%d aa=%d exit=%d/%d far=%d rise=%d scut=%d cut=%d yield=%d ramp=%d skip=%d jump back=%d strip=%d as=%d miss=%d np=%d pk=%d away=%d robust=%d spot=%d/%d hland=%d low=%d lhang=%d seam=%d/%d pflip=%d tbdrop=%d div=%d spath=%d sfloor=%d ticks=%d sims=%d us=%lld worst=%lld",
                      n[c_land], n[c_flip], n[c_pin_catch], n[c_hold], n[c_park], n[c_keys], n[c_along], n[c_own], n[c_leave], n[c_aa_leave],
                      n[c_exit], n[c_exit_none], n[c_far], n[c_rise], n[c_scan_cut], n[c_cut], n[c_yield], n[c_ramp], n[c_skip], n[c_jump_back],
                      n[c_jump_strip], n[c_as_take], n[c_pin_miss], n[c_no_park], n[c_park_keep], n[c_away], n[c_robust], n[c_spot], n[c_spot_sims],
-                     n[c_hold_land], n[c_low], n[c_leave_hang], n[c_seam], n[c_seam_park], n[c_pin_flip], n[c_ticks], n[c_sims], s_wcUs, s_wcUsWorst);
+                     n[c_hold_land], n[c_low], n[c_leave_hang], n[c_seam], n[c_seam_park], n[c_pin_flip],
+                     n[c_tb_drop], n[c_div], n[c_spot_path], n[c_spot_floor], n[c_ticks], n[c_sims], s_wcUs, s_wcUsWorst);
         for (int& c : s_wcCount)
             c = 0;
         s_wcUs = s_wcUsWorst = 0ll;
@@ -108,8 +116,20 @@ static void WallClimb(void* pLocal, UserCmd_t* cmd)
     const Vec3 mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);
     if (on_ground)
         s_wcGroundZ = origin.z;
+    // div: this START vs the END wc simmed for what it sent last tick. a later feature's rewrite ( auto bounce / bounce assist ) or the
+    // server's correction both land here: div high + catches simmed ( land= ) but not had = the sims are not what the server runs
+    if (s_wcPredCmd >= 0 && s_wcPredCmd == cmd->command_number - 1) {
+        const Vec3 dp = origin - s_wcPredOrg, dv = start_vel - s_wcPredVel;
+        if (dp.Length() > 1e-4f || dv.Length() > 1e-3f) {
+            ++s_wcCount[c_div];
+            if (s_wcDivLogged < 64 && ++s_wcDivLogged)
+                DebugLog("WC DIV: dorg=%.5f,%.5f,%.5f dvel=%.3f,%.3f,%.3f start g=%d vz=%.2f pred vz=%.2f", dp.x, dp.y, dp.z, dv.x, dv.y, dv.z,
+                         on_ground, start_vel.z, s_wcPredVel.z);
+        }
+    }
+    s_wcPredCmd = -1;
 
-    const float pin         = TargetPredictZVel();
+    const float pin        = TargetPredictZVel();
     const auto pinned       = [pin](const Vec3& v) { return v.x == 0.f && v.y == 0.f && v.z == pin; };
     const bool start_pinned = !on_ground && pinned(start_vel);
     // server pinned what wc simmed free = flush park is a coin flip here ( 10-07 log: 0 / 41 pins simmed ), park off till ground
@@ -149,13 +169,25 @@ static void WallClimb(void* pLocal, UserCmd_t* cmd)
     }
     // no yield to a pixel surf latch: wc parks flush, so crease pins come often and a latched ride hung you 27-34 ticks
     // ( 10-06 22:20 log ). pixel_surf yields to active( ) instead, it runs after wc
+    // tb's catches + a running ride only. s_tbOwnsCmd ( cumidere hug, botox-style creep / press ) is NOT a yield: botox wc runs first
+    // and tb drops its non-catch cmd on a wc tick ( texturebug.cpp:159, 10-31 log: 888 STOMP@texture_bug = lost catches ). ours 11-03:
+    // yield 425 / ticks 4246, the hug fires every air wall tick = wc never got the cmd with tb on the same key
     if (s_asHolding || s_psAssistHopActive || s_psAssistDuckHeld || s_textureBugHit || s_headSurfHit || s_ebDetected
-        || s_headBounceHit || s_tbOwnsCmd || (On(g_textureBug, g_textureBugKey, g_textureBugMode) && s_tbRideHold > 0)) {
+        || s_headBounceHit || (On(g_textureBug, g_textureBugKey, g_textureBugMode) && s_tbRideHold > 0)) {
         s_wcHolding = false;
         ++s_wcCount[c_yield];
         return;
     }
     s_wallClimbActive = !on_ground;
+    if (!on_ground && !s_airStuckHit) {
+        // tb / hs / hb ran before us and caught nothing: their cmd goes, wc starts from what they were handed ( botox order ).
+        // air stuck's steer stays: botox runs it before wc too, so its cmd IS wc's keys there
+        s_wcCount[c_tb_drop] += s_tbOwnsCmd;
+        s_tbOwnsCmd      = false;
+        cmd->forwardmove = s_wcPreTbFwd;
+        cmd->sidemove    = s_wcPreTbSide;
+        cmd->buttons     = s_wcPreTbButtons;
+    }
     // air stuck on the same key publishes a wall hug every air tick by a wall, pin or not: only a catch takes the cmd from it
     const bool as_steers   = s_airStuckHit;
     const UserCmd_t as_cmd = *cmd;
@@ -239,7 +271,12 @@ static void WallClimb(void* pLocal, UserCmd_t* cmd)
     // first try that stays unpinned for k_exit_look ticks of your keys ( a one tick unpin that re-pins = staircase ), else first unpin
     const auto exit_pin = [&]() {
         const float r  = DEG2RADF(wall_yaw + 90.f);
-        const float sg = start_vel.Length2D() >= k_pin_sign_xy && cosf(r) * start_vel.x + sinf(r) * start_vel.y < 0.f ? -1.f : 1.f;
+        // botox: too slow to read a side ( a pinned START is xy 0 ) = your raw along wish's side: a fixed + shove fought a strafe the
+        // other way, your keys pushed back into the seam, pin, shove = side to side on the seam ( lab P73 / P79 exit_wish )
+        float wx, wy;
+        WorldWish(you.viewangles.y, you.forwardmove, you.sidemove, wx, wy);
+        const float vd = cosf(r) * start_vel.x + sinf(r) * start_vel.y, wd = cosf(r) * wx + sinf(r) * wy;
+        const float sg = start_vel.Length2D() >= k_pin_sign_xy ? (vd < 0.f ? -1.f : 1.f) : wd < 0.f ? -1.f : 1.f;
         const UserCmd_t tries[] = { keys, with(wall_yaw + sg * 90.f, 30.f, user_duck), with(wall_yaw - sg * 90.f, 30.f, user_duck),
                                     with(wall_yaw, -5.f, user_duck), with(wall_yaw, -450.f, user_duck) };
         int pick = -1, first = -1;
@@ -330,7 +367,16 @@ static void WallClimb(void* pLocal, UserCmd_t* cmd)
                 TraceHull(j.base, o, mins, maxs, MASK_PLAYERSOLID, &filter, &tr);
                 GameTrace_t gr{};
                 TraceHull(o, o - Vec3(0.f, 0.f, 2.f), mins, maxs, MASK_PLAYERSOLID, &filter, &gr);
-                if (tr.startsolid || tr.fraction < 1.f || gr.startsolid || gr.fraction >= 1.f || gr.plane.normal.z < 0.7f) {
+                // idx 0 = where you stand: no path to trace ( a zero length box flush on a disp face can read solid ). 11-03 log: 113 / 113
+                // jobs scored -1 on every spot, here too, so which half fails is counted ( spath= sfloor= )
+                const bool path_bad  = j.idx && (tr.startsolid || tr.fraction < 1.f);
+                const bool floor_bad = gr.startsolid || gr.fraction >= 1.f || gr.plane.normal.z < 0.7f;
+                if (path_bad || floor_bad) {
+                    s_wcCount[c_spot_path] += path_bad;
+                    s_wcCount[c_spot_floor] += !path_bad && floor_bad;
+                    static int s_spot0Logged = 0;
+                    if (!j.idx && s_spot0Logged < 32 && ++s_spot0Logged)
+                        DebugLog("WC SPOT0: floor ss=%d frac=%.3f nz=%.2f z=%.3f", gr.startsolid ? 1 : 0, gr.fraction, gr.plane.normal.z, o.z);
                     finish(-1);
                     continue;
                 }
@@ -611,26 +657,15 @@ static void WallClimb(void* pLocal, UserCmd_t* cmd)
                     std::sort(parks.begin(), parks.end(), [](const Park& a, const Park& b) { return a.snag != b.snag ? b.snag : a.d < b.d; });
                     have_park = false;
                     for (int p = 0; p < static_cast<int>(parks.size()) && p < k_robust_parks && !have_park; ++p) {
-                        bool ok = true;
-                        for (int v = 0; v < 3 && ok; ++v) {
-                            Vec3 o = origin, vel = start_vel;
-                            if (v < 2) {
-                                for (int u = 0; u <= v; ++u) {
-                                    if (fabsf(wall_n.x) > 0.05f)
-                                        o.x = std::nextafter(o.x, wall_n.x > 0.f ? -FLT_MAX : FLT_MAX);
-                                    if (fabsf(wall_n.y) > 0.05f)
-                                        o.y = std::nextafter(o.y, wall_n.y > 0.f ? -FLT_MAX : FLT_MAX);
-                                }
-                            } else {
-                                vel.x -= wall_n.x * k_robust_vel;
-                                vel.y -= wall_n.y * k_robust_vel;
-                            }
-                            restore();
-                            AsSetOrigin(pLocal, o);
-                            EntSetV3(pLocal, g_offVelocity, vel);
-                            SimOut q{};
-                            ok = chain(parks[p].c, q) && !pinned(q.vel);
-                        }
+                        // botox 11-03 online log: START never drifts into the face ( 41 / 42 WC DIV ), the 1 / 2 ulp origin nudges pinned
+                        // every flush park = park, keys_rob, park ( ours 11-03: robust 735 vs park 427 ). into face vel only: lab wallA first +13%, stuck 0
+                        Vec3 vel = start_vel;
+                        vel.x -= wall_n.x * k_robust_vel;
+                        vel.y -= wall_n.y * k_robust_vel;
+                        restore();
+                        AsSetVelocity(pLocal, vel);
+                        SimOut q{};
+                        const bool ok = chain(parks[p].c, q) && !pinned(q.vel);
                         if (ok)
                             best_d = parks[p].d, best_c = parks[p].c, best_xy = parks[p].xy, best_snag = parks[p].snag, have_park = true;
                     }
@@ -779,8 +814,9 @@ static void WallClimb(void* pLocal, UserCmd_t* cmd)
     }
 
     // wc t: every wall tick. u = end of your cmd, s = end of what wall climb sent ( s.xy < u.xy = it cost speed ). org / vel / yaw
-    // = START + your keys, enough to replay the tick in fl_lab. extra sims, debug log only, not in us=. quiet ticks 1 in 33 ( DiagOk )
-    if (g_debugLogEnable && DiagOk(s_wcDiagTick, landed || held || jump_fix || was_cut)) {
+    // = START + your keys, enough to replay the tick in fl_lab. extra sims, debug log only, not in us=. quiet ticks print 1 in 33
+    // ( DiagOk ), the sims run every tick: s is the END div= checks next tick
+    if (g_debugLogEnable) {
         const auto raw = [&](const UserCmd_t& c, SimOut& out) {
             restore();
             step(c);
@@ -792,6 +828,12 @@ static void WallClimb(void* pLocal, UserCmd_t* cmd)
             raw(*cmd, s);
         else
             s = u;
+        if (!as_steers) {
+            s_wcPredCmd = cmd->command_number;
+            s_wcPredOrg = s.origin;
+            s_wcPredVel = s.vel;
+        }
+        if (DiagOk(s_wcDiagTick, landed || held || jump_fix || was_cut))
         DebugLog("WC T: %s g=%d n=%.2f,%.2f disp=%d xy=%.1f u=%.1f/%.1f/%d s=%.1f/%.1f/%d fs=%.1f,%.1f->%.3f,%.3f j=%d/%d d=%d/%d sims=%d%s org=%.4f,%.4f,%.4f vel=%.3f,%.3f,%.3f yaw=%.3f gz=%.3f",
                  branch, on_ground, wall_n.x, wall_n.y, disp_wall ? 1 : 0, start_vel.Length2D(), u.vel.Length2D(), u.vel.z,
                  (u.flags & FL_ONGROUND) != 0, s.vel.Length2D(), s.vel.z, (s.flags & FL_ONGROUND) != 0, keys.forwardmove, keys.sidemove,

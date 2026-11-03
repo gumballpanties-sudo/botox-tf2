@@ -20,6 +20,23 @@ static bool s_bOn = false;   // Vars::Misc::Movement::AutoRocketJump
 static int  s_iGoombaK = -1; // ticks until the falling player reaches our standing head
 static constexpr int kApplyAbove = 0, kTimingOffset = 0, kChokeCount = 1;
 
+// ---- reject summary: one "GOOMBA R:" line per bind hold, the count of cmds each gate ate.
+// Every gate below used to return silently, so a hold that never fired left no trace ----
+static struct GmbDiag
+{
+	int cmds = 0, nowpn = 0, noK = 0, duck = 0, noAtk = 0, ang = 0, plans = 0;
+	int cand = 0, noInfo = 0, noHit = 0, onUs = 0, low = 0, rising = 0, fire = 0;
+	float bestNow = -1e9f, bestNext = -1e9f;
+} s_tDiag;
+static void Gmb_DiagFlush()
+{
+	GmbDiag& d = s_tDiag;
+	if (d.cmds)
+		DebugLog("GOOMBA R: cmds=%d nowpn=%d noK=%d duck=%d noAtk=%d ang=%d plans=%d cand=%d noInfo=%d noHit=%d onUs=%d low=%d rising=%d fire=%d bestNow=%.0f bestNext=%.0f",
+			d.cmds, d.nowpn, d.noK, d.duck, d.noAtk, d.ang, d.plans, d.cand, d.noInfo, d.noHit, d.onUs, d.low, d.rising, d.fire, d.bestNow, d.bestNext);
+	d = {};
+}
+
 // ---- goomba rocket plan: score every aim, fire on the best tick ---------------------------
 // The boost has two sources (math + SDK refs in goomba_pure.h): the blast pushes the enemy
 // (damage falls off with distance to their feet/centre), and a landing on our rising head hands
@@ -99,12 +116,18 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 
 	struct Pick { float flScore = -1e9f; Vec3 vAng = {}; int n = 0; gmb::Outcome o = {}; float flMePush = 0.f, flThemPush = 0.f; };
 	Pick tNow, tNext;
+	GmbDiag& d = s_tDiag;
+	d.plans++;
 	for (auto& vAng : vCands)
 	{
+		d.cand++;
 		ProjectileInfo tInfo = {};
 		if (!F::ProjSim.GetInfo(pLocal, pWeapon, vAng, tInfo, ProjSimEnum::Trace | ProjSimEnum::InitCheck | ProjSimEnum::NoRandomAngles)
 			|| tInfo.m_flVelocity <= 0.f)
+		{
+			d.noInfo++;
 			continue;
+		}
 		Vec3 vFwd; Math::AngleVectors(tInfo.m_vAng, &vFwd);
 		const float flStep = tInfo.m_flVelocity * dt;
 
@@ -112,7 +135,10 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 		CTraceFilterCollideable tFilter = {}; tFilter.pSkip = pLocal;
 		SDK::Trace(tInfo.m_vPos, tInfo.m_vPos + vFwd * (flStep * 12.f), MASK_SOLID, &tFilter, &tTrace);
 		if (!tTrace.DidHit())
+		{
+			d.noHit++;
 			continue;
+		}
 		const int n = (std::max)(1, int(ceilf((tTrace.endpos - tInfo.m_vPos).Length() / flStep)));
 		const gmb::V vBlast = GV(tTrace.endpos + tTrace.plane.normal);   // slope lives in the normal
 
@@ -121,7 +147,10 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 			const int T = f + n;
 			gmb::Body tMe = MeAt(T), tThem = ThemAt(t0 + TICKS_TO_TIME(T));
 			if (tThem.org.z - (tMe.org.z + tMe.hullZ) <= 0.f)
+			{
+				d.onUs++;
 				continue;   // they would already be on (or past) us when it goes off
+			}
 			const gmb::V vMePush = gmb::BlastImpulse(vBlast, tMe, flDmg, flRadius, 0.5f, 10.f /* in air at the blast: ctap or already flying */, bMeDuck ? 55.f : 82.f);
 			const gmb::V vThemPush = gmb::BlastImpulse(vBlast, tThem, flDmg, flRadius, 0.5f, 6.f, flThemForceZ);
 			tMe.vel = tMe.vel + vMePush; tThem.vel = tThem.vel + vThemPush;
@@ -132,9 +161,11 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 		}
 	}
 
+	d.bestNow = (std::max)(d.bestNow, tNow.flScore); d.bestNext = (std::max)(d.bestNext, tNext.flScore);
 	// beat a plain jump (289) or it is not a boost, and do not fire on a rising curve
-	if (tNow.flScore < 289.f || tNow.flScore < tNext.flScore)
-		return false;
+	if (tNow.flScore < 289.f) { d.low++; return false; }
+	if (tNow.flScore < tNext.flScore) { d.rising++; return false; }
+	d.fire++;
 	vAngles = tNow.vAng;
 	iDelay = tNow.n;
 	DebugLog("GOOMBA: rocket plan score=%.0f next=%.0f ticks=%d ang=%.0f/%.0f contact=%d myVz=%.0f pushMe=%.0f pushThem=%.0f",
@@ -246,6 +277,10 @@ void CAutoRocketJump::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* p
 	// take every cmd, used or not: a contact from a cmd this skipped must never start a jump later
 	s_iGoombaK = Movement_TakeGoombaRocketContact();
 	s_bOn = g_goomba && g_goombaHow == 1 && MovementKeyOK(g_goombaKey, g_goombaMode);
+	if (!s_bOn)
+		Gmb_DiagFlush();   // bind let go: one line for the whole hold
+	else
+		s_tDiag.cmds++;
 	// Amalgam with both vars off reaches no button write but the particle cannon's own
 	// IN_ATTACK2 echo (a no-op), so idling here is the same behavior minus the sims
 	if (!s_bOn && m_iFrame == -1)
@@ -256,6 +291,7 @@ void CAutoRocketJump::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* p
 
 	if (!pWeapon || !pLocal->IsAlive() || pLocal->IsAGhost() || I::EngineVGui->IsGameUIVisible())
 	{
+		s_tDiag.nowpn++;
 		m_iFrame = -1;
 		return;
 	}
@@ -263,11 +299,14 @@ void CAutoRocketJump::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* p
 	static bool bStaticGrounded = false;
 	bool bLastGrounded = bStaticGrounded;
 	bool bCurrGrounded = bStaticGrounded = pLocal->m_hGroundEntity();
-	if (m_iFrame == -1)
+	// grounded: the ctap needs a fresh duck, so not while ducked or inside the duck timer.
+	// Amalgam's ARJ also refused an UNducked air shot (its landing ctap wants one); a goomba
+	// in the air has no landing to ctap, so that half is gone -- it ate every air hold.
+	if (m_iFrame == -1 && s_iGoombaK >= 1 && bCurrGrounded
+		&& (pLocal->IsDucking() || I::GlobalVars->curtime < pLocal->m_flDuckTimer()))
 	{
-		bool bDuck = pLocal->IsDucking();
-		if ((bCurrGrounded ? bDuck || I::GlobalVars->curtime < pLocal->m_flDuckTimer() : !bDuck))
-			return;
+		s_tDiag.duck++;
+		return;
 	}
 
 	bool bValidWeapon = false;
@@ -281,16 +320,29 @@ void CAutoRocketJump::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* p
 	}
 	if (!bValidWeapon)
 	{
+		s_tDiag.nowpn++;
 		m_iFrame = -1;
 		return;
 	}
 	else if (s_bOn)
 		pCmd->buttons &= ~IN_ATTACK2; // fix for retarded issue
 
-	if (m_iFrame == -1 && s_iGoombaK >= 1
-		&& (pWeapon->m_iItemDefinitionIndex() == Soldier_m_TheBeggarsBazooka ? G::Attacking == 1 : G::CanPrimaryAttack || G::Reloading)
-		&& SetAngles(pLocal, pWeapon, pCmd))
+	if (m_iFrame == -1 && s_bOn)
 	{
+		if (s_iGoombaK < 1) s_tDiag.noK++;
+		else if (!(pWeapon->m_iItemDefinitionIndex() == Soldier_m_TheBeggarsBazooka ? G::Attacking == 1 : G::CanPrimaryAttack || G::Reloading)) s_tDiag.noAtk++;
+	}
+	if (m_iFrame == -1 && s_iGoombaK >= 1
+		&& (pWeapon->m_iItemDefinitionIndex() == Soldier_m_TheBeggarsBazooka ? G::Attacking == 1 : G::CanPrimaryAttack || G::Reloading))
+	{
+		// Amalgam's spot is only a seed: in the air it needs a landing inside 10 ticks, which a
+		// goomba (target falling onto us mid-flight) usually lacks. No spot -> the view angle
+		// seeds the search instead of killing it
+		if (!SetAngles(pLocal, pWeapon, pCmd))
+		{
+			s_tDiag.ang++;
+			m_vAngles = pCmd->viewangles;
+		}
 		// goomba: Amalgam's single-spot sim is replaced by the scored search (GoombaPlan), which
 		// keeps Amalgam's spot (m_vAngles from SetAngles) as one of its candidates
 		bool bWillHit = s_bOn && GoombaPlan(pLocal, pWeapon, bCurrGrounded, m_vAngles, m_iDelay);

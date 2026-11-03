@@ -741,6 +741,11 @@ int  g_psAssistMaxPoints = 3;
 float g_psAssistReuseDelay = 3.f;
 bool g_psAssistRender = true;
 bool g_psAssistJumpBox = true;
+bool g_pixelJump = false;  int g_pixelJumpKey = 0;  int g_pixelJumpMode = 1;
+bool g_pjUnsafe = false;
+bool g_pjCrouch = false;
+int  g_pjSetPointKey = 0, g_pjDeletePointKey = 0;
+bool g_pjRender = true;
 bool  g_psGroundHelp = false;
 float g_psGroundHelpAngle = 45.f;
 float g_psLaunchZSlack = 4.f;   // half k_psCatchZ: an arc shifted less than that still
@@ -788,6 +793,7 @@ int  g_prBotMateKey = 0;
 int  g_prSentryKey = 0;
 int  g_prDispenserKey = 0;
 int  g_prTeleporterKey = 0;
+std::atomic<int> g_prMenuReq{0};
 int  g_prBotClass = 5;        // index into k_prClassArg -- 5 = heavy (biggest dummy)
 
 // -- Unit C: ESP (src/hacks/aim/esp.cpp, extern list hacks/esp/esp_vars.h) -- botox defaults --

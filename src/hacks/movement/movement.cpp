@@ -156,6 +156,9 @@ static void* g_engineTrace  = nullptr; // EngineTraceClient003
 // wave 2: engine predicted-frame restore + abs origin write (both direct fns, Aletherium sigs)
 using SetAbsOrigin_t = void(__fastcall*)(void* ent, const Vec3&);  // CBaseEntity::SetAbsOrigin
 static SetAbsOrigin_t g_fnSetAbsOrigin = nullptr;
+// CBaseEntity::SetAbsVelocity: SetupMove reads GetAbsVelocity (sdk prediction.cpp:623), so a sim
+// started off a m_vecVelocity netvar write alone runs the OLD velocity. Optional, nothing gates on it
+static SetAbsOrigin_t g_fnSetAbsVelocity = nullptr;
 
 // mov/lea [rip+disp32]: disp at +3, insn len 7
 static uint8_t* RelToAbs(uint8_t* addr)
@@ -206,16 +209,21 @@ void Movement_Install()
             uint8_t* a = PatternScan(hClient, "48 89 5C 24 ? 57 48 83 EC ? 48 8B FA 48 8B D9 E8 ? ? ? ? F3 0F 10 83");
             if (a) g_fnSetAbsOrigin = reinterpret_cast<SetAbsOrigin_t>(a);
         }
+        if (!g_fnSetAbsVelocity) {
+            // Amalgam CBaseEntity_SetAbsVelocity sig (aim/defs.h), unique in client.dll on disk 11-03
+            uint8_t* a = PatternScan(hClient, "48 89 5C 24 ? 57 48 83 EC ? F3 0F 10 81 ? ? ? ? 48 8B DA 0F 2E 02");
+            if (a) g_fnSetAbsVelocity = reinterpret_cast<SetAbsOrigin_t>(a);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 
     g_predReady = g_prediction && g_gameMovement && g_moveHelper && g_globalVars
                && g_randomSeed && g_fnTransferData;
     g_frameReady = g_predReady && g_fnRestoreFrame && g_fnSetAbsOrigin;
 
-    DebugLog("movement: trace=%p pred=%p gm=%p mh=%p gv=%p seed=%p xfer=%p restore=%p setabs=%p ready=%d frame=%d",
+    DebugLog("movement: trace=%p pred=%p gm=%p mh=%p gv=%p seed=%p xfer=%p restore=%p setabs=%p setvel=%p ready=%d frame=%d",
              g_engineTrace, g_prediction, g_gameMovement, g_moveHelper,
              g_globalVars, g_randomSeed, (void*)g_fnTransferData,
-             (void*)g_fnRestoreFrame, (void*)g_fnSetAbsOrigin, (int)g_predReady, (int)g_frameReady);
+             (void*)g_fnRestoreFrame, (void*)g_fnSetAbsOrigin, (void*)g_fnSetAbsVelocity, (int)g_predReady, (int)g_frameReady);
 }
 
 
@@ -966,6 +974,7 @@ static ps::SurfEvidence s_psEv{};
 static bool s_prevSurfVel = false;
 static int  s_pixelSurfTicks = 0;
 static bool s_psAssistHopActive = false; // assist hop fired/pending -- arc is sim-validated, AirStuck must yield
+static bool s_psAssistHopPj = false;     // ...and pixeljump planned it (indicator split)
 // botox `wall_detected`: AutoAlign's flat-wall find, or pixel surf's own 16-ray probe when
 // AutoAlign is off (pixelsurf.inl PsWallDetectFallback). Pixel surf's hunt gate reads it
 static bool s_aaWallDetected = false;
@@ -1606,6 +1615,8 @@ static void FastMovement(void* pLocal, UserCmd_t* pCmd)
     case 0:
     {
         if (!g_fastStop || !flSpeed) return;
+        // bhop landing tick = grounded w/ no move keys; braking here eats hop speed
+        if (s_rawJumpHeld || (pCmd->buttons & IN_JUMP)) return;
 
         Vec3 vDirection = VectorAngles(EntV3(pLocal, g_offVelocity));
         vDirection.y = pCmd->viewangles.y - vDirection.y;
@@ -1655,6 +1666,10 @@ static bool s_wallClimbHit = false;    // botox g_wall_climb.caught(): wc's catc
 static bool s_wallClimbActive = false; // botox g_wall_climb.active(): wc ran an air wall tick this cmd (pixel surf yields)
 static bool s_wcLanded = false;        // botox g_wall_climb.m_hit: a land went out (indicator + detection)
 static bool s_wcSyncWant = false;      // wc key held: AS_Sync keeps cl_pred_optimize armed for it too
+// cmd right before TextureBug. botox runs wc BEFORE tb and tb keeps only a real catch on a wc tick
+// (texturebug.cpp:159); here tb runs first, so wc starts its air wall ticks from this instead
+static float s_wcPreTbFwd = 0.f, s_wcPreTbSide = 0.f;
+static int   s_wcPreTbButtons = 0;
 static bool s_airStuckHit = false;
 // s_shouldPixelSurf / s_psRidingNow / s_psAssistHopActive moved ABOVE AutoJumpbug --
 // jumpbug is a PRE-prediction feature and has to read the ride state too
@@ -2057,7 +2072,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     // publishes, so a blocked cmd has to reach it even when nothing is measuring
     const bool bCalcOn = g_routeCalc || g_pixelCalc || g_psFinder || s_pfBusy || s_rcBusy
                       || s_pmBusy || s_pmReq || g_psMapLines
-                      || (g_psAssist && g_psAssistRender);
+                      || (g_psAssist && g_psAssistRender) || (g_pixelJump && g_pjRender);
     if (bMoveBlocked && !bCalcOn) return;
 
     RefreshTargetPredictZVel();  // once per cmd -- IsTargetVz in sweep loops reads cache
@@ -2127,7 +2142,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
                                       // auto bounce / bounce assist run in the probe block: no prediction = never called
                                       || On(g_autoBounce, g_autoBounceKey, g_autoBounceMode)
                                       || On(g_bounceAssist, g_bounceAssistKey, g_bounceAssistMode)
-                                      || On(g_psAssist, g_psAssistKey, g_psAssistMode))));
+                                      || On(g_psAssist, g_psAssistKey, g_psAssistMode)
+                                      || On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode))));
     const bool needPred = needPredMove
                        || (probesOK && (
                                      // finder: held OR just released (release tick runs the scan),
@@ -2199,6 +2215,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             else if (s_psShouldUnduck) pCmd->buttons &= ~IN_DUCK;
             PsSurfFixTick(pLocal, pCmd);   // Unit A3: hold duck a couple ticks into a fresh ride
             AutoAlign(pLocal, pCmd);
+            s_wcPreTbFwd = pCmd->forwardmove; s_wcPreTbSide = pCmd->sidemove; s_wcPreTbButtons = pCmd->buttons;
             TextureBug(pLocal, pCmd);
             HeadSurf(pLocal, pCmd);
             // after HS on purpose (coldtires texturebug.cpp:212): a ceiling RIDE always beats a
@@ -2314,7 +2331,9 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         // ps assist: delusional's HITGODA is exactly this flag -- true while a sim-validated
         // hop is pending or in flight, cleared the tick the arc ends
         s.astOn    = On(g_psAssist, g_psAssistKey, g_psAssistMode);
-        s.astHit   = s_psAssistHopActive;
+        s.astHit   = s_psAssistHopActive && !s_psAssistHopPj;
+        s.pjOn     = On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode);
+        s.pjHit    = s_psAssistHopActive && s_psAssistHopPj;
         s.ebOn     = On(g_edgeBug, g_edgeBugKey, g_edgeBugMode);
         s.ebHit    = s_ebDetected;           // publish runs after EdgeBugPost, so this is final
         // ...and so is the plan the overlay draws. One publish point, so every early return and

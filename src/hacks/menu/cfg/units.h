@@ -10,3 +10,5 @@
 #include "u_spec.h"
 #include "u_misc.h"
 #include "u_game.h"
+#include "u_btchams.h"
+#include "u_points.h"

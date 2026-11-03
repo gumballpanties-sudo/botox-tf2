@@ -1243,15 +1243,16 @@ static void DrawHeroin(ImDrawList* dl, ImGuiIO& io)
 
     const std::string brand = Brand();
     std::string rest = " / dev", fps;
-    if (g_wmShowTime) rest += " | " + Clock("%H:%M:%S");
-    if (g_wmShowFPS) { rest += " | "; fps = std::to_string(shownAvg > 0.f ? (int)(1.f / shownAvg) : 0); }
+    if (g_wmShowTime) rest += " / " + Clock("%H:%M:%S");
+    if (g_wmShowFPS) { rest += " / "; fps = std::to_string(shownAvg > 0.f ? (int)(1.f / shownAvg) : 0); }
 
     // Text + SameLine(0, 0) chain, window AlwaysAutoResize inside constraints (50,25)-(300,250)
     const float contentW = w(brand) + w(rest) + w(fps) + (g_wmShowFPS ? w(" fps") : 0.f);
     const float width = std::clamp(contentW + 16.f, 50.f, 300.f), height = std::clamp(px + 16.f, 25.f, 250.f);
-    // heroin places it with FramePadding.x * 2 (= 8) and leaves the fps number out of the measure
-    const float measured = w(brand) + w(rest + (g_wmShowFPS ? " fps" : ""));
-    const float x = floorf(io.DisplaySize.x - (8.f + measured + io.DisplaySize.x * g_wmHeroinX));
+    // heroin places it with FramePadding.x * 2 (= 8). heroin leaves fps number out of measure ->
+    // box ran off right edge with show fps; measure full content + clamp outer ring on screen
+    const float x = floorf((std::min)(io.DisplaySize.x - (8.f + contentW + io.DisplaySize.x * g_wmHeroinX),
+                                      io.DisplaySize.x - width - 1.f));
     const float y = floorf(g_wmHeroinY * io.DisplaySize.y);
     SetBox(x - 2.f, y - 2.f, x + width + 1.f, y + height + 1.f);
 

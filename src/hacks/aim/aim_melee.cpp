@@ -6,6 +6,7 @@
 #include "movesim.h"
 #include "engineprediction.h"
 #include "ticks.h"
+#include "backtrack.h"
 
 // dih's log (src/dllmain.cpp). Off unless "debug log" is ticked in the menu.
 void DebugLog(const char* fmt, ...);
@@ -1069,9 +1070,14 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	// newest first; tick_count is moved back by that many ticks. Stats and the miss line stay on
 	// the default tick so they read the same as bs17's.
 	const float flTRewind0 = m_flTRewind;
-	const int nBack = Vars::Aimbot::Melee::BackstabBacktrack.Value
+	// Global backtrack on = knife backtrack on too, capped by its time limit (same records the
+	// hitscan aim reads are judged here off the knife's own track: it has his yaw, bones do not).
+	const bool bGlobalBt = F::Backtrack.Enabled();
+	int nBack = Vars::Aimbot::Melee::BackstabBacktrack.Value || bGlobalBt
 		? BsMath::RewindBackTicks(m_flTDue, flTRewind0, BacktrackCorrect(), TICK_INTERVAL)
 		: 0;
+	if (bGlobalBt)
+		nBack = std::min(nBack, TIME_TO_TICKS(F::Backtrack.TimeLimit()));
 
 	BsJudge tBest = {};   // the default tick's furthest judgement (logged), or the one that fired
 	bool bFired = false;
@@ -1181,6 +1187,7 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 			pCmd->tick_count -= iBack;
 			++m_iBtFires;
 		}
+		F::Backtrack.m_eShot = iBack ? CBacktrack::EShot::Record : CBacktrack::EShot::Live;
 
 		++m_iFires;
 		m_tLastFire = { flNow, tBest.m_iIndex, tBest.m_flP, tBest.m_flSigma, tBest.m_flMargin,

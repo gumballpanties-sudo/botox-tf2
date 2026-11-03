@@ -457,6 +457,14 @@ namespace Vars
 			// leak an old value into whatever takes the slot.
 		SUBNAMESPACE_END(Melee);
 
+		// botox m_backtrack_enable / m_aimbot_aim_at_backtrack / m_backtrack_time_limit (defaults
+		// = botox variables.h). Extended (fake latency) not ported. See aim/backtrack.h.
+		SUBNAMESPACE_BEGIN(Backtrack, Aimbot)
+			CVar(Enabled, "Backtrack", false);
+			CVar(AimAt, "Aim at backtrack", false);
+			CVar(TimeLimit, "Backtrack time", 200, SLIDER_CLAMP, 0, 200, 1, "%d ms");
+		SUBNAMESPACE_END(Backtrack);
+
 		// Sniper scope FOV scale (gap.md Unit F) -- TF2's scope zoom is one fixed FOV per
 		// zoom level; this scales it client-side. See CHLClient_CreateMove (hooks.cpp).
 		SUBNAMESPACE_BEGIN(ScopeFOV, Aimbot)

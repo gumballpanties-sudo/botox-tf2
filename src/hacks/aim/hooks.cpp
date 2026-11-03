@@ -12,6 +12,7 @@
 #include "nospread_hitscan.h"
 #include "movesim.h"
 #include "esp.h"
+#include "backtrack.h"
 #include "scope_fov.h"
 #include "hud_aim.h"   // unit hud: botox hud group data, collected in IEngineVGui_Paint
 
@@ -733,6 +734,7 @@ MAKE_HOOK(CHLClient_CreateMove, U::Memory.GetVirtual(I::Client, 21), void,
 	I::Prediction->Update(I::ClientState->m_nDeltaTick, I::ClientState->m_nDeltaTick > 0, I::ClientState->last_command_ack, I::ClientState->lastoutgoingcommand + I::ClientState->chokedcommands);
 
 	UpdateInfo(pLocal, pWeapon, pCmd);
+	F::Backtrack.BeginCommand(pCmd, pLocal);   // botox create_move_proxy: server tick before anything shoots
 	ScopeFOV::Run(pLocal);
 		Movement_RunGuarded(reinterpret_cast<UserCmd_t*>(pCmd)); // dih movement pipeline, in Misc.RunPre's slot
 	// NOTE: EnginePrediction.Start is called inside F::Ticks.Start (and paired with the single
@@ -751,16 +753,6 @@ MAKE_HOOK(CHLClient_CreateMove, U::Memory.GetVirtual(I::Client, 21), void,
 
 	AntiCheatCompatibility(pCmd, pSendPacket);
 	LocalAnimations(pLocal, pCmd, *pSendPacket);
-
-	// Clean POV demos: the demo cmdinfo's localViewAngles.
-	if (Vars::Misc::Game::CleanPOVDemos.Value)
-	{
-		// Source of the demo cmdinfo angle: on NORMAL ticks use the final cmd angle.
-		const Vec3 vRealView = G::SilentAngles || G::PSilentAngles ? I::EngineClient->GetViewAngles() : pCmd->viewangles;
-		// The GetLocalViewAngles hook has no command slot to index by, so it reads this latest copy when the
-		// engine asks for the local view while recording the demo.
-		G::RealViewAngles = vRealView;
-	}
 
 	G::Choking = !*pSendPacket;
 	G::LastUserCmd = pCmd;
@@ -830,6 +822,7 @@ MAKE_HOOK(CHLClient_FrameStageNotify, U::Memory.GetVirtual(I::Client, 35), void,
 		H::Entities.Store();
 		RemoveInterpAnims();
 		F::AimbotMelee.StoreBackstabSnapshots();   // raw records: must run before render-start interpolation
+		F::Backtrack.Store();                      // botox lagcomp records: network origin, before interpolation
 
 		F::MoveSim.Store();
 		F::CritHack.Store();
@@ -933,7 +926,11 @@ MAKE_HOOK(CPrediction_GetLocalViewAngles, S::CPrediction_GetLocalViewAngles(), v
 	if (!H::Entities.GetLocal())
 		return;
 
-	Vec3 vAng = G::RealViewAngles;
+	// Engine view = what the screen shows. Every cmd-only angle write (silent/psilent aim, backstab,
+	// auto rocket jump, airblast, edgebug/airstuck/psassist/texturebug, anticheat compat) never
+	// reaches it, so none of them can leak into the demo -- flagged or not. Deliberate visible
+	// writes (non-silent aim, EngineSetViewAngles) do, matching what you saw live.
+	Vec3 vAng = I::EngineClient->GetViewAngles();
 	if (G::FakePOVActive)
 	{	// Add the smoothed fake-POV offset (relative to the real view), clamping/normalizing the result.
 		float flPitch = vAng.x + G::FakePOVOffset.x;

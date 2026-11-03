@@ -28,10 +28,14 @@
 // ============================================================================
 
 #include "psdash.h"
+#include "pjseam.h"
 
 // JT_DASHAIM = the dash again, wish toward the seam (psdash.h). Same mask bit as JT_AIRDASH
+// JT_REGPEAK / JT_LONGPEAK = heroin "pixeljump crouch" (g_pjCrouch, FUN_18007f710 pass 1): jump and lj
+// flown again with duck from the descent start. Mask bit of the base type
 enum { JT_NONE = 0, JT_REGULAR, JT_CROUCH, JT_MINI, JT_MINIDUCK, JT_LONG, JT_LONGDUCK, JT_AIRDASH,
-       JT_DASHAIM, JT_COUNT };
+       JT_DASHAIM, JT_REGPEAK, JT_LONGPEAK, JT_COUNT };
+static bool PsIsPeak(int iType) { return iType == JT_REGPEAK || iType == JT_LONGPEAK; }
 static bool PsIsDash(int iType) { return iType == JT_AIRDASH || iType == JT_DASHAIM; }
 
 // per-point allowed-jump bits, Aletherium readout order (ENTER window edits these)
@@ -47,6 +51,8 @@ static int PsTypeBit(int iType)
     case JT_LONGDUCK: return 5;
     case JT_AIRDASH:  return 6;
     case JT_DASHAIM:  return 6;
+    case JT_REGPEAK:  return 1;
+    case JT_LONGPEAK: return 4;
     }
     return -1;
 }
@@ -56,6 +62,7 @@ static const char* PsTypeName(int iType)
     static const char* kNames[] = {
         "", "regular jump", "crouch jump", "minijump", "minijump (duck)",
         "longjump", "longjump (duck)", "double jump", "double jump (aim)",
+        "jump + crouch", "longjump + crouch",
     };
     return (iType >= JT_REGULAR && iType < JT_COUNT) ? kNames[iType] : "jump";
 }
@@ -94,6 +101,8 @@ static std::vector<Vec3> s_psMapLines;
 // are published as red rings and both place a TEXTUREBUG marker (routecalc.inl RcPickFinder)
 static std::vector<Vec3> s_psMapTbPts;
 static std::vector<PsAssistPt> s_psAssistPts;  // saved assist targets, current map only
+static std::vector<PsAssistPt> s_pjPts;        // pixeljump's own saved points (<map>.pj.txt)
+static int s_pjActive = -1;                    // pixeljump target index for the draw (-1 = none)
 static unsigned s_psGen = 0;                   // bumped on load/add/erase -- open ENTER window closes on change
 static char s_psMap[128] = {};            // map the lists belong to ("" = none loaded)
 static int  s_psAssistActive = -1;        // assist target index for the draw (-1 = none)
@@ -234,20 +243,20 @@ static const char* EngineLevelName()
     return n ? n : "";
 }
 
-static void PsPointsFile(const char* map, char* out, size_t n)
+static void PsPointsFile(const char* map, char* out, size_t n, const char* ext = ".txt")
 {
     char safe[128];
     snprintf(safe, sizeof(safe), "%s", (map && map[0]) ? map : "unknown");
     for (char* c = safe; *c; ++c)
         if (*c == '/' || *c == '\\' || *c == ':') *c = '_'; // workshop/x.ugc123 etc.
-    snprintf(out, n, "%s\\points\\%s.txt", CONFIG_DIR, safe);
+    snprintf(out, n, "%s\\points\\%s%s", CONFIG_DIR, safe, ext);
 }
 
-static void PsLoadPointsForMap(const char* map)
+static std::vector<PsAssistPt> PsReadPoints(const char* map, const char* ext)
 {
     std::vector<PsAssistPt> pts;
     char path[MAX_PATH];
-    PsPointsFile(map, path, sizeof(path));
+    PsPointsFile(map, path, sizeof(path), ext);
     if (FILE* f = fopen(path, "r"))
     {
         char line[256];
@@ -268,9 +277,18 @@ static void PsLoadPointsForMap(const char* map)
         }
         fclose(f);
     }
+    return pts;
+}
+
+static void PsLoadPointsForMap(const char* map)
+{
+    std::vector<PsAssistPt> pts = PsReadPoints(map, ".txt");
+    std::vector<PsAssistPt> pjPts = PsReadPoints(map, ".pj.txt");
     PmAbort();             // ...and the map scan's cursor points into the OLD map's brush list
     std::lock_guard<std::mutex> l(g_psLock);
     s_psAssistPts.swap(pts);
+    s_pjPts.swap(pjPts);
+    s_pjActive = -1;
     s_psFinderPts.clear(); // finder results are per-session, drop on map change
     s_psFinderLines.clear();
     s_psTbPts.clear();
@@ -282,19 +300,22 @@ static void PsLoadPointsForMap(const char* map)
     snprintf(s_psMap, sizeof(s_psMap), "%s", map ? map : "");
 }
 
-static void PsWritePoints()
+static void PsWritePointList(const std::vector<PsAssistPt>& pts, const char* ext)
 {
     char dir[MAX_PATH], path[MAX_PATH];
     _mkdir(CONFIG_DIR);
     snprintf(dir, sizeof(dir), "%s\\points", CONFIG_DIR);
     _mkdir(dir);
-    PsPointsFile(s_psMap, path, sizeof(path));
+    PsPointsFile(s_psMap, path, sizeof(path), ext);
     FILE* f = fopen(path, "w");
     if (!f) return;
-    for (const PsAssistPt& p : s_psAssistPts)
+    for (const PsAssistPt& p : pts)
         fprintf(f, "%f %f %f %d %f\n", p.pos.x, p.pos.y, p.pos.z, p.typeMask, p.radius);
     fclose(f);
 }
+
+static void PsWritePoints() { PsWritePointList(s_psAssistPts, ".txt"); }
+static void PjWritePoints() { PsWritePointList(s_pjPts, ".pj.txt"); }
 
 // ---- Pixel finder (hold = stretch a scan column on the aimed wall, release =
 // brute-force it for pixel-surf catch heights; Aletherium PixelFinder) ----
@@ -1422,7 +1443,6 @@ static constexpr float k_psCatchZ  = 8.f;   // a pin this close to the saved z I
 static constexpr float k_psPastZ   = 16.f;  // fell this far under it: stop simming, nothing below can be it
 static constexpr int   k_psConfirm = 3;     // airborne pin ticks that make a CATCH and not a graze
 static constexpr int   k_psConfirmPress = 2;  // heroin: vz on the pin this tick AND the last
-static constexpr float k_psSeamZ   = 0.05f;   // heroin's hundredths window, a hair of float slack
 static constexpr float k_psMinApex = 8.f;   // smaller than any real launch (mini gains ~16)
 static constexpr float k_psLaunchVz    = 100.f; // a real launch reads ~262 after FinishGravity
 static constexpr int   k_psLaunchTries = 2;     // press, release, press -- more means it simply cannot
@@ -1497,7 +1517,7 @@ static PsInputs_t PsHopInputs(int iType, int iSince, const Vec3& vOrigin, const 
     }
 
     const bool bMini = iType == JT_MINI || iType == JT_MINIDUCK;
-    const bool bLong = iType == JT_LONG || iType == JT_LONGDUCK;
+    const bool bLong = iType == JT_LONG || iType == JT_LONGDUCK || iType == JT_LONGPEAK;
     const bool bHold = iType == JT_CROUCH || iType == JT_LONGDUCK;
 
     // the launch press rides tick 0, and the launch-type duck rides the SAME cmd:
@@ -1512,7 +1532,8 @@ static PsInputs_t PsHopInputs(int iType, int iSince, const Vec3& vOrigin, const 
     // MINIDUCK is genuinely "MINI, 20u higher from the apex on" -- a different arc, in
     // the sim as well as live. An earlier build deleted the +20 because it was a number bolted
     // onto a candidate the sim could not tell apart; it is a simulated press now
-    if (iType == JT_MINIDUCK && iSince >= 1 && vVel.z < 0.f) o.duck = true;
+    // heroin's peak pass is the same press on jump / lj: duck from the first descending tick on
+    if ((iType == JT_MINIDUCK || PsIsPeak(iType)) && iSince >= 1 && vVel.z < 0.f) o.duck = true;
 
     // THE SEAM PRESS. PixelFinder proved every one of these points with the hull driven
     // gently into the face (vInto * 10); a hull merely falling PAST the wall has nothing
@@ -1557,7 +1578,8 @@ struct PsHop_t
 };
 
 static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vTarget,
-                        float flHullReachXY, const Vec3* pWallN = nullptr)
+                        float flHullReachXY, const Vec3* pWallN = nullptr,
+                        bool bUnsafe = false)
 {
     PsHop_t r;
 
@@ -1686,6 +1708,18 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
             if (flGap < r.gap) { r.gap = flGap; r.gapVz = flVz; }
         }
 
+        // heroin "unsafe pixeljump" (FUN_18007dd70): the seam's height while falling, within 200u
+        // 2D of the point, IS the catch -- no pin vz, no hold proof, no moved check
+        if (bUnsafe && bAir && flVz < 0.f && pjs::SeamHit(flZ, vTarget.z)
+            && flFlatNow < 200.f)
+        {
+            r.caught = true;
+            r.catchSince = iSince;
+            r.catchZ = flZ;
+            r.catchFlat = flFlatNow;
+            break;
+        }
+
         // ---- THE PIN, and it is the whole feature ----------------------------------------
         // Gravity is the entire model of an untouched tick: StartGravity + FinishGravity take
         // vz down by exactly one full step, so a free tick lands on flPreVz - 2*half BY
@@ -1706,7 +1740,7 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
                 // it is heroin's test: the seam's own height (FUN_18007dcc0, same unit, hundredths
                 // within 2) anywhere along the face -- a surf is a line, the saved point one spot on
                 // it. No press = the old over-the-point gate
-                const bool bAtSeam = pWallN ? fabsf(flZ - vTarget.z) <= k_psSeamZ
+                const bool bAtSeam = pWallN ? pjs::SeamHit(flZ, vTarget.z)
                                             : bOverPoint && fabsf(flZ - vTarget.z) <= k_psCatchZ;
                 if (bAtSeam)
                 {
@@ -1770,6 +1804,7 @@ static Vec3  s_asHopTarget = {};
 static Vec3  s_asHopN = {}, s_asPendingN = {};          // the target's wall: the sim's press, replayed live
 static bool  s_asHopHasN = false, s_asPendingHasN = false;
 static bool  s_asSetHeld = false, s_asDelHeld = false;
+static bool  s_asUnsafeHop = false;   // hop/pending was planned by pixeljump with "unsafe" on
 // the promise, so the outcome line is promise-vs-result and not another guess
 static int   s_asPromCatch = -1;
 static float s_asPromApex = 0.f, s_asPromNeed = 0.f;
@@ -1812,6 +1847,7 @@ static float s_asOutLaunchZ = 0.f, s_asOutPeakZ = -1e9f;
 static float s_asOutGap = 1e9f, s_asOutGapVz = 0.f;
 static float s_asOutPerp = -1.f, s_asOutLat = -1.f;
 static bool  s_asOutRode = false;
+static bool  s_asOutSeam = false;      // a descending live tick sat in heroin's seam window
 static int   s_asOutRideTick = -1;     // the tick the ride actually started on
 static int   s_asOutTicks = 0, s_asOutPressed = 0;
 
@@ -1825,7 +1861,7 @@ static void PsOutcomeBegin(float flLaunchZ, const Vec3& vTarget, int iType,
     s_asOutPeakZ = flLaunchZ;
     s_asOutGap = 1e9f; s_asOutGapVz = 0.f;
     s_asOutPerp = -1.f; s_asOutLat = -1.f;
-    s_asOutRode = false; s_asOutRideTick = -1;
+    s_asOutRode = false; s_asOutSeam = false; s_asOutRideTick = -1;
     s_asOutTicks = 0; s_asOutPressed = 0;
     s_asPromApex = flPromApex; s_asPromNeed = flPromNeed; s_asPromCatch = iPromCatch;
 }
@@ -1897,9 +1933,10 @@ static void PsStampJumpBox(int iType, float flTargetZ)
         return;
     s_renderAfter = now + 500;
     const char* szLaunch = iType == JT_MINI || iType == JT_MINIDUCK ? "mj"
-                         : iType == JT_LONG || iType == JT_LONGDUCK ? "lj"
+                         : iType == JT_LONG || iType == JT_LONGDUCK || iType == JT_LONGPEAK ? "lj"
                          : PsIsDash(iType)                          ? "double jump" : "jump";
-    const bool bCrouch = iType == JT_CROUCH || iType == JT_MINIDUCK || iType == JT_LONGDUCK;
+    const bool bCrouch = iType == JT_CROUCH || iType == JT_MINIDUCK || iType == JT_LONGDUCK
+                      || PsIsPeak(iType);
     char sz[96];
     snprintf(sz, sizeof(sz), "%s to surf at %f with %f%s", szLaunch, flTargetZ, s_prePredOrigin.z,
              bCrouch ? " (crouch)" : " (stand)");
@@ -1932,7 +1969,10 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     // real ground contact is the PRE-prediction flag (post-prediction already reflects the
     // cmd we are building) -- same as MiniJump / LongJump
     const bool bOnGround = (s_prePredFlags & FL_ONGROUND) != 0;
-    const bool bAssistOn = On(g_psAssist, g_psAssistKey, g_psAssistMode);
+    // pixeljump (heroin FUN_18007f710) = its own key over the same points, sim and live tail.
+    // Held, it wins: heroin's pick (nearest point <= 1000u), heroin's types, its unsafe/crouch
+    const bool bPjOn = On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode);
+    const bool bAssistOn = On(g_psAssist, g_psAssistKey, g_psAssistMode) || bPjOn;
     const bool bAlive    = EntAlive(pLocal);
     const float flHullReachXY = g_offMaxs > 0 ? EntV3(pLocal, g_offMaxs).Length2D() : 34.6f;
     const float flGravity = CvarFloat("sv_gravity", 800.f);
@@ -1994,7 +2034,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     if (s_psAssistDuckHeld)
     {
         s_asDuckMiss = (s_asJumpType != JT_NONE || s_psRidingNow) ? 0 : s_asDuckMiss + 1;
-        if (bOnGround || !g_psAssist || !bAlive || s_asDuckMiss > k_psRideMissMax)
+        if (bOnGround || !(g_psAssist || g_pixelJump) || !bAlive || s_asDuckMiss > k_psRideMissMax)
             s_psAssistDuckHeld = false;
         else
             pCmd->buttons |= IN_DUCK;
@@ -2012,6 +2052,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         }
         if (s_prePredVel.z < 0.f)
         {
+            if (pjs::SeamHit(vOrigin.z, s_asOutTarget.z))
+                s_asOutSeam = true;
             const float flGap = fabsf(vOrigin.z - s_asOutTarget.z);
             if (flGap < s_asOutGap)
             {
@@ -2052,14 +2094,14 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             // a divergence between the choreography the sim flew and the one the cmd carried,
             // which is the only way this build can misfire
             DebugLog("PS: outcome %s promA=%.1f promNeed=%.1f promCatch=%d | liveA=%.1f "
-                     "gap=%.3f step=%.2f zf=%.3f perp=%.3f lat=%.2f press=%d rode=%d rideAt=%d "
+                     "gap=%.3f step=%.2f zf=%.3f perp=%.3f lat=%.2f press=%d seam=%d rode=%d rideAt=%d "
                      "ticks=%d",
                      PsTypeName(s_asOutType), s_asPromApex, s_asPromNeed, s_asPromCatch,
                      s_asOutPeakZ - s_asOutLaunchZ,
                      s_asOutGap > 1e8f ? -1.f : s_asOutGap,
                      fabsf(s_asOutGapVz) * TickInterval(),
                      s_asOutTarget.z - truncf(s_asOutTarget.z),
-                     s_asOutPerp, s_asOutLat, s_asOutPressed,
+                     s_asOutPerp, s_asOutLat, s_asOutPressed, (int)s_asOutSeam,
                      (int)s_asOutRode, s_asOutRideTick, s_asOutTicks);
             s_asOutOn = false;
         }
@@ -2153,6 +2195,36 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     }
     s_asDelHeld = bDelHeld;
 
+    // ---- pixeljump's own points: set snaps to a finder dot like the assist's, delete = nearest pj point
+    {
+        static bool s_pjSetHeld = false, s_pjDelHeld = false;
+        const bool bPjSet = g_pixelJump && g_pjSetPointKey != 0 && MovementKeyOK(g_pjSetPointKey, 1);
+        const bool bPjDel = g_pixelJump && g_pjDeletePointKey != 0 && MovementKeyOK(g_pjDeletePointKey, 1);
+        Vec3 vHit;
+        if (((bPjSet && !s_pjSetHeld) || (bPjDel && !s_pjDelHeld)) && AimHit(vHit))
+        {
+            std::lock_guard<std::mutex> l(g_psLock);
+            if (bPjSet && !s_pjSetHeld)
+            {
+                const Vec3* pSnap = nullptr;
+                float flBest = g_psAssistSnap;
+                for (const Vec3& p : s_psFinderPts)
+                    if (const float flDist = vHit.DistTo(p); flDist < flBest) { flBest = flDist; pSnap = &p; }
+                if (pSnap) { s_pjPts.push_back({ *pSnap, 127 }); PjWritePoints(); }
+            }
+            else
+            {
+                int iErase = -1;
+                float flBest = g_psAssistSnap;
+                for (int i = 0; i < (int)s_pjPts.size(); i++)
+                    if (const float flDist = vHit.DistTo(s_pjPts[i].pos); flDist < flBest) { flBest = flDist; iErase = i; }
+                if (iErase >= 0) { s_pjPts.erase(s_pjPts.begin() + iErase); PjWritePoints(); }
+            }
+        }
+        s_pjSetHeld = bPjSet;
+        s_pjDelHeld = bPjDel;
+    }
+
     // ---- every active saved point inside its own radius, nearest first -------------------
     struct PsTarget_t { float dist; float rank; Vec3 pos; int mask; float engage; int idx; Vec3 n; bool hasN; };
     static constexpr int k_psMaxTargets = 8;   // == the slider's ceiling
@@ -2183,7 +2255,25 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     {
         std::lock_guard<std::mutex> l(g_psLock);
         s_psAssistActive = -1;
-        if (bAssistOn)
+        s_pjActive = -1;
+        if (bPjOn)
+        {
+            // heroin: the nearest saved point, 3D, and only if it is within 1000u. Own list (s_pjPts)
+            float flBest = 1000.f;
+            for (int i = 0; i < (int)s_pjPts.size(); i++)
+            {
+                const PsAssistPt& pt = s_pjPts[i];
+                const float flDist = vOrigin.DistTo(pt.pos);
+                if (flDist > flBest)
+                    continue;
+                flBest = flDist;
+                aTargets[0] = { flDist, flDist, pt.pos, 127, 1000.f, i, pt.normal, pt.hasNormal };
+                nTargets = 1;
+            }
+            if (nTargets > 0)
+                s_pjActive = aTargets[0].idx;
+        }
+        else if (bAssistOn)
         {
             const int nWant = g_psAssistMaxPoints < 1 ? 1
                             : (g_psAssistMaxPoints > k_psMaxTargets ? k_psMaxTargets
@@ -2205,7 +2295,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             }
             if (nTargets > 0)
                 s_psAssistActive = aTargets[0].idx;
-            if (s_asPendingType != JT_NONE && s_asPendingIdx >= 0
+            if (s_asPendingType != JT_NONE && s_asPendingIdx >= 0 && !s_psAssistHopPj
                 && s_asPendingIdx < (int)s_psAssistPts.size())
                 s_psAssistActive = s_asPendingIdx;
         }
@@ -2235,10 +2325,11 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             vN.Normalize();
             t.n = vN; t.hasN = true;
             std::lock_guard<std::mutex> l(g_psLock);
-            if (t.idx < (int)s_psAssistPts.size())
+            std::vector<PsAssistPt>& list = bPjOn ? s_pjPts : s_psAssistPts;
+            if (t.idx < (int)list.size())
             {
-                s_psAssistPts[t.idx].normal = vN;
-                s_psAssistPts[t.idx].hasNormal = true;
+                list[t.idx].normal = vN;
+                list[t.idx].hasNormal = true;
             }
             break;
         }
@@ -2261,7 +2352,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         else if (!g_bhop && bAssistOn && s_asEntryJumpPrev)
         {
             bool bDashPoint = false;
-            for (int i = 0; i < nTargets; i++)
+            for (int i = 0; i < nTargets && !bPjOn; i++)   // pixeljump never dashes
                 if (aTargets[i].mask & (1 << PsTypeBit(JT_AIRDASH))) bDashPoint = true;
             if (s_asJumpStrip || (bDashNow && bDashPoint && s_asJumpType == JT_NONE
                                   && s_asPendingType == JT_NONE && !s_asRideHold))
@@ -2304,7 +2395,11 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             // and AutoAlign ran after: at 200 u/s a few ticks of air strafe are nothing, at 600+
             // they move the hull a whole hull-width off the arc the sim proved, which is "the
             // assist misses at speed". The assist owns the pair for the whole hop now, like the bits
-            if (in.wish)
+            // heroin unsafe: live cmd keeps the player's move (its stored-wish replay is skipped
+            // under pixelsurf_unsafe), only the buttons are the hop's. The dash tick still needs its wish
+            if (s_asUnsafeHop && !(PsIsDash(s_asJumpType) && s_asHopTick == 0))
+                ;
+            else if (in.wish)
             {
                 MV_WriteWishWorld(pCmd, in.wishDir, in.wishMag);
                 s_asOutPressed++;
@@ -2315,7 +2410,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             // the crouch types' duck is the one that must survive the hop being cleared at the
             // catch; long's t1-2 launch duck is a launch shape and is meant to be released
             if (s_asJumpType == JT_CROUCH || s_asJumpType == JT_LONGDUCK
-                || s_asJumpType == JT_MINIDUCK)
+                || s_asJumpType == JT_MINIDUCK || PsIsPeak(s_asJumpType))
             {
                 if (in.duck) { s_psAssistDuckHeld = true; s_asDuckMiss = 0; }
             }
@@ -2459,7 +2554,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             nPlanned++;
 
         struct Cand_t { int type; bool allowed; PsHop_t res; };
-        static constexpr int k_nCands = 8;
+        static constexpr int k_nCands = 10;
         Cand_t aCands[k_nCands] =
         {
             { JT_MINI,     false, {} },
@@ -2470,9 +2565,27 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             { JT_LONGDUCK, false, {} },
             { JT_AIRDASH,  false, {} },
             { JT_DASHAIM,  false, {} },   // mask bit 6 too (PsTypeBit)
+            { JT_REGPEAK,  false, {} },   // pixeljump crouch only, base type's mask bit
+            { JT_LONGPEAK, false, {} },
+        };
+        // heroin's set, in its order: jump, mj, lj, crouched, then the crouch pass (jump, lj)
+        auto PjOrder = [](int iType) -> int
+        {
+            switch (iType)
+            {
+            case JT_REGULAR:  return 0;
+            case JT_MINI:     return 1;
+            case JT_LONG:     return 2;
+            case JT_CROUCH:   return 3;
+            case JT_REGPEAK:  return g_pjCrouch ? 4 : -1;
+            case JT_LONGPEAK: return g_pjCrouch ? 5 : -1;
+            }
+            return -1;
         };
         for (int k = 0; k < k_nCands; k++)
-            aCands[k].allowed = (iTargetMask & (1 << PsTypeBit(aCands[k].type))) != 0;
+            aCands[k].allowed = bPjOn ? PjOrder(aCands[k].type) >= 0
+                              : (iTargetMask & (1 << PsTypeBit(aCands[k].type))) != 0
+                                && !PsIsPeak(aCands[k].type);
         // the dash is an AIR press and costs a jump charge -- offer it only where it exists
         if (!bDashNow)
             aCands[6].allowed = aCands[7].allowed = false;
@@ -2484,10 +2597,11 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         const float flNeedNow = vDelta.z;
         auto OrderKey = [&](int k) -> float
         {
+            if (bPjOn) return (float)PjOrder(aCands[k].type);
             if (bDashNow && PsIsDash(aCands[k].type)) return -1.f;
             return fabsf(s_apexSeen[aCands[k].type] - flNeedNow);
         };
-        int aOrder[k_nCands] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+        int aOrder[k_nCands] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
         for (int a = 0; a < k_nCands; a++)
             for (int b = a + 1; b < k_nCands; b++)
                 if (OrderKey(aOrder[b]) < OrderKey(aOrder[a]))
@@ -2507,7 +2621,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                 if (SimsLeft() < 24 || TbBudgetUsedUs() + 600 > usTargetEnd)
                     break;
                 aCands[k].res = PsSimHop(pLocal, pCmd, aCands[k].type, vTarget, flHullReachXY,
-                                         aTargets[iT].hasN ? &aTargets[iT].n : nullptr);
+                                         aTargets[iT].hasN ? &aTargets[iT].n : nullptr,
+                                         bPjOn && g_pjUnsafe);
                 nSimmedCands++;
                 if (aCands[k].res.launchDelay >= 0 && aCands[k].res.apexGain > 0.f)
                     s_apexSeen[aCands[k].type] = aCands[k].res.apexGain;
@@ -2536,8 +2651,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
 
         // ---- one diag line per decision ---------------------------------------------------
         {
-            char szCands[720]; int nC = 0; szCands[0] = 0;
-            static const char* kShort[k_nCands] = { "mini", "reg", "mnid", "crch", "long", "lngd", "dash", "dasa" };
+            char szCands[900]; int nC = 0; szCands[0] = 0;
+            static const char* kShort[k_nCands] = { "mini", "reg", "mnid", "crch", "long", "lngd", "dash", "dasa", "regp", "lngp" };
             for (int k = 0; k < k_nCands && nC < (int)sizeof(szCands) - 110; k++)
             {
                 const PsHop_t& c = aCands[k].res;
@@ -2578,11 +2693,11 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             }
 
             if (iPick != JT_NONE && pPick)
-                DebugLog("PS: pick=%s pt=%d/%d i%d dist=%.0f used=%d need=%.2f apex=%.1f "
+                DebugLog("%s: pick=%s pt=%d/%d i%d dist=%.0f used=%d need=%.2f apex=%.1f "
                          "catch=t%d z%+.3f flat=%.1f zf=%.3f gnd=%d rad=%.0f mask=%d%s "
                          "worth=%d [%s] sims=%d",
-                         PsTypeName(iPick), iT, nTargets, iTargetIdx, aTargets[iT].dist,
-                         s_psUsedIdx, vTarget.z - pPick->launchZ, pPick->apexGain,
+                         bPjOn ? "PJ" : "PS", PsTypeName(iPick), iT, nTargets, iTargetIdx,
+                         aTargets[iT].dist, s_psUsedIdx, vTarget.z - pPick->launchZ, pPick->apexGain,
                          pPick->catchSince, pPick->catchZ - vTarget.z, pPick->catchFlat,
                          vTarget.z - truncf(vTarget.z), (int)bOnGround, flEngage,
                          iTargetMask, szOff, (int)bWorthSimming, szCands,
@@ -2593,10 +2708,10 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                 // being compared does not sample them, it hides all but the first
                 static int s_psDiagTick[k_psMaxTargets] = {};
                 if (DiagOk(s_psDiagTick[iT], false))
-                    DebugLog("PS: none pt=%d/%d i%d dist=%.0f used=%d need=%.2f flat=%.1f "
+                    DebugLog("%s: none pt=%d/%d i%d dist=%.0f used=%d need=%.2f flat=%.1f "
                              "zf=%.3f gnd=%d rad=%.0f mask=%d%s worth=%d [%s] sims=%d",
-                             iT, nTargets, iTargetIdx, aTargets[iT].dist, s_psUsedIdx,
-                             vDelta.z, flFlat, vTarget.z - truncf(vTarget.z),
+                             bPjOn ? "PJ" : "PS", iT, nTargets, iTargetIdx, aTargets[iT].dist,
+                             s_psUsedIdx, vDelta.z, flFlat, vTarget.z - truncf(vTarget.z),
                              (int)bOnGround, flEngage, iTargetMask, szOff,
                              (int)bWorthSimming, szCands, k_cmdSimCap - SimsLeft());
             }
@@ -2606,13 +2721,15 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             continue;       // this target had nothing; the next one may
 
         // ---- COMMIT ----------------------------------------------------------------------
-        { std::lock_guard<std::mutex> l(g_psLock); s_psAssistActive = iTargetIdx; }
+        { std::lock_guard<std::mutex> l(g_psLock); (bPjOn ? s_pjActive : s_psAssistActive) = iTargetIdx; }
         s_asPromApex  = pPick->apexGain;
         s_asPromNeed  = vTarget.z - pPick->launchZ;
         s_asPromCatch = pPick->catchSince;
 
         const int iDelay = pPick->launchDelay;
         const bool bDash = PsIsDash(iPick);
+        s_asUnsafeHop = bPjOn && g_pjUnsafe;
+        s_psAssistHopPj = bPjOn;
         const bool bFireNow = iDelay <= 0 && (bOnGround || bDash);
 
         // the live commit needs the same clear latch the sim flew. With m_nOldButtons
@@ -2689,9 +2806,20 @@ void PS_GetDrawData(PsDrawData& out)
     out.finderLines = s_psFinderLines;
     out.mapTbPts = s_psMapTbPts;
     out.assistPts.resize(s_psAssistPts.size());
+    out.assistRadius.resize(s_psAssistPts.size());
+    out.assistNormal.resize(s_psAssistPts.size());
     for (size_t i = 0; i < s_psAssistPts.size(); i++)
-        out.assistPts[i] = s_psAssistPts[i].pos;
+    {
+        const PsAssistPt& pt = s_psAssistPts[i];
+        out.assistPts[i] = pt.pos;
+        out.assistRadius[i] = pt.radius > 0.f ? pt.radius : g_psAssistRadius;
+        out.assistNormal[i] = pt.hasNormal ? pt.normal : Vec3();
+    }
     out.assistActive = s_psAssistActive;
+    out.pjPts.resize(s_pjPts.size());
+    for (size_t i = 0; i < s_pjPts.size(); i++)
+        out.pjPts[i] = s_pjPts[i].pos;
+    out.pjActive = s_pjActive;
     out.lineActive = s_psFinderFirst && s_psFinderHeld;
     out.lineA = s_psFinderStart;
     out.lineB = s_psFinderEnd;

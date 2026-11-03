@@ -51,6 +51,7 @@ add_library(botox SHARED
     src/hacks/hud/spectator_list.cpp
     src/hacks/misc/discord_ex.cpp
     src/hacks/misc/game_extras.cpp
+    src/hacks/misc/names.cpp
     src/hacks/menu/debugmenu.cpp
     src/hacks/menu/unitE_menu.cpp
     src/hacks/hud/indicators.cpp
@@ -186,6 +187,11 @@ add_executable(flipworld_test tests/flipworld_test.cpp)
 # Build + run: cmake --build build --config Release --target backstab_test && build\Release\backstab_test.exe
 add_executable(backstab_test tests/backstab_test.cpp)
 
+# Gate test for the backtrack window (src/hacks/aim/backtrack_math.h): every record botox's window calls
+# usable must pass the TF2 server's own lag comp tick check, over a ping / interp / tick rate sweep.
+# Build + run: cmake --build build --config Release --target backtrack_test && build\Release\backtrack_test.exe
+add_executable(backtrack_test tests/backtrack_test.cpp)
+
 # Gate test for fake movement anti-snag (src/hacks/movement/fm_slide.h): box-world hull traces, lip step,
 # seam slide, crease/tall wall/ceiling/startsolid must NOT move.
 # Build + run: cmake --build build --config Release --target fmslide_test && build\Release\fmslide_test.exe
@@ -228,6 +234,10 @@ add_executable(jbpredict_test tests/jbpredict_test.cpp)
 # Build + run: cmake --build build --config Release --target psdash_test && build\Release\psdash_test.exe
 add_executable(psdash_test tests/psdash_test.cpp)
 
+# Gate test for pixeljump's seam height test (pjseam.h pjs::SeamHit = heroin FUN_18007dcc0).
+# Build + run: cmake --build build --config Release --target pjseam_test && build\Release\pjseam_test.exe
+add_executable(pjseam_test tests/pjseam_test.cpp)
+
 # Gate test for the media player's cover art geometry (src/hacks/hud/mp_art.h): the scale +
 # centre crop handed to winrt's BitmapTransform, including the rect-out-of-bounds case that
 # would throw inside the decode and silently kill the art.
@@ -248,6 +258,11 @@ add_executable(unitE_test tests/unitE_test.cpp)
 # line pick, TF2 colour strip, gtx JSON accept rule, steam profile xml, split_cvars.
 # Build + run: powershell -NoProfile -File tools/locked_build.ps1 -Target gamepure_test && build\Release\gamepure_test.exe
 add_executable(gamepure_test tests/gamepure_test.cpp)
+
+# Gate test for custom names' pure half (src/hacks/misc/names_pure.h): ';' list pick, trim,
+# cycle wrap, timer step + clock rewind.
+# Build + run: powershell -NoProfile -File tools/locked_build.ps1 -Target names_test && build\Release\names_test.exe
+add_executable(names_test tests/names_test.cpp)
 
 # Gate test for unit E5's gif frame math (src/hacks/hud/gif_frame.h): frame-index-from-time
 # with variable per-frame delays and infinite loop wrap.
@@ -440,6 +455,26 @@ target_compile_definitions(menuchrome_test PRIVATE
 # this target is to hit it.
 target_compile_options(menuchrome_test PRIVATE $<$<CONFIG:Release>:/UNDEBUG>)
 set_target_properties(menuchrome_test PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# Gate test for the movement > points look (src/hacks/movement/points_style.h): ring gap masks,
+# shapes, designs, style table. Real ImGui draw list, no device.
+# Build + run: cmake --build build --config Release --target points_style_test && build\Release\points_style_test.exe
+add_executable(points_style_test tests/points_style_test.cpp
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/freetype/imgui_freetype.cpp
+)
+target_include_directories(points_style_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${IMGUI_DIR} "${FREETYPE_STATIC_DIR}/include")
+target_link_directories(points_style_test PRIVATE
+    "${FREETYPE_STATIC_DIR}/lib" "$<$<CONFIG:Debug>:${FREETYPE_STATIC_DIR}/debug/lib>")
+target_link_libraries(points_style_test PRIVATE optimized freetype debug freetyped user32 gdi32)
+target_compile_definitions(points_style_test PRIVATE
+    NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+set_target_properties(points_style_test PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Gate test for the settings tab "visuals config" key list (src/hacks/menu/visual_keys.h):

@@ -4,6 +4,8 @@
 #include "ticks.h"
 #include "movesim.h"
 #include "weapon_tuning.h"
+#include "backtrack.h"
+#include <span>
 
 std::vector<Target_t> CAimbotHitscan::GetTargets(CTFPlayer* pLocal, CTFWeaponBase* pWeapon)
 {
@@ -41,7 +43,10 @@ std::vector<Target_t> CAimbotHitscan::GetTargets(CTFPlayer* pLocal, CTFWeaponBas
 			}
 
 			float flFOVTo; Vec3 vPos, vAngleTo;
-			if (!F::AimbotGlobal.PlayerBoneInFOV(pEntity->As<CTFPlayer>(), vLocalPos, vLocalAngles, flFOVTo, vPos, vAngleTo, Vars::Aimbot::Hitscan::Hitboxes.Value, WeaponTuning::GetFOV(pWeapon)))
+			// botox gates every record on its own cosine: a usable record inside the fov keeps
+			// a target whose live body is outside it
+			if (!F::AimbotGlobal.PlayerBoneInFOV(pEntity->As<CTFPlayer>(), vLocalPos, vLocalAngles, flFOVTo, vPos, vAngleTo, Vars::Aimbot::Hitscan::Hitboxes.Value, WeaponTuning::GetFOV(pWeapon))
+				&& !F::Backtrack.RecordInFOV(pEntity, vLocalPos, vLocalAngles, WeaponTuning::GetFOV(pWeapon), flFOVTo, vPos, vAngleTo))
 				continue;
 
 			int iPriority = F::AimbotGlobal.GetPriority(pEntity->entindex());
@@ -253,8 +258,38 @@ int CAimbotHitscan::CanHit(Target_t& tTarget, CTFPlayer* pLocal, CTFWeaponBase* 
 	if (!tTarget.m_pEntity->SetupBones(g_tLiveRecord.m_aBones, MAXSTUDIOBONES, BONE_USED_BY_HITBOX, tTarget.m_pEntity->m_flSimulationTime()))
 		return false;
 
-	// live record only (backtrack removed)
-	TickRecord* vRecords[1] = { &g_tLiveRecord };
+	// botox scan_targets: live record (scan.m_live) + every usable lag record (scan.m_records),
+	// see m_iBtPass. Usable on THIS cmd's clock: a record the server rejects is rewound to the
+	// window centre = miss. Players only: buildings are not lag compensated.
+	static TickRecord* vRecordBuf[1 + CBacktrack::kMaxRecords];
+	std::span<TickRecord*> vRecords;
+	{
+		int nRecords = 0;
+		if (m_iBtPass == 0)
+			vRecordBuf[nRecords++] = &g_tLiveRecord;
+		if (tTarget.m_iTargetType == TargetEnum::Player && (m_iBtPass == 1 || F::Backtrack.AimAt()))
+		{
+			if (auto pList = F::Backtrack.GetRecords(tTarget.m_pEntity->entindex()))
+			{
+				for (int i = 0; i < F::Backtrack.Count(); i++)
+					if (F::Backtrack.Usable(tTarget.m_pEntity, pList[i].m_flSimTime))
+						vRecordBuf[nRecords++] = &pList[i];
+			}
+		}
+
+		// botox ranks every candidate point by crosshair cosine and takes the best. CanHit takes
+		// the first record that hits, so order them by fov to their body centre first.
+		// ponytail: body centre, not per hitbox; per-hitbox rank if a far-off record keeps winning
+		if (nRecords > 1)
+		{
+			const Vec3 vView = G::CurrentUserCmd->viewangles, vHalf = (tTarget.m_pEntity->m_vecMins() + tTarget.m_pEntity->m_vecMaxs()) / 2;
+			auto Fov = [&](const TickRecord* p) { return Math::CalcFov(vView, Math::CalcAngle(m_vEyePos, p->m_vOrigin + vHalf)); };
+			std::sort(vRecordBuf, vRecordBuf + nRecords, [&](const TickRecord* a, const TickRecord* b) { return Fov(a) < Fov(b); });
+		}
+		vRecords = { vRecordBuf, size_t(nRecords) };
+	}
+	if (vRecords.empty())
+		return false;
 
 	bool bPeekCheck = false;
 	if (Vars::Aimbot::Hitscan::PeekAmount.Value && pWeapon->GetWeaponSpread())
@@ -755,71 +790,87 @@ void CAimbotHitscan::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pC
 	if (!G::AimTarget.m_iEntIndex)
 		G::AimTarget = { vTargets.front().m_pEntity->entindex(), I::GlobalVars->tickcount, 0 };
 
-	for (auto& tTarget : vTargets)
+	// botox find_target: live (+ records with aim at backtrack) first; nothing hit and
+	// backtrack on = second scan, records only (CanHit reads m_iBtPass)
+	bool bDone = false;
+	for (m_iBtPass = 0; m_iBtPass < 2 && !bDone; m_iBtPass++)
 	{
-		if (nWeaponID == TF_WEAPON_MEDIGUN && pWeapon->As<CWeaponMedigun>()->m_hHealingTarget().Get() == tTarget.m_pEntity)
-		{
-			if (G::LastUserCmd->buttons & IN_ATTACK)
-				pCmd->buttons |= IN_ATTACK;
-			return;
-		}
+		if (m_iBtPass == 1 && (!F::Backtrack.Enabled() || F::Backtrack.AimAt()))
+			break;
 
-		const auto iResult = CanHit(tTarget, pLocal, pWeapon);
-		if (!iResult) continue;
-		if (iResult == 2)
+		for (auto& tTarget : vTargets)
 		{
-			G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount, 0 };
+			if (nWeaponID == TF_WEAPON_MEDIGUN && pWeapon->As<CWeaponMedigun>()->m_hHealingTarget().Get() == tTarget.m_pEntity)
+			{
+				if (G::LastUserCmd->buttons & IN_ATTACK)
+					pCmd->buttons |= IN_ATTACK;
+				return;
+			}
+
+			const auto iResult = CanHit(tTarget, pLocal, pWeapon);
+			if (!iResult) continue;
+			if (iResult == 2)
+			{
+				G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount, 0 };
+				Aim(pCmd, tTarget.m_vAngleTo);
+				bDone = true;
+				break;
+			}
+
+			G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount };
+			G::AimPoint = { tTarget.m_vPos, I::GlobalVars->tickcount };
+			F::Backtrack.m_pTarget = tTarget.m_pRecord != &g_tLiveRecord ? tTarget.m_pRecord : nullptr;   // bt chams type 2
+
+			if (ShouldFire(pLocal, pWeapon, pCmd, tTarget))
+			{
+				switch (nWeaponID)
+				{
+				case TF_WEAPON_MEDIGUN:
+					if (!(G::LastUserCmd->buttons & IN_ATTACK))
+						pCmd->buttons |= IN_ATTACK;
+					break;
+				case TF_WEAPON_SNIPERRIFLE_CLASSIC:
+					if (pWeapon->As<CTFSniperRifle>()->m_flChargedDamage() && pLocal->m_hGroundEntity())
+						pCmd->buttons &= ~IN_ATTACK;
+					break;
+				case TF_WEAPON_LASER_POINTER:
+					pCmd->buttons |= IN_ATTACK | IN_ATTACK2;
+					break;
+				default:
+					pCmd->buttons |= IN_ATTACK;
+				}
+
+				if (Vars::Aimbot::Hitscan::Modifiers.Value & Vars::Aimbot::Hitscan::ModifiersEnum::Tapfire && pWeapon->GetWeaponSpread() != 0.f && !pLocal->InCond(TF_COND_RUNE_PRECISION)
+					&& m_vEyePos.DistTo(tTarget.m_vPos) > Vars::Aimbot::Hitscan::TapfireDistance.Value)
+				{
+					const float flTimeSinceLastShot = (pLocal->m_nTickBase() * TICK_INTERVAL) - pWeapon->m_flLastFireTime();
+					if (flTimeSinceLastShot <= (pWeapon->GetBulletsPerShot() > 1 ? 0.25f : 1.25f))
+						pCmd->buttons &= ~IN_ATTACK;
+				}
+			}
+
+			G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
+			if (G::Attacking == 1 && nWeaponID != TF_WEAPON_LASER_POINTER && tTarget.m_iTargetType == TargetEnum::Player)
+			{
+				// botox commit_shot: the fire cmd asks lag comp for the record we aimed at
+				tTarget.m_bBacktrack = tTarget.m_pRecord && tTarget.m_pRecord != &g_tLiveRecord;
+				if (F::Backtrack.Enabled())
+					F::Backtrack.CommitShot(tTarget.m_bBacktrack ? tTarget.m_pRecord : nullptr, pCmd);
+			}
+			DrawVisuals(pLocal, tTarget, nWeaponID);
+
 			Aim(pCmd, tTarget.m_vAngleTo);
+			if (G::SilentAngles)
+			{
+				switch (nWeaponID)
+				{
+				case TF_WEAPON_MEDIGUN:
+				//case TF_WEAPON_LASER_POINTER: // we can psilent with the wrangler though probably with some hacks
+					G::SilentAngles = false, G::PSilentAngles = true;
+				}
+			}
+			bDone = true;
 			break;
 		}
-
-		G::AimTarget = { tTarget.m_pEntity->entindex(), I::GlobalVars->tickcount };
-		G::AimPoint = { tTarget.m_vPos, I::GlobalVars->tickcount };
-
-		if (ShouldFire(pLocal, pWeapon, pCmd, tTarget))
-		{
-			switch (nWeaponID)
-			{
-			case TF_WEAPON_MEDIGUN:
-				if (!(G::LastUserCmd->buttons & IN_ATTACK))
-					pCmd->buttons |= IN_ATTACK;
-				break;
-			case TF_WEAPON_SNIPERRIFLE_CLASSIC:
-				if (pWeapon->As<CTFSniperRifle>()->m_flChargedDamage() && pLocal->m_hGroundEntity())
-					pCmd->buttons &= ~IN_ATTACK;
-				break;
-			case TF_WEAPON_LASER_POINTER:
-				pCmd->buttons |= IN_ATTACK | IN_ATTACK2;
-				break;
-			default:
-				pCmd->buttons |= IN_ATTACK;
-			}
-
-			if (Vars::Aimbot::Hitscan::Modifiers.Value & Vars::Aimbot::Hitscan::ModifiersEnum::Tapfire && pWeapon->GetWeaponSpread() != 0.f && !pLocal->InCond(TF_COND_RUNE_PRECISION)
-				&& m_vEyePos.DistTo(tTarget.m_vPos) > Vars::Aimbot::Hitscan::TapfireDistance.Value)
-			{
-				const float flTimeSinceLastShot = (pLocal->m_nTickBase() * TICK_INTERVAL) - pWeapon->m_flLastFireTime();
-				if (flTimeSinceLastShot <= (pWeapon->GetBulletsPerShot() > 1 ? 0.25f : 1.25f))
-					pCmd->buttons &= ~IN_ATTACK;
-			}
-		}
-
-		G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
-		if (G::Attacking == 1 && nWeaponID != TF_WEAPON_LASER_POINTER)
-		{
-		}
-		DrawVisuals(pLocal, tTarget, nWeaponID);
-
-		Aim(pCmd, tTarget.m_vAngleTo);
-		if (G::SilentAngles)
-		{
-			switch (nWeaponID)
-			{
-			case TF_WEAPON_MEDIGUN:
-			//case TF_WEAPON_LASER_POINTER: // we can psilent with the wrangler though probably with some hacks
-				G::SilentAngles = false, G::PSilentAngles = true;
-			}
-		}
-		break;
 	}
 }

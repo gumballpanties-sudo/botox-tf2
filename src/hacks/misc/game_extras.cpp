@@ -1,5 +1,6 @@
 #include "game_extras.h"
 #include "game_pure.h"
+#include "names.h"                      // custom names: same answer as C_PlayerResource::GetPlayerName
 #include "../aim/aim.h"                 // Aim_ChatPrint (CBaseHudChat::ChatPrintf, game thread)
 #include "../movement/detections.h"     // g_detectionLabel, the chat brand botox's brand() reads
 #include "../screen/screenfx.h"         // ScreenFx_QueueForced -- mat_queue_mode has two owners
@@ -213,6 +214,7 @@ bool __fastcall h_GetPlayerInfo(void* self, int ent, void* pinfo)
     MiscHookGuard _g;
     const bool ok = o_GetPlayerInfo(self, ent, pinfo);
     if (ok && pinfo && g_botNames && !g_eject) PatchPlayerInfo(static_cast<uint8_t*>(pinfo));
+    if (ok && pinfo && !g_eject) Names_PatchInfo(ent, pinfo);
     return ok;
 }
 

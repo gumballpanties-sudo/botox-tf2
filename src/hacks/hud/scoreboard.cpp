@@ -2,6 +2,7 @@
 #include "../../globals/common.h"
 #include "../network/mmfix.h"     // MMFix_Pump -- CVGui::RunFrame is the main thread the GC calls need
 #include "../../hooks/crashlog.h"  // breadcrumbs + the main-thread hitch trace, both into C:otox-tf2\crash.log
+#include "../misc/names.h"        // right-click "Add to Alias List"
 #include <intrin.h>
 
 // ==== reveal scoreboard =============================================================
@@ -240,7 +241,8 @@ static void __fastcall h_VGuiRunFrame(void* thisptr)
 // ==== STEAM HISTORY ==================================================================
 // "Steam History" in the scoreboard's right-click menu -> opens
 // steamhistory.net/id/<steam64> for that player in the steam overlay. Ported from
-// fpsoverlay's scoreboard_hook.cpp (the alias / marking half is not brought over).
+// fpsoverlay's scoreboard_hook.cpp, with its "Add to Alias List" item (custom names,
+// misc/names.cpp). Group marking is not brought over.
 //
 // Three hooks, because the menu never carries the player it was opened on:
 //   CTFClientScoreBoardDialog::OnScoreBoardMouseRightRelease calls IsFakePlayer(index)
@@ -336,13 +338,17 @@ static void* __fastcall h_AddMenuItem(void* thisptr, const char* pszButtonText,
                                       const char* pszCommand, const char* pszCategory)
 {
     MiscHookGuard _g;
-    if (SteamHistoryOn() && s_addrAddMenuProfile
+    if (!g_eject && s_addrAddMenuProfile
         && uintptr_t(_ReturnAddress()) == s_addrAddMenuProfile)
     {
-        s_shAccountID = PlayerAccountID(s_shPlayerIndex);
+        s_shAccountID = PlayerAccountID(s_shPlayerIndex);   // hooked GetPlayerInfo: also caches the real name
         void* ret = o_AddMenuItem(thisptr, pszButtonText, pszCommand, pszCategory);
-        if (s_shAccountID)
+        if (s_shAccountID && g_steamHistory)
             o_AddMenuItem(thisptr, "Steam History", "botox_history", "profile");
+        // fpsoverlay scoreboard_hook: alias item, always on (custom names, misc > player list)
+        if (s_shAccountID)
+            o_AddMenuItem(thisptr, Names_HasAlias(s_shAccountID) ? "Edit Alias" : "Add to Alias List",
+                          "botox_alias", "profile");
         return ret;   // the real item's panel, not ours -- the caller keeps using it
     }
     return o_AddMenuItem(thisptr, pszButtonText, pszCommand, pszCategory);
@@ -364,6 +370,13 @@ static void __fastcall h_OnCommand(void* thisptr, const char* command)
             SteamOverlay_OpenURL(url);
         }
         return;   // ours: the game has no such command
+    }
+    // fpsoverlay iv_alias: add (real name as the start text); "Edit" = it is already there,
+    // the name is edited in misc > player list
+    if (!g_eject && command && strcmp(command, "botox_alias") == 0)
+    {
+        Names_AddAlias(s_shAccountID, s_shPlayerIndex);
+        return;
     }
     o_OnCommand(thisptr, command);
 }

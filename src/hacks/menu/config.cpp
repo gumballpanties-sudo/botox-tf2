@@ -5,6 +5,7 @@
 #include "../visuals/skins.h"     // and so does the skinchanger's per-weapon block
 #include "../visuals/hats.h"      // and the hat changer's slots
 #include "../visuals/skinshare.h" // and the sharing toggles
+#include "../misc/names.h"        // and custom names' cycle lists + aliases
 #include "../movement/detections.h"    // unit B
 #include "../movement/ps_lines.h"      // unit B
 #include "../movement/recorder.h"      // unit B
@@ -648,6 +649,14 @@ static const CfgEntry kEntries[] = {
     // psAssistSteer deleted (steer lock). Stale keys in an old cfg are ignored on load
     { "psAssistRender",   CfgEntry::BOOL,   &g_psAssistRender, 0 },
     { "psAssistJumpBox",  CfgEntry::BOOL,   &g_psAssistJumpBox, 0 },
+    { "pixelJump",        CfgEntry::BOOL,   &g_pixelJump, 0 },
+    { "pixelJumpKey",     CfgEntry::INT,    &g_pixelJumpKey, 0 },
+    { "pixelJumpMode",    CfgEntry::INT,    &g_pixelJumpMode, 0 },
+    { "pjUnsafe",         CfgEntry::BOOL,   &g_pjUnsafe, 0 },
+    { "pjCrouch",         CfgEntry::BOOL,   &g_pjCrouch, 0 },
+    { "pjSetPointKey",    CfgEntry::INT,    &g_pjSetPointKey, 0 },
+    { "pjDeletePointKey", CfgEntry::INT,    &g_pjDeletePointKey, 0 },
+    { "pjRender",         CfgEntry::BOOL,   &g_pjRender, 0 },
     { "psGroundHelp",     CfgEntry::BOOL,   &g_psGroundHelp, 0 },
     { "psGroundHelpAngle",CfgEntry::FLOAT,  &g_psGroundHelpAngle, 0 },
     { "psLaunchZSlack",   CfgEntry::FLOAT,  &g_psLaunchZSlack, 0 },
@@ -1000,6 +1009,8 @@ static const CfgEntry kEntries[] = {
 #include "cfg/u_spec.inc"
 #include "cfg/u_misc.inc"
 #include "cfg/u_game.inc"
+#include "cfg/u_btchams.inc"
+#include "cfg/u_points.inc"
 };
 
 // botox g_config.folder(visuals): visuals files live one folder down
@@ -1055,6 +1066,7 @@ void SaveConfig(const char* path, bool visuals)
         Skins_SaveCfg(f);
         Hats_SaveCfg(f);   // "hatsEnable" + "hat_<slot>=def style unusual paint"
         SkinShare_SaveCfg(f);   // shareNet / shareSend / shareRecv
+        Names_SaveCfg(f);       // custom names: cycle lists + aliases
 
         // Aimbot vars (src/hacks/aim/aim.cpp). Appended after dih's own entries;
         // they are keyed by their registered "Vars::..." name so they cannot collide with kEntries.
@@ -1179,6 +1191,7 @@ void LoadConfig(const char* path, bool visuals)
         if (Skins_LoadCfg(key, val)) continue;
         if (Hats_LoadCfg(key, val)) continue;
         if (SkinShare_LoadCfg(key, val)) continue;
+        if (Names_LoadCfg(key, val)) continue;
         if (Ind_LoadLegacy(key, val)) continue;
         // esp rows from before the botox players port: one box combo (0 off, 1 corner, 2 full)
         // and one "health" row that drew bar + number. Never written now, read once into the new rows

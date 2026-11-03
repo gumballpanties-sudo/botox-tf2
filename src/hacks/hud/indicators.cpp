@@ -807,6 +807,7 @@ static int part_fired(const int id)
     case LBL_EB:   return trick(PTS_EDGE_BUG);
     case LBL_PS:
     case LBL_AST:
+    case LBL_PJ:
     case LBL_TUNG: return trick(PTS_PIXEL_SURF);
     case LBL_JB:   return trick(PTS_JUMP_BUG);
     case LBL_TB:   return trick(PTS_TEXTURE_BUG);
@@ -1312,6 +1313,8 @@ static void keybind_indicators(const MvInd_t& s)
         add(LBL_AS, s.strafeOn);
     if (g_psAssist && shown(KI_PSA))
         add_hit(LBL_AST, s.astHit, s.astOn);
+    if (g_pixelJump && shown(KI_PJ))
+        add_hit(LBL_PJ, s.pjHit, s.pjOn);
     if (g_bounceAssist && shown(KI_PSA))
         add_hit(LBL_BAST, s.bastHit, s.bastOn);
     if (g_autoCrouch && shown(KI_AC))

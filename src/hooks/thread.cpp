@@ -25,6 +25,7 @@
 #include "../hacks/misc/misc_overlays.h"   // unit misc: ConsoleTint_Install
 #include "../hacks/misc/discord_ex.h"   // unit E: discord rich presence, its own IPC thread
 #include "../hacks/misc/game_extras.h"  // unit game: bot names GetPlayerInfo hook + eject restore
+#include "../hacks/misc/names.h"        // custom names: C_PlayerResource::GetPlayerName hook
 #include "../hacks/visuals/skinshare.h" // SkinShare_Shutdown: steam networking worker joined at eject
 #include "../hacks/aim/aim.h"
 #include "../hacks/misc/boot_screen.h"   // eject splash: begin before g_eject, end before unhook
@@ -189,16 +190,6 @@ static void PollThread()
     for (int i = 0; i < 60 && !g_eject; ++i) Sleep(50);
     if (g_eject || !WaitForClientInit()) { DebugLog("poll_thread: ejected before install"); return; }
 
-    // vgui::IPanel::PaintTraverse -- slot 41, counted off public/vgui/IPanel.h including the
-    // destructor slot IBaseInterface contributes. This is where the crosshair draws: inside
-    // the game's own UI pass, so it is in the backbuffer before anyone's Present hook runs.
-    // Here and not in MainThread: at game start d3d9.dll can load before vgui2.dll does.
-    if (void* panels = VGui_GetPanelInterface())
-        InstallVTableHook(panels, 41, "vgui: PaintTraverse", (void*)&h_PaintTraverse,
-                          (void**)&o_PaintTraverse);
-    else DebugLog("vgui: VGUI_Panel009 not found -- crosshair falls back to EndScene");
-    ConsoleTint_Install();   // unit misc: botox console color (ISurface::DrawSetColor)
-
     static const char* const kEngineNames[]  = {"VEngineClient014","VEngineClient013","VEngineClient015",nullptr};
     static const char* const kCvarNames[]    = {"VEngineCvar004","VEngineCvar007","VEngineCvar003",nullptr};
     static const char* const kModelInfoNames[]= {"VModelInfoClient006","VModelInfoClient007",nullptr};
@@ -216,6 +207,18 @@ static void PollThread()
     // IVRenderView -- SetBlend/GetBlend for the transparent viewmodel
     if (!g_renderView) g_renderView = GetInterfaceAny("engine.dll", kRenderViewNames);
     if (!g_entityList) g_entityList = (IClientEntityList*)GetInterfaceAny("client.dll", kEntListNames);
+
+    // vgui::IPanel::PaintTraverse -- slot 41, counted off public/vgui/IPanel.h including the
+    // destructor slot IBaseInterface contributes. This is where the crosshair draws: inside
+    // the game's own UI pass, so it is in the backbuffer before anyone's Present hook runs.
+    // Here and not in MainThread: at game start d3d9.dll can load before vgui2.dll does.
+    // AFTER the interfaces above: the hook reads g_engine on its first paint (OvQueue ->
+    // PsEngineW2S), and installing it first was a null-vtable AV every inject (crash.log).
+    if (void* panels = VGui_GetPanelInterface())
+        InstallVTableHook(panels, 41, "vgui: PaintTraverse", (void*)&h_PaintTraverse,
+                          (void**)&o_PaintTraverse);
+    else DebugLog("vgui: VGUI_Panel009 not found -- crosshair falls back to EndScene");
+    ConsoleTint_Install();   // unit misc: botox console color (ISurface::DrawSetColor)
 
     InstallVTableHook(g_modelRender, 19, "nohats: DrawModelExecute",
                       (void*)h_DrawModelExecute, (void**)&o_DrawModelExecute);
@@ -255,6 +258,9 @@ static void PollThread()
                 { "soundesp: CSoundEmitterSystem::EmitSound",   // Amalgam sig, verified
                   "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 41 56 48 81 EC ? ? ? ? 49 8B D9",
                   (void*)h_EmitSound,             (void**)&o_EmitSound },
+                { "names: C_PlayerResource::GetPlayerName",      // Amalgam sig, 1 hit 11-03
+                  "48 89 5C 24 ? 56 48 83 EC ? 48 63 F2",
+                  (void*)h_GetPlayerName,         (void**)&o_GetPlayerName },
             };
             for (const auto& h : kClientHooks)
                 InstallPatternHook(hClient, h.tag, h.sig, h.hook, h.orig);
@@ -420,11 +426,14 @@ static void MainThread()
 
     // PaintTraverse moved to PollThread (vgui2.dll may not be loaded yet here).
 
-    MH_EnableHook(MH_ALL_HOOKS);
-
+    // Config BEFORE the hooks go live: LoadConfig is plain data writes (hat slots cleared and
+    // refilled, strings, curves), and the first Present builds the font atlas off g_dpiScale.
+    // Loaded after, the render thread read every one of those mid-write on its first frames.
     _mkdir(CONFIG_DIR);
     if (GetFileAttributesA(CONFIG_PATH) == INVALID_FILE_ATTRIBUTES) SaveConfig();
     LoadConfig();
+
+    MH_EnableHook(MH_ALL_HOOKS);
 
     DebugLog("botox loaded, hooks installed");
     LogPresentHookOwner();
@@ -465,8 +474,11 @@ static void MainThread()
     // Join PollThread FIRST. It calls MH_CreateHook/MH_EnableHook, so letting it live
     // past MH_DisableHook(MH_ALL_HOOKS) races MinHook's own state -- and it used to be
     // joined with a 2000ms wait against its own 3000ms opening sleep, i.e. never.
+    // Not joined = it may still MH_CreateHook/MH_EnableHook after both disables below, a live
+    // detour into an image about to unmap -- such an eject stays soft.
+    bool pollJoined = true;
     if (g_hPollThread) {
-        WaitForSingleObject(g_hPollThread, 6000);
+        pollJoined = WaitForSingleObject(g_hPollThread, 6000) == WAIT_OBJECT_0;
         CloseHandle(g_hPollThread);
         g_hPollThread = nullptr;
     }
@@ -547,17 +559,31 @@ static void MainThread()
     // through dead-but-valid code. The cost is MinHook's own heap, leaked once, at eject.
     MH_DisableHook(MH_ALL_HOOKS);   // idempotent: catch anything armed after the first call
 
-    // Real unload unless something provably still runs in us: a hook that never drained, or
-    // hats the game thread never freed (FrameStageNotify did not tick). Then soft, as before.
-    const bool hard = drained && !Hats_AnyLive();
-
-    if (g_showMenu) ShowCursor(FALSE);
+    if (g_showMenu) { g_showMenu = false; ShowCursor(FALSE); }
     ClipCursor(nullptr);
+
+    // WndProc: put the game's back only if we are still the top of the chain. Anyone who
+    // subclassed after us saved WndProcHook as THEIR previous proc and keeps calling it --
+    // overwriting them breaks them, and unmapping under them is a crash on the next message.
+    // Left in place, WndProcHook passes straight through at g_eject, and the eject goes soft.
+    bool wndProcOff = true;
+    if (g_imguiInit && g_origWndProc && g_hwnd && IsWindow(g_hwnd))
+    {
+        if ((WNDPROC)GetWindowLongPtrW(g_hwnd, GWLP_WNDPROC) == WndProcHook)
+            SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
+        else {
+            wndProcOff = false;
+            DebugLog("eject: wndproc subclassed after us -- left chained");
+        }
+    }
+
+    // Real unload unless something provably still runs in us: a hook that never drained, hats
+    // the game thread never freed (FrameStageNotify did not tick), a poll thread that never
+    // joined, or a wndproc we could not take back. Then soft, as before.
+    const bool hard = drained && !Hats_AnyLive() && pollJoined && wndProcOff;
 
     if (g_imguiInit)
     {
-        if (g_origWndProc && g_hwnd)
-            SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
         CsgoCrosshair_ReleaseTextures();
         ColorCorr_Destroy();
         Bloom_Destroy();
@@ -568,8 +594,9 @@ static void MainThread()
     }
 
     if (hard) DebugLog("eject: unloading dll");
-    else      DebugLog("eject: SOFT (hook depth %d/%d, hats live %d) -- dll stays mapped, restart game to rebuild",
-                       g_hookDepth.load(), g_miscHookDepth.load(), (int)Hats_AnyLive());
+    else      DebugLog("eject: SOFT (hook depth %d/%d, hats live %d, poll joined %d, wndproc off %d) -- dll stays mapped, restart game to rebuild",
+                       g_hookDepth.load(), g_miscHookDepth.load(), (int)Hats_AnyLive(),
+                       (int)pollJoined, (int)wndProcOff);
 
     DebugLog_Shutdown();   // last line written; hands C:otox-tf2\debug.log back to the user
 

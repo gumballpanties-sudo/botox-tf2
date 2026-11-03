@@ -22,6 +22,7 @@
 #include "../hacks/movement/detections.h"    // unit B
 #include "../hacks/movement/recorder.h"      // unit B
 #include "../hacks/movement/ps_lines.h"      // unit B (vars only, draw loop appended into RenderPsOverlay below)
+#include "../hacks/movement/points_style.h"  // movement > points page look (botox points_ui.cpp styles)
 #include "../hacks/screen/screenfx_passes.h"   // unit D: sharpen/grain/vignette/invert/posterize/deband/channel-shift/emphasize/show-depth
 #include "../hacks/visuals/world_fx.h"          // unit D: fullbright/disable-interp tick + aspect ratio dest rect
 #include "../hacks/hud/hitmarker.h"         // unit E: misc HUD
@@ -66,9 +67,7 @@
 //   DIH-1 project with dih's engine matrix and snap to the pixel grid. Without the snap a
 //         1px AA stroke lands on subpixel coords and re-weights every frame the camera
 //         breathes, which reads as marker shiver.
-//   DIH-2 "active" = the target the assist is planning for, latched 400ms . The
-//         reference stores a per-point enable flag; dih's live target flips at tick rate.
-//         Active rings white, not their red accent -- this overlay stays monochrome.
+//   DIH-2 (gone 11-03: saved points now take botox's movement > points look, points_style.h)
 //   DIH-3 their pulsing 3-axis world cross is dropped (user ask), so a marker never draws
 //         over what it marks.
 // Points come from the movement thread (PS_GetDrawData snapshot) and project with
@@ -105,17 +104,10 @@ constexpr float kPtLerpSpan   = 300.f;  // then 11 -> 4 over this many units
 constexpr float kPtRNear      = 11.0f;  // baseRadius
 constexpr float kPtRFar       = 4.0f;
 constexpr float kPtRMin       = 3.0f;
-constexpr float kPtCull       = 1500.f; // past this the point is not drawn at all
-constexpr float kPtFadeStart  = 1400.f; // alphaMultiplier ramps 1 -> 0 over the last 100
 constexpr float kPtRingThick  = 0.5f;   // outlineThickness
-constexpr float kPtHoverScale = 1.5f;   // targetScale while hovered
 constexpr float kPtScaleSpeed = 10.0f;  // LerpFloat(current, target, dt * scaleSpeed)
-constexpr float kPtFillA      = 100.f;  // fillAlpha
 constexpr int   kSegments     = 32;     // both circles of both features
-// the reference rings an active point in menu::menu_accent (245,40,40). dih's menu is
-// monochrome, so active is white -- same job, no second colour in the overlay.
-constexpr int   kActiveWhite = 255;     // active ring
-constexpr int   kIdleGrey    = 100;     // inactive ring
+// cull distance, fade, size, fill, hover size, colours: movement > points (cfg/u_points.h)
 
 // botox AnimatedPoint. Render-thread only: the movement thread owns the point lists, this
 // owns how they animate, so there is nothing to lock.
@@ -217,7 +209,8 @@ static void RenderPsOverlay()
     const bool bAssist = g_psAssist && g_psAssistRender;
     // map-scan lines have their own switch and outlive the finder, so they keep the snapshot
     // (and the overlay) alive on their own -- the copy is free when the list is empty
-    const bool bPoints = bFinder || bAssist || g_psMapLines;
+    const bool bPj = g_pixelJump && g_pjRender;
+    const bool bPoints = bFinder || bAssist || bPj || g_psMapLines;
     if (!bPoints && !g_psAssistJumpBox) { PsOverlayResetAnim(); return; }
 
     // One snapshot per frame. Point rendering off (jump box on) copies no vectors at all.
@@ -370,18 +363,24 @@ static void RenderPsOverlay()
             if (dx * dx + dy * dy < hoveredSq) { hoveredSq = dx * dx + dy * dy; hovered = i; }
         }
 
+        // botox: dot size * point size, fill = background opacity * opacity, ring = finder style
+        // colour * opacity, outline thickness. Jump surf (ours) keeps its fixed orange
         const float ease = 1.f - expf(-5.f * dt);
         for (auto& m : members)
         {
-            const float target = (m.group == hovered ? kPfHoverSize : kPfDotSize) * m.dot->prog;
+            const float target = (m.group == hovered ? kPfHoverSize : kPfDotSize) * m.dot->prog * PointsSize();
             m.dot->size += (target - m.dot->size) * ease;
             groups[m.group].size = std::max(groups[m.group].size, m.dot->size);
         }
 
-        for (const Group& g : groups)
+        constexpr int kPfStyle[kPfTypes] = { PS_STYLE_PF_HB, PS_STYLE_PF_PJ, PS_STYLE_PF_PS, PS_STYLE_PF_TB, -1 };
+        const float op = std::clamp(g_pointsOpacity, 0.f, 1.f);
+        const float pfThick = PointsThickness(1.f);
+        for (const Group& g : groups)   // render finder points off = draw only, fades keep running
         {
-            if (!g.drawn || g.size <= 0.f) continue;
-            dl->AddCircleFilled(g.screen, g.size, IM_COL32(0, 0, 0, int(g.progress * 100.f)), kSegments);
+            if (!g_pointsRenderFinder || !g.drawn || g.size <= 0.f) continue;
+            dl->AddCircleFilled(g.screen, g.size,
+                                IM_COL32(0, 0, 0, int(g.progress * 255.f * std::clamp(g_pointsFill, 0.f, 1.f) * op)), kSegments);
             float a0[kPfTypes] = {}, a1[kPfTypes] = {};
             ImU32 col[kPfTypes] = {};
             for (int t = 0; t < kPfTypes; t++)
@@ -390,13 +389,14 @@ static void RenderPsOverlay()
                 const int s = g.slot[t];
                 a0[s] = kPfTop + s * kPfTurn / g.types;
                 a1[s] = a0[s] + kPfTurn / g.types;
-                col[s] = IM_COL32(kPfRgb[t][0], kPfRgb[t][1], kPfRgb[t][2], int(g.dot[t]->prog * 255.f));
+                col[s] = kPfStyle[t] >= 0 ? PointStyleU32(kPfStyle[t], g.dot[t]->prog)
+                                          : IM_COL32(kPfRgb[t][0], kPfRgb[t][1], kPfRgb[t][2], int(g.dot[t]->prog * 255.f * op));
             }
-            if (g.types == 1) { dl->AddCircle(g.screen, g.size, col[0], kSegments, 1.f); continue; }
+            if (g.types == 1) { dl->AddCircle(g.screen, g.size, col[0], kSegments, pfThick); continue; }
             for (int i = 0; i < g.types; i++)
             {
                 dl->PathArcTo(g.screen, g.size, a0[i], a1[i], kSegments / g.types);
-                dl->PathStroke(col[i], 0, 1.f);
+                dl->PathStroke(col[i], 0, pfThick);
             }
         }
     }
@@ -458,24 +458,106 @@ static void RenderPsOverlay()
             dl->AddLine(a, b, IM_COL32(133, 133, 133, 255), 1.f);
     }
 
+    // ---- saved points: botox points_ui.cpp RenderPoints 1:1, look from movement > points ----
+    // (vars cfg/u_points.h, styles movement/points_style.h). Not ported: botox's per-point
+    // "3d radius ring" + free points (TF2 points have neither field), assist render height.
+    const float maxDrawDist = std::max(g_pointsMaxDist, 1.f);
+    const float fadeStart   = maxDrawDist * 0.6f;
+    const float opacity     = std::clamp(g_pointsOpacity, 0.f, 1.f);
+    const float size        = PointsSize();
+    const float fill        = std::clamp(g_pointsFill, 0.f, 1.f);
+    const float hoverScale  = std::clamp(g_pointsHoverScale, 1.f, 3.f);
+    ImFont* labelFont = g_menuReg ? g_menuReg : ImGui::GetFont();   // botox verdana 11
+    // alpha passed in already holds opacity. radius color = active point while you stand outside its radius
+    auto StyleColor = [&](int style, bool inRadius, float alpha) -> ImU32
+    {
+        if (g_pointsRadiusColor && !inRadius) return PointColU32(g_pointsRadiusClr, alpha);
+        return PointStyleRaw(style, alpha);
+    };
+    // botox project_world_axis: screen direction of a world axis through pos + how much of it faces
+    // the camera (0 = straight at you, 1 = flat on screen)
+    auto ProjectAxis = [&](const Vec3& pos, const Vec3& dir, float probe, float& ox, float& oy, float& ratio) -> bool
+    {
+        auto span = [&](const Vec3& axis, float& sx, float& sy) -> bool
+        {
+            ImVec2 a, b;
+            if (!W2S(pos + axis * probe, a) || !W2S(pos - axis * probe, b)) return false;
+            sx = a.x - b.x; sy = a.y - b.y;
+            return true;
+        };
+        float dx, dy, xx, xy, yx, yy, zx, zy;
+        if (!span(dir, dx, dy)) return false;
+        if (!span(Vec3(1.f, 0.f, 0.f), xx, xy) || !span(Vec3(0.f, 1.f, 0.f), yx, yy) || !span(Vec3(0.f, 0.f, 1.f), zx, zy))
+            return false;
+        const float full = sqrtf((xx * xx + xy * xy + yx * yx + yy * yy + zx * zx + zy * zy) * 0.5f);
+        if (full < 0.0001f) return false;
+        const float len = sqrtf(dx * dx + dy * dy);
+        ratio = std::clamp(len / full, 0.f, 1.f);
+        if (len < 0.0001f) { ox = 1.f; oy = 0.f; return true; }
+        ox = dx / len; oy = dy / len;
+        return true;
+    };
+    auto Design = [&](int style, const ImVec2& s, float effR, float dirX, float dirY, float ratio, ImU32 color)
+    {
+        const float half = PointDesignHalf(effR) * PointArrowLengthScale(ratio);
+        const int a = int(((color >> IM_COL32_A_SHIFT) & 0xFFu) * PointArrowFade(ratio));
+        if (a > 0) PointDesignEmit(dl, style, s, half, dirX, dirY, PointWithAlpha(color, a));
+    };
+
+    // pixeljump's own points = botox's bounce-list loop as style pixeljump (point_type 2). No
+    // ENTER window. In radius = heroin's 1000u pick range (psassist.inl), pj points have no own
+    if (bPj && g_pointsRenderBounce)
+    {
+        static std::vector<float> s_pjScale;
+        if (s_pjScale.size() != d.pjPts.size()) s_pjScale.assign(d.pjPts.size(), 0.f);
+        for (int i = 0; i < (int)d.pjPts.size(); i++)
+        {
+            const Vec3& p = d.pjPts[i];
+            ImVec2 s;
+            if (!W2S(p, s)) continue;
+            const float dist = d.localOrigin.DistTo(p);
+            if (dist > maxDrawDist) continue;
+            float baseR = 10.f;
+            if (g_pointsDistanceShrink && dist > 275.f)
+            {
+                if (dist <= 650.f)
+                {
+                    float t = Clamp01((dist - 275.f) / 375.f);
+                    t = t * t * (3.f - 2.f * t);
+                    baseR = LerpF(10.f, 2.f, t);
+                }
+                else baseR = 2.f;
+            }
+            baseR = std::max(baseR, 3.f) * size;
+            float outlineT = 0.5f;
+            if (dist > 200.f) outlineT = LerpF(0.5f, 1.f, Clamp01((dist - 200.f) / 200.f));
+            float aMul = 1.f;
+            if (g_pointsDistanceFade && dist > fadeStart) aMul = Clamp01((maxDrawDist - dist) / (maxDrawDist - fadeStart));
+            aMul *= opacity;
+            const bool inRadius = dist <= 1000.f;
+            const ImU32 ring = StyleColor(PS_STYLE_PJ, inRadius, aMul);
+            const bool hov = InCross(s, baseR);
+            s_pjScale[i] = LerpF(s_pjScale[i], hov ? hoverScale : 1.f, Clamp01(dt * kPtScaleSpeed));
+            const float r = baseR * s_pjScale[i] * PointsPulse(inRadius);
+            dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, int(255.f * fill * aMul)), kSegments);
+            PointRingEmit(dl, PS_STYLE_PJ, s, r, ring, outlineT);
+            float dx = 0.f, dy = -1.f, ratio = 1.f;
+            { float x, y, q; if (ProjectAxis(p, Vec3(0.f, 0.f, 1.f), 16.f, x, y, q)) { dx = x; dy = y; ratio = q; } }
+            Design(PS_STYLE_PJ, s, r, dx, dy, ratio, StyleColor(PS_STYLE_PJ, inRadius, aMul * 200.f / 255.f));
+            PointLabelEmit(dl, labelFont, PS_STYLE_PJ, s, r, aMul);
+        }
+    }
+
     if (!bAssist) return;   // saved points + the ENTER window are the assist's
 
-    // ---- saved targets: RenderPoints (assist.cpp:2290-2477) --------------------------
-    // DIH-2: `assistActive` is whichever target owned the LAST command and goes -1 on every
-    // command that produced no pick, so at tick rate the ring was strobing accent/grey. A new
-    // index takes over at once (the marker must stay truthful about WHICH point is planned
-    // for) and losing it only drops after 400ms of nothing. Render-side and frame-local, so
-    // it cannot race the movement thread.
-    static int s_actIdx = -1;
-    static unsigned long long s_actMs = 0;
-    if (d.assistActive >= 0) { s_actIdx = d.assistActive; s_actMs = now; }
-    else if (s_actIdx >= 0 && (now < s_actMs || now - s_actMs > 400)) s_actIdx = -1;
-    if (s_actIdx >= (int)d.assistPts.size()) s_actIdx = -1;
-
+    // ---- saved assist targets: botox RenderPoints pixelsurf loop as style pixelsurf ------
+    // every saved point is botox "active" (TF2 points have no enable flag): style colour, or the
+    // radius colour while you stand outside its engage radius. Arrow = along the wall, from the
+    // normal the assist caches on the point; not resolved yet = botox's no-probe fallback (1,0)
     if (s_ptScale.size() != d.assistPts.size())
         s_ptScale.assign(d.assistPts.size(), 1.f);
 
-    for (int i = 0; i < (int)d.assistPts.size(); i++)
+    for (int i = 0; g_pointsRenderPs && i < (int)d.assistPts.size(); i++)
     {
         const Vec3& p = d.assistPts[i];
 
@@ -483,32 +565,42 @@ static void RenderPsOverlay()
         if (!W2S(p, s)) continue;
 
         const float dist = d.localOrigin.DistTo(p);
-        if (dist > kPtCull) continue;
+        if (dist > maxDrawDist) continue;
 
-        // radius: full out to 300u, then shrinks to 4 by 600u, never under 3
         float baseR = kPtRNear;
-        if (dist > kPtNear)
+        if (g_pointsDistanceShrink && dist > kPtNear)
             baseR = LerpF(kPtRNear, kPtRFar, Clamp01((dist - kPtNear) / kPtLerpSpan));
-        if (baseR < kPtRMin) baseR = kPtRMin;
+        baseR = std::max(baseR, kPtRMin) * size;
 
-        // alpha: solid until 1400u, then out over the last 100
-        const float aMul = dist > kPtFadeStart ? Clamp01((kPtCull - dist) / 100.f) : 1.f;
+        float aMul = 1.f;
+        if (g_pointsDistanceFade && dist > fadeStart) aMul = Clamp01((maxDrawDist - dist) / (maxDrawDist - fadeStart));
+        aMul *= opacity;
 
-        const bool act = (i == s_actIdx) || (i == s_psPointWin);
-        const ImU32 ring = act ? IM_COL32(kActiveWhite, kActiveWhite, kActiveWhite, int(255.f * aMul))
-                               : IM_COL32(kIdleGrey, kIdleGrey, kIdleGrey, int(255.f * aMul));
-        const ImU32 fill = IM_COL32(0, 0, 0, int(kPtFillA * aMul));
+        const bool inRadius = i < (int)d.assistRadius.size() && dist <= d.assistRadius[i];
+        const ImU32 ring = StyleColor(PS_STYLE_PS, inRadius, aMul);
+        const ImU32 fillC = IM_COL32(0, 0, 0, int(255.f * fill * aMul));
 
         // hover is measured on the UNSCALED radius, so a point cannot grow itself into the
         // crosshair and latch there. First one hovered owns ENTER/BACKSPACE.
         const bool hov = InCross(s, baseR);
         if (hov && s_psPointHover < 0) s_psPointHover = i;
 
-        s_ptScale[i] = LerpF(s_ptScale[i], hov ? kPtHoverScale : 1.f, Clamp01(dt * kPtScaleSpeed));
-        const float r = baseR * s_ptScale[i];
+        s_ptScale[i] = LerpF(s_ptScale[i], hov ? hoverScale : 1.f, Clamp01(dt * kPtScaleSpeed));
+        const float r = baseR * s_ptScale[i] * PointsPulse(inRadius);
 
-        dl->AddCircleFilled(s, r, fill, kSegments);
-        dl->AddCircle(s, r, ring, kSegments, kPtRingThick);
+        dl->AddCircleFilled(s, r, fillC, kSegments);
+        PointRingEmit(dl, PS_STYLE_PS, s, r, ring, kPtRingThick);
+
+        float dx = 1.f, dy = 0.f, ratio = 1.f;
+        if (PointStyleDesign(PS_STYLE_PS) >= 0 && i < (int)d.assistNormal.size())
+        {
+            const Vec3& n = d.assistNormal[i];
+            const float len = sqrtf(n.x * n.x + n.y * n.y);
+            float x, y, q;
+            if (len > 0.0001f && ProjectAxis(p, Vec3(-n.y / len, n.x / len, 0.f), 16.f, x, y, q)) { dx = x; dy = y; ratio = q; }
+        }
+        Design(PS_STYLE_PS, s, r, dx, dy, ratio, StyleColor(PS_STYLE_PS, inRadius, aMul * 200.f / 255.f));
+        PointLabelEmit(dl, labelFont, PS_STYLE_PS, s, r, aMul);
     }
 
     // ---- pixelsurf lines (unit B): connect the saved targets in index order, a route line
@@ -918,18 +1010,23 @@ static void RenderRouteOverlay()
                 prev = s; bHavePrev = true;
             }
 
+            // markers follow movement > points: "render calculator points", calculator style (shape, gaps,
+            // accent * opacity), point size, outline thickness; black disc at opacity
             auto TextW = [&](const char* t) { return mf->CalcTextSizeA(mf->FontSize, FLT_MAX, 0.f, t).x; };
-            auto Ring = [&](const ImVec2& s, const char* inner, const char* label)
+            const float op = std::clamp(g_pointsOpacity, 0.f, 1.f);
+            const ImU32 markCol = PointStyleU32(PS_STYLE_CALC, 1.f);
+            auto Ring = [&](const ImVec2& s, float base, const char* inner, const char* label)
             {
-                const float r = 11.f;
-                dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, 255), kSegments);
-                dl->AddCircle(s, r, accent, kSegments, 1.f);
-                dl->AddText(mf, mf->FontSize, ImVec2(s.x - TextW(inner) * 0.5f, s.y - mf->FontSize * 0.5f - 1.f), accent, inner);
-                dl->AddText(mf, mf->FontSize, ImVec2(s.x - TextW(label) * 0.5f, s.y - r - mf->FontSize - 3.f),
-                            IM_COL32(255, 255, 255, 255), label);
+                const float r = base * PointsSize();
+                dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, int(255.f * op)), kSegments);
+                PointRingEmit(dl, PS_STYLE_CALC, s, r, markCol, 1.f);
+                dl->AddText(mf, mf->FontSize, ImVec2(s.x - TextW(inner) * 0.5f, s.y - mf->FontSize * 0.5f - 1.f), markCol, inner);
+                if (label)
+                    dl->AddText(mf, mf->FontSize, ImVec2(s.x - TextW(label) * 0.5f, s.y - r - mf->FontSize - 3.f),
+                                IM_COL32(255, 255, 255, int(255.f * op)), label);
             };
 
-            for (size_t i = 0; bRoutePts && i < d.pts.size(); i++)
+            for (size_t i = 0; bRoutePts && g_pointsRenderCalc && i < d.pts.size(); i++)
             {
                 ImVec2 s;
                 if (!W2S(d.pts[i].pos, s)) continue;
@@ -941,13 +1038,13 @@ static void RenderRouteOverlay()
                 snprintf(lbl, sizeof(lbl), "%s%s%s%s%s", RC_TypeName(p.type), p.filtered ? " *" : "",
                          p.enabled ? "" : " (off)", p.player ? " (player)" : "",
                          !p.stand ? " (ducked)" : !p.duck ? " (stand)" : "");
-                Ring(s, num, lbl);
+                Ring(s, 11.f, num, lbl);
             }
 
-            // pixel calculator marker: the same ring, a "p" in it instead of a number (it is not
-            // part of the numbered route)
+            // pixel calculator marker: botox pixel_calc 12px ring with "px" in it (not part of the
+            // numbered route). The pixeljump label is ours: TF2 pixel calc also answers lips
             ImVec2 s;
-            if (bPixelPt && W2S(d.pixel, s)) Ring(s, "p", d.pixelType == 5 ? "pixeljump" : "pixel");
+            if (bPixelPt && g_pointsRenderCalc && W2S(d.pixel, s)) Ring(s, 12.f, "px", d.pixelType == 5 ? "pixeljump" : nullptr);
         }
     }
 
@@ -2391,6 +2488,8 @@ static bool IsMenuInputMsg(UINT msg)
 
 LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    // Eject: ImGui is torn down under this, and a later subclasser may keep us chained.
+    if (g_eject) return CallWindowProcW(g_origWndProc, hWnd, msg, wParam, lParam);
     if (msg == WM_KEYDOWN) {
         if ((int)wParam == g_menuKey) {
             g_showMenu = !g_showMenu;
@@ -2411,6 +2510,15 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             s_psPointWin = s_psPointHover;
             s_psPointWinGen = PS_PointsGen();
             s_psPointWinOpenMs = GetTickCount64();
+            return 0;
+        }
+        // botox movement > points "delete points": key on the hovered point deletes it, window
+        // closed. botox keys_blocked: console up = the key is being typed (IVEngineClient slot 11)
+        if (s_psPointWin < 0 && g_pointsDelete && g_pointsDeleteKey > 0 && (int)wParam == g_pointsDeleteKey
+            && s_psPointHover >= 0 && !(g_engine && VCall<bool>(g_engine, 11)))
+        {
+            PS_PointDelete(s_psPointHover);
+            s_psPointHover = -1;
             return 0;
         }
         if (s_psPointWin >= 0 && GetTickCount64() - s_psPointWinOpenMs > 250)

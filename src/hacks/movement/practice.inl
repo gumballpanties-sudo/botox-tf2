@@ -429,9 +429,11 @@ static void Practice_Tick(UserCmd_t* pCmd)
                  s_prSavePos.x, s_prSavePos.y, s_prSavePos.z, s_prSaveAng.x, s_prSaveAng.y);
     }
     if (Pressed(g_prTpKey, hTp) && bAlive)           PrTeleport();
-    if (Pressed(g_prBotEnemyKey, hEnemy) && bAlive)  PrBot(pLocal, pCmd, true);
-    if (Pressed(g_prBotMateKey, hMate) && bAlive)    PrBot(pLocal, pCmd, false);
-    if (Pressed(g_prSentryKey, hSentry) && bAlive)   PrBuild(pLocal, pCmd, k_prSentry);
-    if (Pressed(g_prDispenserKey, hDisp) && bAlive)  PrBuild(pLocal, pCmd, k_prDispenser);
-    if (Pressed(g_prTeleporterKey, hTele) && bAlive) PrBuild(pLocal, pCmd, k_prTeleporter);
+    // menu buttons = same actions, no bind needed; dead = request dropped, like a key press
+    const int req = g_prMenuReq.exchange(0);
+    if ((Pressed(g_prBotEnemyKey, hEnemy) || (req & 1)) && bAlive)  PrBot(pLocal, pCmd, true);
+    if ((Pressed(g_prBotMateKey, hMate) || (req & 2)) && bAlive)    PrBot(pLocal, pCmd, false);
+    if ((Pressed(g_prSentryKey, hSentry) || (req & 4)) && bAlive)   PrBuild(pLocal, pCmd, k_prSentry);
+    if ((Pressed(g_prDispenserKey, hDisp) || (req & 8)) && bAlive)  PrBuild(pLocal, pCmd, k_prDispenser);
+    if ((Pressed(g_prTeleporterKey, hTele) || (req & 16)) && bAlive) PrBuild(pLocal, pCmd, k_prTeleporter);
 }

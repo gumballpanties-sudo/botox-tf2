@@ -10,6 +10,7 @@
 #include "../hud/hud_extra.h"   // unit hud: fonts tab net graph page reset
 #include "../visuals/lagres.h"
 #include "../movement/movement.h"   // RC_* marker access for the route calculator's marker list
+#include "../movement/points_style.h"   // movement > points page: styles + preview
 #include "../visuals/skins.h"      // skinchanger tab: weapon/warpaint/reskin tables + particle list
 #include "../visuals/hats.h"       // inventory tab "hats" page
 #include "../visuals/skinshare.h"  // skinchanger tab "networking" box
@@ -1555,6 +1556,13 @@ static void Page_MovementMain()
         BindKeyNoMode("##prdisp", &g_prDispenserKey);
         ImGui::Label("teleporter");
         BindKeyNoMode("##prtele", &g_prTeleporterKey);
+
+        // same actions without a bind: cmd thread runs them next tick at your crosshair
+        static const char* kPrBtn[5] = { "spawn enemy##prb", "spawn friendly##prb",
+            "build sentry##prb", "build dispenser##prb", "build teleporter##prb" };
+        for (int i = 0; i < 5; i++)
+            if (ImGui::Button(kPrBtn[i], ImVec2(-1.f, 0.f)))
+                g_prMenuReq.fetch_or(1 << i);
     }
     menu_group_end();
 
@@ -1617,6 +1625,21 @@ static void Page_MovementMain()
                 SliderF("launch z slack", &g_psLaunchZSlack, 0.f, 32.f, "%.0f");
                 ImGui::Checkbox("show points", &g_psAssistRender);
                 ImGui::Checkbox("jump popup", &g_psAssistJumpBox);
+            }, ImVec2(240.f, -1));
+
+        // heroin pixeljump: same saved points, own key
+        ImGui::Checkbox("pixeljump", &g_pixelJump);
+        if (g_pixelJump)
+            ImGui::OptionPopup("pixeljump settings", [&]() {
+                ImGui::Label("pixeljump keybind");
+                ImGui::Keybind("pixeljump key", &g_pixelJumpKey, &g_pixelJumpMode);
+                ImGui::Label("set point");
+                BindKeyNoMode("##pjsetbind", &g_pjSetPointKey);
+                ImGui::Label("delete point");
+                BindKeyNoMode("##pjdelbind", &g_pjDeletePointKey);
+                ImGui::Checkbox("show points", &g_pjRender);
+                ImGui::Checkbox("unsafe pixeljump", &g_pjUnsafe);
+                ImGui::Checkbox("pixeljump crouch", &g_pjCrouch);
             }, ImVec2(240.f, -1));
 
         ImGui::Checkbox("pixel calculator", &g_pixelCalc);
@@ -1824,14 +1847,108 @@ static void Page_MovementRecorder()
     UnitB_Menu_movement_recorder();
 }
 
-static const char* kMoveSub[4] = { "main", "indicators", "calculator", "recorder" };
+// botox menu_tab_movement.cpp points_page 1:1 ("lumi points page: global look | per kind design,
+// preview right"). Vars cfg/u_points.h, look movement/points_style.h, drawn by render.cpp
+static void Page_MovementPoints()
+{
+    constexpr ImGuiColorEditFlags alphaFlags = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
+        ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs |
+        ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar |
+        ImGuiColorEditFlags_NoBorder;   // botox color_picker_alpha_flags
+    static int selected = PS_STYLE_PS;
+
+    menu_columns_begin();
+
+    if (menu_group_begin("points"))
+    {
+        ImGui::Checkbox("render ps assist points", &g_pointsRenderPs);
+        ImGui::Checkbox("render bounce assist points", &g_pointsRenderBounce);
+        ImGui::Checkbox("render calculator points", &g_pointsRenderCalc);
+        ImGui::Checkbox("render finder points", &g_pointsRenderFinder);
+        ImGui::SliderFloat("points opacity", &g_pointsOpacity, 0.1f, 1.f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderFloat("max render distance", &g_pointsMaxDist, 200.f, 4000.f, "%.0f u", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::Checkbox("distance fade", &g_pointsDistanceFade);
+        ImGui::Checkbox("distance shrink", &g_pointsDistanceShrink);
+        ImGui::Checkbox("radius color", &g_pointsRadiusColor);
+        if (g_pointsRadiusColor)
+        {
+            ImGui::SameLine();
+            ImGui::ColorEdit4("##points radius color", g_pointsRadiusClr, alphaFlags);
+        }
+        ImGui::Checkbox("delete points", &g_pointsDelete);
+        if (g_pointsDelete)
+            BindKeyNoMode("delete points key", &g_pointsDeleteKey);
+    }
+    menu_group_end();
+
+    if (menu_group_begin("appearance"))
+    {
+        ImGui::SliderFloat("point size", &g_pointsSize, 0.5f, 3.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderFloat("outline thickness", &g_pointsThickness, 0.5f, 4.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderFloat("background opacity", &g_pointsFill, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderFloat("hover size", &g_pointsHoverScale, 1.f, 2.5f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderFloat("design size", &g_pointsDesignSize, 0.2f, 1.2f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::Checkbox("glow", &g_pointsGlow);
+        ImGui::Checkbox("pulse in radius", &g_pointsPulse);
+        ImGui::Checkbox("point labels", &g_pointsLabels);
+    }
+    menu_group_end();
+
+    menu_columns_next();
+
+    if (menu_group_begin("point design"))
+    {
+        static const char* names[PS_STYLE_COUNT] = {};
+        if (!names[0])
+            for (int s = 0; s < PS_STYLE_COUNT; ++s) names[s] = PointStyleGet(s).name;
+        ImGui::Combo("point type", &selected, names, PS_STYLE_COUNT);
+        const PointStyle& style = PointStyleGet(selected);
+
+        // assist + calculator points follow the accent
+        if (style.color)
+            ImGui::ColorEdit4("point color", style.color, alphaFlags);
+
+        if (style.gaps)
+        {
+            ImGui::Combo("outline shape", style.shape, kPointShapeNames, kPointShapeCount);
+            static const char* kGaps[] = { "top", "bottom", "left", "right" };
+            ImGui::MultiCombo("outline gaps", style.gaps, kGaps, 4);
+        }
+
+        if (style.design)
+        {
+            ImGui::Checkbox("draw design", style.design);
+            if (*style.design)
+                ImGui::Combo("design type", style.designType, kPointDesignNames, kPointDesignCount);
+        }
+    }
+    menu_group_end();
+
+    if (menu_group_begin("preview"))
+    {
+        ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, 220.f));
+        const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+        const float cx = (lo.x + hi.x) * 0.5f, cy = (lo.y + hi.y) * 0.5f - 8.f;
+        const float r = std::clamp((std::min)(hi.x - lo.x, hi.y - lo.y) * 0.15f * g_pointsSize, 2.5f, (hi.y - lo.y) * 0.35f);
+        PointStylePreview(selected, cx, cy, r);
+        const char* label = PointStyleGet(selected).name;
+        const ImVec2 textS = ImGui::CalcTextSize(label);
+        ImGui::GetWindowDrawList()->AddText(ImVec2(std::floor(cx - textS.x * 0.5f), cy + r + 10.f), ImGui::GetColorU32(ImGuiCol_Text), label);
+    }
+    menu_group_end();
+
+    menu_columns_end();
+}
+
+static const char* kMoveSub[5] = { "main", "indicators", "calculator", "recorder", "points" };
 static int s_moveSub = 0;
 static void Tab_MovementRoot()
 {
     if      (s_moveSub == 0) Page_MovementMain();
     else if (s_moveSub == 1) Page_MovementIndicators();
     else if (s_moveSub == 2) Page_MovementCalculator();
-    else                     Page_MovementRecorder();
+    else if (s_moveSub == 3) Page_MovementRecorder();
+    else                     Page_MovementPoints();
 }
 
 // ==== misc / fonts / settings helpers ===============================================
@@ -1839,6 +1956,7 @@ static void Tab_MovementRoot()
 #include <functional>
 #include <shellapi.h>   // ShellExecuteA -- settings "open folder" (WIN32_LEAN_AND_MEAN drops it)
 #include "../misc/game_extras.h"   // unit game: chat translator / bot names / cvar list / image url box
+#include "../misc/names.h"         // custom names: cycle lists + misc > player list (aliases)
 #include "../misc/game_pure.h"     // n_game::SplitCvars -- cvars "add" splits on ';'
 #include "../screen/blur_rect.h"   // BlurRectFade -- settings "background blur"
 
@@ -2475,6 +2593,62 @@ static void Page_MiscMain()
                     BotNames_Randomize();
             }, ImVec2(220.f, -1.f));
 
+        // fpsoverlay names tab 1:1 (hacks/misc/names.cpp), split over two cogs. Other players'
+        // own names (fpsoverlay aliases) = misc > player list.
+        static auto namesCycleRows = []() {
+            // fpsoverlay CYCLE section: shown whenever any cycle is active
+            const bool anyCycle = (g_useCustomUsername && g_enableNameCycle)
+                || (g_streamerMode == 2 && (g_enableTeamLabelCycle || g_enableEnemyLabelCycle))
+                || (g_streamerMode == 3 && g_enableEveryoneLabelCycle);
+            if (!anyCycle) return;
+            ImGui::Combo("cycle on##names", &g_nameTrigger, "timer\0on kill\0");
+            if (g_nameTrigger == 0)
+                ImGui::SliderFloat("interval##names", &g_nameInterval, 0.1f, 60.f, "%.1f s");
+        };
+
+        ImGui::Checkbox("custom name", &g_useCustomUsername);
+        if (g_useCustomUsername)
+            ImGui::OptionPopup("custom name settings", []() {
+                ImGui::InputText("your name##customname", g_customUsername, sizeof(g_customUsername));
+                ImGui::Checkbox("cycle name##customname", &g_enableNameCycle);
+                if (g_enableNameCycle)
+                    Names_EntryList("##names", g_nameList, "+ add name");
+                namesCycleRows();
+            }, ImVec2(220.f, -1.f));
+
+        {
+            static int s_lastMode = 2;   // checkbox brings back the last mode picked
+            bool streamer = g_streamerMode != 0;
+            if (g_streamerMode != 0) s_lastMode = g_streamerMode;
+            if (ImGui::Checkbox("streamer mode", &streamer))
+                g_streamerMode = streamer ? s_lastMode : 0;
+        }
+        if (g_streamerMode != 0)
+            ImGui::OptionPopup("streamer mode settings", []() {
+                int shown = g_streamerMode - 1;
+                if (ImGui::Combo("others shown as##streamer", &shown, "their class\0team labels\0one label\0"))
+                    g_streamerMode = shown + 1;
+                if (g_streamerMode == 2)
+                {
+                    ImGui::InputText("teammate label##streamer", g_streamerTeamLabel, sizeof(g_streamerTeamLabel));
+                    ImGui::Checkbox("cycle teammate label##streamer", &g_enableTeamLabelCycle);
+                    if (g_enableTeamLabelCycle)
+                        Names_EntryList("##teamlabels", g_teamLabelList, "+ add label");
+                    ImGui::InputText("enemy label##streamer", g_streamerEnemyLabel, sizeof(g_streamerEnemyLabel));
+                    ImGui::Checkbox("cycle enemy label##streamer", &g_enableEnemyLabelCycle);
+                    if (g_enableEnemyLabelCycle)
+                        Names_EntryList("##enemylabels", g_enemyLabelList, "+ add label");
+                }
+                else if (g_streamerMode == 3)
+                {
+                    ImGui::InputText("everyone label##streamer", g_streamerEveryoneLabel, sizeof(g_streamerEveryoneLabel));
+                    ImGui::Checkbox("cycle everyone label##streamer", &g_enableEveryoneLabelCycle);
+                    if (g_enableEveryoneLabelCycle)
+                        Names_EntryList("##evlabels", g_everyoneLabelList, "+ add label");
+                }
+                namesCycleRows();
+            }, ImVec2(220.f, -1.f));
+
         SafeCheckbox("sv_pure bypass", &g_pureBypass);
 
         ImGui::Checkbox("performance", &g_perfEnable);
@@ -2700,13 +2874,26 @@ static void Page_MiscCvars()
     if (execute) GameExtras_ExecCvars();
 }
 
-// botox misc pages: main, player list, cvars. No player list page in this build yet, so
-// "cvars" is page 1 (botox order kept, the missing page just is not there).
-static const char* kMiscSub[2] = { "main", "cvars" };
+// botox misc pages: main, player list, cvars (botox order).
+// botox misc > player list slot: here it holds custom names' per-player aliases (fpsoverlay
+// names tab alias list), the page botox fills with revive / aimbot picks.
+static void Page_MiscPlayerList()
+{
+    if (menu_group_begin("player list", 0.f, ImGui::GetContentRegionAvail().y - 20.f))   // 20 = the title band above the box
+    {
+        if (ImGui::BeginChild("##player list rows", ImVec2(0.f, 0.f), false, 0))
+            Names_PlayerListMenu();
+        ImGui::EndChild();
+    }
+    menu_group_end();
+}
+
+static const char* kMiscSub[3] = { "main", "player list", "cvars" };
 static int s_miscSub = 0;
 static void Tab_MiscRoot()
 {
-    if (s_miscSub == 1) { Page_MiscCvars(); return; }
+    if (s_miscSub == 1) { Page_MiscPlayerList(); return; }
+    if (s_miscSub == 2) { Page_MiscCvars(); return; }
     Page_MiscMain();
 }
 
@@ -3515,8 +3702,8 @@ static int s_tab = TAB_AIMBOT;
 static const SidebarTab kSidebar[TAB_COUNT] = {
     { kTabNames[TAB_AIMBOT],    nullptr,     0 },
     { kTabNames[TAB_VISUALS],   kVisualsSub, 3 },
-    { kTabNames[TAB_MOVEMENT],  kMoveSub,    4 },
-    { kTabNames[TAB_MISC],      kMiscSub,    2 },
+    { kTabNames[TAB_MOVEMENT],  kMoveSub,    5 },
+    { kTabNames[TAB_MISC],      kMiscSub,    3 },
     { kTabNames[TAB_INVENTORY], kInvSub,     2 },
     { kTabNames[TAB_FONTS],     kFontsSub,   3 },
     { kTabNames[TAB_SETTINGS],  nullptr,     0 },
@@ -3763,22 +3950,23 @@ void RenderMenu()
     const ImVec2 wz = ImGui::GetWindowSize();
     const float rnd = ImGui::GetStyle().WindowRounding;
 
-    // ---- botox on_end_scene order: top band, window border, accent line under the band;
-    // bottom band + accent line on its top edge. Lines = RenderFadedGradientLine (bright
+    // ---- botox on_end_scene order: top band, accent line under the band, bottom band,
+    // window border, accent line on bottom band top edge. Lines = RenderFadedGradientLine (bright
     // centre, fading to both ends), full window width.
     // Bands + border each get botox's own PushClipRect(.., false): the window's clip rect is
     // inset WindowPadding.x/2 = 4px per side, which cut the bands and the side border short.
     dl->PushClipRect(wp, ImVec2(wp.x + wz.x, wp.y + mf::kHeaderH), false);
     dl->AddRectFilled(wp, ImVec2(wp.x + wz.x, wp.y + mf::kHeaderH), kBandBg(), rnd, ImDrawFlags_RoundCornersTop);
     dl->PopClipRect();
-    dl->PushClipRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), false);
-    dl->AddRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), kWindowBorder(), rnd);
-    dl->PopClipRect();
     RenderFadedGradientLine(dl, ImVec2(wp.x, wp.y + mf::kHeaderH - 1.f), ImVec2(wz.x, 1.f), ImColor(Accent()));
 
     const float botY = wp.y + wz.y - 12.f;   // menu_bottom_band_height
     dl->PushClipRect(ImVec2(wp.x, botY), ImVec2(wp.x + wz.x, wp.y + wz.y), false);
     dl->AddRectFilled(ImVec2(wp.x, botY), ImVec2(wp.x + wz.x, wp.y + wz.y), kBandBg(), rnd, ImDrawFlags_RoundCornersBottom);
+    dl->PopClipRect();
+    // border after both bands: bottom fill drawn over it hid the outline
+    dl->PushClipRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), false);
+    dl->AddRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), kWindowBorder(), rnd);
     dl->PopClipRect();
     RenderFadedGradientLine(dl, ImVec2(wp.x, botY), ImVec2(wz.x, 1.f), ImColor(Accent()));
 

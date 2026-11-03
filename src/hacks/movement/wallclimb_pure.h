@@ -57,7 +57,8 @@ namespace wc
     enum e_count {
         c_land, c_flip, c_pin_catch, c_hold, c_park, c_keys, c_along, c_own, c_leave, c_aa_leave, c_exit, c_exit_none, c_far, c_rise,
         c_scan_cut, c_cut, c_yield, c_ramp, c_skip, c_jump_back, c_jump_strip, c_as_take, c_pin_miss, c_no_park,
-        c_park_keep, c_away, c_robust, c_spot, c_spot_sims, c_hold_land, c_low, c_leave_hang, c_seam, c_seam_park, c_pin_flip, c_ticks, c_sims, c_max
+        c_park_keep, c_away, c_robust, c_spot, c_spot_sims, c_hold_land, c_low, c_leave_hang, c_seam, c_seam_park, c_pin_flip,
+        c_tb_drop, c_div, c_spot_path, c_spot_floor, c_ticks, c_sims, c_max
     };
 
     inline const std::vector<float>& FineRungs()

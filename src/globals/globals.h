@@ -808,6 +808,12 @@ extern float g_psAssistReuseDelay; // seconds a surf you just rode is planned LA
 // g_psAssistSteer (steer lock) deleted -- the last viewangle read in the assist
 extern bool g_psAssistRender;      // draw finder/assist points on the world
 extern bool g_psAssistJumpBox;     // "minijump to <z>" popup after an assist jump
+// heroin pixeljump (FUN_18007f710): own key, runs on the ps assist points + sim (psassist.inl)
+extern bool g_pixelJump;  extern int g_pixelJumpKey;  extern int g_pixelJumpMode;
+extern bool g_pjUnsafe;            // "unsafe pixeljump": seam z within 200u 2D, no pin proof
+extern bool g_pjCrouch;            // "pixeljump crouch": jump + lj again, duck from descent
+extern int  g_pjSetPointKey, g_pjDeletePointKey;   // pixeljump's own points (<map>.pj.txt)
+extern bool g_pjRender;            // draw pixeljump points
 // ---- uneven ground ----
 extern bool  g_psGroundHelp;       // grounded: silently steer your own move at the target you are
                                    // planning for, so walking up to a seam lands you under it
@@ -860,6 +866,7 @@ extern int  g_prBotMateKey;        // bot of your team at the crosshair
 extern int  g_prSentryKey;         // enemy sentry where you look, Disable'd (= it never fires)
 extern int  g_prDispenserKey;      // enemy dispenser where you look
 extern int  g_prTeleporterKey;     // enemy teleporter entrance where you look
+extern std::atomic<int> g_prMenuReq; // menu buttons: bit 0-4 = enemy mate sentry disp tele, Practice_Tick eats
 extern int  g_prBotClass;          // 0-8: scout sniper soldier demoman medic heavy pyro spy engi
 
 // -- Skybox ConVar handle. The sky-name / fog-colour redirect buffers are visuals.cpp's own

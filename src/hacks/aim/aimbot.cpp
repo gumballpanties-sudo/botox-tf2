@@ -1,6 +1,7 @@
 #include "aimbot.h"
 
 #include "aim_hitscan.h"
+#include "backtrack.h"
 #include "aim_projectile.h"
 #include "aim_melee.h"
 #include "autodetonate.h"
@@ -153,6 +154,8 @@ void CAimbot::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 	RunMain(pLocal, pWeapon, pCmd);
 
 	G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
+	F::Backtrack.RunBacktrack(pLocal, pWeapon, pCmd);   // botox run_backtrack: fire cmds the aim did not commit
+	F::Backtrack.RunMeleeSmack(pLocal, pWeapon, pCmd);  // melee lag comp happens at smack, not at the press
 }
 
 void CAimbot::Store(CBaseEntity* pEntity, size_t iSize)
