@@ -518,6 +518,9 @@ add_executable(recorder_test tests/recorder_test.cpp)
 # Gate test for the detection core (src/hacks/movement/detections_core.h): physical edgebug + fresh gate.
 # Build + run: cmake --build build --config Release --target detections_test && build\Release\detections_test.exe
 add_executable(detections_test tests/detections_test.cpp)
+# Gate test for the jumpstats core (src/hacks/movement/jumpstats_core.h): botox jump_stats types/gates.
+# Build + run: cmake --build build --config Release --target jumpstats_test && build\Release\jumpstats_test.exe
+add_executable(jumpstats_test tests/jumpstats_test.cpp)
 # Gate test for Unit C's ESP pure math (src/hacks/esp/esp_math.h): oof-arrow edge placement
 # + distance fade. No SDK deps, so no AIM_DIR flags needed.
 # Build + run: cmake --build build --config Release --target esp_math_test && build\Release\esp_math_test.exe

@@ -707,8 +707,7 @@ extern bool g_autoCrouch;  extern int g_autoCrouchKey;  extern int g_autoCrouchM
 extern int  g_autoCrouchTicks;  // look-ahead ticks for the landing trace (def 6)
 extern bool g_djStrafe;    extern int g_djStrafeKey;    extern int g_djStrafeMode;   // scout double jump keeps velocity dir
 extern bool g_silentView;       // smooth demo view: lock recorded viewangles during demo playback
-extern bool g_jumpstats;        // count clean bhop/lj/mj/wallclimb takeoffs
-void MV_GetJumpstats(int& bhop, int& longjump, int& minijump, int& wallclimb);
+extern bool g_jumpstats;        // botox jump stats: clean landing -> chat line (detections.cpp)
 
 // -- Unit A3 port (movement_tricks2.inl + small hooks): tung/bounce/pf modes/eb presets/
 // ps fix, from botox csgo-sdk. Simplified where the botox source is a full sim-planner or a
@@ -1034,22 +1033,8 @@ extern char  g_chamsArmsCfg[160];
 extern char  g_chamsSleeveCfg[160];
 extern float g_glowVisColor[4];
 extern float g_glowInvisColor[4];
-extern bool  g_glowLegacy;
-extern int   g_glowLegacyStyle;         // 0 default, 1 rim, 2 outline, 3 pulse
-extern bool  g_glowNormalBlend;
-extern float g_glowThickness;
-extern bool  g_glowGradient;
-extern float g_glowVisOuterColor[4];
-extern float g_glowInvisOuterColor[4];
-extern float g_glowGradientInner;
-extern bool  g_glowWave;
-extern float g_glowWaveColor[4];
-extern float g_glowWaveSpeed;
-extern float g_glowWaveSize;
-extern float g_glowWaveStrength;
-extern bool  g_glowPulse;
-extern float g_glowPulseSpeed;
-extern float g_glowPulseMin;
+extern int   g_glowStyle;               // 0 soft, 1 outline
+extern float g_glowSize;                // 1..10 soft blur / 1..6 outline px
 
 // ==== Inline engine helpers ==============================================================
 // IClientEntityList::GetClientEntity = slot 3. IVEngineClient: GetLocalPlayer = 12,

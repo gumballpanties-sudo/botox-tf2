@@ -18,3 +18,11 @@ struct DetTick
     bool  tb = false, as = false, ps = false, wc = false;
 };
 void Detections_Tick(const DetTick& t);
+
+// botox jump_stats: a clean landing prints "<label> | J: 245.12 units | ..." to chat.
+// Gate = g_jumpstats (globals.h). Fed every cmd's START state: this cmd's start is the end of the
+// last one, so the (start, now) pair botox reads off its prediction backup is (last, this) here,
+// with the last cmd's inputs. Movement thread.
+#include "jumpstats_core.h"
+inline bool g_jumpstatsShowFails = false;
+void Jumpstats_Tick(const JsFrame& frame, const JsCmd& cmd, float maxspeed);

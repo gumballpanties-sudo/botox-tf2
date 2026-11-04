@@ -170,49 +170,17 @@ void UnitC_Menu_visuals_esp()
                 ImGui::SliderFloat("duration##player hitboxes", &g_espHitboxesDuration, 0.1f, 10.f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
         }, ImVec2(220.f, -1));
 
-    // botox menu_tab_visuals.cpp "player glow" row + popup, verbatim order/labels/ranges.
-    // What each option drives in TF2: aim/chams.cpp GlowPass banner.
+    // player glow: aim/chams.cpp Glow_Render (Amalgam halo). Works without the players esp.
     ImGui::Checkbox("player glow", &g_glowEnable);
     if (g_glowEnable)
         ImGui::OptionPopup("player glow settings", [&]() {
-            const bool legacy   = g_glowLegacy;
-            const bool gradient = !legacy && g_glowGradient;
-
-            ImGui::ColorRow(gradient ? "visible inner##player vis glow color" : "player visible##player vis glow color", g_glowVisColor, kPickerAlpha);
-            if (gradient)
-                ImGui::ColorRow("visible outer##player vis glow outer color", g_glowVisOuterColor, kPickerAlpha);
-            ImGui::ColorRow(gradient ? "invisible inner##player invis glow color" : "player invisible##player invis glow color", g_glowInvisColor, kPickerAlpha);
-            if (gradient)
-                ImGui::ColorRow("invisible outer##player invis glow outer color", g_glowInvisOuterColor, kPickerAlpha);
-
-            ImGui::Checkbox("accent wave##player glow", &g_glowWave);
-            if (g_glowWave) {
-                ImGui::ColorRow("wave color##player glow wave", g_glowWaveColor, kPickerNoAlpha);
-                ImGui::SliderFloat("wave speed##player glow wave", &g_glowWaveSpeed, 0.05f, 4.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-                if (!legacy)
-                    ImGui::SliderFloat("wave size##player glow wave", &g_glowWaveSize, 0.05f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-                ImGui::SliderFloat("wave strength##player glow wave", &g_glowWaveStrength, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-            }
-
-            ImGui::Checkbox("edge pulse##player glow", &g_glowPulse);
-            if (g_glowPulse) {
-                ImGui::SliderFloat("pulse speed##player glow pulse", &g_glowPulseSpeed, 0.1f, 4.f, "%.1fx", ImGuiSliderFlags_AlwaysClamp);
-                ImGui::SliderFloat("pulse min##player glow pulse", &g_glowPulseMin, 0.f, 95.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
-            }
-
-            ImGui::Checkbox("legacy##player glow", &g_glowLegacy);
-            if (legacy) {
-                ImGui::Combo("style##player glow legacy", &g_glowLegacyStyle, "default\0rim\0outline\0pulse\0");
-                return;
-            }
-
-            ImGui::Checkbox("normal blending##player glow", &g_glowNormalBlend);
-            if (g_glowNormalBlend)
-                ImGui::SliderFloat("thickness##player glow", &g_glowThickness, 2.f, 30.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
-
-            ImGui::Checkbox("gradient##player glow", &g_glowGradient);
-            if (gradient)
-                ImGui::SliderFloat("inner size##player glow gradient", &g_glowGradientInner, 0.f, 100.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::ColorRow("player visible##player vis glow color", g_glowVisColor, kPickerAlpha);
+            ImGui::ColorRow("player invisible##player invis glow color", g_glowInvisColor, kPickerAlpha);
+            ImGui::Combo("style##player glow", &g_glowStyle, "soft\0outline\0");
+            if (g_glowStyle == 1)
+                ImGui::SliderFloat("size##player glow", &g_glowSize, 1.f, 6.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+            else
+                ImGui::SliderFloat("size##player glow", &g_glowSize, 1.f, 10.f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
         }, ImVec2(220.f, -1));
 
     ImGui::Checkbox("player stencil", &g_esxStencil);

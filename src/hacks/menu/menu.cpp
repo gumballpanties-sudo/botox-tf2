@@ -602,7 +602,8 @@ static void Page_VisualsWorld()
         ImGui::Checkbox("remove hud elements", &g_wdNoHud);
         if (g_wdNoHud)
         {
-            // TF2 vgui panels (world_fx3_math.h k_hudElems): botox's radar and c4 icon have none
+            // TF2 vgui panels (world_fx3_math.h k_hudElems), TF2's own hud groups, not botox's CS:GO list
+            static_assert(wfx3::k_hudElemCount == k_wdHudCount && wfx3::k_hudElemCount <= 31, "hud list / cfg slots");
             const char* items[wfx3::k_hudElemCount];
             int mask = 0;
             for (int i = 0; i < wfx3::k_hudElemCount; ++i)
@@ -3269,7 +3270,8 @@ static void Tab_Skins()
         MenuTooltip("peers that want them get your skinchanger + hats loadout.");
     ImGui::Checkbox("show shared cosmetics", &g_shareRecv);
     if (ImGui::IsItemHovered())
-        MenuTooltip("peers' loadouts are drawn on their players (skinchanger and hats must be on).");
+        MenuTooltip("peers' weapon skins + hats are drawn on their players.\n"
+                    "works with your own skinchanger / hats off.");
     ImGui::TextDisabled("%s", SkinShare_Status());
 }
 

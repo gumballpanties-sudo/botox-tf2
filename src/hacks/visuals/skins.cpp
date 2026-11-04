@@ -1382,10 +1382,12 @@ static WeaponTarget ResolveWeaponTarget(void* pWeapon, int origDefIdx)
 // so every player in the PVS carries it. Same two passes as ours: def index before the unpack
 // (stage 2, material override / style skin) and def + m_nSkin + attributes after it. The viewmodel
 // work (sequence remap, attachment refresh, streak counters) is ours alone and is not repeated.
-// Gated on BOTH skinchangers being on: ours, because the passes are ours, and "show shared".
+// Gated on "show shared" only: our own skinchanger can be off and peers still show.
+static bool PeerSkinsOn() { return g_shareNet && g_shareRecv && !g_eject; }
+
 __declspec(noinline) static void ApplyPeerWeapons(bool preWrite)
 {
-    if (!g_shareNet || !g_shareRecv) return;
+    if (!PeerSkinsOn()) return;
     if (s_offMyWeapons <= 0 || s_offItemDefIndex <= 0 || (!preWrite && s_offAttrList <= 0)) return;
     __try {
         for (int p = 0; p < kShareMaxPeers; ++p) {
@@ -1406,6 +1408,9 @@ __declspec(noinline) static void ApplyPeerWeapons(bool preWrite)
                 const int origDefIdx = SEH_ReadInt(pWeapon, s_offItemDefIndex);
                 const WeaponTarget wt = ResolveWeaponTargetIn(peer->lo.skins, rev, nRev, origDefIdx);
                 if (!wt.cfg) continue;
+                // Same as ours: a reskin model nobody on the server owns has no model index, and
+                // the weapon built off that def draws nothing. Cached per def, cheap.
+                if (preWrite && wt.cfg->reskinDef > 0) GetReskinViewmodelIdx(wt.cfg->reskinDef);
                 if (wt.targetDef > 0 && wt.targetDef != origDefIdx)
                     SEH_WriteInt(pWeapon, s_offItemDefIndex, wt.targetDef);
                 if (preWrite) continue;
@@ -1521,7 +1526,7 @@ __declspec(noinline) static void PreWriteDefIndexes()
         void* pLocal = GetClientEntity(localIdx);
         if (!pLocal) return;
 
-        for (int i = 0; i < 48; i++) {
+        for (int i = 0; g_enableSkins && i < 48; i++) {   // ours; peers below run either way
             const unsigned int hWeapon = SEH_ReadHandle(pLocal, s_offMyWeapons, i);
             if (hWeapon == 0xFFFFFFFF || hWeapon == 0) continue;
             void* pWeapon = SEH_EntFromHandle(hWeapon);
@@ -1797,7 +1802,7 @@ static void __fastcall h_FrameStageNotify(int stage)
     // stage 2: the snapshot has arrived and nothing has been unpacked yet.
     if (stage == 2) {
         CrashSpan _s("fsn/skins-pre");
-        if (g_enableSkins && s_preWriteCallSite != 0 && s_entityChangeAge >= 9)
+        if ((g_enableSkins || PeerSkinsOn()) && s_preWriteCallSite != 0 && s_entityChangeAge >= 9)
             PreWriteDefIndexes();
         return;
     }
@@ -1845,12 +1850,18 @@ static void __fastcall h_FrameStageNotify(int stage)
     static DWORD s_updDue     = 0;
     // A peer's loadout arrived / changed / left: its weapons were built off the old def index,
     // and only a full update rebuilds them -- same reason ours needs one.
+    // "show shared" flipped either way rebuilds too: on = apply what is already in, off = drop it.
     static uint32_t s_peerGen = 0;
+    static bool     s_peerWasOn = false;
+    const bool      peerOn    = PeerSkinsOn();
     const uint32_t  peerGen   = SkinShare_LoadoutGen();
-    const bool peerChanged = g_shareNet && g_shareRecv && peerGen != s_peerGen;
-    s_peerGen = peerGen;
-    const bool updReq = skinEnabling || skinDisabling
-                     || (g_enableSkins && (g_skinNeedsUpdate || (chg & SC_Rebuild) || peerChanged));
+    bool anyPeerLo = false;   // no loadout in = nothing to rebuild (a join does not full-update)
+    for (int p = 0; p < kShareMaxPeers && !anyPeerLo; ++p)
+        if (const SharePeer* sp = SkinShare_Peer(p)) anyPeerLo = sp->hasLoadout && !sp->lo.skins.empty();
+    const bool peerChanged = (peerOn && peerGen != s_peerGen) || (peerOn != s_peerWasOn && anyPeerLo);
+    s_peerGen = peerGen; s_peerWasOn = peerOn;
+    const bool updReq = skinEnabling || skinDisabling || peerChanged
+                     || (g_enableSkins && (g_skinNeedsUpdate || (chg & SC_Rebuild)));
     g_skinNeedsUpdate = false;
     const DWORD now = GetTickCount();
     if (updReq) {
@@ -1866,7 +1877,7 @@ static void __fastcall h_FrameStageNotify(int stage)
     // rebuilt by the refresh at the bottom -- same frame, no full update.
     if (g_enableSkins && (chg & SC_Fest)) s_festRefreshedWpn = nullptr;
 
-    if (!g_enableSkins && !skinDisabling) return;
+    if (!g_enableSkins && !skinDisabling && !peerOn) return;
 
     const int localIdx = GetLocalPlayerIndex();
     if (localIdx < 1) return;
@@ -1923,7 +1934,7 @@ static void __fastcall h_FrameStageNotify(int stage)
 
     // The first frames after a respawn hand out weapon entities that are still being filled in.
     if (s_entityChangeAge < 9) { ++s_entityChangeAge; return; }
-    if (!g_enableSkins) return;
+    if (!g_enableSkins) { ApplyPeerWeapons(false); return; }   // own off, peers still shown
 
     UpdateActiveRemap(pLocal);
     // Second sweep of the same frame, and the only one on the frame a reskin is first switched

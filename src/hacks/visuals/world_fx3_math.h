@@ -93,23 +93,38 @@ inline float SunDrift(float drift, float speed, float dt)
 }
 
 // TF2 vgui panel names for botox's remove hud elements list (index = g_wdNoHudElems slot).
-// Every name is the panel's own constructor name in the 2013 SDK client (see world_fx3.cpp).
-struct HudElem { const char* label; const char* panels[3]; };
+// Every name is the panel's own constructor name in the 2013 SDK client (src/game/client/tf): the
+// BaseClass(NULL, "...") string, or the class name for DECLARE_HUDELEMENT panels built with
+// pElementName. Children count too (HudPlayerHealth / HudPlayerClass live in HudPlayerStatus):
+// h_PaintTraverse runs once per panel. Max 31 rows (MultiCombo int mask), k_wdHudCount must match.
+struct HudElem { const char* label; const char* panels[7]; };
 inline constexpr HudElem k_hudElems[] = {
-    { "health & armor",       { "HudPlayerHealth", nullptr, nullptr } },
-    { "ammo",                 { "HudWeaponAmmo", nullptr, nullptr } },
-    { "weapon selection",     { "HudWeaponSelection", nullptr, nullptr } },
-    { "killfeed",             { "HudDeathNotice", nullptr, nullptr } },
-    { "money",                { "CurrencyStatusPanel", nullptr, nullptr } },
-    { "timer & team counter", { "HudObjectiveStatus", "HudKothTimeStatus", nullptr } },
-    { "chat",                 { "HudChat", nullptr, nullptr } },
-    { "alerts",               { "HudAlert", nullptr, nullptr } },
-    { "hint text",            { "HudHintDisplay", "HudHintKeyDisplay", nullptr } },
-    { "voice menu",           { "HudMenu", nullptr, nullptr } },
-    { "vote",                 { "CHudVote", nullptr, nullptr } },
-    { "spectator panel",      { "specgui", nullptr, nullptr } },
-    { "death cam",            { "FreezePanel", nullptr, nullptr } },
-    { "win panel",            { "WinPanel", nullptr, nullptr } },
+    { "health",                { "HudPlayerHealth" } },
+    { "class portrait",        { "HudPlayerClass" } },
+    { "ammo",                  { "HudWeaponAmmo" } },
+    { "weapon selection",      { "HudWeaponSelection", "ItemQuickSwitchPanel" } },
+    { "killfeed",              { "HudDeathNotice" } },
+    { "damage & heal numbers", { "CDamageAccountPanel", "CHealthAccountPanel", "CHudAccountPanel" } },
+    { "target id",             { "CMainTargetID", "CSpectatorTargetID", "CSecondaryTargetID" } },
+    { "timer & objective",     { "HudObjectiveStatus", "HudKothTimeStatus", "HudControlPointIcons", "HudMatchStatus" } },
+    { "uber meter",            { "HudMedicCharge" } },
+    { "class meters",          { "HudItemEffectMeter", "HudDemomanCharge", "HudDemomanPipes", "HudBowCharge",
+                                 "HudFlameRocketCharge", "HudSapperCharge", "HudScopeCharge" } },
+    { "building status",       { "CHudBuildingStatusContainer_Engineer", "CHudBuildingStatusContainer_Spy" } },
+    { "build & disguise menu", { "HudMenuEngyBuild", "HudMenuEngyDestroy", "HudMenuSpyDisguise", "HudEurekaEffectTeleportMenu" } },
+    { "disguise status",       { "DisguiseStatus" } },
+    { "chat",                  { "HudChat" } },
+    { "voice & taunt menu",    { "HudMenu", "HudMenuTauntSelection" } },
+    { "alerts",                { "HudAlert", "NotificationPanel", "HudTeamGoal", "HudTeamSwitch" } },
+    { "hint text",             { "HudHintDisplay", "HudHintKeyDisplay" } },
+    { "vote",                  { "CHudVote" } },
+    { "damage indicator",      { "HudDamageIndicator" } },
+    { "game crosshair",        { "HudCrosshair" } },
+    { "spectator panel",       { "specgui" } },
+    { "freeze cam",            { "FreezePanel" } },
+    { "death stats",           { "StatPanel" } },
+    { "win panel",             { "WinPanel", "ArenaWinPanel" } },
+    { "mvm status",            { "HudMannVsMachineStatus", "CurrencyStatusPanel" } },
 };
 inline constexpr int k_hudElemCount = (int)(sizeof(k_hudElems) / sizeof(k_hudElems[0]));
 

@@ -2137,7 +2137,6 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         AutoCrouch(pLocal, pCmd);
         DoubleJumpStrafe(pLocal, pCmd);   // after AutoStrafe: owns the wish on the dash tick
         SmoothDemoView(pLocal, pCmd);
-        JumpstatsTick(pLocal, pCmd);
     }
 
     // botox: pre features may have rewritten it -- predict + detect on the exact recorded inputs
@@ -2410,6 +2409,20 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         d.tick        = s_prePredTick;
         d.tb = s_textureBugHit; d.as = s_airStuckHit; d.ps = s.psHit; d.wc = s_wcLanded;
         Detections_Tick(d);
+
+        // botox jump_stats: same cmd start state; trick flags = botox get_trick_states set
+        JsFrame jf;
+        jf.ground  = d.onGround;
+        jf.walk    = d.walk;
+        jf.x = s_prePredOrigin.x; jf.y = s_prePredOrigin.y; jf.z = s_prePredOrigin.z;
+        jf.vx = s_prePredVel.x;   jf.vy = s_prePredVel.y;   jf.vz = s_prePredVel.z;
+        jf.airDash = g_offAirDash > 0 ? EntI(pLocal, g_offAirDash) : 0;
+        JsCmd jc;
+        jc.tick    = pCmd->tick_count;
+        jc.duck    = (pCmd->buttons & IN_DUCK) != 0;
+        jc.mouseDx = pCmd->mousedx;
+        jc.trick   = s_ebDetected || s_textureBugHit || s_airStuckHit || s_wcLanded || s.psHit;
+        Jumpstats_Tick(jf, jc, g_offMaxspeed > 0 ? EntF(pLocal, g_offMaxspeed) : 0.f);
     }
 }
 

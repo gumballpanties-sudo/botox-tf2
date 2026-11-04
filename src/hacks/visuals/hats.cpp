@@ -583,12 +583,16 @@ void Hats_FrameStage(int stage)
             s_freedFrame[i] = s_frame;
         }
 
-    if (g_eject || !g_hatsEnable || !IsInGame()) {
+    // Peers' hats need only "show shared": our own hat changer off still ticks them (local slots
+    // then wear nothing, so body / hide below come out empty too).
+    const bool peersOn = g_shareNet && g_shareRecv;
+    if (!g_hatsEnable) s_appliedOnce = false;   // the next spawn applies whatever the menu holds by then
+    if (g_eject || (!g_hatsEnable && !peersOn) || !IsInGame()) {
         for (int i = 0; i < kTotalSlots; ++i)
             if (s_live[i].ent) Release(i, g_eject ? "eject" : "off");
         if (s_bodyOpCount) s_bodyOpCount = 0;
         s_hideCount = 0;
-        s_appliedOnce = false;   // the next spawn applies whatever the menu holds by then
+        s_appliedOnce = false;
         return;
     }
 
@@ -605,7 +609,7 @@ void Hats_FrameStage(int stage)
 
     // The first snapshot: whatever the menu holds when the hats come on (a respawn applies the
     // rest). A dead local player keeps the old one until it spawns -- the TF2 order.
-    if (!s_appliedOnce) ApplySnapshot("first frame");
+    if (g_hatsEnable && !s_appliedOnce) ApplySnapshot("first frame");
 
     for (int i = 0; i < kHatSlots; ++i) {
         const HatSlot c = s_applied[i];
@@ -613,7 +617,7 @@ void Hats_FrameStage(int stage)
         // TF2's rule when the hat is a backpack item: worn only on the classes it is equipped on
         // in the loadout screen (bit 0 = the screen touched it, bit cls = equipped there). With no
         // backpack copy there is nothing to equip, so the slot is worn on every class that can.
-        const bool wear = alive && Wearable(d, cls, team)
+        const bool wear = g_hatsEnable && alive && Wearable(d, cls, team)
                        && (!g_hatsBackpack || ((c.eqMask & 1) && (c.eqMask >> cls & 1)));
         TickSlot(i, c, d, wear, cls, team, owner);
     }

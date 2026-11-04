@@ -1,5 +1,6 @@
 #include "unitA_menu.h"
 #include "menu.h"
+#include "../movement/detections.h"   // g_jumpstatsShowFails
 
 // Unit A widgets: flat botox-style rows, continuing the "movement" group menu.cpp
 // already opened (Page_MovementMain). Items with their own cog (edge bug style/mouse
@@ -60,9 +61,7 @@ void UnitA_Menu_movement_main()
 
     ImGui::Checkbox("jumpstats", &g_jumpstats);
     if (g_jumpstats)
-        ImGui::OptionPopup("jumpstats", [&]() {
-            int bhop = 0, lj = 0, mj = 0, wc = 0;
-            MV_GetJumpstats(bhop, lj, mj, wc);
-            ImGui::Text("bhop %d  lj %d  mj %d  wallclimb %d", bhop, lj, mj, wc);
+        ImGui::OptionPopup("jumpstats settings", [&]() {
+            ImGui::Checkbox("show fails##jumpstats", &g_jumpstatsShowFails);
         }, ImVec2(220.f, -1));
 }

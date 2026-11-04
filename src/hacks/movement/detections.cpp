@@ -20,6 +20,42 @@ static void Print(DetType type, const char* event)
     DebugLog("DET: %s", event);
 }
 
+// botox push_notice CHAT_TOKEN_JUMPSTATS + jump_stats g_jump_stats_line: accent label, grey " |",
+// values in the tier color, words grey
+void Jumpstats_Tick(const JsFrame& frame, const JsCmd& cmd, float maxspeed)
+{
+    static JsState s;
+    static JsFrame lastFrame;
+    static JsCmd lastCmd;
+    static bool have = false;
+    if (!g_jumpstats) { s = {}; have = false; return; }
+
+    JsResult r;
+    const bool landed = have && JsStep(s, lastFrame, frame, lastCmd, JsScale(maxspeed), g_jumpstatsShowFails, r);
+    lastFrame = frame; lastCmd = cmd; have = true;
+    if (!landed) return;
+
+    static constexpr const char* kColors[6] = { "BEBEBE", "4B6AF9", "41FE3F", "FC0301", "E0AD37", "D22CE4" };
+    const char* v = kColors[r.tier];
+    const char* g = kColors[0];
+    char label[64]; int n = 0;
+    for (const char* p = g_detectionLabel; *p && n < 63; ++p) if (*p != '%') label[n++] = *p;   // ChatPrintf formats
+    label[n] = 0;
+    char line[512];
+    // "%%%%" -> "%%" in line -> ChatPrintf prints "%"
+    snprintf(line, sizeof(line),
+             "\x07%02X%02X%02X%s\x07" "7D7D7D |"
+             "\x07%s %s: %.2f\x07%s units | \x07%s%d\x07%s strafes | \x07%s%.0f\x07%s pre | "
+             "\x07%s%.0f\x07%s max | \x07%s%.2f\x07%s height | \x07%s%d%%%%\x07%s sync",
+             (int)(g_accentColor[0] * 255), (int)(g_accentColor[1] * 255), (int)(g_accentColor[2] * 255),
+             n ? label : "botox",
+             v, r.name, r.distance, g, v, r.strafes, g, v, r.pre, g,
+             v, r.max, g, v, r.height, g, v, r.sync, g);
+    Aim_ChatPrint(line);
+    DebugLog("JSTAT: %s %.2f tier=%d strafes=%d pre=%.0f max=%.0f h=%.2f sync=%d",
+             r.name, r.distance, r.tier, r.strafes, r.pre, r.max, r.height, r.sync);
+}
+
 static void PrintEb(int chain)
 {
     char ev[32];

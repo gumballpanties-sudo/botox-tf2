@@ -4,6 +4,7 @@
 #include "../movement/movement.h"      // Vec3, AngleVectors, Ray_mv, GameTrace_t, kTrace_TraceRay
 #include "../movement/prediction.h"    // g_globalVars
 #include "../../render/render.h"       // W2S_Project
+#include "../../hooks/crashlog.h"      // CrashSpan
 #include <mutex>
 #include <deque>
 #include <unordered_map>
@@ -445,21 +446,31 @@ struct ModSaved { unsigned hash; int group; float orig[3]; };
 static std::unordered_map<void*, ModSaved> s_modSaved;
 static float s_modNextWalk = 0.f;
 static int   s_modLastMask = 0;
+static int   s_modCount    = -1;   // GetNumMaterials at the last walk
 static float s_modLast[4][3] = {};
 
 // SEH leaves (no dtors in a __try frame, C2712): the walk itself and the two IMaterial calls.
+static unsigned short s_matInvalid = 0;   // InvalidMaterial, read once per walk (first step)
 __declspec(noinline) static bool MatWalkStep(bool first, unsigned short& h, void*& m, const char*& name, const char*& group)
 {
     __try {
-        const unsigned short invalid = VCall<unsigned short>(s_matSys, 75);
+        if (first) s_matInvalid = VCall<unsigned short>(s_matSys, 75);
         h = first ? VCall<unsigned short>(s_matSys, 73) : VCall<unsigned short>(s_matSys, 74, h);
-        if (h == invalid) return false;
+        if (h == s_matInvalid) return false;
         m = VCall<void*>(s_matSys, 76, h);
         name = group = nullptr;
         if (m && !VCall<bool>(m, 42)) { name = VCall<const char*>(m, 0); group = VCall<const char*>(m, 1); }
         else m = nullptr;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// IMaterialSystem::GetNumMaterials, slot 77 (right after GetMaterial 76; FindTexture 79 confirms the
+// count: 78 is SetAsyncTextureLoadCache). -1 = unreadable. A walk is only owed when this moves:
+// materials are only added mid-map (props, cosmetics streamed in) and dropped at level change.
+__declspec(noinline) static int MatCount()
+{
+    if (!s_matSys) return -1;
+    __try { return VCall<int>(s_matSys, 77); } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 __declspec(noinline) static void MatModulate(void* m, const float* rgb)
 {
@@ -518,14 +529,31 @@ static void Mod_Frame()
         b = b < 0.f ? 0.f : (b > 4.f ? 4.f : b);
         for (int c = 0; c < 3; ++c) wanted[g][c] = col[g][c] * b;
     }
-    const float now = Now();
-    const bool changed = mask != s_modLastMask || memcmp(wanted, s_modLast, sizeof(wanted)) != 0;
     if (!mask && !s_modLastMask) return;
-    if (!changed && now < s_modNextWalk && now >= s_modNextWalk - 2.f) return;
-    Mod_Walk(mask, wanted, mask != s_modLastMask || !mask);
+    if (!s_matSys) s_matSys = GetInterface("materialsystem.dll", "VMaterialSystem082");
+    const float now = Now();
+    const bool maskChanged = mask != s_modLastMask;
+    const bool colChanged  = memcmp(wanted, s_modLast, sizeof(wanted)) != 0;
+    const int  count       = MatCount();
+    const bool countMoved  = count < 0 || count != s_modCount;
+    const bool due         = now >= s_modNextWalk || now < s_modNextWalk - 2.f;
+
+    // The full walk is thousands of materials x 6 vcalls: only on a mask flip, or once a second at
+    // most while the material count moves (late-loaded props picked up within a second).
+    if (maskChanged || (countMoved && due)) {
+        Mod_Walk(mask, wanted, maskChanged || !mask);
+        s_modCount    = count;
+        s_modNextWalk = now + 1.f;
+    } else if (colChanged && !countMoved) {
+        // colour / brightness drag: same material set, re-modulate what the last walk matched.
+        // ponytail: follows stored pointers, safe because the count did not move (materials only
+        // free at level change, which clears this map); a same-frame free+alloc would slip by.
+        for (auto& kv : s_modSaved)
+            if (mask & (1 << kv.second.group)) MatModulate(kv.first, wanted[kv.second.group]);
+    } else return;   // nothing new, or the count moved inside the 1s throttle: next walk catches it
+
     s_modLastMask = mask;
     memcpy(s_modLast, wanted, sizeof(wanted));
-    s_modNextWalk = now + 1.f;   // late-loaded materials (props streamed in) picked up within a second
     if (!mask) s_modSaved.clear();
 }
 
@@ -604,7 +632,9 @@ struct TexSaved { unsigned hash; int slot; void* orig[k_texSlotCount]; void* ori
 static std::unordered_map<void*, TexSaved> s_texSaved;
 static std::unordered_map<void*, unsigned> s_decalHidden;   // material -> name hash, only ones WE hid
 static unsigned s_texLastSig = 0;
-static float    s_texNextWalk = 0.f, s_decalNextWalk = 0.f;
+static float    s_texNextWalk = 0.f;
+static int      s_texCount = -1;      // GetNumMaterials at the last walk
+static bool     s_texRetry = false;   // a material's original textures were not loaded yet
 
 static void Tex_RestoreOne(void* m, TexSaved& e)
 {
@@ -695,21 +725,36 @@ static void Tex_Frame()
     static bool s_anyLast = false;
     if (!any && s_anyLast) Tex_RestoreAll(false);   // the last category just went off
     s_anyLast = any;
+    static bool s_decalsLast = false;
+    const bool decalsOn = decals && !s_decalsLast;
+    s_decalsLast = decals;
     if (!any && !decals) return;
 
+    // Walk owed on a settings change, or once a second at most while the material count moves
+    // (new props / decals / cosmetics) or a material's textures were not loaded yet. Never on a
+    // bare timer: the walk is every material in the game, a hitch each time.
     const bool changed = sig != s_texLastSig;
-    const bool decalWalk = decals && (now >= s_decalNextWalk || now < s_decalNextWalk - 2.f);
-    if (!changed && !decalWalk && now < s_texNextWalk && now >= s_texNextWalk - 2.f) return;
-    s_texLastSig = sig;
+    const int  count   = MatCount();
+    const bool due     = now >= s_texNextWalk || now < s_texNextWalk - 2.f;
+    if (!changed && !decalsOn && !(due && (count < 0 || count != s_texCount || s_texRetry))) return;
+    s_texLastSig  = sig;
     s_texNextWalk = now + 1.f;
-    if (decals) s_decalNextWalk = now + 1.f;
+    s_texCount    = count;
+    s_texRetry    = false;
 
-    void* want[8] = {};
-    for (int i = 0; i < 8; ++i) {
-        want[i] = FindTex(names[i]);
-        if (changed && names[i] && !want[i]) DebugLog("worldfx3: world texture '%s' not found", names[i]);
+    // FindTexture by name is a dictionary hit at best and a disk probe for a missing custom
+    // name, so only on a settings change (level change zeroes the sig, so new map = re-found).
+    static void* s_want[8] = {};
+    static void* s_flat    = nullptr;
+    if (changed) {
+        for (int i = 0; i < 8; ++i) {
+            s_want[i] = FindTex(names[i]);
+            if (names[i] && !s_want[i]) DebugLog("worldfx3: world texture '%s' not found", names[i]);
+        }
+        s_flat = FindTex("dev/flat_normal");
     }
-    void* flat = FindTex("dev/flat_normal");
+    void* const* want = s_want;
+    void* flat = s_flat;
 
     int applied = 0, restored = 0, hidden = 0;
     unsigned short h = 0; void* m = nullptr; const char *name = nullptr, *grp = nullptr;
@@ -717,6 +762,13 @@ static void Tex_Frame()
         if (!m) continue;
         const unsigned hash = NameHash(name);
         const bool world = grp && !strcmp(grp, "World textures");
+        const bool texCand = any && (world || ModGroup(grp, name) == 2);
+        if (!decals) {   // cheap skips before MatInfoGet's 5 vcalls: not ours, or already in its wanted state
+            if (!texCand) continue;
+            auto k = s_texSaved.find(m);
+            if (k != s_texSaved.end() && k->second.hash == hash &&
+                (k->second.slot < 0 || want[k->second.slot] == k->second.applied)) continue;
+        } else if (!texCand && s_decalHidden.count(m)) continue;
         MatInfo info{};
         if (!MatInfoGet(m, info)) continue;
 
@@ -727,7 +779,7 @@ static void Tex_Frame()
             ++hidden;
             continue;
         }
-        if (!any || (!world && ModGroup(grp, name) != 2)) continue;
+        if (!texCand) continue;
 
         auto it = s_texSaved.find(m);
         if (it != s_texSaved.end() && it->second.hash != hash) { Tex_Release(it->second); s_texSaved.erase(it); it = s_texSaved.end(); }
@@ -756,7 +808,7 @@ static void Tex_Frame()
                 if (!e.orig[i]) { e.orig[i] = VarTexture(var); TexRef(e.orig[i], true); }   // not loaded yet: retried next walk
                 if (e.orig[i]) { VarSetTexture(var, tex); wrote = true; }
             }
-            if (!wrote) continue;
+            if (!wrote) { s_texRetry = true; continue; }
             if (flat && !IsSsbump(m))
                 for (int i = 0; i < 2; ++i) {
                     void* var = MatVar(m, k_texBumps[i]);
@@ -911,6 +963,7 @@ void WorldFx3_Frame()
     void* local = localIdx > 0 ? GetClientEntity(localIdx) : nullptr;
     Trail_Frame(local);
     Dlight_Frame(local, localIdx);
+    CrashSpan _s("view/wfxmat");   // stutter probe: names this if a material walk ever hitches
     Mod_Frame();
     Tex_Frame();
 }

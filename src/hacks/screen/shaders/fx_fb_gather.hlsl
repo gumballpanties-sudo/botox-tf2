@@ -32,7 +32,12 @@
 //   c2 = tap cap, max streak, tile size, frame noise
 //   c6 = width, height, 1/width, 1/height
 //   c8 = depth scale, the gun's fence, player count, gun run
-//   c14 = blur gamma, 1 / gamma, -, -   (botox "blur gamma", f0e average_bright; 1 = plain average)
+//   c14 = blur gamma, 1 / gamma, -, onto the frame   (botox "blur gamma", f0e average_bright; 1 = plain average)
+//
+// AN UNTOUCHED PIXEL IS DISCARDED when the gather draws straight onto the frame (c14.w): the
+// frame is the 8x msaa backbuffer, and writing back what was already there costs a full-screen
+// msaa write a run -- most of the screen in the gun run, all of it standing still. Into the
+// trail's input it must write, that target holds nothing else.
 
 sampler2D sColor : register(s0);
 sampler2D sInfo  : register(s1);
@@ -78,13 +83,15 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     // the world run never touches the gun: it is bolted to the camera and nothing in that run
     // knows what its animation did
-    if (cen_gun > 0.5 && c8.w < 0.5) return float4(out_color(cen), 1.0);
-
     float2 tile     = tex2Dlod(sTile, float4(uv + tile_offs(vpos), 0, 0)).xy;
     float  tile_len = length(tile);
 
-    // nothing within reach of this pixel moved at all
-    if (tile_len < 1.0) return float4(out_color(cen), 1.0);
+    // ... and nothing within reach of this pixel moved at all
+    if ((cen_gun > 0.5 && c8.w < 0.5) || tile_len < 1.0)
+    {
+        if (c14.w > 0.5) discard;
+        return float4(out_color(cen), 1.0);
+    }
 
     float2 tile_dir = tile / max(1e-15, tile_len);
 
@@ -104,6 +111,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     // a still pixel next to a moving one has no direction of its own: walk the tile's twice
     float4 cen_main = cen_len < 1.0 ? tile_main : float4(info.zw, cen_len, 1.0);
+
+    // TAPS ARE SPACED BY THE TILE'S STREAK, so a part slower than the tile max (the hand beside
+    // the blade tip) is hit by fewer of them, and each has to count tile / own reach -- bg by the
+    // centre's, fg by the tap's. Without it both sides of that edge under-blur into a step (botox).
+    // Same units both sides: info.x and the tile are the half streak in pixels.
+    float rc = min(tile_len / max(cen_len, 1.0), half_n);
 
     // negated on the way back so the two halves do not leave a gap down the middle
     float2 noise = (ign(vpos) - 0.5) * float2(1.0, -1.0);
@@ -145,6 +158,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         float2 w0 = d0 * s0w * float2(m.w, smoothstep(0.10, 0.45, abs(dot(i0.zw, m.xy))));
         float2 w1 = d1 * s1w * float2(m.w, smoothstep(0.10, 0.45, abs(dot(i1.zw, m.xy))));
 
+        w0 *= float2(rc, min(tile_len / max(i0.x, 1.0), half_n));
+        w1 *= float2(rc, min(tile_len / max(i1.x, 1.0), half_n));
+
         // AND A GUN PIXEL ONLY EVER TAKES GUN. The depth test alone leaves the world a way in
         // (a tap behind the gun still fills whatever weight the streak did not), so the fence
         // is checked outright. The other way round is left alone.
@@ -183,6 +199,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     bg += float4(cen, 1.0);
 
     float4 acc = (bg + fg) / total;
+
+    // the reach weights can stack past one sample each: over-full = normalise, under = fill
+    acc /= max(acc.w, 1.0);
     acc.rgb += saturate(1.0 - acc.w) * fill;
 
     return float4(out_color(acc.rgb), 1.0);

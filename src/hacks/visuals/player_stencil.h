@@ -32,8 +32,6 @@ struct PlayerStencilSettings
 
 // Main thread, after the stencil marking draws. Copies s.
 void PlayerStencil_Submit(const PlayerStencilSettings& s);
-// botox glow_enabled(): our full-res glow drew last time -> the material system halo stays off.
-bool PlayerStencil_GlowLive();
 // shaders refused / targets failed for good: outline + inner glow off, glow back to the halo
 bool PlayerStencil_Failed();
 // render.cpp h_Reset: the DEFAULT-pool targets must be gone before the device resets (shaders survive)

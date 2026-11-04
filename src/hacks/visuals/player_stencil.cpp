@@ -40,7 +40,6 @@ namespace
 	IDirect3DVertexShader9*      s_capsuleVs = nullptr;
 	IDirect3DVertexDeclaration9* s_capsuleDecl = nullptr;
 	bool                         s_failed = false;
-	std::atomic<bool>            s_glowLive{ false };
 
 	IDirect3DSurface9* s_msaaSurf = nullptr, *s_maskSurf = nullptr, *s_distSurf = nullptr, *s_blurSurf = nullptr;
 	IDirect3DTexture9* s_maskTex = nullptr, *s_distTex = nullptr, *s_blurTex = nullptr;
@@ -355,8 +354,6 @@ namespace
 			if (ds) ds->Release();
 			target->Release();
 		}
-		if (st.glow)
-			s_glowLive.store(drawn, std::memory_order_relaxed);
 		static bool s_logged = false;
 		if (!s_logged && drawn)
 		{
@@ -391,6 +388,5 @@ void PlayerStencil_Submit(const PlayerStencilSettings& s)
 		Fn_Call(&s_fn[slot]);   // mat_queue_mode 0: this thread issues the d3d
 }
 
-bool PlayerStencil_GlowLive() { return s_glowLive.load(std::memory_order_relaxed); }
 bool PlayerStencil_Failed() { return s_failed; }
 void PlayerStencil_ReleaseTargets() { ReleaseTargets(); }

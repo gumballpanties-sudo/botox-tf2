@@ -2,7 +2,8 @@
 // Textually included by movement.cpp (same convention as edgebug.inl/texturebug.inl) --
 // shares every helper/static in that TU (On, EntV3/EntI/EntF, TraceHull, IN_*, FL_*...).
 // Ported: nulls, hsw, delay hop, auto crouch, smooth demo
-// view (reuses engIsPlayingDemo=76, same confirmed vtable slot as fakemove.inl), jumpstats.
+// view (reuses engIsPlayingDemo=76, same confirmed vtable slot as fakemove.inl).
+// jumpstats: detections.cpp Jumpstats_Tick (chat print, botox jump_stats).
 // edge skip + blockbot: movement_edge.inl. tung/bounce/pf modes/eb presets/ps fix:
 // movement_tricks2.inl. No ladder tricks: TF2 has no ladders.
 
@@ -431,32 +432,3 @@ static void SmoothDemoView(void* pLocal, UserCmd_t* pCmd)
     s_have = true;
 }
 
-// ==== jumpstats: counts clean bhop/longjump/minijump/wallclimb takeoffs this life, no
-// hook needed -- edge-detected off the same IN_JUMP/flags reads every other feature here
-// already uses. Ported concept from botox bot_names/jumpstats memory note (remapped
-// taxonomy: CS:GO's bhop/lj/ladderjump/wallclimb -> TF2's bhop/lj/mj/wallclimb) ====
-struct JumpstatsCounts { int bhop, longjump, minijump, wallclimb; };
-static JumpstatsCounts s_jsCounts{};
-
-static void JumpstatsTick(void* pLocal, UserCmd_t* pCmd)
-{
-    static bool s_wasGround = true;
-    if (!g_jumpstats || !pLocal) return;
-    const bool onGround = EntGround(pLocal);
-    const bool tookOff = s_wasGround && !onGround && (pCmd->buttons & IN_JUMP);
-    s_wasGround = onGround;
-    if (!tookOff) return;
-
-    if (On(g_wallClimb, g_wallClimbKey, g_wallClimbMode))      s_jsCounts.wallclimb++;
-    else if (On(g_longJump, g_longJumpKey, g_longJumpMode))    s_jsCounts.longjump++;
-    else if (On(g_miniJump, g_miniJumpKey, g_miniJumpMode))    s_jsCounts.minijump++;
-    else if (g_bhop)                                          s_jsCounts.bhop++;
-    DebugLog("JSTAT: takeoff bhop=%d lj=%d mj=%d wc=%d",
-             s_jsCounts.bhop, s_jsCounts.longjump, s_jsCounts.minijump, s_jsCounts.wallclimb);
-}
-
-void MV_GetJumpstats(int& bhop, int& longjump, int& minijump, int& wallclimb)
-{
-    bhop = s_jsCounts.bhop; longjump = s_jsCounts.longjump;
-    minijump = s_jsCounts.minijump; wallclimb = s_jsCounts.wallclimb;
-}

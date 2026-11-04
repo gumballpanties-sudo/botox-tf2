@@ -58,22 +58,8 @@ extern bool  g_espEnable;                // botox m_players: stencil / inner / f
 extern bool  g_glowEnable;               // botox "player glow"
 extern float g_glowVisColor[4];
 extern float g_glowInvisColor[4];
-extern bool  g_glowLegacy;
-extern int   g_glowLegacyStyle;          // 0 default, 1 rim, 2 outline, 3 pulse
-extern bool  g_glowNormalBlend;
-extern float g_glowThickness;
-extern bool  g_glowGradient;
-extern float g_glowVisOuterColor[4];
-extern float g_glowInvisOuterColor[4];
-extern float g_glowGradientInner;
-extern bool  g_glowWave;
-extern float g_glowWaveColor[4];
-extern float g_glowWaveSpeed;
-extern float g_glowWaveSize;
-extern float g_glowWaveStrength;
-extern bool  g_glowPulse;
-extern float g_glowPulseSpeed;
-extern float g_glowPulseMin;
+extern int   g_glowStyle;                // 0 soft glow, 1 outline
+extern float g_glowSize;                 // 1..10 soft blur / 1..6 outline px
 
 namespace
 {
@@ -506,29 +492,6 @@ namespace
 		return ChamsLayers::SoundAlpha((EspFx_NowMs() - s_soundMs[entIdx]) / 1000.f, g_chamsSoundDuration, g_chamsSoundFade);
 	}
 
-	// ---- player glow colour helpers (botox "player glow" popup) ----
-	//   accent wave = colour pulled toward the wave colour by a travelling sine (size = spatial scale)
-	//   edge pulse  = alpha breathing between pulse min % and 100 %
-	// The glow itself is the Amalgam stencil + render-target pass at the end of this file.
-	void GlowColor(const float* base, float out[4], float flPhase)
-	{
-		for (int k = 0; k < 4; ++k) out[k] = base[k];
-		if (!g_glowWave) return;
-		const float t = EspFx_NowMs() / 1000.f;
-		const float w = (0.5f + 0.5f * sinf(6.2831853f * (t * g_glowWaveSpeed + flPhase))) * std::clamp(g_glowWaveStrength, 0.f, 1.f);
-		for (int k = 0; k < 3; ++k) out[k] += (g_glowWaveColor[k] - out[k]) * w;
-	}
-
-	float GlowPulse()
-	{
-		const bool bForced = g_glowLegacy && g_glowLegacyStyle == 3;
-		if (!g_glowPulse && !bForced) return 1.f;
-		const float flSpeed = g_glowPulse ? g_glowPulseSpeed : 1.f;
-		const float flMin = g_glowPulse ? std::clamp(g_glowPulseMin / 100.f, 0.f, 1.f) : 0.f;
-		const float s = 0.5f + 0.5f * sinf(6.2831853f * EspFx_NowMs() / 1000.f * flSpeed);
-		return flMin + (1.f - flMin) * s;
-	}
-
 	// ---- entity classification ----
 	// Amalgam CBaseEntity::IsWearable set (+ CTFWearableItem, CEconWearable): canteen and the
 	// engineer PDA expansions are wearables too
@@ -846,12 +809,12 @@ void Chams_RenderCloaked()
 // PushRenderTargetAndViewport (105) CRASHES this build (MSVC overload group) -> Get/SetRenderTarget;
 // never Get/SetViewport (stale queued state). IMaterialSystem: GetBackBufferDimensions 31,
 // Begin/EndRenderTargetAllocation 82/83, CreateNamedRenderTargetTextureEx 85. ITexture IncRef 10, DecRef 11.
-// Menu mapping (botox popup): stencil 1 + blur 1 by default; "normal blending" makes thickness the
-// blur amount (2..30 px -> 0.2..3); legacy "outline" = stencil 2, no blur; wave/pulse as before;
-// gradient has no equivalent here. With the players esp on and legacy off, botox's own full-res
-// glow (visuals/player_stencil.cpp, gradient / screen wave / normal blending thickness) takes over
-// once it has drawn, and this halo is only the fallback (botox glow_effect_spectator). The same
-// stencil pass also marks visible pixels 2 for the player stencil / internal glow mask.
+// Menu: style soft = stencil 1 + blur size/3, outline = stencil size px, no blur. This halo is the
+// only glow renderer: the old hand-over to player_stencil.cpp's full-res glow (sticky "live" flag,
+// needed the esp master on) left frames with neither drawn. The same stencil pass still marks
+// visible pixels 2 for the player stencil / internal glow mask.
+// RTs are RT_SIZE_FULL_FRAME_BUFFER (Amalgam CGlow::Initialize): the material system remakes them
+// on a resolution change, so a resize no longer kills the glow until the next map.
 namespace
 {
 	constexpr int kRcSetRT = 6, kRcGetRT = 7, kRcClearBuffers = 12, kRcClearColor4ub = 73, kRcDrawSSRect = 103;
@@ -867,13 +830,15 @@ namespace
 	void*         s_glowRB1 = nullptr, *s_glowRB2 = nullptr;      // ITexture*
 	IMaterial*    s_glowMatColor = nullptr, *s_glowMatHalo = nullptr, *s_glowMatBlurX = nullptr, *s_glowMatBlurY = nullptr;
 	ChamsMatVar*  s_glowBloom = nullptr;
-	int           s_glowW = 0, s_glowH = 0;
 	bool          s_glowReady = false;
 	volatile bool s_glowRendering = false;
 	bool          s_glowLoggedDraw = false;
 
 	struct GlowItem { CBaseEntity* pEnt; float c[4]; };
 	std::vector<GlowItem> s_glowItems;
+
+	// mat_dxlevel only changes on restart: fixed for the session
+	bool Glow_Dx8() { return I::EngineClient && I::EngineClient->GetDXSupportLevel() < 90; }
 
 	void GlowBackBuffer(int& w, int& h)
 	{
@@ -1033,10 +998,10 @@ namespace
 	void Rgba(float out[4], const float* c) { for (int k = 0; k < 4; k++) out[k] = c[k]; }
 
 	// botox player_stencil after_glow(): settings off the menu vars, capsules off the hitboxes
-	void StencilSubmit(bool bOutline, bool bInner, bool bGlow)
+	void StencilSubmit(bool bOutline, bool bInner)
 	{
 		static PlayerStencilSettings st;   // ~19 KB: not on the stack
-		st.outline = bOutline; st.glow = bGlow; st.inner = bInner;
+		st.outline = bOutline; st.glow = false; st.inner = bInner;   // glow = the halo pass above
 		Rgba(st.innerVisible, g_esxInnerGlowVisColor);
 		Rgba(st.innerInvisible, g_esxInnerGlowInvisColor);
 		st.innerReach[0] = std::clamp(g_esxInnerGlowIntensity, 0.25f, 4.f);
@@ -1094,41 +1059,6 @@ namespace
 		Rgba(st.visible, g_esxStencilVisColor);
 		Rgba(st.invisible, g_esxStencilInvisColor);
 		st.thickness = std::clamp(g_esxStencilThickness, 0.5f, 8.f);
-
-		const bool gradient = g_glowGradient;
-		Rgba(st.glowVisible, g_glowVisColor);
-		Rgba(st.glowInvisible, g_glowInvisColor);
-		Rgba(st.glowVisibleOuter, gradient ? g_glowVisOuterColor : g_glowVisColor);
-		Rgba(st.glowInvisibleOuter, gradient ? g_glowInvisOuterColor : g_glowInvisColor);
-		const float start = 1.f - std::clamp(g_glowGradientInner, 0.f, 100.f) / 100.f;
-		st.gradient[0] = start;
-		st.gradient[1] = 1.f / std::max(1.f - start, 1e-3f);
-		const bool additive = !g_glowNormalBlend;
-		st.gradient[2] = additive ? 15.f /*k_engine_glow_radius*/ : std::clamp(g_glowThickness, 2.f, 30.f);
-		st.gradient[3] = additive ? 1.f : 0.f;
-
-		// real time keeps moving in pause; phases kept in 0..1 so float precision never runs out
-		const float now = I::GlobalVars ? I::GlobalVars->realtime : 0.f;
-		st.wave[0] = st.wave[1] = st.wave[2] = st.wave[3] = 0.f;
-		if (g_glowWave)
-		{
-			const float phase = fmodf(now * g_glowWaveSpeed, 1.f);
-			st.wave[0] = 1.f;
-			st.wave[1] = phase < 0.f ? phase + 1.f : phase;
-			st.wave[2] = 1.f / std::clamp(g_glowWaveSize, 0.05f, 4.f);
-			st.wave[3] = std::clamp(g_glowWaveStrength, 0.f, 1.f);
-			Rgba(st.waveColor, g_glowWaveColor);
-		}
-		if (g_glowPulse)
-		{
-			const float floor_ = std::clamp(g_glowPulseMin, 0.f, 100.f) / 100.f;
-			const float wave = 0.5f + 0.5f * sinf(6.2831853f * fmodf(now * g_glowPulseSpeed, 1.f));
-			const float scale = floor_ + (1.f - floor_) * wave;
-			for (float* c : { st.glowVisible, st.glowInvisible, st.glowVisibleOuter, st.glowInvisibleOuter })
-				c[3] *= scale;
-			if (!additive)
-				st.gradient[2] = std::max(2.f, st.gradient[2] * (0.6f + 0.4f * scale));
-		}
 		PlayerStencil_Submit(st);
 	}
 }
@@ -1145,25 +1075,25 @@ bool Glow_Rendering() { return s_glowRendering; }
 
 void Glow_LevelUnload() {}
 
-// CViewRender::LevelInit (flipworld.cpp hook): the one safe time to allocate named render targets.
-// The RTs and materials live across maps (fpsoverlay vmglow); only a new backbuffer size remakes them.
+// CViewRender::LevelInit (flipworld.cpp hook) + once at inject (thread.cpp PollThread, Amalgam
+// CCore::Load style) so a mid-map inject glows without a map reload.
+// The RTs and materials live across maps (fpsoverlay vmglow) and follow the frame buffer size.
 void Glow_LevelInit()
 {
 	if (!g_matSystem) return;
+	if (s_glowReady) return;
 	int w, h; GlowBackBuffer(w, h);
 	if (w <= 0 || h <= 0) return;
-	if (s_glowReady && w == s_glowW && h == s_glowH) return;
 	GlowRelease();
-	s_glowW = w; s_glowH = h;
 
-	// flipworld.cpp's proven arguments: RT_SIZE_LITERAL 8, IMAGE_FORMAT_RGB888 2, shared depth 0,
+	// RT_SIZE_FULL_FRAME_BUFFER 4 (Amalgam), IMAGE_FORMAT_RGB888 2, shared depth 0,
 	// CLAMPS|CLAMPT|EIGHTBITALPHA 0x200C, CREATERENDERTARGETFLAGS_HDR 1. One Begin/End block for both:
 	// 85 outside a block calls End itself, and End is a full device release/reacquire.
 	using CreateRT_t = void*(__fastcall*)(void*, const char*, int, int, int, int, int, unsigned, unsigned);
 	auto fnCreate = (CreateRT_t)(*reinterpret_cast<void***>(g_matSystem))[kMatSysCreateNamedRTEx];
 	VCallAt<void>(g_matSystem, kMatSysBeginRTAlloc);
-	s_glowRB1 = fnCreate(g_matSystem, "botox_glow_rb1", w, h, 8, 2, 0, 0x200Cu, 1u);
-	s_glowRB2 = fnCreate(g_matSystem, "botox_glow_rb2", w, h, 8, 2, 0, 0x200Cu, 1u);
+	s_glowRB1 = fnCreate(g_matSystem, "botox_glow_rb1", w, h, 4, 2, 0, 0x200Cu, 1u);
+	s_glowRB2 = fnCreate(g_matSystem, "botox_glow_rb2", w, h, 4, 2, 0, 0x200Cu, 1u);
 	VCallAt<void>(g_matSystem, kMatSysEndRTAlloc);
 	if (!s_glowRB1 || !s_glowRB2)
 	{
@@ -1179,13 +1109,19 @@ void Glow_LevelInit()
 	if (s_glowMatColor && !s_glowMatColor->IsErrorMaterial()) s_glowMatColor->IncrementReferenceCount();
 	else s_glowMatColor = nullptr;
 	s_glowMatHalo  = CreateFromVMT("botox_glow_halo",  "\"UnlitGeneric\"\n{\n\t\"$basetexture\" \"botox_glow_rb1\"\n\t\"$additive\" \"1\"\n}\n");
-	s_glowMatBlurX = CreateFromVMT("botox_glow_blurx", "\"BlurFilterX\"\n{\n\t\"$basetexture\" \"botox_glow_rb1\"\n}\n");
-	s_glowMatBlurY = CreateFromVMT("botox_glow_blury", "\"BlurFilterY\"\n{\n\t\"$basetexture\" \"botox_glow_rb2\"\n}\n");
-	s_glowBloom = s_glowMatBlurY ? FindVar(s_glowMatBlurY, "$bloomamount") : nullptr;
+	// dx8: BlurFilterX/Y crash (Amalgam Glow.cpp:163, null deref on map load) -> never made; the
+	// halo runs blur-less there (Glow_Render), UnlitGeneric + stencil + RTs are fine on dx8
+	const bool bDx8 = Glow_Dx8();
+	if (!bDx8)
+	{
+		s_glowMatBlurX = CreateFromVMT("botox_glow_blurx", "\"BlurFilterX\"\n{\n\t\"$basetexture\" \"botox_glow_rb1\"\n}\n");
+		s_glowMatBlurY = CreateFromVMT("botox_glow_blury", "\"BlurFilterY\"\n{\n\t\"$basetexture\" \"botox_glow_rb2\"\n}\n");
+		s_glowBloom = s_glowMatBlurY ? FindVar(s_glowMatBlurY, "$bloomamount") : nullptr;
+	}
 
-	s_glowReady = s_glowMatColor && s_glowMatHalo && s_glowMatBlurX && s_glowMatBlurY && s_glowBloom;
-	DebugLog("glow: level init %dx%d ok=%d rb1=%p rb2=%p color=%p halo=%p blurx=%p blury=%p bloom=%p",
-		w, h, (int)s_glowReady, s_glowRB1, s_glowRB2, (void*)s_glowMatColor, (void*)s_glowMatHalo,
+	s_glowReady = s_glowMatColor && s_glowMatHalo && (bDx8 || (s_glowMatBlurX && s_glowMatBlurY && s_glowBloom));
+	DebugLog("glow: level init %dx%d dx8=%d ok=%d rb1=%p rb2=%p color=%p halo=%p blurx=%p blury=%p bloom=%p",
+		w, h, (int)bDx8, (int)s_glowReady, s_glowRB1, s_glowRB2, (void*)s_glowMatColor, (void*)s_glowMatHalo,
 		(void*)s_glowMatBlurX, (void*)s_glowMatBlurY, (void*)s_glowBloom);
 	if (!s_glowReady) GlowRelease();
 }
@@ -1194,29 +1130,26 @@ void Glow_LevelInit()
 // the 3D scene is done, viewmodel and HUD are not drawn yet.
 void Glow_Render()
 {
-	// botox player_stencil enabled() / inner_enabled() / glow_wanted(): all need the players esp on
+	// botox player_stencil enabled() / inner_enabled(): need the players esp on. Player glow does not.
 	const bool bLive = g_espEnable && !PlayerStencil_Failed();
 	const bool bOutline = bLive && g_esxStencil, bInner = bLive && g_esxInnerGlow;
-	const bool bFullGlow = bLive && g_glowEnable && !g_glowLegacy;
 	if (!g_glowEnable && !bOutline && !bInner)
 		return;
 	if (!s_glowReady)
 	{
-		// injected mid-map: the RTs come with the next CViewRender::LevelInit (map change), like flipworld's
+		// Glow_LevelInit failed at inject (see its log line) or an exception dropped it: retried next map
 		static bool s_logged = false;
-		if (!s_logged) { s_logged = true; DebugLog("glow: enabled but no render targets yet -- they are made on the next map load"); }
+		if (!s_logged) { s_logged = true; DebugLog("glow: enabled but not ready -- retried on the next map load"); }
 		return;
 	}
 	if (!Aim_Active() || !g_matSystem || !g_modelRender
 		|| !I::RenderView || !I::ClientEntityList || !I::EngineClient || !I::ModelInfoClient)
 		return;
-	if (I::EngineClient->GetDXSupportLevel() < 90)   // Amalgam: BlurFilter shaders crash dx8
-		return;
 	auto pLocal = H::Entities.GetLocal();
 	if (!pLocal)
 		return;
 	int w, h; GlowBackBuffer(w, h);
-	if (w <= 0 || h <= 0 || w != s_glowW || h != s_glowH)   // resized: Glow_LevelInit remakes next map
+	if (w <= 0 || h <= 0)
 		return;
 	void* rc = VCallAt<void*>(g_matSystem, kMatSysGetRenderContext);
 	if (!rc)
@@ -1226,7 +1159,6 @@ void Glow_Render()
 	s_glowItems.clear();
 	int aItemOfPlayer[128];
 	for (auto& i : aItemOfPlayer) i = -1;
-	const float flPulse = GlowPulse();
 	const Vec3 vEye = pLocal->GetEyePosition();
 	for (auto pEntity : H::Entities.GetGroup(EntityEnum::PlayerEnemy))
 	{
@@ -1236,10 +1168,9 @@ void Glow_Render()
 		if (!SDK::IsOnScreen(pPlayer, false))
 			continue;
 		const bool bVisible = SDK::VisPos(pLocal, pPlayer, vEye, pPlayer->GetCenter());
-		const Vec3 vOrigin = pPlayer->GetAbsOrigin();
 		GlowItem it{ pPlayer };
-		GlowColor(bVisible ? g_glowVisColor : g_glowInvisColor, it.c, g_glowWaveSize * (vOrigin.x + vOrigin.y) / 512.f);
-		it.c[3] *= flPulse;
+		const float* c = bVisible ? g_glowVisColor : g_glowInvisColor;
+		for (int k = 0; k < 4; ++k) it.c[k] = c[k];
 		const int idx = pPlayer->entindex();
 		if (idx > 0 && idx < 128) aItemOfPlayer[idx] = (int)s_glowItems.size();
 		s_glowItems.push_back(it);
@@ -1266,16 +1197,16 @@ void Glow_Render()
 		s_glowItems.push_back(it);
 	}
 
-	int iStencil = 1; float flBlur = 1.f;
-	if (g_glowLegacy) { if (g_glowLegacyStyle == 2) { iStencil = 2; flBlur = 0.f; } }
-	else if (g_glowNormalBlend) flBlur = std::clamp(g_glowThickness / 10.f, 0.2f, 3.f);
+	// soft: 1 px halo + blur (size 3 = Amalgam's blur 1); outline: size px halo, no blur.
+	// dx8 has no blur materials (Glow_LevelInit): soft draws as outline there
+	const bool bOutlineStyle = g_glowStyle == 1 || Glow_Dx8();
+	const int iStencil = bOutlineStyle ? (int)std::clamp(g_glowSize + 0.5f, 1.f, 6.f) : 1;
+	const float flBlur = bOutlineStyle ? 0.f : std::clamp(g_glowSize, 1.f, 10.f) / 3.f;
 
-	// botox glow_effect_spectator: the engine halo is the fallback once our full-res glow is live
-	const bool bMask = bOutline || bInner || bFullGlow;
-	const bool bHalo = g_glowEnable && !(bFullGlow && PlayerStencil_GlowLive());
-	GlowPasses_SEH(rc, w, h, iStencil, flBlur, bHalo, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr);
+	const bool bMask = bOutline || bInner;
+	GlowPasses_SEH(rc, w, h, iStencil, flBlur, g_glowEnable, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr);
 	if (bMask)
-		StencilSubmit(bOutline, bInner, bFullGlow);
+		StencilSubmit(bOutline, bInner);
 
 	if (!s_glowLoggedDraw)
 	{

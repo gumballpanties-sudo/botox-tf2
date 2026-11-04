@@ -203,6 +203,104 @@ static D3DFORMAT s_fmt = D3DFMT_UNKNOWN;
 static D3DMULTISAMPLE_TYPE s_msaa = D3DMULTISAMPLE_NONE;
 static bool s_shaderFailed = false;
 
+// msaa: the driver refused the one-step resolve into the stage texture, so it goes through
+// s_resolveSurf. Learned once, kept for the device.
+static bool s_directRefused = false;
+
+// ---- what the chain costs the gpu ----------------------------------------------------------
+// INPUT DELAY FROM A POST PASS IS GPU TIME: once the card is the bottleneck the driver queues
+// frames ahead, and every one of them is latency. The sample cap only sizes the gather loop --
+// the resolve, the copy, velocity and tiles are paid every run however low it is set. So the
+// log says what the runs really cost: timestamps around each, read back four frames later and
+// never waited for (a GetData that flushes is a stall of its own).
+struct FbTimer
+{
+    IDirect3DQuery9* disjoint = nullptr;
+    IDirect3DQuery9* begin    = nullptr;
+    IDirect3DQuery9* end      = nullptr;
+    IDirect3DQuery9* freq     = nullptr;
+    bool pending = false;
+};
+static FbTimer s_timer[2][4];       // [world, gun][ring]
+static int     s_timerIdx[2] = {};
+static double  s_timerMs[2]  = {};
+static int     s_timerN[2]   = {};
+static bool    s_timerDead   = false;   // the card has no timestamp queries
+
+static void FbTimerRelease()
+{
+    for (auto& run : s_timer)
+        for (FbTimer& t : run) {
+            for (IDirect3DQuery9** q : { &t.disjoint, &t.begin, &t.end, &t.freq })
+                if (*q) { (*q)->Release(); *q = nullptr; }
+            t.pending = false;
+        }
+}
+
+// collects the slot it is about to reuse (four frames old), then opens it again
+static FbTimer* FbTimerBegin(IDirect3DDevice9* dev, int run)
+{
+    if (s_timerDead) return nullptr;
+
+    FbTimer& t = s_timer[run][s_timerIdx[run]];
+    s_timerIdx[run] = (s_timerIdx[run] + 1) & 3;
+
+    if (!t.disjoint) {
+        if (FAILED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMPDISJOINT, &t.disjoint)) ||
+            FAILED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMP,         &t.begin))    ||
+            FAILED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMP,         &t.end))      ||
+            FAILED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMPFREQ,     &t.freq))) {
+            FbTimerRelease();
+            s_timerDead = true;
+            DebugLog("frameblend: no timestamp queries on this card -- gpu cost not logged");
+            return nullptr;
+        }
+    }
+
+    if (t.pending) {
+        BOOL   disjoint = TRUE;
+        UINT64 a = 0, b = 0, f = 0;
+        // flags 0: no flush. Not back after four frames = dropped, never waited for
+        if (t.disjoint->GetData(&disjoint, sizeof(disjoint), 0) == S_OK &&
+            t.begin->GetData(&a, sizeof(a), 0) == S_OK &&
+            t.end->GetData(&b, sizeof(b), 0) == S_OK &&
+            t.freq->GetData(&f, sizeof(f), 0) == S_OK &&
+            !disjoint && f > 0 && b > a) {
+            s_timerMs[run] += (double)(b - a) * 1000.0 / (double)f;
+            ++s_timerN[run];
+        }
+        t.pending = false;
+    }
+
+    if (run == 0) {
+        static ULONGLONG s_last = 0;
+        const ULONGLONG nowMs = GetTickCount64();
+        if (nowMs - s_last > 2000) {
+            s_last = nowMs;
+            if (s_timerN[0] || s_timerN[1])
+                DebugLog("^FX: frame blending gpu -- world %.3fms gun %.3fms a frame (%d / %d runs; "
+                         "the gun's depth resolve is screenfx's and not in it)",
+                         s_timerN[0] ? s_timerMs[0] / s_timerN[0] : 0.0,
+                         s_timerN[1] ? s_timerMs[1] / s_timerN[1] : 0.0, s_timerN[0], s_timerN[1]);
+            s_timerMs[0] = s_timerMs[1] = 0.0;
+            s_timerN[0]  = s_timerN[1]  = 0;
+        }
+    }
+
+    t.disjoint->Issue(D3DISSUE_BEGIN);
+    t.begin->Issue(D3DISSUE_END);
+    return &t;
+}
+
+static void FbTimerEnd(FbTimer* t)
+{
+    if (!t) return;
+    t->end->Issue(D3DISSUE_END);
+    t->disjoint->Issue(D3DISSUE_END);
+    t->freq->Issue(D3DISSUE_END);
+    t->pending = true;
+}
+
 // ==== main thread =========================================================================
 void FrameBlend_NewFrame()
 {
@@ -507,6 +605,8 @@ void FrameBlend_Destroy()
     FbReleaseTarget(s_trailCurTex, s_trailCurSurf);
 
     if (s_resolveSurf) { s_resolveSurf->Release(); s_resolveSurf = nullptr; }
+    s_directRefused = false;
+    FbTimerRelease();
 
     for (auto& ps : s_ps) { if (ps) { ps->Release(); ps = nullptr; } }
 
@@ -1029,12 +1129,14 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     if (!blur && !wantTrail) return;
 
     // c14 = blur gamma, 1 / gamma (botox f0e average_bright, 1 = plain frame average),
-    //       trail blend (0 on a history that holds nothing yet), -
+    //       trail blend (0 on a history that holds nothing yet),
+    //       gather lands on the frame (1 = an untouched pixel is discarded, not rewritten)
     {
         const float gamma = (g_fbGamma < 1.f) ? 1.f : (g_fbGamma > 10.f ? 10.f : g_fbGamma);
         block[14][0] = gamma;
         block[14][1] = 1.f / gamma;
         block[14][2] = (wantTrail && !s_histEmpty[hk]) ? trail : 0.f;
+        block[14][3] = wantTrail ? 0.f : 1.f;
     }
 
     if (!gunPass) {
@@ -1060,15 +1162,30 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     FbSaved st{};
     FbSave(dev, st);
 
-    // msaa on: resolve the multisampled frame into the plain surface first, then copy that
-    HRESULT blit = dev->StretchRect(target, nullptr, s_resolveSurf ? s_resolveSurf : s_stageSurf,
-                                    nullptr, D3DTEXF_NONE);
-    if (SUCCEEDED(blit) && s_resolveSurf)
-        blit = dev->StretchRect(s_resolveSurf, nullptr, s_stageSurf, nullptr, D3DTEXF_NONE);
+    FbTimer* timer = FbTimerBegin(dev, hk);
+
+    // msaa on: the resolve straight into the stage texture -- d3d9 lets an msaa render target
+    // resolve into a render target texture, and that is one full-frame copy a run less. A driver
+    // that refuses it gets the two-step: resolve into the plain surface, then copy that.
+    HRESULT blit = E_FAIL;
+    if (!s_resolveSurf || !s_directRefused) {
+        blit = dev->StretchRect(target, nullptr, s_stageSurf, nullptr, D3DTEXF_NONE);
+        if (FAILED(blit) && s_resolveSurf) {
+            s_directRefused = true;
+            DebugLog("frameblend: msaa resolve into the stage refused 0x%08lx -- two-step copy",
+                     (unsigned long)blit);
+        }
+    }
+    if (FAILED(blit) && s_resolveSurf) {
+        blit = dev->StretchRect(target, nullptr, s_resolveSurf, nullptr, D3DTEXF_NONE);
+        if (SUCCEEDED(blit))
+            blit = dev->StretchRect(s_resolveSurf, nullptr, s_stageSurf, nullptr, D3DTEXF_NONE);
+    }
 
     if (FAILED(blit)) {
         static bool logged = false;
         if (!logged) { logged = true; DebugLog("frameblend: frame blit failed 0x%08lx", (unsigned long)blit); }
+        FbTimerEnd(timer);
         FbRestore(dev, st);
         return;
     }
@@ -1182,6 +1299,7 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
         s_histEmpty[hk] = false;
     }
 
+    FbTimerEnd(timer);
     FbRestore(dev, st);
 
     static bool s_logged[2] = { false, false };

@@ -702,6 +702,7 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 		tOut.m_flRel = flRel;
 		tOut.m_iK = e.k; tOut.m_iHeld = tHold.m_iCount;
 		tOut.m_bReachNext = bReachNext;
+		tOut.m_bHold = eDec == BsMath::DEC_HOLD;
 		{	// forensics only -- nothing below feeds the decision
 			const BsMath::V3 r = vHC - vEye;
 			const float flBear = BsMath::Deg(atan2f(r.y, r.x));
@@ -711,10 +712,7 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 		}
 
 		if (tOut.m_bFire)
-		{
-			tHold = {};
-			return true;
-		}
+			return true;   // hold reset by RunBackstab once this is the shot taken (bt judges more than one)
 		if (iGate == BSG_REACH)
 			continue;   // an angle with slightly worse odds may connect solidly
 		// counted on the DECISION, not the label: a guard-made hold logs why=turn and must still run
@@ -992,7 +990,8 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	static bool s_bStamped = false; // tells which knife build wrote a log (bs14 tier=, bs15 p=, bs16 p= pb= pg=)
 	// bs17 thin hold verified: first log 52 swings, 0 whiffs, thin= gated 8 commands. bs17b added
 	// front-stab forensics (sm= rb= brate= lat= exp=). bs18 = knife backtrack (bt=), see RewindBackTicks.
-	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs18 (bs17b + knife backtrack bt=). Backtrack UNVERIFIED IN GAME."); }
+	// bs18 log: 24 fires, 22 stabs, 0 whiffs; both fronts = first-passing bt tick (see bs19 below).
+	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs19 (bs18 + best bt tick, not first; bt0= live gate/p). Best-tick UNVERIFIED IN GAME."); }
 	m_bBackstabLegit = Vars::Aimbot::Melee::BackstabAimType.Value == Vars::Aimbot::Melee::BackstabAimTypeEnum::Legit;
 	const int iAimType = GetAimType(pWeapon);
 	// Wall clock for everything that has to line up with player_hurt: inside engine prediction
@@ -1066,23 +1065,29 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	// KNIFE BACKTRACK (dih-bs18). Lag compensation rewinds everybody to the tick OUR tick_count
 	// names; his yaw is read live whatever we ask. So when the default rewind cannot stab, an older
 	// tick inside the server's 0.2 s window (bs_math.h RewindBackTicks) is judged the same way:
-	// every player's box at that tick, the same odds, the same reach. First tick that fires wins,
-	// newest first; tick_count is moved back by that many ticks. Stats and the miss line stay on
+	// every player's box at that tick, the same odds, the same reach. Best tick wins (bs19, below);
+	// tick_count is moved back by that many ticks. Stats and the miss line stay on
 	// the default tick so they read the same as bs17's.
 	const float flTRewind0 = m_flTRewind;
-	// Global backtrack on = knife backtrack on too, capped by its time limit (same records the
-	// hitscan aim reads are judged here off the knife's own track: it has his yaw, bones do not).
-	const bool bGlobalBt = F::Backtrack.Enabled();
-	int nBack = Vars::Aimbot::Melee::BackstabBacktrack.Value || bGlobalBt
+	// Knife backtrack only with its own toggle on; global backtrack alone never turns it on, it
+	// only caps it by its time limit when both are on.
+	int nBack = Vars::Aimbot::Melee::BackstabBacktrack.Value
 		? BsMath::RewindBackTicks(m_flTDue, flTRewind0, BacktrackCorrect(), TICK_INTERVAL)
 		: 0;
-	if (bGlobalBt)
+	if (nBack && F::Backtrack.Enabled())
 		nBack = std::min(nBack, TIME_TO_TICKS(F::Backtrack.TimeLimit()));
 
-	BsJudge tBest = {};   // the default tick's furthest judgement (logged), or the one that fired
+	// bs19: every tick is judged and the BEST shot is taken, not the first. bs18's first-fire picked
+	// the newest tick that barely cleared k_pTake: both its fronts were bt shots at p=0.72 / 0.77
+	// (bt=7/9, 4/9) with older ticks never looked at. An older tick needs k_pGain more to win (the
+	// newer the tick, the further from the server's window edge); a sure shot stops the search.
+	// An older tick never jumps the default tick's HOLD unless it already beats what the wait is for.
+	BsJudge tBest = {};   // the default tick's furthest judgement (logged), then the shot taken
+	BsJudge tShot = {};
+	float aWait[k_maxPlayers] = {};   // per player: the next-tick odds the default tick holds for
 	bool bFired = false;
 	int iBack = 0, nTargets = 0, nTargets0 = 0;
-	for (int j = 0; j <= nBack && !bFired; j++)
+	for (int j = 0; j <= nBack && !(bFired && tShot.m_flP >= BsMath::k_pSure); j++)
 	{
 		m_flTRewind = flTRewind0 - j * TICK_INTERVAL;
 
@@ -1155,11 +1160,18 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 			BsJudge tJudge = {};
 			if (JudgeKnife(aTargets[t], pLocal, pWeapon, tJudge))
 			{
-				tBest = tJudge;
-				bFired = true;
-				iBack = j;
-				break;
+				if (j && tJudge.m_flP < aWait[tJudge.m_iIndex])
+					continue;   // waiting on the default tick is better
+				if (!bFired || tJudge.m_flP > tShot.m_flP + BsMath::k_pGain)
+				{
+					tShot = tJudge;
+					iBack = j;
+					bFired = true;
+				}
+				continue;
 			}
+			if (!j && tJudge.m_bHold)
+				aWait[tJudge.m_iIndex] = std::max(aWait[tJudge.m_iIndex], tJudge.m_flPNext);
 			// the line worth logging is the one that got furthest down the pipeline -- on the default tick
 			if (!j && (tJudge.m_iGate > tBest.m_iGate || tJudge.m_iGate == tBest.m_iGate && tJudge.m_flP > tBest.m_flP))
 				tBest = tJudge;
@@ -1174,6 +1186,9 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 
 	if (bFired)
 	{
+		const BsJudge tLive = tBest;   // why the default tick did not take it (bt0= on the STAB line)
+		tBest = tShot;
+		m_aHold[tBest.m_iIndex] = {};
 		G::AimTarget = { tBest.m_iIndex, I::GlobalVars->tickcount };
 
 		// the knife has no smack delay (knife:229-231): it always presses now, doubletap or not
@@ -1200,14 +1215,15 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 		m_flWhiffTime = -1.f;
 		DebugLog("BS: STAB idx=%d p=%.3f pb=%.3f pg=%.3f gm=%.1f sc=%.1f next=%.3f margin=%.1f fac=%.1f sig=%.1f bear=%.2f k=%d rate=%.0f "
 			"hor=%.3f lerp=%.3f ext=%.3f slack=%.1f pad=%.2f thinpad=%.2f rnext=%d held=%d d=%.1f spd=%.0f my=%.0f rel=%.0f legit=%d n=%d "
-			"sm=%.1f rb=%.1f brate=%.0f lat=%.0f bt=%d/%d",
+			"sm=%.1f rb=%.1f brate=%.0f lat=%.0f bt=%d/%d bt0=%s/%.3f",
 			tBest.m_iIndex, tBest.m_flP, tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flGuardMargin, tBest.m_flSigCore,
 			tBest.m_flPNext, tBest.m_flMargin, tBest.m_flFacing, tBest.m_flSigma,
 			tBest.m_flSigBear, tBest.m_iK, tBest.m_flRate, tBest.m_flHorizon, flLerp, tBest.m_flExtrap,
 			tBest.m_flSlack, tBest.m_flPad, BsMath::ThinPad(tBest.m_flPad, tBest.m_flRel), int(tBest.m_bReachNext),
 			tBest.m_iHeld, tBest.m_flDist, tBest.m_flSpeed, pLocal->m_vecVelocity().Length2D(), tBest.m_flRel,
 			int(m_bBackstabLegit), nTargets,
-			tBest.m_flSeenMargin, tBest.m_flRelYaw, tBest.m_flBearRate, AimLatency() * 1000.f, iBack, nBack);
+			tBest.m_flSeenMargin, tBest.m_flRelYaw, tBest.m_flBearRate, AimLatency() * 1000.f, iBack, nBack,
+			iBack ? BsGateName(tLive.m_iGate) : "fire", tLive.m_flP);
 
 		G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
 		Vec3 vAim = tBest.m_vAim;

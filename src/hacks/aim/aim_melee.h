@@ -79,6 +79,7 @@ private:
 		// bearing swings as we pass (deg/s), the term sigBear does not price
 		float m_flSeenMargin = 0.f, m_flRelYaw = 0.f, m_flBearRate = 0.f;
 		bool  m_bReachNext = true;
+		bool  m_bHold = false;       // decided to wait for the next tick (m_flPNext is what it waits for)
 	};
 	void RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd);
 	bool JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapon, BsJudge& tOut);   // iBox into m_aBoxes

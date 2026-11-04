@@ -65,7 +65,7 @@ inline float g_wdHitMarkerDuration = 1.f;
 // m_disable_post_processing = unit screen's g_sfxDisablePostProcessing (u_screen.h, world_fx.cpp)
 inline bool  g_wdNo3dSky = false;                                 // m_remove_3d_skybox
 inline bool  g_wdNoHud = false;                                    // m_remove_hud_elements
-inline constexpr int k_wdHudCount = 14;                            // world_fx3_math.h k_hudElems
+inline constexpr int k_wdHudCount = 25;                           // world_fx3_math.h k_hudElems
 inline bool  g_wdNoHudElems[k_wdHudCount] = {};                    // m_removed_hud_elements
 
 // ---- viewmodel group (botox variables.h :1008-1031) ----

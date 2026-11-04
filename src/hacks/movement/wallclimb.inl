@@ -3,12 +3,14 @@
 // MV_DetectWallLines / MV_SupportDistance / TB_SteeringAwayFromWall / AsClock / s_prePred* / s_raw* are statics above).
 //
 // A wall climb is ground -> hop -> sweep -> ground, repeated. Airborne beside a displacement wall this sweeps silent
-// into-wall moves for ONE simulated tick and commits the first that ends FL_ONGROUND flush on that face; the win arms a
-// hop that the real grounded tick stamps (CheckJumpButton reads the ground state a cmd STARTS on, so the press cannot
-// go on the cmd that grounds). Three proofs stand between the scan and any write, all engine facts:
+// into-wall and along-wall moves (yaw +-87, both sides), each HELD up to k_depth ticks (iterative deepening off snapshot
+// slots), and commits tick 1 of the first that goes FL_ONGROUND on that face; next tick re-finds it one shallower. The win
+// arms a hop that the real grounded tick stamps (CheckJumpButton reads the ground state a cmd STARTS on, so the press
+// cannot go on the cmd that grounds). Three proofs stand between the scan and any write, all engine facts:
 //   DISP    the face is a displacement (trace.dispFlags): a brush face is one plane and cannot hand a hull a standable facet
 //   NEAR    the hull face is within k_engage_support of it (one tick of fwd=450 closes ~0.45u, 16u out no variant reaches)
-//   GROUND  a swept variant ends the tick FL_ONGROUND and <= k_land_support from THAT face (grounded 8u out = a landing)
+//   GROUND  a held variant goes FL_ONGROUND sooner than the player's own keys would, <= k_land_support from THAT face, or
+//           <= k_engage_support on a disp ground higher than the last ground (crest / quadrant catch; LandOk)
 // No win = no write, the player keeps his own cmd. Hands off the keys = hands off the cmd.
 //
 // Kept from the csgo port, the parts that were real upgrades:
@@ -16,17 +18,21 @@
 //   prevent slow (g_wcPreventSlow: no win that halves xy > 200)        visualize (WC_GetDrawData -> render.cpp RenderWallClimbOverlay)
 //   TF2 rise threshold 250 (CategorizePosition), not CS:GO's 140      TB's non-catch creep no longer starves wc on a shared key:
 //   the sweep starts from the keys TB was handed (s_wcPreTb*), TB's cmd stays unless wc wins
-// Dropped: parks / holds / exit pin / spot scan / jump fix / snapshot slots -- the csgo pin model, TF2 grounds instead.
+// Dropped: parks / holds / exit pin / spot scan / jump fix -- the csgo pin model, TF2 grounds instead. Snapshot slots
+// k_snap_base.. are back, but only inside one call (the lookahead's resume), never across ticks.
 #include <mutex>
 #include "wallclimb_pure.h"
 
 static wc::Hop s_wcHop;
 static int     s_wcWallTick  = -100000; /* last tick a disp face was engaged (the unlatch window) */
 static float   s_wcScanStart = 0.f;
-static float   s_wcGroundZ   = -1e9f;   /* z of the last ground tick, viz "+h" only */
+static float   s_wcGroundZ   = -1e9f;   /* z of the last ground tick: viz "+h", LandOk's rise */
+/* the committed depth-d win: replayed while the re-search misses, so tick 1 of a plan is never sent alone */
+static struct { Vec3 wish; float fwd = 0.f, yo = 0.f; int buttons = 0; int left = 0; } s_wcPlan;
 
 /* per-second counters, debug log */
-static int s_wcN[9]{}; /* ticks scan disp near sweep win hop strip wall */
+static int s_wcN[18]{}; /* ticks scan disp near sweep win hop strip wall rej d1 d2 d3 d4 plan zmiss dup cut */
+static int s_wcDep[wc::k_depth]{};   /* wins per depth */
 static Vec3 s_wcBrushN{};  /* last brush face the disp gate skipped (log bn=) */
 static int s_wcSims = 0; static long long s_wcUs = 0ll, s_wcUsWorst = 0ll;
 static unsigned long long s_wcLogNext = 0ull;
@@ -51,30 +57,39 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     if (const unsigned long long now = GetTickCount64(); g_debugLogEnable && now >= s_wcLogNext) {
         s_wcLogNext = now + 1000ull;
         if (s_wcN[0])
-            DebugLog("WC: ticks=%d scan=%d wall=%d disp=%d near=%d sweep=%d win=%d hop=%d strip=%d sims=%d us=%lld worst=%lld bn=%.2f,%.2f,%.2f",
-                     s_wcN[0], s_wcN[1], s_wcN[8], s_wcN[2], s_wcN[3], s_wcN[4], s_wcN[5], s_wcN[6], s_wcN[7], s_wcSims, s_wcUs, s_wcUsWorst,
+            DebugLog("WC: ticks=%d scan=%d wall=%d disp=%d near=%d sweep=%d win=%d hop=%d strip=%d rej=%d dep=%d/%d/%d/%d/%d/%d plan=%d zmiss=%d dup=%d cut=%d sims=%d us=%lld worst=%lld bn=%.2f,%.2f,%.2f",
+                     s_wcN[0], s_wcN[1], s_wcN[8], s_wcN[2], s_wcN[3], s_wcN[4], s_wcN[5], s_wcN[6], s_wcN[7], s_wcN[9],
+                     s_wcDep[0], s_wcDep[1], s_wcDep[2], s_wcDep[3], s_wcDep[4], s_wcDep[5], s_wcN[14], s_wcN[15], s_wcN[16], s_wcN[17], s_wcSims, s_wcUs, s_wcUsWorst,
                      s_wcBrushN.x, s_wcBrushN.y, s_wcBrushN.z);
         for (int& c : s_wcN) c = 0;
+        for (int& c : s_wcDep) c = 0;
         s_wcSims = 0; s_wcUs = s_wcUsWorst = 0ll;
     }
+
+    // the entity holds this cmd's END here; START is the pre-pred capture. Ground z tracked key or not: a hold key pressed
+    // mid-air must compare against the ground just left, not one from before the last release
+    const bool bGroundPre  = (s_prePredFlags & FL_ONGROUND) != 0;
+    if (bGroundPre) s_wcGroundZ = s_prePredOrigin.z;
 
     const bool key = On(g_wallClimb, g_wallClimbKey, g_wallClimbMode);
     s_wcSyncWant   = key && EntAlive(pLocal);
     if (!pCmd || !key || !EntAlive(pLocal) || EntMoveType(pLocal) != MOVETYPE_WALK) {
         s_wcHop.Reset();
+        s_wcPlan.left = 0;
         s_wcScanStart = 0.f;
         return;
     }
 
     const int iTickNow = g_globalVars->tickcount;
     if (s_wcWallTick > iTickNow) s_wcWallTick = -100000;   // map change rewound the clock
-    // the entity holds this cmd's END here; START is the pre-pred capture
-    const bool bGroundPre  = (s_prePredFlags & FL_ONGROUND) != 0;
     const bool bGroundPost = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
-    if (bGroundPre) s_wcGroundZ = s_prePredOrigin.z;
+    if (bGroundPre) s_wcPlan.left = 0;
 
-    // armed-hop clock, before every yield: a hop armed in the air must survive the ticks TB/AS own
-    const bool armed_hop = s_wcHop.Clock(bGroundPre);
+    // armed-hop clock, before every yield: a hop armed in the air must survive the ticks TB/AS own. Fires only on the
+    // ground the win simulated (a lost plan lands on the floor)
+    const bool hop_ground = s_wcHop.Clock(bGroundPre);
+    const bool armed_hop  = hop_ground && s_wcHop.ZOk(s_prePredOrigin.z);
+    if (hop_ground && !armed_hop) ++s_wcN[15];
 
     // UNLATCH. FinishMove copies this cmd's buttons into m_nOldButtons and a grounded jump is refused while IN_JUMP is set
     // there -- only a jumpless cmd clears it. Held space would block the very seam jump the climb exists to make
@@ -160,7 +175,7 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     s_wallClimbActive = true;   // an air wall tick: pixel surf yields
 
     // seamless leave: steering off the wall = the player keeps the cmd
-    if (TB_SteeringAwayFromWall(&base, primary.plane.normal, base.forwardmove, base.sidemove)) return;
+    if (TB_SteeringAwayFromWall(&base, primary.plane.normal, base.forwardmove, base.sidemove)) { s_wcPlan.left = 0; return; }
 
     const Vec3 approach_normal = primary.plane.normal * -1.f;
     Vec3 angle_wall = VectorAngles(approach_normal);
@@ -168,70 +183,193 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     const Vec3  original_view = pCmd->viewangles;
     const float velocity_yaw  = RAD2DEGF(atan2f(velocity.y, velocity.x));
     const float sign          = SweepSign(NormalizeAngle(velocity_yaw - angle_wall.y));
+    // the player's own wish yaw (sidemove + = right: wish = fwd*forward + side*right, right = yaw - 90). The variants are
+    // tried nearest to the live plan's wish first, else nearest to this (OrderYaws)
+    const float own_yaw   = original_view.y + RAD2DEGF(atan2f(-base.sidemove, base.forwardmove));
+    const bool  plan_live = s_wcPlan.left > 0;
+    int yaw_order[k_yaws];
+    OrderYaws(angle_wall.y, plan_live ? s_wcPlan.wish.y : own_yaw, sign, yaw_order);
 
     AsClock budget;
     budget.Start(k_time_share, TickInterval());
     int sims = 0;
+    bool cut = false;
     const int  nBase   = PredCommandsPredicted();
     const auto restore = [&]() { RestoreToFrame(nBase - 1); };
-    const auto can_sim = [&]() { return SimsLeft() > 0 && !(sims > 0 && budget.Expired()); };
+    const auto can_sim = [&]() {
+        if (SimsLeft() > 0 && !(sims > 0 && budget.Expired())) return true;
+        cut = true;
+        return false;
+    };
     const auto sim     = [&](UserCmd_t c) { restore(); Pred_Simulate(pLocal, &c); ++sims; };
     const auto grounded = [&]() { return (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0; };
     struct Done { const decltype(restore)& r; ~Done() { r(); } } done_restore{ restore };
 
-    // ONE SIM decides whether the rest may run: the player's own move (TB's, if it is creeping) is the baseline. If it already
-    // grounds them the sweep has nothing to buy -- a hop armed off it would fire on whatever they happened to land on
-    if (!can_sim()) return;
-    sim(*pCmd);
-    if (grounded()) return;
-    ++s_wcN[4];
-
     const float start_xy = velocity.Length2D();
-    const bool  duck_now = (base.buttons & IN_DUCK) != 0;
     UserCmd_t best{};
     bool found = false;
     float land_support = 0.f;
-    // stance 0 is the player's own, so a catch the plain sweep makes is the first one tried; the other stance only with
-    // crouch catches on (no crouch pops in demos otherwise)
+    int found_depth = 0, gb = k_depth + 1;
+    float land_z = 0.f, best_yo = 0.f, cur_yo = 0.f;   /* cur_yo: the yaw offset judge() is looking at */
+    Vec3 best_wish{};
+    bool from_plan = false;
+
+    // a held cmd just simulated one more tick (its d-th): 0 = still airborne beside the face, 1 = dead (left the face, or
+    // landed somewhere that is not a catch), 2 = a catch
+    const auto judge = [&](const UserCmd_t& cmd, const Vec3& wish, const int d) -> int {
+        // support's ray runs at the contact's z; a held variant has fallen since, so the contact moves with the hull
+        const Vec3 org = EntV3(pLocal, g_offOrigin);
+        GameTrace_t face = primary;
+        face.endpos.z += org.z - start_pos.z;
+        const float support = MV_SupportDistance(pLocal, face);
+        if (!grounded()) return support <= k_keep_support ? 0 : 1;
+        // GATE 3: grounded ON THAT FACE. On a disp map FL_ONGROUND is very often the floor you were landing on anyway
+        bool ground_disp = false, center_floor = false;
+        if (support > k_land_support && support <= k_engage_support) {
+            TraceFilterWorldProps filter; filter.Setup(pLocal);
+            GameTrace_t tr{};
+            TraceHull(org, org - Vec3(0, 0, 2.f), EntV3(pLocal, g_offMins), EntV3(pLocal, g_offMaxs), MASK_PLAYERSOLID, &filter, &tr);
+            ground_disp = tr.fraction < 1.f && (tr.dispFlags & DISPSURF_SURFACE);
+            if (ground_disp) {
+                GameTrace_t cl{};
+                TraceLine(org + Vec3(0, 0, 1.f), org - Vec3(0, 0, 4.f), MASK_PLAYERSOLID, &filter, &cl);
+                center_floor = cl.fraction < 1.f && cl.plane.normal.z >= 0.7f;
+            }
+        }
+        if (!LandOk(support, ground_disp, org.z, s_wcGroundZ, center_floor)
+            || (Slowed(start_xy, EntV3(pLocal, g_offVelocity).Length2D()) && g_wcPreventSlow)) {
+            ++s_wcN[9];
+            return 1;
+        }
+        found = true; best = cmd; best_wish = wish; land_support = support; found_depth = d; land_z = org.z; best_yo = cur_yo;
+        return 2;
+    };
+
+    // THE PLAN FIRST. Last tick's win is a held cmd with `left` ticks to go: sim it straight through (<= k_depth sims) and,
+    // if it still catches, that is the whole search -- the re-search found it one shallower anyway, at ~100 sims
+    if (s_wcPlan.left > 0 && can_sim()) {
+        UserCmd_t c = base;
+        c.viewangles  = original_view;
+        c.forwardmove = s_wcPlan.fwd;
+        c.sidemove    = 0.f;
+        c.buttons     = (base.buttons & ~(IN_DUCK | IN_JUMP)) | s_wcPlan.buttons;   // the plan owns stance + jump only
+        CorrectMovement(&c, s_wcPlan.wish, original_view);
+        cur_yo = s_wcPlan.yo;
+        restore();
+        for (int d = 1; d <= k_depth && can_sim(); ++d) {
+            UserCmd_t t = c;
+            Pred_Simulate(pLocal, &t); ++sims;
+            if (judge(c, s_wcPlan.wish, d) != 0) break;
+        }
+        from_plan = found;
+        if (found) ++s_wcN[14];
+        else s_wcPlan.left = 0;   // the plan no longer catches from here: search fresh
+    }
+
+    // THE BASELINE decides whether the rest may run: the player's own move (TB's, if it is creeping), held up to k_depth
+    // ticks. Grounding next tick = nothing to buy. Grounding at tick gb = a variant must beat it (land sooner), or a hop
+    // armed off it would fire on whatever they happened to land on
+    if (!found) {
+        if (!can_sim()) return;
+        sim(*pCmd);
+        if (grounded()) return;
+        UserCmd_t c = *pCmd;
+        for (int d = 2; d <= k_depth && can_sim(); ++d) {
+            Pred_Simulate(pLocal, &c); ++sims;
+            if (grounded()) { gb = d; break; }
+        }
+        ++s_wcN[4];
+    }
+
+    // the variants. stance 0 is the player's own, so a catch the plain sweep makes is the first one tried; the other stance
+    // only with crouch catches on (no crouch pops in demos otherwise). A HELD jump (last cmd had it) is stripped: the
+    // airborne unlatch does the same beside a face, and a win carrying it would latch m_nOldButtons on the very tick it
+    // grounds -- a crest catch is often ONE ground tick, the hop must be pressable on it. A fresh press stays (scout
+    // double jump, parachute)
+    const bool  duck_now = (base.buttons & IN_DUCK) != 0;
+    static UserCmd_t s_var[k_max_vars];
+    static Vec3      s_wish[k_max_vars];
+    static bool      s_live[k_max_vars];
+    static float     s_yo[k_max_vars];
+    int nVar = 0;
     for (int stance = 0; stance < 2 && !found; ++stance) {
         if (stance == 1 && !g_wcDuck) break;
-        for (const float forward : k_forward) {
-            if (found) break;
-            for (float offset = 0.f; offset < k_offset_max && !found; offset += k_offset_step) {
-                if (!can_sim()) break;
+        const float* fwd_list = stance == 0 ? k_forward : k_duck_forward;
+        const int    fwd_n    = stance == 0 ? k_forwards : k_duck_forwards;
+        for (const int y : yaw_order)
+            for (int f = 0; f < fwd_n; ++f) {
+                const float offset = k_yaw[y];
                 UserCmd_t fake  = base;
                 fake.viewangles = original_view;
                 if (stance == 1) fake.buttons = duck_now ? (fake.buttons & ~IN_DUCK) : (fake.buttons | IN_DUCK);
-                fake.forwardmove = forward;
+                if (!other_wants_jump && s_prevCmdJump) fake.buttons &= ~IN_JUMP;
+                fake.forwardmove = fwd_list[f];
                 fake.sidemove    = 0.f;
                 Vec3 wish = original_view;
                 wish.y    = angle_wall.y + offset * sign;
                 CorrectMovement(&fake, wish, original_view);   // silent: the view is not touched
-                sim(fake);
-                if (!grounded()) continue;
-                // GATE 3: grounded ON THAT FACE. On a disp map FL_ONGROUND is very often the floor you were landing on anyway
-                const float support = MV_SupportDistance(pLocal, primary);
-                if (support > k_land_support) continue;
-                if (Slowed(start_xy, EntV3(pLocal, g_offVelocity).Length2D()) && g_wcPreventSlow) continue;
-                found = true;
-                best  = fake;
-                land_support = support;
+                s_var[nVar]  = fake;
+                s_wish[nVar] = wish;
+                s_yo[nVar]   = offset * sign;
+                s_live[nVar++] = true;
             }
+    }
+
+    Pred_SnapReserve(k_snap_base + k_max_vars);
+    // iterative deepening: every variant one tick, then every survivor a second tick from its snapshot, ... A held
+    // variant dies when it grounds (win or not: it landed somewhere) or drifts off the face
+    int alive = nVar;
+    static Vec3 s_lo[k_max_vars], s_lv[k_max_vars];
+    static int  s_lf[k_max_vars];
+    for (int d = 1; d <= k_depth && d < gb && alive > 0 && !found; ++d) {
+        int nl = 0;   // states kept this layer, for the duplicate drop
+        for (int i = 0; i < nVar && !found; ++i) {
+            if (!s_live[i]) continue;
+            if (!can_sim()) { alive = 0; break; }
+            const int slot = k_snap_base + i;
+            if (d == 1) restore();
+            else if (!Pred_SnapLoad(pLocal, slot)) { s_live[i] = false; --alive; continue; }
+            UserCmd_t c = s_var[i];
+            Pred_Simulate(pLocal, &c); ++sims;
+            cur_yo = s_yo[i];
+            if (judge(s_var[i], s_wish[i], d) == 0 && d < k_depth) {
+                const Vec3 o = EntV3(pLocal, g_offOrigin), v = EntV3(pLocal, g_offVelocity);
+                const int  fl = EntI(pLocal, g_offFlags) & FL_DUCKING;
+                bool dup = false;
+                for (int k = 0; k < nl && !dup; ++k)
+                    dup = s_lf[k] == fl && (o - s_lo[k]).Length() < k_dup_org && (v - s_lv[k]).Length() < k_dup_vel;
+                if (dup) ++s_wcN[16];
+                else {
+                    s_lo[nl] = o; s_lv[nl] = v; s_lf[nl++] = fl;
+                    if (Pred_SnapSave(pLocal, slot)) continue;
+                }
+            }
+            s_live[i] = false; --alive;
         }
     }
 
     if (found) {
+        s_wcPlan.wish    = best_wish;
+        s_wcPlan.fwd     = sqrtf(best.forwardmove * best.forwardmove + best.sidemove * best.sidemove);   // pre-CorrectMovement wish length
+        s_wcPlan.buttons = best.buttons & (IN_DUCK | IN_JUMP);
+        s_wcPlan.yo      = best_yo;
+        s_wcPlan.left    = found_depth - 1;
+    }
+
+    if (found) {
+        ++s_wcDep[found_depth - 1];
         pCmd->forwardmove = best.forwardmove;
         pCmd->sidemove    = best.sidemove;
         pCmd->buttons     = best.buttons;
         s_tbOwnsCmd       = false;   // wc's win is the cmd now
-        s_wcHop.Arm();               // the ground tick this bought, stamped when it really arrives
+        s_wcHop.Arm(land_z);         // the ground tick this bought, stamped when it really arrives on that z
         s_wallClimbHit = s_wcLanded = true;
         ++s_wcN[5];
-        DebugLog("WC LAND: fwd=%.0f side=%.0f duck=%d live=%.2f land=%.2f n=%.3f,%.3f,%.3f xy=%.0f vz=%.1f sims=%d%s",
-                 best.forwardmove, best.sidemove, (best.buttons & IN_DUCK) != 0, live_support, land_support,
+        DebugLog("WC LAND: d=%d gb=%d fwd=%.0f side=%.0f duck=%d yo=%.0f dev=%.0f live=%.2f land=%.2f n=%.3f,%.3f,%.3f xy=%.0f vz=%.1f sims=%d%s%s",
+                 found_depth, gb, best.forwardmove, best.sidemove, (best.buttons & IN_DUCK) != 0,
+                 best_yo, fabsf(WrapDeg(best_wish.y - own_yaw)), live_support, land_support,
                  primary.plane.normal.x, primary.plane.normal.y, primary.plane.normal.z, start_xy, velocity.z, sims,
-                 tb_creep ? " tbdrop" : "");
+                 tb_creep ? " tbdrop" : "", from_plan ? " plan" : "");
     }
 
     // visualize: the face, then where the outgoing cmd takes you (green end = a land). Extra sims, off the clock
@@ -266,6 +404,7 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     }
 
     const long long us = budget.UsedUs();
+    if (cut) ++s_wcN[17];
     s_wcSims += sims;
     s_wcUs += us;
     s_wcUsWorst = (std::max)(s_wcUsWorst, us);

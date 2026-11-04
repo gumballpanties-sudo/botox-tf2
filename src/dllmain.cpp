@@ -950,22 +950,8 @@ char  g_chamsTeamCloakCfg[160] = "";
 
 float g_glowVisColor[4]        = { 224 / 255.f, 175 / 255.f, 86 / 255.f, 153 / 255.f };
 float g_glowInvisColor[4]      = { 114 / 255.f, 155 / 255.f, 221 / 255.f, 153 / 255.f };
-bool  g_glowLegacy = false;
-int   g_glowLegacyStyle = 0;
-bool  g_glowNormalBlend = false;
-float g_glowThickness = 15.f;
-bool  g_glowGradient = false;
-float g_glowVisOuterColor[4]   = { 0.f, 0.f, 0.f, 1.f };
-float g_glowInvisOuterColor[4] = { 0.f, 0.f, 0.f, 1.f };
-float g_glowGradientInner = 60.f;
-bool  g_glowWave = false;
-float g_glowWaveColor[4]       = { 1.f, 1.f, 1.f, 1.f };
-float g_glowWaveSpeed = 0.5f;
-float g_glowWaveSize = 0.35f;
-float g_glowWaveStrength = 0.8f;
-bool  g_glowPulse = false;
-float g_glowPulseSpeed = 1.f;
-float g_glowPulseMin = 35.f;
+int   g_glowStyle = 0;     // 0 soft, 1 outline
+float g_glowSize = 3.f;    // 1..10 soft blur / 1..6 outline px
 
 // -- Skybox --------------------------------------------------------------------------------
 // Only the ConVar handle is shared (thread.cpp resolves it). The sky-name and fog-colour

@@ -340,6 +340,12 @@ static void PollThread()
             // CViewRender::LevelInit (its RT). The mirror itself rides screenfx's two hooks above.
             FlipWorld_Install();
 
+            // Player glow RTs + materials now, not only at the next map: injected mid-map the
+            // LevelInit hook above never fires. Amalgam CCore::Load -> CGlow::Initialize does the
+            // same from its load thread (bracketed Begin/EndRenderTargetAllocation, level live).
+            // After Aim_Init: Glow_Dx8 reads I::EngineClient (dx8 must skip the BlurFilter mats).
+            Glow_LevelInit();
+
             // Skinchanger: engine FrameStageNotify + CBaseAnimating::SetSequence. Installed
             // after the entity list and IVModelInfo are resolved above -- both are read from
             // inside the FSN hook the moment it goes live.

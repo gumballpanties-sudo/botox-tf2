@@ -81,7 +81,7 @@ void WorldFx2_InstallHooks()
 // Entities found by class name (IClientEntityList slot 0 GetClientNetworkable, slot 6 highest
 // index, IClientNetworkable slot 2 GetClientClass -- all confirmed elsewhere in this DLL).
 // Main thread, once a frame (h_OverrideView): OnDataChanged reaches the shadow manager.
-struct ClassEnt { void* ent; int idx; };
+struct ClassEnt { void* ent; int idx; float nextScan; };
 
 __declspec(noinline) static ClassEnt FindByClass(const char* cls, ClassEnt& cache)
 {
@@ -89,6 +89,10 @@ __declspec(noinline) static ClassEnt FindByClass(const char* cls, ClassEnt& cach
         if (cache.ent && cache.idx > 0 && GetClientEntity(cache.idx) == cache.ent) return cache;
         cache.ent = nullptr; cache.idx = 0;
         if (!g_entityList) return cache;
+        // a map without this entity would rescan all 2048 slots every frame: once a second instead
+        const float now = g_globalVars ? g_globalVars->realtime : 0.f;
+        if (now < cache.nextScan && now >= cache.nextScan - 2.f) return cache;
+        cache.nextScan = now + 1.f;
         const int highest = VCall<int>(g_entityList, 6);
         const int cap = (highest > 0 && highest < 2048) ? highest : 2048;
         for (int i = 1; i <= cap; ++i) {
