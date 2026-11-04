@@ -18,4 +18,14 @@ inline bool SeamHit(float z, float pz)
     const int d = hp - hz;
     return d >= 0 && d <= 2;
 }
+
+// wall-only pixeljump takes ANY pin on the pressed wall. A pin at the launch floor's own height is the hull coming
+// back down onto the floor beside the wall (11-04 log: 6/6 fires "catch z-0.005 need=0.00", rode=0 every time), not
+// a surf. Within k_floorBand of the launch z the ground check (2u down trace) owns the hull anyway
+constexpr float k_floorBand = 2.f;
+inline bool FloorCatch(float z, float launchZ)
+{
+    const float d = z - launchZ;
+    return d > -k_floorBand && d < k_floorBand;
+}
 }

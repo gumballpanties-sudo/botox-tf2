@@ -30,17 +30,31 @@ namespace
 
 	struct SBox { int l, t, r, b, w, h; };
 
-	// c_base_entity::get_bounding_box: the 8 collision-box corners, every one in front of the camera
-	bool ScreenBox(const Vec3& o, const Vec3& mn, const Vec3& mx, SBox& box)
+	// c_base_entity::get_bounding_box: the 8 collision-box corners, every one in front of the camera.
+	// tight (players, buildings) = Amalgam GetDrawBounds: hull turned to the view yaw, so it never
+	// reads ~1.4x wide seen corner-on, then trimmed to its middle 75% (TF2 hull is wider than the model)
+	bool ScreenBox(const Vec3& o, const Vec3& mn, const Vec3& mx, SBox& box, bool tight = false)
 	{
+		float sy = 0.f, cy = 1.f;
+		if (tight)
+		{
+			const float yaw = DEG2RAD(I::EngineClient->GetViewAngles().y);
+			sy = sinf(yaw); cy = cosf(yaw);
+		}
 		float l = FLT_MAX, t = FLT_MAX, r = -FLT_MAX, b = -FLT_MAX;
 		for (int i = 0; i < 8; i++)
 		{
-			const Vec3 p = { o.x + ((i & 1) ? mx.x : mn.x), o.y + ((i & 2) ? mx.y : mn.y), o.z + ((i & 4) ? mx.z : mn.z) };
+			const float lx = (i & 1) ? mx.x : mn.x, ly = (i & 2) ? mx.y : mn.y;
+			const Vec3 p = { o.x + lx * cy - ly * sy, o.y + lx * sy + ly * cy, o.z + ((i & 4) ? mx.z : mn.z) };
 			Vec3 s;
 			if (!SDK::W2S(p, s))
 				return false;
 			l = std::min(l, s.x); t = std::min(t, s.y); r = std::max(r, s.x); b = std::max(b, s.y);
+		}
+		if (tight)
+		{
+			const float trim = (r - l) * 0.125f;
+			l += trim; r -= trim;
 		}
 		box = { (int)l, (int)t, (int)r, (int)b, (int)r - (int)l, (int)b - (int)t };
 		return true;
@@ -600,7 +614,7 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 
 		Part p;
 		p.a = a; p.vOrigin = vOrigin; p.vMins = pPlayer->m_vecMins(); p.vMaxs = pPlayer->m_vecMaxs();
-		if (!ScreenBox(vOrigin, p.vMins, p.vMaxs, p.box))
+		if (!ScreenBox(vOrigin, p.vMins, p.vMaxs, p.box, true))
 			continue;
 		++m_nDrawn;
 		const auto& b = p.box;
@@ -824,7 +838,7 @@ void CEsp::DrawBuildings(CTFPlayer* pLocal)
 
 		Part p;
 		p.a = a; p.vOrigin = vOrigin; p.vMins = pObj->m_vecMins(); p.vMaxs = pObj->m_vecMaxs();
-		if (!ScreenBox(vOrigin, p.vMins, p.vMaxs, p.box))
+		if (!ScreenBox(vOrigin, p.vMins, p.vMaxs, p.box, true))
 			continue;
 		const int iIdx = pObj->entindex();
 		if (iIdx <= 0 || iIdx >= 2048)

@@ -27,6 +27,15 @@ namespace wc
     constexpr float k_offset_step    = 5.f;
     constexpr float k_offset_max     = 45.f;  /* exclusive: 0, 5 .. 40 = 9 yaws */
 
+    // disp-face scan past brush faces. MV_DetectWallLines walks 16 directions from its start and returns the first
+    // face plus that direction's angle UNWRAPPED (start .. start+2pi). The next call starts one direction later; the walk
+    // stops once a full turn from the first start is covered, so it costs at most the 16 directions one scan has
+    constexpr float k_two_pi    = 6.28318530718f;
+    constexpr float k_scan_step = k_two_pi / 16.f;
+    inline float NextScan(const float found_angle) { return found_angle + k_scan_step; }
+    inline bool  ScanLeft(const float start, const float a) { return a < start + k_two_pi - 1e-3f; }
+    inline float WrapScan(const float a) { return std::fmod(a, k_two_pi); }
+
     inline bool Slowed(const float old_xy, const float new_xy)
     {
         return old_xy > k_slow_xy && new_xy / old_xy < k_slow_ratio;

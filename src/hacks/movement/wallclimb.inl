@@ -26,7 +26,8 @@ static float   s_wcScanStart = 0.f;
 static float   s_wcGroundZ   = -1e9f;   /* z of the last ground tick, viz "+h" only */
 
 /* per-second counters, debug log */
-static int s_wcN[8]{}; /* ticks scan disp near sweep win hop strip */
+static int s_wcN[9]{}; /* ticks scan disp near sweep win hop strip wall */
+static Vec3 s_wcBrushN{};  /* last brush face the disp gate skipped (log bn=) */
 static int s_wcSims = 0; static long long s_wcUs = 0ll, s_wcUsWorst = 0ll;
 static unsigned long long s_wcLogNext = 0ull;
 
@@ -50,8 +51,9 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     if (const unsigned long long now = GetTickCount64(); g_debugLogEnable && now >= s_wcLogNext) {
         s_wcLogNext = now + 1000ull;
         if (s_wcN[0])
-            DebugLog("WC: ticks=%d scan=%d disp=%d near=%d sweep=%d win=%d hop=%d strip=%d sims=%d us=%lld worst=%lld",
-                     s_wcN[0], s_wcN[1], s_wcN[2], s_wcN[3], s_wcN[4], s_wcN[5], s_wcN[6], s_wcN[7], s_wcSims, s_wcUs, s_wcUsWorst);
+            DebugLog("WC: ticks=%d scan=%d wall=%d disp=%d near=%d sweep=%d win=%d hop=%d strip=%d sims=%d us=%lld worst=%lld bn=%.2f,%.2f,%.2f",
+                     s_wcN[0], s_wcN[1], s_wcN[8], s_wcN[2], s_wcN[3], s_wcN[4], s_wcN[5], s_wcN[6], s_wcN[7], s_wcSims, s_wcUs, s_wcUsWorst,
+                     s_wcBrushN.x, s_wcBrushN.y, s_wcBrushN.z);
         for (int& c : s_wcN) c = 0;
         s_wcSims = 0; s_wcUs = s_wcUsWorst = 0ll;
     }
@@ -131,17 +133,25 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     GameTrace_t primary{};
     float found_angle = 0.f;
     ++s_wcN[1];
-    if (!MV_DetectWallLines(pLocal, start_pos, mins, maxs, s_wcScanStart, primary, found_angle, k_scan_nz, k_scan_reach)) {
-        s_wcScanStart = 0.f;
-        return;
+    // GATE 1: displacement or nothing. The scan hands back the FIRST face in angle order, so a brush face there (the
+    // trim under a disp cliff, the far side of a corner) used to end the tick with a disp face sitting in the next
+    // direction: 11-04 log read disp=0 on every second. Step past brush faces, one full turn at most
+    // (wallclimb_pure.h NextScan). s_wcWallTick is not stamped on a brush, so the unlatch stays out of it too
+    bool any_wall = false, have_disp = false;
+    for (float a = s_wcScanStart; ScanLeft(s_wcScanStart, a); a = NextScan(found_angle)) {
+        if (!MV_DetectWallLines(pLocal, start_pos, mins, maxs, a, primary, found_angle, k_scan_nz, k_scan_reach))
+            break;
+        any_wall = true;
+        if (primary.dispFlags & DISPSURF_SURFACE) { have_disp = true; break; }
+        s_wcBrushN = primary.plane.normal;
     }
-    // GATE 1: displacement or nothing. s_wcWallTick is not stamped, so the unlatch stays out of it too
-    if (!(primary.dispFlags & DISPSURF_SURFACE)) {
+    if (any_wall) ++s_wcN[8];
+    if (!have_disp) {
         s_wcScanStart = 0.f;   // next scan fresh, do not pin on a brush
         return;
     }
     ++s_wcN[2];
-    s_wcScanStart = found_angle;
+    s_wcScanStart = WrapScan(found_angle);
     // GATE 2: near it, live, before any sim
     const float live_support = MV_SupportDistance(pLocal, primary, &start_pos);
     if (live_support > k_engage_support) return;

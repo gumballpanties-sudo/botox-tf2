@@ -1737,7 +1737,7 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
                 // it is heroin's test: the seam's own height (FUN_18007dcc0, same unit, hundredths
                 // within 2) anywhere along the face -- a surf is a line, the saved point one spot on
                 // it. No press = the old over-the-point gate
-                const bool bAtSeam = bAnySeam ? true
+                const bool bAtSeam = bAnySeam ? !pjs::FloorCatch(flZ, vLaunch.z)
                                    : pWallN ? pjs::SeamHit(flZ, vTarget.z)
                                             : bOverPoint && fabsf(flZ - vTarget.z) <= k_psCatchZ;
                 if (bAtSeam)
