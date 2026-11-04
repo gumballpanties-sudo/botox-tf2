@@ -7,6 +7,7 @@
     { "botNamesLength",     CfgEntry::INT,   &g_botNamesLength, 0 },
     { "botNamesNoPrefix",   CfgEntry::BOOL,  &g_botNamesNoPrefix, 0 },
     { "botNamesPing",       CfgEntry::BOOL,  &g_botNamesPing, 0 },
+    { "backpackExpander",   CfgEntry::BOOL,  &g_backpackExpander, 0 },
     { "streamerMode",             CfgEntry::INT,   &g_streamerMode, 0 },
     { "streamerTeamLabel",        CfgEntry::STR,   g_streamerTeamLabel, sizeof(g_streamerTeamLabel) },
     { "streamerEnemyLabel",       CfgEntry::STR,   g_streamerEnemyLabel, sizeof(g_streamerEnemyLabel) },

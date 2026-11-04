@@ -205,6 +205,7 @@ static int EbFirstReachTick(void* pLocal, const EbHull_t& hull, const Vec3& orig
     Vec3 maxs = hull.maxs;
     maxs.z += hull.grav * segT * segT * 0.125f;   // arc sag under a chord
     TraceFilterWorldProps filter; filter.Setup(pLocal);
+    filter.bEnemies = g_edgeBugPlayers;   // an enemy under you is geometry only when bugging off players
     Vec3 prev = origin;
     for (int seg = 1; seg <= segs; seg++)
     {
@@ -238,21 +239,60 @@ static bool EbSteepRing(void* pLocal)
         const float x = o.x + cosf(a) * 32.f, y = o.y + sinf(a) * 32.f;
         GameTrace_t tr{};
         TraceLine(Vec3(x, y, o.z + 200.f), Vec3(x, y, o.z - 100.f), MASK_PLAYERSOLID, &filter, &tr);
-        if (tr.fraction < 1.f && tr.plane.normal.z < 0.6f) return true;
+        // startsolid = ray began inside a wall/ceiling: normal is 0, not a ramp (killed every bug
+        // next to a wall, 1u wall ledges included)
+        if (!tr.startsolid && tr.fraction < 1.f && tr.plane.normal.z < 0.6f) return true;
     }
     return false;
+}
+
+static bool EbIsPlayer(void* pEnt)
+{
+    if (!pEnt) return false;
+    for (int i = 1; i <= 64; i++) if (GetClientEntity(i) == pEnt) return true;
+    return false;
+}
+
+// the sim's own tick move, enemies included (they are solid to player movement; teammates are
+// not): one hull sweep along vel, and a vertical wall hit is clipped off and swept on, the way
+// TryPlayerMove bumps -- a wall can't touch vz, the ledge sticking out of it can.
+static GameTrace_t EbTickSweep(void* pLocal, const Vec3& from, const Vec3& vel)
+{
+    TraceFilterWorldProps filter; filter.Setup(pLocal); filter.bEnemies = true;
+    const Vec3 mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);
+    Vec3 start = from, move = vel * TickInterval();
+    GameTrace_t tr{};
+    for (int bump = 0; bump < 2; bump++)
+    {
+        tr = GameTrace_t{};
+        TraceHull(start, start + move, mins, maxs, MASK_PLAYERSOLID, &filter, &tr);
+        if (tr.startsolid || tr.fraction >= 1.f || fabsf(tr.plane.normal.z) >= 0.1f || EbIsPlayer(tr.m_pEnt)) break;
+        const Vec3 n = tr.plane.normal;
+        move = move * (1.f - tr.fraction);
+        const float d = move.x * n.x + move.y * n.y + move.z * n.z;
+        move = Vec3(move.x - n.x * d, move.y - n.y * d, move.z - n.z * d);
+        start = tr.endpos;
+    }
+    return tr;
+}
+
+// the bug came off an enemy's head/hull, not the map
+static bool EbOffPlayer(void* pLocal, const Vec3& from, const Vec3& vel)
+{
+    if (g_edgeBugPlayers) return false;
+    const GameTrace_t tr = EbTickSweep(pLocal, from, vel);
+    return tr.DidHit() && EbIsPlayer(tr.m_pEnt);
 }
 
 // slope filter (SimpleVisual EdgeBugSurfaceUsable): sweep the hull one tick along vel from the
 // candidate's pre-sim origin. A face under 0.7 nz never grounds (CategorizePosition,
 // gamemovement.cpp:3864) so it can't reset gravity -- ClipVelocity shaving vz down a ramp is a
 // slide, not a bug. Open air = usable (sim decides). Disp + brush same rule: nz >= 0.7.
+// Enemy player first = not usable unless "bug off players" is on.
 static bool EbSurfaceUsable(void* pLocal, const Vec3& from, const Vec3& vel)
 {
-    TraceFilterWorldProps filter; filter.Setup(pLocal);
-    GameTrace_t tr{};
-    TraceHull(from, from + vel * TickInterval(), EntV3(pLocal, g_offMins), EntV3(pLocal, g_offMaxs),
-              MASK_PLAYERSOLID, &filter, &tr);
+    const GameTrace_t tr = EbTickSweep(pLocal, from, vel);
+    if (!g_edgeBugPlayers && tr.DidHit() && EbIsPlayer(tr.m_pEnt)) return false;
     return tr.fraction >= 1.f || tr.plane.normal.z >= k_ebStandable;
 }
 
@@ -379,20 +419,39 @@ static bool EbFindEdgeTarget(void* pLocal, int reachTick, int windowTicks, float
     const float top = p.z + 16.f + std::max(0.f, -(vel.z - grav * t)) * ipt;
     const Vec3 mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);
     MvEbLane lanes[k_lanes];
+    float laneOff[k_lanes];
     TraceFilterWorldProps filter; filter.Setup(pLocal);
-    for (int i = 0; i < k_lanes; i++)
+    auto cast = [&](float off)
     {
-        const Vec3 c = p + right * ((i - k_lanes / 2) * k_lane);
+        const Vec3 c = p + right * off;
         GameTrace_t tr{};
         TraceHull(Vec3(c.x, c.y, top), Vec3(c.x, c.y, p.z - 128.f), mins, maxs, MASK_PLAYERSOLID, &filter, &tr);
-        lanes[i].kind = (tr.startsolid || tr.allsolid) ? kMvLaneWall : tr.fraction < 1.f ? kMvLaneFloor : kMvLaneVoid;
-        lanes[i].z = tr.endpos.z;
-        lanes[i].nz = tr.plane.normal.z;
+        return MvEbLane{ (tr.startsolid || tr.allsolid) ? kMvLaneWall : tr.fraction < 1.f ? kMvLaneFloor : kMvLaneVoid,
+                         tr.endpos.z, tr.plane.normal.z };
+    };
+    for (int i = 0; i < k_lanes; i++) { laneOff[i] = (i - k_lanes / 2) * k_lane; lanes[i] = cast(laneOff[i]); }
+    // 1u ledges on a wall: every lane over one starts in the wall (a ledge narrower than the 4u gap
+    // never shows). Slide a wall lane toward its open neighbour 1u a step: the first clear spot is
+    // the hull just off the wall, over the ledge if there is one.
+    bool wasWall[k_lanes];
+    for (int i = 0; i < k_lanes; i++) wasWall[i] = lanes[i].kind == kMvLaneWall;
+    for (int i = 0; i < k_lanes; i++)
+    {
+        if (!wasWall[i]) continue;
+        const int d = (i + 1 < k_lanes && !wasWall[i + 1]) ? 1 : (i > 0 && !wasWall[i - 1]) ? -1 : 0;
+        if (!d) continue;
+        for (int s = 1; s < (int)k_lane; s++)
+        {
+            const MvEbLane l = cast(laneOff[i] + d * s);
+            if (l.kind == kMvLaneWall) continue;
+            lanes[i] = l; laneOff[i] += d * s;
+            break;
+        }
     }
     const float cap = std::clamp(g_edgeBugStrafeAngleMax, 0.f, 180.f);
     const float n = (float)(probe + 1);
     const float maxLat = 30.f * ipt * n * (n + 1.f) * 0.5f + 16.f;
-    auto offOf = [&](int i) { return (i - k_lanes / 2) * k_lane; };
+    auto offOf = [&](int i) { return laneOff[i]; };
     const int lip = MV_EbPickLip(lanes, k_lanes, k_stepUp, k_ebStandable, [&](int i)
     {
         const float off = offOf(i);
@@ -621,6 +680,7 @@ static void EbDonorPost(void* pLocal, UserCmd_t* pCmd, int style)
                     if (del) { if (delLimit == 0.f || turned > delLimit) break; }
                     else if (((turned > (dnaCustom ? 1.f : 0.f)) ? dnaLimit : 1.f) != 0.f) break;
                 }
+                const Vec3 preO = EntV3(pLocal, g_offOrigin), preV = EntV3(pLocal, g_offVelocity);
                 Pred_Simulate(pLocal, &c);
                 sims++;
                 const Vec3 vel = EntV3(pLocal, g_offVelocity);
@@ -630,6 +690,7 @@ static void EbDonorPost(void* pLocal, UserCmd_t* pCmd, int style)
                 const bool duckedNow = (EntI(pLocal, g_offFlags) & FL_DUCKING) != 0;
                 if (EbDonorCheck(pLocal, &c, br, grav, shift))
                 {
+                    if (EbOffPlayer(pLocal, preO, preV)) break;   // never eb off players
                     if (!MV_EbStanceOk(g_edgeBugStance, duckedNow)) break;
                     bool blocked = false;
                     if (MV_EbJumpCheck(g_edgeBugStance, duckedNow)) blocked = EbJumpBlocked(pLocal, c, sims);
@@ -866,6 +927,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         // duck press window: TF2's 20u press vs a ~12u fall step, so 3 ticks of retry cover it
         const int duckRetry = std::clamp(EbTicks(3), 2, 8);
         int contactTick = -1;
+        float contactZ = 0.f;   // origin z where contactTick grounded
         const float g = EbHalfGravTick(grav);
         const int probeEvery = std::clamp(EbTicks(2), 1, 8);
         int tailCut = 0, nJumpChecks = 0, nBlocked = 0, nStance = 0, nRejSurf = 0, nSlow = 0;
@@ -1015,7 +1077,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                     const bool grounded = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
                     if (grounded || EntV3(pLocal, g_offVelocity).z > 0.f)
                     {
-                        if (grounded) contactTick = i;
+                        if (grounded) { contactTick = i; contactZ = EntV3(pLocal, g_offOrigin).z; }
                         pending = -1;
                         break;
                     }
@@ -1097,7 +1159,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 { pending = -1; break; }
                 if (pending >= 0)
                 {
-                    if (EntI(pLocal, g_offFlags) & FL_ONGROUND) contactTick = i + 1;
+                    if (EntI(pLocal, g_offFlags) & FL_ONGROUND) { contactTick = i + 1; contactZ = EntV3(pLocal, g_offOrigin).z; }
                     else if (const float vzNow = EntV3(pLocal, g_offVelocity).z;
                              vzNow <= 0.f && (mode != 2 || roundf(vzNow) == roundf(pendingVz - 2.f * g)))
                         latch(pending, pendingPos, pendingDucked);
@@ -1136,6 +1198,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         // BREADTH FIRST: every variant once, THEN the duck sweeps
         int sweepCenter[8]; for (int& x : sweepCenter) x = -1;
         bool sweepApprox[8]{}, baseRan[8]{};
+        float baseLandZ[8]{};
         int baseRuns = 0, sweepRuns = 0, releaseRuns = 0, bendRuns = 0, ebRuns = 0;
         const int firstVariant = (s_ebLastVariant > 0 && s_ebLastVariant < searchCount) ? s_ebLastVariant : 0;
         auto variantAt = [&](int idx) { return idx == 0 ? firstVariant : (idx == firstVariant ? 0 : idx); };
@@ -1154,6 +1217,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
             if (contactTick > bestContact) bestContact = contactTick;
             sweepCenter[v] = contactTick > 0 ? contactTick : (reachTick >= 0 ? reachTick + 1 : -1);
             sweepApprox[v] = contactTick <= 0;
+            baseLandZ[v] = contactZ;
         }
         // PASS 1: DUCK TIMING, even variants, round robin on the offset (latest press first)
         int sweepFirst[8]{}, sweepLast[8]{};
@@ -1220,7 +1284,8 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 bisectRuns += MV_EbBisect(!sweepApprox[v], 7, [&](float a)
                 {
                     runVariant(v, -1, -1, 0, j0, true, a);
-                    return lastRunFound ? kEbOutBug : contactTick >= 0 ? kEbOutLand : kEbOutAir;
+                    return MV_EbBrakeOut(lastRunFound, contactTick >= 0, contactZ,
+                                         !sweepApprox[v], baseLandZ[v], k_mvEbLipDrop);
                 }, [&] { return enough() || brakeOut(); });
             }
             for (int off = 0; off <= brakeOff && !enough() && !brakeOut(); off++)

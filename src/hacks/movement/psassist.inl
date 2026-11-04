@@ -101,8 +101,6 @@ static std::vector<Vec3> s_psMapLines;
 // are published as red rings and both place a TEXTUREBUG marker (routecalc.inl RcPickFinder)
 static std::vector<Vec3> s_psMapTbPts;
 static std::vector<PsAssistPt> s_psAssistPts;  // saved assist targets, current map only
-static std::vector<PsAssistPt> s_pjPts;        // pixeljump's own saved points (<map>.pj.txt)
-static int s_pjActive = -1;                    // pixeljump target index for the draw (-1 = none)
 static unsigned s_psGen = 0;                   // bumped on load/add/erase -- open ENTER window closes on change
 static char s_psMap[128] = {};            // map the lists belong to ("" = none loaded)
 static int  s_psAssistActive = -1;        // assist target index for the draw (-1 = none)
@@ -283,12 +281,9 @@ static std::vector<PsAssistPt> PsReadPoints(const char* map, const char* ext)
 static void PsLoadPointsForMap(const char* map)
 {
     std::vector<PsAssistPt> pts = PsReadPoints(map, ".txt");
-    std::vector<PsAssistPt> pjPts = PsReadPoints(map, ".pj.txt");
     PmAbort();             // ...and the map scan's cursor points into the OLD map's brush list
     std::lock_guard<std::mutex> l(g_psLock);
     s_psAssistPts.swap(pts);
-    s_pjPts.swap(pjPts);
-    s_pjActive = -1;
     s_psFinderPts.clear(); // finder results are per-session, drop on map change
     s_psFinderLines.clear();
     s_psTbPts.clear();
@@ -315,7 +310,6 @@ static void PsWritePointList(const std::vector<PsAssistPt>& pts, const char* ext
 }
 
 static void PsWritePoints() { PsWritePointList(s_psAssistPts, ".txt"); }
-static void PjWritePoints() { PsWritePointList(s_pjPts, ".pj.txt"); }
 
 // ---- Pixel finder (hold = stretch a scan column on the aimed wall, release =
 // brute-force it for pixel-surf catch heights; Aletherium PixelFinder) ----
@@ -1577,9 +1571,12 @@ struct PsHop_t
     int   sims      = 0;
 };
 
+// bAnySeam = heroin pixeljump with no point (FUN_18007f710 local_2c8): vTarget.z means nothing,
+// ANY pin on the pressed wall is the catch -- vz on the pin this tick and last, moved >= 0.005
+// unless unsafe. No seam z, no unsafe shortcut, no fell-past-the-seam cut
 static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vTarget,
                         float flHullReachXY, const Vec3* pWallN = nullptr,
-                        bool bUnsafe = false)
+                        bool bUnsafe = false, bool bAnySeam = false)
 {
     PsHop_t r;
 
@@ -1710,7 +1707,7 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
 
         // heroin "unsafe pixeljump" (FUN_18007dd70): the seam's height while falling, within 200u
         // 2D of the point, IS the catch -- no pin vz, no hold proof, no moved check
-        if (bUnsafe && bAir && flVz < 0.f && pjs::SeamHit(flZ, vTarget.z)
+        if (bUnsafe && !bAnySeam && bAir && flVz < 0.f && pjs::SeamHit(flZ, vTarget.z)
             && flFlatNow < 200.f)
         {
             r.caught = true;
@@ -1740,7 +1737,8 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
                 // it is heroin's test: the seam's own height (FUN_18007dcc0, same unit, hundredths
                 // within 2) anywhere along the face -- a surf is a line, the saved point one spot on
                 // it. No press = the old over-the-point gate
-                const bool bAtSeam = pWallN ? pjs::SeamHit(flZ, vTarget.z)
+                const bool bAtSeam = bAnySeam ? true
+                                   : pWallN ? pjs::SeamHit(flZ, vTarget.z)
                                             : bOverPoint && fabsf(flZ - vTarget.z) <= k_psCatchZ;
                 if (bAtSeam)
                 {
@@ -1759,7 +1757,8 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
                 // heroin's last gate: the hull still MOVED this tick (>= 0.005u), a stuck hang is
                 // not a surf
                 const bool bMoving = flStepXY >= 0.005f;
-                if (++iPinRun >= (pWallN ? k_psConfirmPress : k_psConfirm) && (bMoving || !pWallN))
+                if (++iPinRun >= (pWallN ? k_psConfirmPress : k_psConfirm)
+                    && (bMoving || !pWallN || (bAnySeam && bUnsafe)))
                 {
                     r.caught = true;
                     break;
@@ -1779,7 +1778,7 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
             r.landed = true;
             break;
         }
-        if (flVz < 0.f && flZ < vTarget.z - k_psPastZ)
+        if (!bAnySeam && flVz < 0.f && flZ < vTarget.z - k_psPastZ)
             break;      // fell past the seam -- nothing under it is the point we were sent at
     }
 
@@ -1969,9 +1968,9 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     // real ground contact is the PRE-prediction flag (post-prediction already reflects the
     // cmd we are building) -- same as MiniJump / LongJump
     const bool bOnGround = (s_prePredFlags & FL_ONGROUND) != 0;
-    // pixeljump (heroin FUN_18007f710) = its own key over the same points, sim and live tail.
-    // Held, it wins: heroin's pick (nearest point <= 1000u), heroin's types, its unsafe/crouch
-    const bool bPjOn = On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode);
+    // pixeljump (heroin FUN_18007f710) = its own key, no points: the wall next to us, same sim and
+    // live tail. On with a wall, it wins: heroin's types, its unsafe/crouch. No wall = cleared below
+    bool bPjOn = On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode);
     const bool bAssistOn = On(g_psAssist, g_psAssistKey, g_psAssistMode) || bPjOn;
     const bool bAlive    = EntAlive(pLocal);
     const float flHullReachXY = g_offMaxs > 0 ? EntV3(pLocal, g_offMaxs).Length2D() : 34.6f;
@@ -2195,36 +2194,6 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     }
     s_asDelHeld = bDelHeld;
 
-    // ---- pixeljump's own points: set snaps to a finder dot like the assist's, delete = nearest pj point
-    {
-        static bool s_pjSetHeld = false, s_pjDelHeld = false;
-        const bool bPjSet = g_pixelJump && g_pjSetPointKey != 0 && MovementKeyOK(g_pjSetPointKey, 1);
-        const bool bPjDel = g_pixelJump && g_pjDeletePointKey != 0 && MovementKeyOK(g_pjDeletePointKey, 1);
-        Vec3 vHit;
-        if (((bPjSet && !s_pjSetHeld) || (bPjDel && !s_pjDelHeld)) && AimHit(vHit))
-        {
-            std::lock_guard<std::mutex> l(g_psLock);
-            if (bPjSet && !s_pjSetHeld)
-            {
-                const Vec3* pSnap = nullptr;
-                float flBest = g_psAssistSnap;
-                for (const Vec3& p : s_psFinderPts)
-                    if (const float flDist = vHit.DistTo(p); flDist < flBest) { flBest = flDist; pSnap = &p; }
-                if (pSnap) { s_pjPts.push_back({ *pSnap, 127 }); PjWritePoints(); }
-            }
-            else
-            {
-                int iErase = -1;
-                float flBest = g_psAssistSnap;
-                for (int i = 0; i < (int)s_pjPts.size(); i++)
-                    if (const float flDist = vHit.DistTo(s_pjPts[i].pos); flDist < flBest) { flBest = flDist; iErase = i; }
-                if (iErase >= 0) { s_pjPts.erase(s_pjPts.begin() + iErase); PjWritePoints(); }
-            }
-        }
-        s_pjSetHeld = bPjSet;
-        s_pjDelHeld = bPjDel;
-    }
-
     // ---- every active saved point inside its own radius, nearest first -------------------
     struct PsTarget_t { float dist; float rank; Vec3 pos; int mask; float engage; int idx; Vec3 n; bool hasN; };
     static constexpr int k_psMaxTargets = 8;   // == the slider's ceiling
@@ -2255,25 +2224,42 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     {
         std::lock_guard<std::mutex> l(g_psLock);
         s_psAssistActive = -1;
-        s_pjActive = -1;
-        if (bPjOn)
+        if (bPjOn && s_asJumpType == JT_NONE)   // a pending launch still needs a target to fire
         {
-            // heroin: the nearest saved point, 3D, and only if it is within 1000u. Own list (s_pjPts)
-            float flBest = 1000.f;
-            for (int i = 0; i < (int)s_pjPts.size(); i++)
+            // no points, ever: heroin's no-point mode (FUN_18007f710 local_2c8) on the wall
+            // pixelsurf_autoalign (FUN_180079d00) finds -- 16 x 22.5deg hull traces, vertical face
+            // only (n.z == 0). Its normal is the press, any pin on it the catch (bAnySeam).
+            // heroin reaches 1u and aligns the hull in first; we have no align, so reach further and
+            // let the sim's 25 u/s press decide whether the hull gets there. Nearest face wins
+            // ponytail: 16u reach is a guess at what the press closes in one arc; tune from PJ: logs
+            static constexpr float k_pjWallReach = 16.f;
+            const Vec3& vAt = s_prePredOrigin;
+            const Vec3 mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);
+            TraceFilterWorldOnly f; f.Setup();
+            float flBest = 2.f;
+            Vec3 vWallN;
+            for (int k = 0; k < 16; k++)
             {
-                const PsAssistPt& pt = s_pjPts[i];
-                const float flDist = vOrigin.DistTo(pt.pos);
-                if (flDist > flBest)
+                const float a = (float)k * (as::k_pi / 8.f);
+                GameTrace_t tr{};
+                TraceHull(vAt, Vec3(vAt.x + cosf(a) * k_pjWallReach, vAt.y + sinf(a) * k_pjWallReach, vAt.z),
+                          mins, maxs, MASK_PLAYERSOLID, &f, &tr);
+                if (tr.fraction >= 1.f || tr.startsolid || tr.plane.normal.z != 0.f || tr.fraction >= flBest)
                     continue;
-                flBest = flDist;
-                aTargets[0] = { flDist, flDist, pt.pos, 127, 1000.f, i, pt.normal, pt.hasNormal };
+                flBest = tr.fraction;
+                vWallN = Vec3(tr.plane.normal.x, tr.plane.normal.y, 0.f);
+            }
+            if (flBest < 2.f)
+            {
+                aTargets[0] = { flBest * k_pjWallReach, 0.f, vAt, 127, k_pjWallReach, -1, vWallN, true };
                 nTargets = 1;
             }
-            if (nTargets > 0)
-                s_pjActive = aTargets[0].idx;
         }
-        else if (bAssistOn)
+        // no wall next to us: pixeljump has nothing, the assist keeps its points (pixeljump on
+        // "always on" must not shut the assist off)
+        if (bPjOn && nTargets == 0 && On(g_psAssist, g_psAssistKey, g_psAssistMode))
+            bPjOn = false;
+        if (!bPjOn && bAssistOn)
         {
             const int nWant = g_psAssistMaxPoints < 1 ? 1
                             : (g_psAssistMaxPoints > k_psMaxTargets ? k_psMaxTargets
@@ -2325,7 +2311,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             vN.Normalize();
             t.n = vN; t.hasN = true;
             std::lock_guard<std::mutex> l(g_psLock);
-            std::vector<PsAssistPt>& list = bPjOn ? s_pjPts : s_psAssistPts;
+            std::vector<PsAssistPt>& list = s_psAssistPts;   // pixeljump's wall target always has n
             if (t.idx < (int)list.size())
             {
                 list[t.idx].normal = vN;
@@ -2461,7 +2447,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
 
     if (!bAssistOn || nTargets == 0)
     {
-        if (bAssistOn && g_psAssistJumpBox && s_asJumpType == JT_NONE && s_asPendingType == JT_NONE)
+        if (bAssistOn && !bPjOn && g_psAssistJumpBox && s_asJumpType == JT_NONE && s_asPendingType == JT_NONE)
         {
             static unsigned long long s_lastUnreachable = 0;
             if (const unsigned long long now = GetTickCount64(); now - s_lastUnreachable > 3000)
@@ -2622,7 +2608,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                     break;
                 aCands[k].res = PsSimHop(pLocal, pCmd, aCands[k].type, vTarget, flHullReachXY,
                                          aTargets[iT].hasN ? &aTargets[iT].n : nullptr,
-                                         bPjOn && g_pjUnsafe);
+                                         bPjOn && g_pjUnsafe, bPjOn && iTargetIdx < 0);
                 nSimmedCands++;
                 if (aCands[k].res.launchDelay >= 0 && aCands[k].res.apexGain > 0.f)
                     s_apexSeen[aCands[k].type] = aCands[k].res.apexGain;
@@ -2721,11 +2707,15 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             continue;       // this target had nothing; the next one may
 
         // ---- COMMIT ----------------------------------------------------------------------
-        { std::lock_guard<std::mutex> l(g_psLock); (bPjOn ? s_pjActive : s_psAssistActive) = iTargetIdx; }
+        if (!bPjOn) { std::lock_guard<std::mutex> l(g_psLock); s_psAssistActive = iTargetIdx; }
         s_asPromApex  = pPick->apexGain;
         s_asPromNeed  = vTarget.z - pPick->launchZ;
         s_asPromCatch = pPick->catchSince;
 
+        // no-point pixeljump: the seam IS where the sim pinned, so the hop / outcome / readout
+        // track that height instead of the origin the target was parked on
+        const Vec3 vHopTarget = (bPjOn && iTargetIdx < 0)
+                              ? Vec3(vOrigin.x, vOrigin.y, pPick->catchZ) : vTarget;
         const int iDelay = pPick->launchDelay;
         const bool bDash = PsIsDash(iPick);
         s_asUnsafeHop = bPjOn && g_pjUnsafe;
@@ -2750,10 +2740,10 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             s_psAssistDuckHeld = false;
             s_asJumpType = iPick;
             s_asHopTick = 0;
-            s_asHopTarget = vTarget;
+            s_asHopTarget = vHopTarget;
             s_asHopN = aTargets[iT].n;
             s_asHopHasN = aTargets[iT].hasN;
-            PsOutcomeBegin(vOrigin.z, vTarget, iPick, s_asPromApex, s_asPromNeed, s_asPromCatch);
+            PsOutcomeBegin(vOrigin.z, vHopTarget, iPick, s_asPromApex, s_asPromNeed, s_asPromCatch);
         }
         else
         {
@@ -2764,14 +2754,14 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             // cannot leave it armed forever
             s_asPendingType = iPick;
             s_asPendingTicks = iDelay + 8;
-            s_asPendingTarget = vTarget;
+            s_asPendingTarget = vHopTarget;
             s_asPendingN = aTargets[iT].n;
             s_asPendingHasN = aTargets[iT].hasN;
             s_asPendingIdx = iTargetIdx;
             s_asPendingLaunchZ = pPick->launchZ;
         }
-        if (g_psAssistJumpBox)
-            PsStampJumpBox(iPick, vTarget.z);
+        if (bPjOn ? g_pjReadout : g_psAssistJumpBox)
+            PsStampJumpBox(iPick, vHopTarget.z);
         break;              // this target owns the cmd -- never let a second one write buttons
     }
 
@@ -2816,10 +2806,6 @@ void PS_GetDrawData(PsDrawData& out)
         out.assistNormal[i] = pt.hasNormal ? pt.normal : Vec3();
     }
     out.assistActive = s_psAssistActive;
-    out.pjPts.resize(s_pjPts.size());
-    for (size_t i = 0; i < s_pjPts.size(); i++)
-        out.pjPts[i] = s_pjPts[i].pos;
-    out.pjActive = s_pjActive;
     out.lineActive = s_psFinderFirst && s_psFinderHeld;
     out.lineA = s_psFinderStart;
     out.lineB = s_psFinderEnd;

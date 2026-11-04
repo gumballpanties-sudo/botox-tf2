@@ -14,6 +14,10 @@ inline int  g_botNamesLength   = 8;
 inline bool g_botNamesNoPrefix = true;
 inline bool g_botNamesPing     = false;
 
+// lbox / Amalgam backpack expander: client GetMaxItemCount says 4000 (MAX_NUM_BACKPACK_SLOTS),
+// so the backpack draws every page. GC still owns the real slot count, nothing server side moves.
+inline bool g_backpackExpander = false;
+
 // custom names, fpsoverlay names.cpp 1:1 (hacks/misc/names.cpp; same cfg keys). Streamer mode
 // 0 off, 1 others as class, 2 team / enemy label, 3 one label -- never masks you. Cycle lists
 // (names.h NameList) + per-player aliases live in names.cpp's own cfg block. Trigger 0 timer

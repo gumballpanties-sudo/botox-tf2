@@ -249,13 +249,12 @@ void AB_GetDrawData(AbDrawData& out);
 // last wall tick: the face wc read, where the sent cmd takes you ( lands = over your jump floor ), on ground the spot scan
 struct WcDrawData
 {
-    bool valid = false, ground = false, lands = false, spotValid = false;
+    bool valid = false, ground = false, lands = false;
     unsigned long long ms = 0;   // GetTickCount64 of the publish: stale = wc stopped running
     const char* branch = "-";    // string literal
-    Vec3 wall{}, n{}, land{}, origin{}, spotBase{}, spotN{};
+    Vec3 wall{}, n{}, land{}, origin{};
     Vec3 path[17]{};
-    int pathN = 0, sims = 0, spotCount = 0, spotIdx = 0;
-    int spotScore[33]{};
+    int pathN = 0, sims = 0;
     float half = 24.f, height = 82.f, groundZ = 0.f;
 };
 void WC_GetDrawData(WcDrawData& out);
@@ -278,8 +277,6 @@ struct PsDrawData
     // scan's switch, not the finder's: a scan is minutes of work and its marks outlive the aim
     std::vector<Vec3> mapTbPts;
     int  assistActive = -1;        // assistPts index the assist works toward (-1 = none)
-    std::vector<Vec3> pjPts;       // pixeljump's own saved points (current map)
-    int  pjActive = -1;            // pjPts index pixeljump works toward (-1 = none)
     bool lineActive = false;       // finder scan column being stretched
     Vec3 lineA, lineB;
     Vec3 localOrigin;              // for the distance fade

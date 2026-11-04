@@ -20,9 +20,9 @@
 // apart with no depth-range test anywhere downstream.
 //
 //   c0  = zNear, zFar, tan(fovX/2), tan(fovY/2)
-//   c1  = prev tanX, prev tanY, viewmodel raw-depth cutoff, exposure (frames of travel)
+//   c1  = shutter-open tanX, tanY, viewmodel raw-depth cutoff, strength (plain gain)
 //   c2  = tap cap, max streak, tile size, frame noise
-//   c3..c5 = the reprojection: prev_view^T * cur_view, the eye's own step in .w
+//   c3..c5 = the shutter window reprojection: open_view^T * cur_view, the eye's own step in .w
 //   c6  = width, height, 1/width, 1/height
 //   c8  = depth scale, the gun's fence, player count, gun run
 //   c9..c11 = view space -> world space (the camera's axes as columns, the eye in .w)
@@ -181,9 +181,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     // A SOFT KNEE, NOT min(). Every streak past the cap coming back exactly the cap long draws
     // a visible straight edge across the smear where a whole fast object stops on one line.
-    // Linear to half the cap, bending into it after, value and slope both continuous.
+    // Linear to 75% of the cap (real footage is linear), then an exp knee into it, value and
+    // slope both continuous (botox).
     float mx = max(c2.y, 1e-3);
-    float n  = (h < 0.5 * mx) ? h : (mx - 0.25 * mx * mx / max(h, 1e-3));
+    float h0 = 0.75 * mx;
+    float n  = (h < h0) ? h : (mx - (mx - h0) * exp(-(h - h0) / (mx - h0)));
 
     // and the sub-pixel end is a ramp: 0.99px sitting dead next to a 1.01px neighbour at full
     // length draws the START of the blur as a line the same way

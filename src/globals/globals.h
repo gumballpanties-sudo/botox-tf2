@@ -88,8 +88,8 @@ extern ImFont* g_fontCucumberTahoma14;   // tahoma 14  NoHinting
 extern ImFont* g_fontCucumberVerdana14;  // verdana 14  NoHinting (cucumber measures the user with it)
 extern ImFont* g_fontHowewewareMinecraft14; // minecraft ttf 14  NoHinting
 extern ImFont* g_fontGamesenseSfBold15;  // sf_pro_display_bold 15  Bitmap (drawn at 13)
-extern ImFont* g_fontHeroinArialBd16;    // arialbd 16  LightHinting (heroin watermark + music display)
-extern ImFont* g_fontHeroinProggy13;     // ImGui ProggyClean 13  LightHinting (heroin speclist regular)
+extern ImFont* g_fontHeroinArialBd16;    // arialbd 16  LightHinting (heroin music display)
+extern ImFont* g_fontHeroinProggy13;     // ImGui ProggyClean 13  LightHinting (heroin menu + watermark + speclist regular)
 extern ImFont* g_fontHeroinTahoma16;     // tahoma 16  Monochrome|MonoHinting (heroin interwebz title)
 extern ImFont* g_fontHeroinTahomaBd14;   // tahoma bd 14  Monochrome|MonoHinting (heroin interwebz rows)
 extern ImFont* g_fontHeroinTahoma14;     // tahoma 14  Monochrome|MonoHinting (heroin legacy list)
@@ -647,6 +647,7 @@ extern bool g_edgeBug;     extern int g_edgeBugKey;     extern int g_edgeBugMode
 extern float g_edgeBugPredictTime;   // search window seconds (def 0.35, 0.02-2)
 extern int   g_edgeBugDetectMode;    // 0 normal / 1 enhanced / 2 ebanat
 extern bool  g_edgeBugToEdge;        // autostrafe to edge = the search's autostrafe switch
+extern bool  g_edgeBugPlayers;       // allow bugs off enemy players
 extern float g_edgeBugStrafeAngleMax; // max path bend off course (def 180 = off)
 extern bool  g_edgeBugMouseSteer;    // re-plan + pick between paths by where the mouse turns
 extern int   g_edgeBugPaths;         // plans kept per search when steering (1-4)
@@ -686,7 +687,6 @@ extern float g_tbPredictReach;     // sideways reach of the predicted-path scan 
 extern bool g_wallClimb;   extern int g_wallClimbKey;   extern int g_wallClimbMode;
 extern bool g_wcPreventSlow;   // botox m_wall_climb_prevent_slow: no catch that halves xy > 200
 extern bool g_wcDuck;          // botox m_wall_climb_duck: crouch catches (other stance tried)
-extern int  g_wcSpotReach;     // botox m_wall_climb_spot_reach: ground spot scan along the wall, u (0-32)
 extern bool g_wcViz;           // botox m_wall_climb_visualize
 extern float g_wcVizColor[4];
 extern bool g_airStuck;    extern int g_airStuckKey;    extern int g_airStuckMode;
@@ -808,12 +808,11 @@ extern float g_psAssistReuseDelay; // seconds a surf you just rode is planned LA
 // g_psAssistSteer (steer lock) deleted -- the last viewangle read in the assist
 extern bool g_psAssistRender;      // draw finder/assist points on the world
 extern bool g_psAssistJumpBox;     // "minijump to <z>" popup after an assist jump
-// heroin pixeljump (FUN_18007f710): own key, runs on the ps assist points + sim (psassist.inl)
+// heroin pixeljump (FUN_18007f710), no-point mode only: nearest wall + ps assist sim (psassist.inl)
 extern bool g_pixelJump;  extern int g_pixelJumpKey;  extern int g_pixelJumpMode;
-extern bool g_pjUnsafe;            // "unsafe pixeljump": seam z within 200u 2D, no pin proof
+extern bool g_pjUnsafe;            // "unsafe pixeljump": any pin catches, no moved proof
 extern bool g_pjCrouch;            // "pixeljump crouch": jump + lj again, duck from descent
-extern int  g_pjSetPointKey, g_pjDeletePointKey;   // pixeljump's own points (<map>.pj.txt)
-extern bool g_pjRender;            // draw pixeljump points
+extern bool g_pjReadout;           // "<launch> to surf at <z>" popup on a pixeljump
 // ---- uneven ground ----
 extern bool  g_psGroundHelp;       // grounded: silently steer your own move at the target you are
                                    // planning for, so walking up to a seam lands you under it

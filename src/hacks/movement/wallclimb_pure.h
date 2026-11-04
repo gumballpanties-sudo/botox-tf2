@@ -1,116 +1,78 @@
 #pragma once
-// wall climb pure half (botox wall_climb.cpp anon namespace): constants + the wish / yaw math. No engine types:
-// Cmd = anything with viewangles.{x,y,z} / forwardmove / sidemove, V = anything with .x .y .z. Used by wallclimb.inl,
-// gate-tested by tests/wallclimb_test.cpp
+// wall climb pure half: constants + the hop state machine. No engine types, gate-tested by tests/wallclimb_test.cpp.
+//
+// A climb is ground -> hop -> one-tick sweep that grounds the hull flush on a displacement seam -> hop again.
+// The sweep lives in wallclimb.inl (engine sims). What can be tested cold is here: the armed hop (an air win marks
+// the ground tick it bought, the launch fires on the REAL grounded tick, a refused press is released for one tick
+// so m_nOldButtons clears) and the prevent-slow test.
 #include <cmath>
-#include <vector>
 
 namespace wc
 {
-    constexpr float k_contact      = 0.05f;
-    constexpr float k_pin_reach    = 1.f;
-    constexpr float k_wall_nz      = 0.35f;
-    constexpr float k_hull_step    = 0.03125f;
-    constexpr float k_fine_lo      = 5e-4f; /* ladder rungs in F = the wish that moves the hull 1/32u in one tick */
-    constexpr float k_fine_hi      = 0.05f;
-    constexpr float k_fine_ratio   = 1.3f;
-    constexpr float k_away_lo      = 3e-3f; /* away rungs from here: smaller ones move the hull under 1 float */
-    constexpr float k_coarse[]     = { 0.1f, 0.2f, 0.4f, 0.84f, 1.2f, 2.f };
-    constexpr float k_along_fwd[]  = { 5.f, 30.f, 0.875f, 15.f };
-    constexpr float k_along_off[]  = { 85.999f, 86.999f, 87.999f }; /* 111 antoha offsets, side opposite velocity's tangent */
-    constexpr float k_rise_vz      = 260.f; /* CTF CategorizePosition never grounds zvel > 250 */
-    constexpr int   k_hold_ticks   = 8;
-    constexpr int   k_pin_tries    = 3;
-    constexpr int   k_exit_look    = 3;
-    constexpr float k_keys_ulp     = 1.3e-4f;
-    constexpr float k_park_keep    = 2.f; /* park ends this much slower in xy than your keys = your keys ( lab P42 ) */
-    constexpr float k_land_above   = 2.f;
-    constexpr float k_low_ledge    = 10.f; /* a land this far under your jump floor = a ledge you fall past, not a climb */
-    constexpr int   k_reserve_sims = 24;
-    constexpr int   k_commit_sims  = 3;
-    constexpr float k_time_share   = 0.6f;
-    constexpr float k_slow_xy      = 200.f;
-    constexpr float k_slow_ratio   = 0.5f;
-    constexpr float k_pin_sign_xy  = 5.f;
-    constexpr float k_jump_share   = 0.8f; /* jump must reach 80% of ideal vz */
-    constexpr float k_jump_impulse = 289.f;
-    constexpr int   k_back_steps   = 16;
-    constexpr float k_seam_off     = 0.03125f;
-    constexpr float k_seam_below   = 64.f;
-    constexpr float k_seam_floor   = 2.f;
-    constexpr float k_leave_cos    = 0.5f;
-    constexpr int   k_robust_parks = 3; /* lab P62 */
-    constexpr float k_robust_vel   = 0.002f;
-    constexpr float k_snag_along   = 2.f;   /* lab P69: along wall speed a seam snag is judged on */
-    constexpr float k_snag_keep    = 0.25f; /* a sim that ends under this share of it snagged */
-    constexpr float k_spot_step    = 2.f;
-    constexpr float k_spot_rise    = 10.f;
-    constexpr int   k_spot_ticks   = 64;
-    constexpr int   k_spot_tick_sims = 20;
-    constexpr float k_spot_snap    = 0.25f;
-    constexpr float k_spot_look    = 4.f; /* ticks of along speed counted when walking to the spot */
-    constexpr float k_spot_along[] = { 0.f, 10.f, -10.f, 25.f, -25.f, 60.f, -60.f, 150.f, -150.f, 250.f, -250.f };
-    constexpr int   k_viz_ticks    = 16;
+    constexpr float k_scan_nz        = 0.65f; /* disp walls are bumpy: facets read up to ~0.7 below standable */
+    constexpr float k_scan_reach     = 16.f;  /* detect out to here (2u threw away 43% of the air ticks) */
+    constexpr float k_engage_support = 8.f;   /* hull face -> disp face, live, before any sim: commit range */
+    constexpr float k_land_support   = 2.f;   /* post-sim: grounded ON the face, not near it */
+    constexpr float k_min_input      = 0.01f; /* hands off the keys = hands off the cmd */
+    constexpr float k_rise_vz        = 250.f; /* CTFGameMovement::CategorizePosition never grounds vz > 250 (tf_gamemovement.cpp:2358) */
+    constexpr int   k_jump_pending   = 4;     /* ticks an air win stays armed waiting for its ground tick */
+    constexpr int   k_engage_ticks   = 8;     /* "a face recently": the jump-bit unlatch needs a wall */
+    constexpr float k_time_share     = 0.6f;  /* of one tick, wall clock, on top of the shared sim pool */
+    constexpr float k_slow_xy        = 200.f; /* prevent slow: no win that halves xy above this */
+    constexpr float k_slow_ratio     = 0.5f;
+    constexpr int   k_viz_ticks      = 16;
+    /* the three fwd values one simulated tick can tell apart: 450 spends the whole air addspeed cap, 30 is the cap, 5 is a
+       crawl. The duck is the axis that really moves the hull (airborne Duck() finishes the same tick = 20u origin lift) */
+    constexpr float k_forward[]      = { 450.f, 30.f, 5.f };
+    constexpr float k_offset_step    = 5.f;
+    constexpr float k_offset_max     = 45.f;  /* exclusive: 0, 5 .. 40 = 9 yaws */
 
-    inline float Rad(const float deg) { return deg * 0.017453292519943295f; }
+    inline bool Slowed(const float old_xy, const float new_xy)
+    {
+        return old_xy > k_slow_xy && new_xy / old_xy < k_slow_ratio;
+    }
 
-    enum e_count {
-        c_land, c_flip, c_pin_catch, c_hold, c_park, c_keys, c_along, c_own, c_leave, c_aa_leave, c_exit, c_exit_none, c_far, c_rise,
-        c_scan_cut, c_cut, c_yield, c_ramp, c_skip, c_jump_back, c_jump_strip, c_as_take, c_pin_miss, c_no_park,
-        c_park_keep, c_away, c_robust, c_spot, c_spot_sims, c_hold_land, c_low, c_leave_hang, c_seam, c_seam_park, c_pin_flip,
-        c_tb_drop, c_div, c_spot_path, c_spot_floor, c_ticks, c_sims, c_max
+    // yaw sweep sign: skew the into-wall wish against the side the velocity comes from
+    inline float SweepSign(const float relative_yaw) { return relative_yaw >= 0.f ? -1.f : 1.f; }
+
+    enum e_hop { hop_none, hop_release, hop_press };
+
+    struct Hop
+    {
+        int  pending   = 0;     /* ticks left on an armed hop (air win -> ground press) */
+        bool jumpedLast = false; /* pressed last tick and STILL grounded = engine refused */
+
+        void Arm() { pending = k_jump_pending; }
+        void Reset() { pending = 0; jumpedLast = false; }
+
+        // every tick, before any yield: returns true when the armed hop's ground tick arrived
+        bool Clock(const bool ground_pre)
+        {
+            if (pending <= 0)
+                return false;
+            --pending;
+            if (!ground_pre)
+                return false;
+            pending = 0;
+            return true;
+        }
+
+        // grounded tick: what to do with IN_JUMP. raw_jump = the real space bar (wc never jumps on its own),
+        // prev_jump = last cmd went out with IN_JUMP (m_nOldButtons has it = a press now is refused as a pogo)
+        e_hop Launch(const bool armed, const bool raw_jump, const bool prev_jump)
+        {
+            if (!armed || !raw_jump) { jumpedLast = false; return hop_none; }
+            if (jumpedLast || prev_jump) { jumpedLast = false; return hop_release; }
+            jumpedLast = true;
+            return hop_press;
+        }
     };
 
-    inline const std::vector<float>& FineRungs()
+    // airborne: strip a held IN_JUMP so the landing tick's press is not refused. Only beside a face wc has engaged, never
+    // on the tick the ground is left / regained (ej / lj / mj own those), never while another feature wants the bit
+    inline bool Unlatch(const bool ground_pre, const bool ground_post, const bool raw_jump, const bool engaged, const bool other_wants_jump)
     {
-        static const std::vector<float> v = [] {
-            std::vector<float> r{ 0.f };
-            for (float m = k_fine_lo; m <= k_fine_hi; m *= k_fine_ratio)
-                r.push_back(m);
-            return r;
-        }();
-        return v;
+        const bool left = ground_pre && !ground_post, landing = !ground_pre && ground_post;
+        return !ground_pre && !left && !landing && raw_jump && engaged && !other_wants_jump;
     }
-
-    template <class Cmd, class V>
-    inline bool WishLeavesWall(const Cmd& c, const V& n)
-    {
-        const float p = Rad(c.viewangles.x), y = Rad(c.viewangles.y), r = Rad(c.viewangles.z);
-        const float sp = sinf(p), cp = cosf(p), sy = sinf(y), cy = cosf(y), sr = sinf(r), cr = cosf(r);
-        float fx = cp * cy, fy = cp * sy, rx = -sr * sp * cy + cr * sy, ry = -sr * sp * sy - cr * cy;
-        if (const float l = sqrtf(fx * fx + fy * fy); l > 0.f)
-            fx /= l, fy /= l;
-        if (const float l = sqrtf(rx * rx + ry * ry); l > 0.f)
-            rx /= l, ry /= l;
-        const float wx = fx * c.forwardmove + rx * c.sidemove;
-        const float wy = fy * c.forwardmove + ry * c.sidemove;
-        const float l  = sqrtf(wx * wx + wy * wy);
-        return l > 0.f && (wx * n.x + wy * n.y) > k_leave_cos * l;
-    }
-
-    template <class V>
-    inline float FaceD(const V& o, const V& n) { return o.x * n.x + o.y * n.y + o.z * n.z; }
-
-    inline void WorldWish(const float yaw, const float f, const float s, float& x, float& y)
-    {
-        const float a = Rad(yaw);
-        x = f * cosf(a) + s * sinf(a);
-        y = f * sinf(a) - s * cosf(a);
-    }
-
-    // botox n_tb::move_fix_to_yaw: fwd/side meant at world yaw, rotated onto the cmd's view yaw. never strips buttons
-    template <class Cmd>
-    inline void MoveFixToYaw(const float yaw, Cmd& c)
-    {
-        const float y = yaw >= 0.f ? yaw : yaw + 360.f;
-        const float v = c.viewangles.y >= 0.f ? c.viewangles.y : c.viewangles.y + 360.f;
-        float d       = y <= v ? 360.f - fabsf(y - v) : fabsf(v - y);
-        d             = 360.f - d;
-        const float f = c.forwardmove, s = c.sidemove;
-        c.forwardmove = cosf(Rad(d)) * f + cosf(Rad(d + 90.f)) * s;
-        c.sidemove    = sinf(Rad(d)) * f + sinf(Rad(d + 90.f)) * s;
-    }
-
-    inline float AtIdx(const int i) { return (i & 1 ? 1.f : -1.f) * k_spot_step * static_cast<float>((i + 1) / 2); }
 }
-

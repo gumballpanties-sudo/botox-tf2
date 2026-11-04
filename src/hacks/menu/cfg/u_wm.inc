@@ -8,6 +8,7 @@
     { "wmHavocColor",        CfgEntry::FLOAT4, g_wmHavocColor, 0 },
     { "wmInteriumBg",        CfgEntry::FLOAT4, g_wmInteriumBg, 0 },
     { "wmGsGameColor",       CfgEntry::FLOAT4, g_wmGsGameColor, 0 },
+    { "wmLobotomyTitleColor", CfgEntry::FLOAT4, g_wmLobotomyTitleColor, 0 },
     { "wmGsSenseColor",      CfgEntry::FLOAT4, g_wmGsSenseColor, 0 },
     { "wmGsBar",             CfgEntry::BOOL,   &g_wmGsBar, 0 },
     { "wmGsX",               CfgEntry::FLOAT,  &g_wmGsX, 0 },

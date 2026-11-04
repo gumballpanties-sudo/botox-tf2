@@ -218,6 +218,18 @@ bool __fastcall h_GetPlayerInfo(void* self, int ent, void* pinfo)
     return ok;
 }
 
+// CTFPlayerInventory::GetMaxItemCount (tf_item_inventory.cpp). Amalgam sig; body opens
+// mov ebx, 300 = DEFAULT_NUM_BACKPACK_SLOTS. 4000 = MAX_NUM_BACKPACK_SLOTS, the backpack
+// panel's page-count ceiling (BACKPACK_MAX_PAGES).
+using GetMaxItemCount_t = int(__fastcall*)(void*);
+GetMaxItemCount_t o_GetMaxItemCount = nullptr;
+
+int __fastcall h_GetMaxItemCount(void* self)
+{
+    if (g_backpackExpander && !g_eject) return 4000;
+    return o_GetMaxItemCount(self);
+}
+
 // The engine's own answer, never ours (chat names, bot detection for the ping writes).
 __declspec(noinline) bool RawPlayerInfo(int ent, uint8_t* out)
 {
@@ -626,6 +638,8 @@ bool s_wasInGame = false;
 // ==== public ========================================================================
 void GameExtras_Install()
 {
+    InstallPatternHook(GetModuleHandleA("client.dll"), "backpack expander: GetMaxItemCount",
+                       "40 53 48 83 EC ? 48 8B 89 ? ? ? ? BB", (void*)h_GetMaxItemCount, (void**)&o_GetMaxItemCount);
     if (o_GetPlayerInfo || !g_engine) return;
     InstallVTableHook(g_engine, 8, "bot names: GetPlayerInfo", (void*)h_GetPlayerInfo, (void**)&o_GetPlayerInfo);
 }

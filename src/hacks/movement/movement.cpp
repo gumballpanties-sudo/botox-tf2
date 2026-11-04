@@ -85,6 +85,7 @@ struct TraceFilterWorldProps
     void** vfptr;
     void*  pSkip;
     int    nSkipTeam;   // local player's team -- brushes on it are not solid to us
+    bool   bEnemies = false;   // opt-in: hit enemy players (solid to our movement, teammates are not)
 
     static bool __fastcall sShouldHit(TraceFilterWorldProps* self, void* pEnt, int /*mask*/)
     {
@@ -96,8 +97,8 @@ struct TraceFilterWorldProps
         } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         if ((h >> 16) == (1u << 15)) return true;           // static prop
         int idx = (int)(h & 0xFFFF);                        // ENT_ENTRY_MASK (16 bit)
-        if (idx >= 1 && idx <= 64 && GetClientEntity(idx) == pEnt)
-            return false;                                   // player slot -> skip
+        if (idx >= 1 && idx <= 64 && GetClientEntity(idx) == pEnt && !self->bEnemies)
+            return false;                                   // player slot -> skip (bEnemies: team rule below)
         if (g_offSolidFlags > 0)                            // pass-through trigger volumes
         {
             __try {
@@ -142,6 +143,7 @@ struct TraceFilterWorldProps
         vfptr = vt;
         pSkip = skip;
         nSkipTeam = 0;
+        bEnemies = false;
         if (skip && g_offTeamNum > 0)
         {
             __try { nSkipTeam = *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(skip) + g_offTeamNum); }
@@ -1597,6 +1599,27 @@ static void MiniJump(void* pLocal, UserCmd_t* pCmd)
         pCmd->buttons |= IN_DUCK;
 }
 
+// RIDE ENDS, LAND, MJ = A PLAIN JUMP. The surf duck lets go on the landing tick (PSU ground drop),
+// that release arms m_flDuckTimer (OnUnDuck, +0.3s) and DuckOverrides strips the grounded takeoff
+// duck until it runs out -- same for any duck < 0.3s before a mj takeoff. Nothing beats the timer,
+// so the jump waits it out (<= 0.3s) and the takeoff comes out mini. Pre-prediction: the cmd is
+// simulated as sent. While FL_DUCKING CheckJumpButton refuses the jump anyway, so that part of the
+// wait is free, and the strip is the release a held space needs to fire again.
+// After DelayHop, before AutoGoomba (its press is the last word). EdgeJump's post-pred press can't
+// wait (the lip is now), so it still goes out plain and MiniJump logs it
+static void MiniJumpWaitTimer(void* pLocal, UserCmd_t* pCmd)
+{
+    if (!(pCmd->buttons & IN_JUMP) || !On(g_miniJump, g_miniJumpKey, g_miniJumpMode)
+        || g_offFlags <= 0 || g_offDuckTimer <= 0 || g_offTickBase <= 0)
+        return;
+    if (!(EntI(pLocal, g_offFlags) & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK)
+        return;
+    // the curtime this cmd runs at; one tick of margin so a tickbase off-by-one waits, never strips
+    const float flNow = EntI(pLocal, g_offTickBase) * TickInterval();
+    if (EntF(pLocal, g_offDuckTimer) > flNow - TickInterval())
+        pCmd->buttons &= ~IN_JUMP;
+}
+
 // Fast stop / fast accelerate (Aletherium FastMovement; duck speed + kart +
 // doubletap/antiaim gates dropped).
 static void FastMovement(void* pLocal, UserCmd_t* pCmd)
@@ -1988,8 +2011,8 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
 // ---- Air stuck: botox air_stuck.cpp 1:1 (airstuck.inl) ----
 #include "airstuck.inl"
 
-// ---- Wall climb: botox wall_climb.cpp 1:1 (wallclimb.inl). After airstuck.inl: it takes the cmd from AS on a
-// catch (s_asStamp* / AsClock / AsSetOrigin live there)
+// ---- Wall climb: the pre-port disp sweep + armed hop (wallclimb.inl). After airstuck.inl: AsClock lives there and
+// wc yields to AS's pins
 #include "wallclimb.inl"
 
 // the whole pixel finder + pixel surf assist moved OUT of movement.cpp into
@@ -2072,7 +2095,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     // publishes, so a blocked cmd has to reach it even when nothing is measuring
     const bool bCalcOn = g_routeCalc || g_pixelCalc || g_psFinder || s_pfBusy || s_rcBusy
                       || s_pmBusy || s_pmReq || g_psMapLines
-                      || (g_psAssist && g_psAssistRender) || (g_pixelJump && g_pjRender);
+                      || (g_psAssist && g_psAssistRender);
     if (bMoveBlocked && !bCalcOn) return;
 
     RefreshTargetPredictZVel();  // once per cmd -- IsTargetVz in sweep loops reads cache
@@ -2109,6 +2132,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         Nulls(pLocal, pCmd);
         Hsw(pLocal, pCmd);
         DelayHop(pLocal, pCmd);
+        MiniJumpWaitTimer(pLocal, pCmd);
         AutoGoomba(pLocal, pCmd);   // after the jump owners: its press/release is the last word
         AutoCrouch(pLocal, pCmd);
         DoubleJumpStrafe(pLocal, pCmd);   // after AutoStrafe: owns the wish on the dash tick

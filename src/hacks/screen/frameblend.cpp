@@ -101,8 +101,15 @@ struct FbFrame
     float zNearVm = 1.f;
     float zFarVm  = 1000.f;
 
-    // rows of prev_view^T * cur_view, the eye's own movement in .w
+    // rows of prev_view^T * cur_view, the eye's own movement in .w -- pass six (trail) only
     float reproj[3][4] = {};
+
+    // botox shutter window: the camera at shutter open -> now, read off the sample ring. What
+    // the velocity pass streaks -- frame blending averages the REAL frames inside the shutter,
+    // so this is the path the camera took, not one frame's step stretched to the shutter
+    float windowReproj[3][4] = {};
+    float windowFov  = 90.f;
+    float windowSpan = 0.f;
 
     // the camera's axes as columns with the eye in .w: what puts a view-space point back into
     // the world, which is the only way to ask which player's box it is inside
@@ -112,7 +119,7 @@ struct FbFrame
     float basis[3][3] = {};
     float origin[3]   = {};
 
-    // how many frames of travel the shutter stays open for: shutter / frametime
+    // the world's strength: a plain gain, 1 = what a real shutter saw (the window already spans it)
     float exposure = 0.f;
 
     // the same for the gun, uncapped by the world's amount -- its transforms are RUN for the
@@ -154,9 +161,8 @@ static float s_playerPose[k_playerSlots][3] = {};
 
 static std::atomic<int> s_frameId{ 0 };
 
-// the view angles over the last half second, for the sway model (main thread only)
+// the camera over the last half second, for the sway model and the shutter window (main thread only)
 static fbm::SwayHistory s_sway;
-static double           s_swayBase = 0.0;   // float time loses ms precision past a day of uptime
 
 // ---- device objects ----------------------------------------------------------------------
 enum FbShader { FB_VELOCITY = 0, FB_TILE_H, FB_TILE_V, FB_NEIGHBOUR, FB_GATHER, FB_TRAIL, FB_SHADER_MAX };
@@ -233,7 +239,10 @@ __declspec(noinline) static bool FbReadOrigin(const void* ent, float out[3])
 // TURN is deliberately not in it either -- his legs follow the animation state's feet yaw and
 // his chest follows his eyes, so there is no one rotation that describes what the mesh did, and
 // feeding either in draws a streak through a man standing still flicking his mouse.
-static void FbCollectPlayers(FbFrame& f, const float basis[3][3], const float origin[3])
+//
+// then* = the camera at shutter open, travelScale = shutter span / this frame's elapsed.
+static void FbCollectPlayers(FbFrame& f, const float basis[3][3], const float origin[3],
+                             const float thenBasis[3][3], const float thenOrigin[3], float travelScale)
 {
     fbm::ViewToWorld(basis, origin, f.viewToWorld);
 
@@ -284,14 +293,15 @@ static void FbCollectPlayers(FbFrame& f, const float basis[3][3], const float or
         // equal to the camera's -- which is exactly what a wall gets. No dormancy test needed.
         Entry& e = entries[total++];
 
-        // the eye's own step, less his: what the camera would have written, minus where he took
-        // himself. A player standing still leaves this equal to the camera's reprojection, which
-        // is the check that the two agree.
-        const float shift[3] = { origin[0] - s_prevOrigin[0] - travel[0],
-                                 origin[1] - s_prevOrigin[1] - travel[1],
-                                 origin[2] - s_prevOrigin[2] - travel[2] };
+        // the eye's own step over the shutter window, less his: what the camera would have
+        // written, minus where he took himself. A player standing still leaves this equal to the
+        // camera's window reprojection, which is the check that the two agree. Players are
+        // interpolated = smooth, so one frame of travel stretched to the window is his path.
+        const float shift[3] = { origin[0] - thenOrigin[0] - travel[0] * travelScale,
+                                 origin[1] - thenOrigin[1] - travel[1] * travelScale,
+                                 origin[2] - thenOrigin[2] - travel[2] * travelScale };
 
-        fbm::Reprojection(s_prevBasis, basis, shift, e.rows);
+        fbm::Reprojection(thenBasis, basis, shift, e.rows);
 
         for (int a = 0; a < 3; ++a) {
             e.box[0][a] = where[a] + k_hullMins[a] + ((a == 2) ? k_playerFloor : -k_playerMargin);
@@ -364,9 +374,28 @@ void FrameBlend_UpdateView(const float origin[3], const float angles[3],
 
     const double elapsed = s_havePrev ? (now - s_prevTime) : 0.0;
 
-    // sampled every frame, valid or not: the lag model looks back a tenth of a second
-    if (s_sway.filled == 0) s_swayBase = now;
-    s_sway.Sample(angles, (float)(now - s_swayBase));
+    // sampled every frame, valid or not: the lag model looks back a tenth of a second, the
+    // shutter window up to 60 ms
+    s_sway.Sample(angles, origin, fov, now);
+
+    const float shutter = ((g_fbShutter < 0.f) ? 0.f : (g_fbShutter > 60.f ? 60.f : g_fbShutter)) * 0.001f;
+
+    // botox shutter window: the streak runs from the camera at shutter open to now, read off the
+    // ring -- not last frame's step x shutter/elapsed, which extrapolates one noisy mouse delta
+    // and pops with every frametime swing
+    float thenBasis[3][3];
+    float thenOrigin[3] = { origin[0], origin[1], origin[2] };
+    float thenFov       = fov;
+    float windowSpan    = 0.f;
+    memcpy(thenBasis, basis, sizeof(basis));
+    {
+        float thenAngles[3];
+        const double reached = s_sway.CameraAt(now - shutter, thenAngles, thenOrigin, thenFov);
+        if (reached >= 0.0) {
+            windowSpan = (float)((now - reached > 0.0) ? now - reached : 0.0);
+            fbm::Basis(thenAngles, thenBasis);
+        }
+    }
 
     const float step[3] = { origin[0] - s_prevOrigin[0],
                             origin[1] - s_prevOrigin[1],
@@ -382,7 +411,10 @@ void FrameBlend_UpdateView(const float origin[3], const float angles[3],
     // THIS RUNS ON AN INVALID FRAME TOO: it is the frame that WRITES the poses the next one
     // measures against, and it needs the camera as it is here and as it was last time -- so it
     // goes before either is overwritten at the bottom.
-    FbCollectPlayers(f, basis, origin);
+    float travelScale = (elapsed > 0.0) ? (float)(windowSpan / elapsed) : 0.f;
+    if (travelScale > 8.f) travelScale = 8.f;
+
+    FbCollectPlayers(f, basis, origin, thenBasis, thenOrigin, travelScale);
 
     if (f.valid)
     {
@@ -391,15 +423,19 @@ void FrameBlend_UpdateView(const float origin[3], const float angles[3],
         // prev_view^T * cur_view, and prev_view^T * (eye_now - eye_then) in the fourth column
         fbm::Reprojection(s_prevBasis, basis, step, f.reproj);
 
-        // THE SHUTTER, and why it is divided by the frametime: the reprojection measures how far
-        // a point moved in ONE frame, and an exposure is a length of TIME. Eight frames of
-        // travel is the stop -- past that one frame of colour is being stretched over more
-        // screen than it has detail for.
-        const float shutter = ((g_fbShutter < 0.f) ? 0.f : (g_fbShutter > 60.f ? 60.f : g_fbShutter)) * 0.001f;
-        const float frames  = (float)(shutter / elapsed);
-        const float capped  = (frames > 8.f) ? 8.f : frames;
+        // and the same from shutter open, which is what the velocity pass streaks
+        const float windowStep[3] = { origin[0] - thenOrigin[0], origin[1] - thenOrigin[1], origin[2] - thenOrigin[2] };
+        fbm::Reprojection(thenBasis, basis, windowStep, f.windowReproj);
+        f.windowFov  = thenFov;
+        f.windowSpan = windowSpan;
 
-        f.exposure    = ((g_fbAmount < 0.f) ? 0.f : g_fbAmount) * capped;
+        // the window already spans the shutter: the world's strength is a plain gain. The gun's
+        // transforms are still RUN for shutter / frametime (fbbones.h), eight frames the stop --
+        // past that one frame of colour is stretched over more screen than it has detail for.
+        const float frames = (float)(shutter / elapsed);
+        const float capped = (frames > 8.f) ? 8.f : frames;
+
+        f.exposure    = (g_fbAmount < 0.f) ? 0.f : g_fbAmount;
         f.gunExposure = capped;
 
         // botox player trail: history time constant off the shutter
@@ -415,7 +451,7 @@ void FrameBlend_UpdateView(const float origin[3], const float angles[3],
             const float interp = (ci && ci->GetFloat() > 0.f) ? ci->GetFloat() : 0.1f;
             const float scale  = (ci && ci->GetFloat() > 0.f && cs) ? cs->GetFloat() : 5.f;
             float vel[3];
-            if (fbm::SwayVelocity(s_sway, (float)(now - s_swayBase), interp, scale, vel))
+            if (fbm::SwayVelocity(s_sway, now, interp, scale, vel))
                 fbm::SwayShift(vel, shutter, g_fbVmSway, g_fbVmAmount, f.swayShift);
         }
     }
@@ -888,6 +924,10 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     const float prevTanX  = tanf(prevClamp * 0.5f * 3.14159265f / 180.f);
     const float prevTanY  = prevTanX / aspect;
 
+    const float winClamp = (f.windowFov < 1.f) ? 1.f : (f.windowFov > 170.f ? 170.f : f.windowFov);
+    const float winTanX  = tanf(winClamp * 0.5f * 3.14159265f / 180.f);
+    const float winTanY  = winTanX / aspect;
+
     const float vmClamp = (f.fovVm < 1.f) ? 1.f : (f.fovVm > 170.f ? 170.f : f.fovVm);
     const float vmTanX  = tanf(vmClamp * 0.5f * 3.14159265f / 180.f);
     const float vmTanY  = vmTanX / aspect;
@@ -901,9 +941,11 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     // AND THE STREAK IS CAPPED TO WHAT THE TAPS CAN FILL. The gather asks for one sample per
     // pixel of streak and then clamps that count, so a streak past the count is walked with the
     // SAME number of samples spread further apart -- and a smear whose taps stand five pixels
-    // apart is not a smear, it is that many separate copies of the thing.
+    // apart is not a smear, it is that many separate copies of the thing. taps x2 (botox) = at
+    // most 2 px between jittered taps; a cap of taps flattened every flick to the same 32 px at
+    // default samples, and real footage keeps streak length proportional to speed.
     float maxLength = ((g_fbMaxStreak < 0.f) ? 0.f : g_fbMaxStreak) * height;
-    const float lengthCeiling = (ceilingPx < (float)taps) ? ceilingPx : (float)taps;
+    const float lengthCeiling = (ceilingPx < (float)(taps * 2)) ? ceilingPx : (float)(taps * 2);
     if (maxLength < 4.f) maxLength = 4.f;
     if (maxLength > lengthCeiling) maxLength = lengthCeiling;
 
@@ -914,8 +956,10 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     block[0][2] = tanX;
     block[0][3] = tanY;
 
-    block[1][0] = prevTanX;
-    block[1][1] = prevTanY;
+    // velocity pass: the shutter window. Swapped to last frame before pass six, which reads one
+    // frame of history
+    block[1][0] = winTanX;
+    block[1][1] = winTanY;
     block[1][2] = 0.1f;             // the raw depth range the engine squeezes the gun into
     block[1][3] = f.exposure;
 
@@ -925,7 +969,7 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     // the noise walks with the frame so two frames' taps do not land on top of each other
     block[2][3] = (float)(f.frame & 63);
 
-    for (int r = 0; r < 3; ++r) memcpy(block[3 + r], f.reproj[r], sizeof(float) * 4);
+    for (int r = 0; r < 3; ++r) memcpy(block[3 + r], f.windowReproj[r], sizeof(float) * 4);
 
     block[6][0] = width;
     block[6][1] = height;
@@ -984,7 +1028,7 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     if (gunPass && boneCount <= 0) blur = false;
     if (!blur && !wantTrail) return;
 
-    // c14 = blur gamma, 1 / gamma (botox f0e average_bright, 2 = the old c*c / sqrt look),
+    // c14 = blur gamma, 1 / gamma (botox f0e average_bright, 1 = plain frame average),
     //       trail blend (0 on a history that holds nothing yet), -
     {
         const float gamma = (g_fbGamma < 1.f) ? 1.f : (g_fbGamma > 10.f ? 10.f : g_fbGamma);
@@ -1123,6 +1167,11 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
         dev->SetSamplerState(2, D3DSAMP_MINFILTER, D3DTEXF_POINT);    // INTZ: never filtered
         dev->SetSamplerState(2, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
 
+        // the history is ONE frame old: last frame's camera, not the shutter window
+        block[1][0] = prevTanX;
+        block[1][1] = prevTanY;
+        for (int r = 0; r < 3; ++r) memcpy(block[3 + r], f.reproj[r], sizeof(float) * 4);
+
         dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0f);
         pass(s_histSurf[hk][next], s_w, s_h, trailPs);
 
@@ -1139,9 +1188,9 @@ void FrameBlend_Draw(IDirect3DDevice9* dev, IDirect3DSurface9* target,
     if (!s_logged[gunPass ? 1 : 0]) {
         s_logged[gunPass ? 1 : 0] = true;
         DebugLog("^FX: frame blending %s drew %dx%d tile %d exposure=%.2f gun=%.2f bones=%d "
-                 "players=%d taps=%d max=%.0fpx blur=%d trail=%.2f gamma=%.2f sway=%.2f,%.2f,%.2f",
+                 "players=%d taps=%d max=%.0fpx blur=%d trail=%.2f gamma=%.2f sway=%.2f,%.2f,%.2f cam=%.2fms",
                  gunPass ? "gun" : "world", s_w, s_h, s_tileSize, f.exposure, f.gunExposure,
                  boneCount, f.playerCount, taps, maxLength, (int)blur, wantTrail ? trail : 0.f,
-                 block[14][0], f.swayShift[0], f.swayShift[1], f.swayShift[2]);
+                 block[14][0], f.swayShift[0], f.swayShift[1], f.swayShift[2], f.windowSpan * 1000.f);
     }
 }

@@ -95,13 +95,17 @@ void EquipRegion_Install()
     for (const auto& h : hooks)
         if (!InstallPatternHook(client, h.name, h.sig, h.hook, h.orig)) allOk = false;
 
-    // Only latch when everything landed, so a partial install retries next tick instead
-    // of leaving the loadout half-unlocked.
-    if (allOk && s_addrGetItemInLoadoutCall)
-        s_installed = true;
+    // Latch after ONE attempt whatever the result. client.dll does not change mid-session, so a
+    // miss now is a miss forever -- the old "retry until all land" ran 4 full ~60MB scans of
+    // client.dll on the Present thread every 2 s for the rest of the session (stale sigs after a
+    // TF2 update = permanent stutter), and a partial hit re-created hooks that already existed.
+    s_installed = true;
+    if (!allOk || !s_addrGetItemInLoadoutCall)
+        DebugLog("equipregion: incomplete install, sigs stale -- not retrying this session");
 }
 
-// Install lazily: nobody who leaves this off pays a scan of client.dll.
+// Install lazily: nobody who leaves this off pays a scan of client.dll. The 2 s retry only
+// covers client.dll not being loaded yet; Install latches after its first real attempt.
 void EquipRegion_Tick()
 {
     if (s_installed || !g_equipRegionUnlock || g_eject) return;

@@ -277,25 +277,36 @@ namespace fbm
         return a - 180.f;
     }
 
+    // one camera sample a frame (angles, origin, fov): the sway model AND the shutter window
+    // read it. double time: a float clock rounds to 0.24 ms after an hour.
     struct SwayHistory
     {
         static constexpr int N = 128;   // > (interp + window) at 400 fps
-        float time[N]      = {};
-        float angles[N][3] = {};
-        int   head = 0, filled = 0;
+        double time[N]      = {};
+        float  angles[N][3] = {};
+        float  origin[N][3] = {};
+        float  fov[N]       = {};
+        int    head = 0, filled = 0;
 
         void Clear() { head = filled = 0; }
 
-        void Sample(const float ang[3], float t)
+        void Sample(const float ang[3], const float org[3], float fv, double t)
         {
+            // teleport / respawn: the shutter window must never streak across it
+            if (filled > 0) {
+                const int newest = (head - 1 + N) % N;
+                const float d[3] = { org[0] - origin[newest][0], org[1] - origin[newest][1], org[2] - origin[newest][2] };
+                if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 128.f * 128.f) filled = 0;
+            }
             time[head] = t;
-            for (int a = 0; a < 3; ++a) angles[head][a] = ang[a];
+            fov[head]  = fv;
+            for (int a = 0; a < 3; ++a) { angles[head][a] = ang[a]; origin[head][a] = org[a]; }
             head = (head + 1) % N;
             if (filled < N) ++filled;
         }
 
         // the angles at time t, interpolated between the two samples around it
-        bool AnglesAt(float t, float out[3]) const
+        bool AnglesAt(double t, float out[3]) const
         {
             if (filled < 2) return false;
             const int newest = (head - 1 + N) % N;
@@ -305,19 +316,53 @@ namespace fbm
             for (int step = 1; step < filled; ++step) {
                 const int older = (newest - step + N) % N;
                 if (time[older] > t) { newer = older; continue; }
-                const float span = time[newer] - time[older];
-                float f = (span > 1e-6f) ? (t - time[older]) / span : 0.f;
-                f = (f < 0.f) ? 0.f : (f > 1.f ? 1.f : f);
+                const double span = time[newer] - time[older];
+                double f = (span > 1e-6) ? (t - time[older]) / span : 0.0;
+                f = (f < 0.0) ? 0.0 : (f > 1.0 ? 1.0 : f);
                 for (int a = 0; a < 3; ++a)
-                    out[a] = angles[older][a] + NormAngle(angles[newer][a] - angles[older][a]) * f;
+                    out[a] = angles[older][a] + NormAngle(angles[newer][a] - angles[older][a]) * (float)f;
                 return true;
             }
             return false;
         }
+
+        // botox camera_at: the camera at `t` (shutter open), lerped between samples. Clamps to
+        // the oldest sample and never lerps across a gap > 1/15 s (a stall). Returns the time
+        // actually reached, < 0 = no history.
+        double CameraAt(double t, float ang[3], float org[3], float& fv) const
+        {
+            if (filled < 1) return -1.0;
+
+            const auto copy = [&](int s) {
+                for (int a = 0; a < 3; ++a) { ang[a] = angles[s][a]; org[a] = origin[s][a]; }
+                fv = fov[s];
+                return time[s];
+            };
+
+            int newer = (head - 1 + N) % N;
+            if (t >= time[newer]) return copy(newer);
+
+            for (int step = 1; step < filled; ++step) {
+                const int older = (newer - 1 + N) % N;
+                const double span = time[newer] - time[older];
+                if (span <= 0.0 || span > 1.0 / 15.0) return copy(newer);   // stop at the near side
+                if (time[older] > t) { newer = older; continue; }
+
+                double f = (t - time[older]) / span;
+                f = (f < 0.0) ? 0.0 : (f > 1.0 ? 1.0 : f);
+                for (int a = 0; a < 3; ++a) {
+                    ang[a] = angles[older][a] + NormAngle(angles[newer][a] - angles[older][a]) * (float)f;
+                    org[a] = origin[older][a] + (origin[newer][a] - origin[older][a]) * (float)f;
+                }
+                fv = fov[older] + (fov[newer] - fov[older]) * (float)f;
+                return t;
+            }
+            return copy(newer);   // ring shorter than the shutter: oldest we have
+        }
     };
 
     // the gun's offset at time t in VIEW axes (right, up, forward), botox sway_at
-    inline bool SwayAt(const SwayHistory& h, float t, float interp, float scale, float out[3])
+    inline bool SwayAt(const SwayHistory& h, double t, float interp, float scale, float out[3])
     {
         out[0] = out[1] = out[2] = 0.f;
         if (interp <= 0.f) return false;
@@ -344,13 +389,13 @@ namespace fbm
     }
 
     // units per second, over botox's 30 ms window
-    inline bool SwayVelocity(const SwayHistory& h, float t, float interp, float scale, float out[3])
+    inline bool SwayVelocity(const SwayHistory& h, double t, float interp, float scale, float out[3])
     {
         out[0] = out[1] = out[2] = 0.f;
-        constexpr float window = 0.03f;
+        constexpr double window = 0.03;
         float now[3], before[3];
         if (!SwayAt(h, t, interp, scale, now) || !SwayAt(h, t - window, interp, scale, before)) return false;
-        for (int a = 0; a < 3; ++a) out[a] = (now[a] - before[a]) / window;
+        for (int a = 0; a < 3; ++a) out[a] = (float)((now[a] - before[a]) / window);
         return true;
     }
 

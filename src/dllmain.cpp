@@ -586,6 +586,7 @@ bool g_edgeBug = false;     int g_edgeBugKey = 0;     int g_edgeBugMode = 1;
 float g_edgeBugPredictTime = 0.35f;   // search window, seconds
 int   g_edgeBugDetectMode = 0;        // 0 normal / 1 enhanced / 2 ebanat
 bool  g_edgeBugToEdge = true;         // autostrafe to edge (also the autostrafe switch)
+bool  g_edgeBugPlayers = false;       // allow bugs off enemy players (off = map geometry only)
 float g_edgeBugStrafeAngleMax = 180.f; // max path bend off course, 180 = off
 bool  g_edgeBugMouseSteer = true;
 int   g_edgeBugPaths = 3;
@@ -634,7 +635,7 @@ bool  g_tbPredict = true;      // roll the flight forward, close the gap BEFORE 
 int   g_tbPredictTicks = 40;   // how many ticks of flight the scan rolls (40 = 0.6s)
 float g_tbPredictReach = 24.f; // how far to the side of the flight a face still counts
 bool g_wallClimb = false;   int g_wallClimbKey = 0;   int g_wallClimbMode = 1;
-bool g_wcPreventSlow = true;  bool g_wcDuck = true;  int g_wcSpotReach = 16;   // botox wall climb defaults
+bool g_wcPreventSlow = true;  bool g_wcDuck = true;   // botox wall climb defaults
 bool g_wcViz = false;  float g_wcVizColor[4] = { 1.f, 190 / 255.f, 90 / 255.f, 1.f };
 bool g_airStuck = false;    int g_airStuckKey = 0;    int g_airStuckMode = 1;
 
@@ -744,8 +745,7 @@ bool g_psAssistJumpBox = true;
 bool g_pixelJump = false;  int g_pixelJumpKey = 0;  int g_pixelJumpMode = 1;
 bool g_pjUnsafe = false;
 bool g_pjCrouch = false;
-int  g_pjSetPointKey = 0, g_pjDeletePointKey = 0;
-bool g_pjRender = true;
+bool g_pjReadout = true;
 bool  g_psGroundHelp = false;
 float g_psGroundHelpAngle = 45.f;
 float g_psLaunchZSlack = 4.f;   // half k_psCatchZ: an arc shifted less than that still

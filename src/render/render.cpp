@@ -209,9 +209,10 @@ static void RenderPsOverlay()
     const bool bAssist = g_psAssist && g_psAssistRender;
     // map-scan lines have their own switch and outlive the finder, so they keep the snapshot
     // (and the overlay) alive on their own -- the copy is free when the list is empty
-    const bool bPj = g_pixelJump && g_pjRender;
-    const bool bPoints = bFinder || bAssist || bPj || g_psMapLines;
-    if (!bPoints && !g_psAssistJumpBox) { PsOverlayResetAnim(); return; }
+    const bool bPoints = bFinder || bAssist || g_psMapLines;
+    // each feature gates its own stamp (psassist.inl), so either switch keeps the stack alive
+    const bool bBox = g_psAssistJumpBox || (g_pixelJump && g_pjReadout);
+    if (!bPoints && !bBox) { PsOverlayResetAnim(); return; }
 
     // One snapshot per frame. Point rendering off (jump box on) copies no vectors at all.
     static PsDrawData d;
@@ -227,7 +228,7 @@ static void RenderPsOverlay()
     // the bottom, 25 tall, 14 pad, 95 min wide, fade 0.25 / show 1.8 / fade 0.2, top accent line
     // shrinking over the life, verdana 11 with a 1px quarter-alpha shadow, max 5, same text
     // dropped inside 2 s
-    if (g_psAssistJumpBox)
+    if (bBox)
     {
         struct Win { std::string text; float t0; };
         static std::vector<Win> s_wins;
@@ -504,50 +505,6 @@ static void RenderPsOverlay()
         if (a > 0) PointDesignEmit(dl, style, s, half, dirX, dirY, PointWithAlpha(color, a));
     };
 
-    // pixeljump's own points = botox's bounce-list loop as style pixeljump (point_type 2). No
-    // ENTER window. In radius = heroin's 1000u pick range (psassist.inl), pj points have no own
-    if (bPj && g_pointsRenderBounce)
-    {
-        static std::vector<float> s_pjScale;
-        if (s_pjScale.size() != d.pjPts.size()) s_pjScale.assign(d.pjPts.size(), 0.f);
-        for (int i = 0; i < (int)d.pjPts.size(); i++)
-        {
-            const Vec3& p = d.pjPts[i];
-            ImVec2 s;
-            if (!W2S(p, s)) continue;
-            const float dist = d.localOrigin.DistTo(p);
-            if (dist > maxDrawDist) continue;
-            float baseR = 10.f;
-            if (g_pointsDistanceShrink && dist > 275.f)
-            {
-                if (dist <= 650.f)
-                {
-                    float t = Clamp01((dist - 275.f) / 375.f);
-                    t = t * t * (3.f - 2.f * t);
-                    baseR = LerpF(10.f, 2.f, t);
-                }
-                else baseR = 2.f;
-            }
-            baseR = std::max(baseR, 3.f) * size;
-            float outlineT = 0.5f;
-            if (dist > 200.f) outlineT = LerpF(0.5f, 1.f, Clamp01((dist - 200.f) / 200.f));
-            float aMul = 1.f;
-            if (g_pointsDistanceFade && dist > fadeStart) aMul = Clamp01((maxDrawDist - dist) / (maxDrawDist - fadeStart));
-            aMul *= opacity;
-            const bool inRadius = dist <= 1000.f;
-            const ImU32 ring = StyleColor(PS_STYLE_PJ, inRadius, aMul);
-            const bool hov = InCross(s, baseR);
-            s_pjScale[i] = LerpF(s_pjScale[i], hov ? hoverScale : 1.f, Clamp01(dt * kPtScaleSpeed));
-            const float r = baseR * s_pjScale[i] * PointsPulse(inRadius);
-            dl->AddCircleFilled(s, r, IM_COL32(0, 0, 0, int(255.f * fill * aMul)), kSegments);
-            PointRingEmit(dl, PS_STYLE_PJ, s, r, ring, outlineT);
-            float dx = 0.f, dy = -1.f, ratio = 1.f;
-            { float x, y, q; if (ProjectAxis(p, Vec3(0.f, 0.f, 1.f), 16.f, x, y, q)) { dx = x; dy = y; ratio = q; } }
-            Design(PS_STYLE_PJ, s, r, dx, dy, ratio, StyleColor(PS_STYLE_PJ, inRadius, aMul * 200.f / 255.f));
-            PointLabelEmit(dl, labelFont, PS_STYLE_PJ, s, r, aMul);
-        }
-    }
-
     if (!bAssist) return;   // saved points + the ENTER window are the assist's
 
     // ---- saved assist targets: botox RenderPoints pixelsurf loop as style pixelsurf ------
@@ -757,8 +714,7 @@ static void RenderAutoBounceOverlay()
 }
 
 // ==== wall climb overlay (botox wall_climb render) ===============================================
-// face wc reads, where the sent cmd takes you ( green end = a land over your jump floor ), on ground the spot scan along
-// the wall: green = climbed off that spot, red = nothing / sticky, grey = blocked or not run yet, big = where you get walked
+// face wc reads, where the sent cmd takes you ( green end = a land the sweep won )
 static void RenderWallClimbOverlay()
 {
     if (!g_wallClimb || !g_wcViz) return;
@@ -825,32 +781,12 @@ static void RenderWallClimbOverlay()
     snprintf(buf, sizeof(buf), "wc %s %d", d.branch ? d.branch : "-", d.sims);
     label(d.wall + up + Vec3(0.f, 0.f, 4.f), buf, color);
 
-    if (!d.ground) {
-        for (int i = 0; i + 1 < d.pathN; i++) line(d.path[i], d.path[i + 1], color, 1.5f);
-        if (d.pathN > 1) dot(d.path[d.pathN - 1], d.lands ? 5.f : 3.f, d.lands ? green : color);
-        if (d.lands) {
-            snprintf(buf, sizeof(buf), "+%.0f", d.land.z - d.groundZ);
-            label(d.land + Vec3(0.f, 0.f, 8.f), buf, green);
-        }
-        return;
-    }
-
-    if (!d.spotValid) return;
-    const Vec3 st(d.spotN.y, -d.spotN.x, 0.f);
-    const auto at_idx = [](int i) { return (i & 1 ? 1.f : -1.f) * 2.f * (float)((i + 1) / 2); };   // wallclimb.inl wc::AtIdx
-    int best = -1;
-    for (int i = 0; i < d.spotIdx; ++i)
-        if (d.spotScore[i] > 0 && (best < 0 || d.spotScore[i] > d.spotScore[best])) best = i;
-    for (int i = 0; i < d.spotCount; ++i) {
-        const Vec3 p = d.spotBase + st * at_idx(i) + Vec3(0.f, 0.f, 1.f);
-        const int s  = i < d.spotIdx ? d.spotScore[i] : -2;
-        dot(p, i == best ? 5.f : 2.5f, s > 0 ? green : s == 0 ? red : grey);
-    }
-    if (best >= 0) {
-        const Vec3 p = d.spotBase + st * at_idx(best) + Vec3(0.f, 0.f, 1.f);
-        line(d.origin + Vec3(0.f, 0.f, 1.f), p, green, 1.5f);
-        snprintf(buf, sizeof(buf), "+%.0f", (float)(d.spotScore[best] - 1000));
-        label(p + Vec3(0.f, 0.f, 10.f), buf, green);
+    if (d.ground) return;
+    for (int i = 0; i + 1 < d.pathN; i++) line(d.path[i], d.path[i + 1], color, 1.5f);
+    if (d.pathN > 1) dot(d.path[d.pathN - 1], d.lands ? 5.f : 3.f, d.lands ? green : color);
+    if (d.lands) {
+        snprintf(buf, sizeof(buf), "+%.0f", d.land.z - d.groundZ);
+        label(d.land + Vec3(0.f, 0.f, 8.f), buf, green);
     }
 }
 
@@ -1681,8 +1617,8 @@ static void BuildFontAtlas()
 
     g_fontAirflow14 = plain(sf_ui_display_semibold, sizeof(sf_ui_display_semibold), 14.f, 0, cyr); orElse(g_fontAirflow14, g_fontBold);
 
-    // heroin-new (Documents\!) FUN_18004d980: arialbd 16 = its Fonts[0] (watermark + music display),
-    // AddFontDefault = speclist "regular", tahoma 16 / tahomabd 14 = "interwebz", tahoma 14 = legacy
+    // heroin-new (Documents\!) FUN_18004d980: arialbd 16 = music display,
+    // AddFontDefault = menu + watermark + speclist "regular", tahoma 16 / tahomabd 14 = "interwebz", tahoma 14 = legacy
     {
         ImFontConfig h = flagged(ImGuiFreeTypeBuilderFlags_LightHinting);   // OversampleH 2, PixelSnapH
         h.OversampleH = 2; h.OversampleV = 1; h.PixelSnapH = true;

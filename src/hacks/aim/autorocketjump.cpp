@@ -47,8 +47,95 @@ static void Gmb_DiagFlush()
 // beats the best "one tick later": that is the peak.
 #include "../movement/goomba_pure.h"
 int Movement_GoombaTarget();
+int Movement_GoombaPath(const gmb::PathPt** ppPath);
 
 static gmb::V GV(const Vec3& v) { return { v.x, v.y, v.z }; }
+
+// ---- auto goomba sims, called from the movement pipeline (movement_ex.inl AutoGoomba) ------
+// It runs pre-prediction, outside any bracket: MoveSim saves + restores the prediction flags
+// and frametime itself, and Pred_Start / EnginePrediction set the move helper host per sim.
+
+// Target path. Heroin's goomba assist (FUN_180075a10) copies its target, runs the engine's
+// ProcessMovement on it for the latency in ticks and tests the z window every tick. Same here
+// through Amalgam's MoveSim: snapshot -> tCmd (the server time our cmd runs at), then n ticks
+// recorded. 0 = no sim (aim interfaces down / init failed): the caller keeps the parabola.
+int Aim_GoombaPath(int iIndex, float flCmdTime, int n, gmb::PathPt& tNow, gmb::PathPt* pOut)
+{
+	if (n <= 0 || !I::GameMovement || !I::MoveHelper || !I::Prediction || !H::Entities.GetLocal())
+		return 0;
+	auto pClient = I::ClientEntityList->GetClientEntity(iIndex);
+	auto pEnt = pClient ? pClient->As<CBaseEntity>() : nullptr;
+	if (!pEnt || !pEnt->IsPlayer())
+		return 0;
+
+	auto Pt = [](const CMoveData& m) -> gmb::PathPt
+	{
+		return { m.m_vecAbsOrigin.x, m.m_vecAbsOrigin.y, m.m_vecAbsOrigin.z, m.m_vecVelocity.x, m.m_vecVelocity.y, m.m_vecVelocity.z };
+	};
+	int w = 0;
+	MoveStorage tStorage;
+	if (F::MoveSim.Initialize(pEnt, tStorage, false, true))
+	{
+		// a stale snapshot is a lag spike, not physics: same 0.5 s clamp as the parabola
+		const int iPre = std::clamp(TIME_TO_TICKS(flCmdTime - tStorage.m_flSimTime), 0, TIME_TO_TICKS(0.5f));
+		for (int i = 0; i < iPre; i++)
+			F::MoveSim.RunTick(tStorage, false);
+		tNow = Pt(tStorage.m_MoveData);
+		for (; w < n && !tStorage.m_bFailed; w++)
+		{
+			F::MoveSim.RunTick(tStorage, false);
+			pOut[w] = Pt(tStorage.m_MoveData);
+		}
+		if (tStorage.m_bFailed)
+			w = 0;
+	}
+	F::MoveSim.Restore(tStorage);
+	return w;
+}
+
+// Our sticky launch: the vz our armed stickies add when the det cmd's PostThink sets them off.
+// tMe = where that cmd's movement leaves us (after the 0x806 jump). Arm + radius = Amalgam's
+// autodetonate GetRadius. -1 = nothing armed reaches us (a det would only be a crouch jump).
+// ponytail: no blast LOS trace (stickies under our own feet are never blocked); add the
+// ApplyToEntity trace (tf_gamerules.cpp:5771) if a wall between us ever fakes a boost.
+float Aim_GoombaStickyKick(const gmb::Body& tMe, bool bDucked)
+{
+	static auto tf_grenadelauncher_livetime = H::ConVars.FindVar("tf_grenadelauncher_livetime");
+	static auto tf_sticky_radius_ramp_time = H::ConVars.FindVar("tf_sticky_radius_ramp_time");
+	static auto tf_sticky_airdet_radius = H::ConVars.FindVar("tf_sticky_airdet_radius");
+	if (!H::Entities.GetLocal())
+		return -1.f;
+
+	float flKick = 0.f;
+	bool bAny = false;
+	for (auto pEnt : H::Entities.GetGroup(EntityEnum::LocalStickies))
+	{
+		auto pBomb = pEnt->As<CTFGrenadePipebombProjectile>();
+		auto pWeapon = pBomb->m_hOriginalLauncher()->As<CTFWeaponBase>();
+		if (!pWeapon)
+			pWeapon = H::Entities.GetWeapon();
+		if (!pWeapon || !pBomb->m_flCreationTime()
+			|| I::GlobalVars->curtime < pBomb->m_flCreationTime() + SDK::AttribHookValue(0.8f, "sticky_arm_time", pWeapon))
+			continue;
+
+		float flRadius = 146.f;
+		if (!pBomb->m_bTouched() && tf_grenadelauncher_livetime && tf_sticky_radius_ramp_time && tf_sticky_airdet_radius)
+		{
+			const float flLive = tf_grenadelauncher_livetime->GetFloat(), flRamp = tf_sticky_radius_ramp_time->GetFloat();
+			flRadius *= Math::RemapVal(I::GlobalVars->curtime - pBomb->m_flCreationTime(), flLive, flLive + flRamp, tf_sticky_airdet_radius->GetFloat(), 1.f);
+		}
+		flRadius = SDK::AttribHookValue(flRadius, "mult_explosion_radius", pWeapon);
+		const float flDmg = pBomb->m_flDamage() > 0.f ? pBomb->m_flDamage() : pWeapon->GetDamage();
+
+		const gmb::V v = gmb::SelfStickyPush(GV(pBomb->GetAbsOrigin()), tMe, flDmg, flRadius, bDucked);
+		if (v.x != 0.f || v.y != 0.f || v.z != 0.f)
+		{
+			bAny = true;
+			flKick += v.z;
+		}
+	}
+	return bAny ? flKick : -1.f;
+}
 
 static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded, Vec3& vAngles, int& iDelay)
 {
@@ -69,12 +156,25 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 	const Vec3  vThemOrg = pThem->m_vecOrigin(), vThemVel = pThem->m_vecVelocity();
 	const float flThemHull = pThem->m_vecMaxs().z - pThem->m_vecMins().z, flThemHalf = pThem->m_vecMaxs().x;
 	const float flThemForceZ = pThem->IsDucking() ? 62.f : 82.f;
-	auto ThemAt = [&](float t)
+	// T ticks past our fire cmd. The movement side's ProcessMovement path when it reaches that
+	// far (path k = ticks past OUR cmd's server time, so k = lead + T), the parabola otherwise
+	const gmb::PathPt* pPath = nullptr;
+	const int nPath = Movement_GoombaPath(&pPath);
+	auto ThemAt = [&](int T)
 	{
 		gmb::Body b;
+		b.half = flThemHalf; b.hullZ = flThemHull;
+		const int k = iLead + T;
+		if (pPath && k >= 1 && k <= nPath)
+		{
+			const gmb::PathPt& p = pPath[k - 1];
+			b.org = { p.x, p.y, p.z };
+			b.vel = { p.vx, p.vy, p.vz };
+			return b;
+		}
+		const float t = t0 + TICKS_TO_TIME(T);
 		b.org = GV(vThemOrg) + GV(vThemVel) * t + gmb::V{ 0.f, 0.f, -0.5f * g * t * t };
 		b.vel = GV(vThemVel); b.vel.z -= g * t;
-		b.half = flThemHalf; b.hullZ = flThemHull;
 		return b;
 	};
 
@@ -145,7 +245,7 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 		for (int f = 0; f < 2; f++)   // fire this cmd / one cmd later
 		{
 			const int T = f + n;
-			gmb::Body tMe = MeAt(T), tThem = ThemAt(t0 + TICKS_TO_TIME(T));
+			gmb::Body tMe = MeAt(T), tThem = ThemAt(T);
 			if (tThem.org.z - (tMe.org.z + tMe.hullZ) <= 0.f)
 			{
 				d.onUs++;

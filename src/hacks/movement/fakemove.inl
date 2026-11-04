@@ -831,6 +831,8 @@ static void FakeMove_Tick()
         if (On(g_fmHeadSurf,   g_fmHeadSurfKey,   g_fmHeadSurfMode))   b |= FM_HEADSURF;
     }
     s_fmBits = b;
-    FM_WallbugCvar(g_fmEnabled && g_fmWallbugFix && !g_eject
+    // not gated on g_fmEnabled: it is a server cvar, not a fake bind. wc / as / tb pins need it,
+    // and cfg fmEnabled=0 + fmWallbugFix=1 silently never applied it
+    FM_WallbugCvar(g_fmWallbugFix && !g_eject
                    && GetTickCount64() - s_fmServerSeenMs < 1000);
 }

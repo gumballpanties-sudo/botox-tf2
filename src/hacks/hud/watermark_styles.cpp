@@ -1216,6 +1216,7 @@ static void DrawGamesense(ImDrawList* dl, ImGuiIO& io)
 
 // style 22: heroin -- heroin-new FUN_18004b9f0, ImGui window "watermark_menu" redrawn on the list.
 // Default ImGuiStyle (padding 8), bg = its primary color, menu accent where heroin uses its accent.
+// Font: render loop FUN_18004ee80 pushes DAT_18035b6e8 (AddFontDefault = ProggyClean 13) around it.
 static constexpr ImU32 kHeroinBg   = IM_COL32(37, 39, 48, 255);   // cfg primary color (0x1803531a8)
 static constexpr ImU32 kHeroinDark = IM_COL32(15, 15, 15, 255);   // 0x180350f70
 // window rect [min, max): fill, three insets (dark / accent 25% / dark), accent + black outside
@@ -1231,7 +1232,7 @@ static void HeroinBox(ImDrawList* dl, ImVec2 min, ImVec2 max)
 }
 static void DrawHeroin(ImDrawList* dl, ImGuiIO& io)
 {
-    ImFont* font = Or(g_fontHeroinArialBd16);
+    ImFont* font = Or(g_fontHeroinProggy13);
     const float px = font->FontSize;
     const auto w = [&](const std::string& s) { return ImguiW(font, s); };   // ImGui::CalcTextSize, ceiled
 
@@ -1330,6 +1331,62 @@ static void DrawAirflow(ImDrawList* dl, ImGuiIO& io)
     dl->Flags = oldFlags;
 }
 
+// style 23: lobotomy v2 -- lumiabeta FUN_1007b020. sf pro bold 13, box (x, 10) to (x + w, size + 22),
+// x = screen - w - 5, w = text + 12 eased dt * 8 (snaps after a 1 s gap or a > 200 px jump). Fill (13) r4,
+// black ring 1 px out, (50) ring on the edge. Text (x + 6, 16): brand in the title colour, then per part
+// " | " (150) + user / time (150) or number (white) + unit (150).
+static void DrawLobotomyV2(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontLobotomyBold13);
+    constexpr ImU32 grey = IM_COL32(150, 150, 150, 255), white = IM_COL32(255, 255, 255, 255);
+    const float now = (float)ImGui::GetTime();
+
+    static float smoothFps = 0.f, fpsTime = 0.f;
+    static int shownFps = 0;
+    smoothFps = smoothFps * 0.9f + io.Framerate * 0.100000024f;
+    if (now - fpsTime >= 0.3f) { fpsTime = now; shownFps = (int)(smoothFps + 0.5f); }
+
+    using Part = std::vector<std::pair<std::string, ImU32>>;
+    std::vector<Part> parts;
+    if (g_wmUser) parts.push_back({ { User(), grey } });
+    if (g_wmShowTime) parts.push_back({ { Clock("%H:%M"), grey } });
+    if (g_wmTickrate && TickLive()) parts.push_back({ { std::to_string(Tickrate()), white }, { " tick", grey } });
+    if (g_wmShowFPS) parts.push_back({ { std::to_string(shownFps), white }, { " fps", grey } });
+
+    const std::string brand = Brand();
+    const float size = font->FontSize, separatorW = ImguiW(font, " | ");
+
+    float target = ImguiW(font, brand) + 12.f;
+    for (const auto& part : parts) {
+        target += separatorW;
+        for (const auto& [text, color] : part) target += ImguiW(font, text);
+    }
+
+    static float width = 0.f, widthTime = 0.f;
+    if (now - widthTime <= 1.f && fabsf(width - target) <= 200.f)
+        target = (target - width) * io.DeltaTime * 8.f + width;
+    width = target;
+    widthTime = now;
+
+    const float x = io.DisplaySize.x - width - 5.f;
+    const ImVec2 min(x, 10.f), max(x + width, size + 22.f);
+    SetBox(min.x - 1.f, min.y - 1.f, max.x + 1.f, max.y + 1.f);
+
+    dl->AddRectFilled(min, max, IM_COL32(13, 13, 13, 255), 4.f);
+    dl->AddRect(ImVec2(min.x - 1.f, 9.f), ImVec2(max.x + 1.f, max.y + 1.f), IM_COL32(0, 0, 0, 255), 4.f, 0, 1.f);
+    dl->AddRect(min, max, IM_COL32(50, 50, 50, 255), 4.f, 0, 1.f);
+
+    float textX = x + 6.f;
+    const auto put = [&](const std::string& s, ImU32 c) { dl->AddText(font, size, ImVec2(textX, 16.f), c, s.c_str()); textX += ImguiW(font, s); };
+
+    const float* t = g_wmLobotomyTitleColor;
+    put(brand, IM_COL32((int)(t[0] * 255.f + 0.5f), (int)(t[1] * 255.f + 0.5f), (int)(t[2] * 255.f + 0.5f), 255));
+    for (const auto& part : parts) {
+        put(" | ", grey);
+        for (const auto& [text, color] : part) put(text, color);
+    }
+}
+
 // botox misc.cpp draw_watermark(): clarity v2 (3) and cucumber (19) run before the m_watermark
 // check (they gate / fade on it themselves), every other style needs it on.
 void Watermark_Draw()
@@ -1371,6 +1428,7 @@ void Watermark_Draw()
     case 20: return DrawHoweweware(dl, io);
     case 21: return DrawGamesense(dl, io);
     case 22: return DrawHeroin(dl, io);
+    case 23: return DrawLobotomyV2(dl, io);
     default: return DrawDefault(dl, io);
     }
 }
@@ -1409,6 +1467,10 @@ MediaLook Watermark_MediaLook(int style)
     case 21: return { true, PackColor(g_wmGsSenseColor), IM_COL32(255, 255, 255, 230), 0 };
     // heroin FUN_18004b0f0 music display: white title, artist white at 0.5, +1 black shadow
     case 22: return { true, white, IM_COL32(255, 255, 255, 127), 1 };
+    case 23: {   // lobotomy v2 wm: title colour, (150) grey, no shadow
+        const float* t = g_wmLobotomyTitleColor;
+        return { true, IM_COL32((int)(t[0] * 255.f + 0.5f), (int)(t[1] * 255.f + 0.5f), (int)(t[2] * 255.f + 0.5f), 255), IM_COL32(150, 150, 150, 255), 0 };
+    }
     default: return { true, white, accent, 0 };   // style 0: menu accent
     }
 }
@@ -1487,6 +1549,11 @@ void Watermark_MediaFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, int style)
         if (g_wmGsBar) GamesenseBar(dl, ImVec2(min.x + 3.f, min.y + 3.f), ImVec2(max.x - 3.f, max.y - 3.f));
         break;
     case 22: HeroinBox(dl, ImVec2(min.x + 2.f, min.y + 2.f), ImVec2(max.x - 1.f, max.y - 1.f)); break;   // outer rings stay in [min, max]
+    case 23:
+        dl->AddRectFilled(min, max, IM_COL32(13, 13, 13, 255), 4.f);
+        dl->AddRect(ImVec2(min.x - 1.f, min.y - 1.f), ImVec2(max.x + 1.f, max.y + 1.f), IM_COL32(0, 0, 0, 255), 4.f, 0, 1.f);
+        dl->AddRect(min, max, IM_COL32(50, 50, 50, 255), 4.f, 0, 1.f);
+        break;
     default: break;
     }
 }

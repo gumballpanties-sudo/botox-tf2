@@ -226,6 +226,18 @@ inline int MV_EbBisect(bool loLand, int iters, RunFn run, StopFn stop)
     return runs;
 }
 
+// bisect outcome of one braked run. A landing on another floor than the base run's (a 1u ledge vs
+// the floor past it) is the far side of the bracket, same as flying past: base lands past the
+// ledge, full brake lands on it -> the bug band (hull trailing edge leaving the ledge) sits between.
+// Without it both read "land" and the bisect never opened for thin ledges.
+inline MvEbOut MV_EbBrakeOut(bool bug, bool landed, float z, bool baseLanded, float baseZ, float stepUp)
+{
+    if (bug) return kEbOutBug;
+    if (!landed) return kEbOutAir;
+    if (baseLanded && fabsf(z - baseZ) > stepUp) return kEbOutAir;
+    return kEbOutLand;
+}
+
 // ================= deep pass cost (TF2 port, not botox) =======================================
 // botox spends the whole clock share whenever reach says geometry is near. 10-31 log: 515 of 667
 // searches hit the cap, 6 of them found; far / no contact = 525 no-find searches at ~7ms each.

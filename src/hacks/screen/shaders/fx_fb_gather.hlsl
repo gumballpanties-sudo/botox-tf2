@@ -19,8 +19,8 @@
 // the moving thing uncovered, and whatever weight is left at the end is filled with the
 // background rather than the centre -- which is what stops the hard edge around a fast object.
 //
-// Blurring is done in ~linear light with the highlights pushed out by an invertible reinhard:
-// a tracer smeared in gamma space goes grey, in linear it stays a streak of light.
+// Blurring is done in x^gamma space (c14): 1 averages the frames as stored, higher keeps
+// brights bright.
 //
 // THE FENCE. Pass one parks every gun pixel under c8.y, so:
 //   world run   a gun pixel keeps its own colour outright -- the world reaching INTO the gun
@@ -32,7 +32,7 @@
 //   c2 = tap cap, max streak, tile size, frame noise
 //   c6 = width, height, 1/width, 1/height
 //   c8 = depth scale, the gun's fence, player count, gun run
-//   c14 = blur gamma, 1 / gamma, -, -   (botox "blur gamma", f0e average_bright; 2 = c*c / sqrt)
+//   c14 = blur gamma, 1 / gamma, -, -   (botox "blur gamma", f0e average_bright; 1 = plain average)
 
 sampler2D sColor : register(s0);
 sampler2D sInfo  : register(s1);
@@ -43,8 +43,11 @@ float4 c6 : register(c6);
 float4 c8 : register(c8);
 float4 c14 : register(c14);
 
-float3 in_color(float3 c)  { c = pow(saturate(c), c14.x); return c / (1.5 - max(c.r, max(c.g, c.b))); }
-float3 out_color(float3 c) { return pow(saturate((1.5 * c) / (1.0 + max(c.r, max(c.g, c.b)))), c14.y); }
+// botox: plain x^gamma, average, x^(1/gamma). 1 = blur / smoothie default (average the frames as
+// stored), 2.2 = their bright blend (linear light). No tonemap: frame blending never boosts
+// highlights, it averages.
+float3 in_color(float3 c)  { return pow(saturate(c), c14.x); }
+float3 out_color(float3 c) { return pow(saturate(c), c14.y); }
 
 // interleaved gradient noise, animated on the frame: the taps land between each other every frame
 float ign(float2 p)

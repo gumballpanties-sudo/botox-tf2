@@ -25,7 +25,7 @@ inline float g_mbFallMax   = 10.f;
 // true motion blur extras (botox variables.h:992-1000)
 inline float g_fbObject       = 0.f;     // player trail: history blend, x shutter
 inline float g_fbVmSway       = 0.f;     // viewmodel sway: the gun's lag behind a turn
-inline float g_fbGamma        = 2.f;     // blur gamma: 2 = the old look
+inline float g_fbGamma        = 1.f;     // blur gamma: 1 = blur/smoothie frame blend, 2.2 = bright blend
 
 // bloom (botox variables.h:1007)
 inline float g_bloomAspect = 0.f;        // + = wide, - = tall

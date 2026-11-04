@@ -1355,6 +1355,7 @@ static void StyleFonts(int style, ImFont*& title, ImFont*& artist, float& size)
     case 20: pick(g_fontHowewewareMinecraft14, g_fontHowewewareMinecraft14); break;
     case 21: pick(g_fontGamesenseSfBold15, g_fontGamesenseSfBold15); size = 13.f; break;
     case 22: pick(g_fontHeroinArialBd16, g_fontHeroinArialBd16); break;   // heroin music display face
+    case 23: pick(g_fontLobotomyBold13, g_fontLobotomyBold13); break;     // lobotomy v2 wm face, sf pro bold 13
     default: break;
     }
     if (!title || !artist) {

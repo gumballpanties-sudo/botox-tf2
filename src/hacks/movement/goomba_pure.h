@@ -27,17 +27,61 @@ inline float Rise(float vz0, float g, float t) { return vz0 * t - 0.5f * g * t *
 // nothing to time).
 inline constexpr float kTouch = 2.f;
 
-inline int ContactTick(float gap, float theirVz, float myVz, bool myFalls, float g, float dt, int maxK)
+// our head rise k ticks after the fire cmd starts. kick = vz a blast adds at the END of the
+// fire tick: a sticky goes off in the det cmd's PostThink (SecondaryAttack ->
+// DetonateRemotePipebombs -> Detonate, tf_weapon_pipebomblauncher.cpp:566), which runs after
+// that cmd's ProcessMovement (player_command.cpp RunCommand). So tick 1 moves on the old vz
+// (the jump of a 0x806 press), every tick after on old + kick. kick 0 = one closed form.
+inline float MyRise(float myVz, bool myFalls, float kick, float g, float dt, int k)
+{
+    const float t = dt * (float)k;
+    if (kick == 0.f || k <= 1) return myFalls ? Rise(myVz, g, t) : myVz * t;
+    const float first = myFalls ? Rise(myVz, g, dt) : myVz * dt;
+    return first + Rise((myFalls ? myVz - g * dt : myVz) + kick, g, t - dt);
+}
+
+// our vz right after the fire tick: what a landing on us hands them (gamemovement.cpp:3622)
+inline float LaunchVz(float myVz, bool myFalls, float kick, float g, float dt)
+{
+    return (myFalls ? myVz - g * dt : myVz) + kick;
+}
+
+inline int ContactTick(float gap, float theirVz, float myVz, bool myFalls, float g, float dt, int maxK, float kick = 0.f)
 {
     if (gap <= 0.f || dt <= 0.f) return -1;
     for (int k = 1; k <= maxK; ++k)
     {
         const float t = dt * (float)k;
-        const float mine = myFalls ? Rise(myVz, g, t) : myVz * t;
         // touch = their ground probe reaching our head: CategorizePosition traces 2u down
         // (tf_gamemovement.cpp:2373). Heroin's goomba assist uses a 1.2u window the same way
-        if (gap + Rise(theirVz, g, t) - mine <= kTouch)
+        if (gap + Rise(theirVz, g, t) - MyRise(myVz, myFalls, kick, g, dt, k) <= kTouch)
             return k;
+    }
+    return -1;
+}
+
+// ---- simulated target path (aim/autorocketjump.cpp Aim_GoombaPath) -----------------------
+// Heroin's goomba assist (FUN_180075a10) runs the real ProcessMovement on its target instead
+// of a parabola: walls, ceilings, ledges and OUR hull stop them. p[k-1] = their feet +
+// velocity after k ticks past the server time our cmd runs at.
+struct PathPt { float x = 0.f, y = 0.f, z = 0.f, vx = 0.f, vy = 0.f, vz = 0.f; };
+
+// ContactTick on that path. me/myVel = our feet + velocity now, myHull = our height,
+// reach = per-axis touch distance (half widths summed). First k whose feet are within kTouch
+// of our (moving) head with the hulls overlapping in xy; -1 = they never land on us inside n
+// (a ledge caught them, they slid off, or they passed beside us).
+inline int PathContact(const PathPt* p, int n, float meX, float meY, float meZ, float myVx, float myVy,
+                       float myHull, float myVz, bool myFalls, float kick, float reach, float g, float dt)
+{
+    for (int k = 1; k <= n; ++k)
+    {
+        const float t = dt * (float)k;
+        const float feet = meZ + MyRise(myVz, myFalls, kick, g, dt, k);
+        const PathPt& q = p[k - 1];
+        const bool over = fabsf(q.x - (meX + myVx * t)) < reach && fabsf(q.y - (meY + myVy * t)) < reach;
+        if (over && q.z - (feet + myHull) <= kTouch)
+            return k;
+        if (q.z < feet) return -1;   // their feet under ours: went past us
     }
     return -1;
 }
@@ -81,6 +125,14 @@ inline V BlastImpulse(V src, const Body& b, float dmg, float radius, float fallo
     const float l = dir.Len();
     if (l < 1e-3f) return { 0.f, 0.f, force };   // dead centre: straight up, the engine's normalize of 0 is 0
     return dir * (-force / l);
+}
+
+// our launch off our own sticky: self pipebomb damage x0.75 (tf_gamerules.cpp:5826), half
+// falloff, scale 9 (DAMAGE_FORCE_SCALE_SELF, tf_player.cpp:147 / :10297), crouch hull counts
+// as 55 (:10252). Each sticky is its own explosion: the caller sums them.
+inline V SelfStickyPush(V src, const Body& me, float dmg, float radius, bool ducked)
+{
+    return BlastImpulse(src, me, dmg * 0.75f, radius, 0.5f, 9.f, ducked ? 55.f : 82.f);
 }
 
 // what the target leaves with after a blast. me / them = both bodies the instant the blast

@@ -15,6 +15,7 @@ inline float g_wmHavocColor[4]  = { 115 / 255.f, 155 / 255.f, 1.f, 1.f };  // m_
 inline float g_wmInteriumBg[4]  = { 0.f, 0.f, 0.f, 1.f };                // m_watermark_interium_bg
 
 inline float g_wmGsGameColor[4]  = { 1.f, 1.f, 1.f, 1.f };                    // m_watermark_gamesense_game_color
+inline float g_wmLobotomyTitleColor[4] = { 1.f, 1.f, 1.f, 1.f };               // m_watermark_lobotomy_title_color
 inline float g_wmGsSenseColor[4] = { 149 / 255.f, 184 / 255.f, 6 / 255.f, 1.f }; // m_watermark_gamesense_sense_color
 inline bool  g_wmGsBar = true;                                                // m_watermark_gamesense_bar
 inline float g_wmGsX = 0.f, g_wmGsY = 0.f;                                    // m_watermark_gamesense_x / _y

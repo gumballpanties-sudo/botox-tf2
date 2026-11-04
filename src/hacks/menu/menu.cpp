@@ -880,7 +880,7 @@ static void Page_VisualsScreen()
                 ImGui::Label("quality");
                 SliderI("max samples##true motion blur", &g_fbSamples, 4, 64);
                 SliderF("max streak##true motion blur", &g_fbMaxStreak, 0.005f, 0.1f, "%.3f");
-                // 2 = old look. higher = bright streaks stay bright
+                // 1 = blur/smoothie frame blend, 2.2 = bright blend (linear light). higher = brights win
                 SliderF("blur gamma##true motion blur", &g_fbGamma, 1.f, 10.f, "%.2f");
                 ImGui::Checkbox("universal depth##true motion blur", &g_fxUniversalDepth);
                 ImGui::TextDisabled("depth: %s %s", ScreenFx_RouteName(), ScreenFx_VerifyName());
@@ -1241,6 +1241,7 @@ static void Page_MovementMain()
                         SliderF("angle limit##ebdnaangle", &g_edgeBugDnaAngleLimit, 0.f, 45.f, "%.1f");
                     }
                 }
+                ImGui::Checkbox("bug off players##ebplayers", &g_edgeBugPlayers);
                 if (style == 0)
                 {
                     SliderF("edge bug predict time", &g_edgeBugPredictTime, 0.02f, 2.f, "%.2f s");
@@ -1412,7 +1413,6 @@ static void Page_MovementMain()
                 ImGui::Keybind("wall climb key", &g_wallClimbKey, &g_wallClimbMode);
                 ImGui::Checkbox("prevent slow", &g_wcPreventSlow);
                 ImGui::Checkbox("crouch catches", &g_wcDuck);
-                SliderI("spot reach", &g_wcSpotReach, 0, 32, "%d u");
                 ImGui::Checkbox("visualize##wcviz", &g_wcViz);
                 ImGui::ColorEdit4("visualize color##wcvizcolor", g_wcVizColor,
                     ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_NoOptions |
@@ -1627,17 +1627,13 @@ static void Page_MovementMain()
                 ImGui::Checkbox("jump popup", &g_psAssistJumpBox);
             }, ImVec2(240.f, -1));
 
-        // heroin pixeljump: same saved points, own key
+        // heroin pixeljump: no points, the wall next to you (key popup has "always on")
         ImGui::Checkbox("pixeljump", &g_pixelJump);
         if (g_pixelJump)
             ImGui::OptionPopup("pixeljump settings", [&]() {
                 ImGui::Label("pixeljump keybind");
                 ImGui::Keybind("pixeljump key", &g_pixelJumpKey, &g_pixelJumpMode);
-                ImGui::Label("set point");
-                BindKeyNoMode("##pjsetbind", &g_pjSetPointKey);
-                ImGui::Label("delete point");
-                BindKeyNoMode("##pjdelbind", &g_pjDeletePointKey);
-                ImGui::Checkbox("show points", &g_pjRender);
+                ImGui::Checkbox("readout", &g_pjReadout);
                 ImGui::Checkbox("unsafe pixeljump", &g_pjUnsafe);
                 ImGui::Checkbox("pixeljump crouch", &g_pjCrouch);
             }, ImVec2(240.f, -1));
@@ -2112,10 +2108,11 @@ static void Page_MiscMain()
                 void GifTex_PathInput(const char*, const char*, char*, size_t);   // hud/gif_tex.cpp
 
                 int& style = g_wmStyle;
-                if (style < 0 || style > 22) style = 0;
+                if (style < 0 || style > 23) style = 0;
                 ImGui::Combo("style##watermark style", &style,
                     "default\0kamibebra\0clarity\0clarity v2\0delusional\0interwebz\0havoc\0onetap\0airflow\0ev0lve\0legendware\0"
-                    "interium\0skebob\0cumidere\0illusory\0lumi\0billware\0dna\0dna clarity\0cucumber\0howeweware\0gamesense\0heroin\0");
+                    "interium\0skebob\0cumidere\0illusory\0lumi\0billware\0dna\0dna clarity\0cucumber\0howeweware\0gamesense\0heroin\0"
+                    "lobotomy v2\0");
 
                 ImGui::InputTextWithHint("name##watermark text", "botox", g_wmLabel, 25);
 
@@ -2152,6 +2149,13 @@ static void Page_MiscMain()
                     ImGui::SliderFloat("x offset##watermark heroin", &g_wmHeroinX, 0.f, 1.f, "%.3f");
                     ImGui::SliderFloat("y offset##watermark heroin", &g_wmHeroinY, 0.f, 1.f, "%.3f");
                 }
+                if (style == 23) {
+                    ImGui::Checkbox("user##watermark lobotomy v2", &g_wmUser);
+                    ImGui::Checkbox("tickrate##watermark lobotomy v2", &g_wmTickrate);
+                    ImGui::Checkbox("fps##watermark lobotomy v2", &g_wmShowFPS);
+                    ImGui::Checkbox("time##watermark lobotomy v2", &g_wmShowTime);
+                    ImGui::ColorRow("title color##watermark lobotomy v2", g_wmLobotomyTitleColor, alphaFlags);
+                }
 
                 if (style == 12)
                     ImGui::Checkbox("typing effect##watermark skebob", &g_wmSkebobTyping);
@@ -2163,7 +2167,7 @@ static void Page_MiscMain()
                 if (labelStyle)
                     ImGui::Combo("label##watermark label", &label, "time\0fps\0user\0none\0");
 
-                const bool showsUser = ((style == 0 || style == 2 || style == 15 || style == 21) && g_wmUser) || style == 12 ||
+                const bool showsUser = ((style == 0 || style == 2 || style == 15 || style == 21 || style == 23) && g_wmUser) || style == 12 ||
                                        (style == 1 && (g_wmKamiShowFlags & 1)) || style == 3 || style == 8 || style == 10 ||
                                        style == 17 || style == 18 || style == 19 || style == 20 || (labelStyle && label == 2);
                 if (showsUser)
@@ -2714,6 +2718,7 @@ static void Page_MiscMain()
             }, ImVec2(200.f, -1.f));
 
         ImGui::Checkbox("equip region unlock", &g_equipRegionUnlock);
+        ImGui::Checkbox("backpack expander", &g_backpackExpander);
         ImGui::Checkbox("sv_cheats bypass", &g_cheatsBypass);
     }
     menu_group_end();
@@ -3586,10 +3591,11 @@ static const MenuStyleRow k_menuStyles[] = {
     // heroin dll c_menu::render FUN_18004ce90 + style apply FUN_18004ea40, fresh-inject cfg (.data):
     // window = inner_color, "outer" child = outer_color, frame = inner (checkbox grad outer->inner),
     // Border = menu_color @ .25, main window border = menu_color, tab text 120 idle. Stock style = no rounding.
-    // One font for everything: io default arialbd 16.
+    // One font for everything: render loop FUN_18004ee80 pushes DAT_18035b6e8 (AddFontDefault =
+    // ProggyClean 13) before the menu. arialbd 16 is only the music display's.
     { "heroin", IM_COL32(37, 39, 48, 255), IM_COL32(42, 44, 56, 255), IM_COL32(42, 44, 56, 255), IM_COL32(37, 39, 48, 255),
       IM_COL32(82, 161, 148, 64), IM_COL32(82, 161, 148, 255), IM_COL32(37, 39, 48, 255), IM_COL32(255, 255, 255, 255),
-      IM_COL32(120, 120, 120, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontHeroinArialBd16; }, []() -> ImFont* { return g_fontHeroinArialBd16; } },
+      IM_COL32(120, 120, 120, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontHeroinProggy13; }, []() -> ImFont* { return g_fontHeroinProggy13; } },
 };
 static const int k_menuStyleCount = (int)(sizeof(k_menuStyles) / sizeof(k_menuStyles[0]));
 
