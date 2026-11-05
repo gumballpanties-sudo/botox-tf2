@@ -3,7 +3,7 @@
 #include <cstring>
 #include <string>
 
-// Unit wm: the pure halves of the watermark port, split out so tests/wmpure_test.cpp can run
+// Watermark: the pure halves of the watermark port, split out so tests/wmpure_test.cpp can run
 // them without ImGui / GDI+ / d3d9. Used by gif_tex.cpp, watermark.cpp, watermark_styles.cpp.
 namespace n_wm {
 

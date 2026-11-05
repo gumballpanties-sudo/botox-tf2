@@ -2,11 +2,11 @@
 #include "../../globals/globals.h"
 #include <cstring>
 
-// Unit D2 port: the features Unit D pass 1 listed BLOCKED (new hook, or infra it did not
-// own) and this unit's own brief covers -- remove visual recoil, dlight, sun angle, custom
+// the features World fx pass 1 listed BLOCKED (new hook, or infra it did not
+// own) and this file's brief covers -- remove visual recoil, dlight, sun angle, custom
 // weather particle colour, world/prop texture (colour) replace. Reflections, remove hud
 // elements, custom blood colour, minecraft hud and web on surface stay blocked here too --
-// see the Unit D2 return report for why each one is blocked.
+// see the world fx 2 port notes for why each one is blocked.
 
 // CBasePlayer::CalcView, client.dll, pattern-hooked (new -- distinct function address, not
 // a second hook on an owned vtable slot). Sig verified against Aletherium/Amalgam's own

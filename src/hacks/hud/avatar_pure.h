@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <cstddef>
 
-// Unit E5: avatar_cache's pure arithmetic, split out so it is testable without the Steam
+// avatar_cache's pure arithmetic, split out so it is testable without the Steam
 // SDK or d3d9 (same shape as gif_frame.h / mp_art.h).
 // Gate test: tests/avatar_cache_test.cpp.
 namespace n_avatar {

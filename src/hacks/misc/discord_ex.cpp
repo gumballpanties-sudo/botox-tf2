@@ -1,5 +1,5 @@
 #include "discord_ex.h"
-#include "unitE_logic.h"
+#include "misc_util.h"
 #include <string>
 #include <ctime>
 #include <cstdint>
@@ -52,7 +52,7 @@ bool OpenPipe()
         s_pipe = CreateFileA(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (s_pipe == INVALID_HANDLE_VALUE) continue;
         DebugLog("discord rpc: pipe %s open, handshake client_id=%s", name, ClientId());
-        SendFrame(op_handshake, std::string("{\"v\":1,\"client_id\":\"") + n_unitE::JsonEscape(ClientId()) + "\"}");
+        SendFrame(op_handshake, std::string("{\"v\":1,\"client_id\":\"") + n_util::JsonEscape(ClientId()) + "\"}");
         return true;
     }
     return false;
@@ -145,9 +145,9 @@ DWORD WINAPI DiscordThread(LPVOID)
 
             if (ready)
             {
-                const std::string map   = n_unitE::JsonEscape(n_unitE::LevelNameShort(LevelNameRaw()).c_str());
+                const std::string map   = n_util::JsonEscape(n_util::LevelNameShort(LevelNameRaw()).c_str());
                 const std::string where = map.empty() ? "in menu" : "playing on " + map;
-                const std::string image = g_discordImageKey[0] ? n_unitE::JsonEscape(g_discordImageKey) : k_image;
+                const std::string image = g_discordImageKey[0] ? n_util::JsonEscape(g_discordImageKey) : k_image;
 
                 const std::string activity =
                     "{\"details\":\"" + where + "\",\"timestamps\":{\"start\":" + std::to_string(start) +

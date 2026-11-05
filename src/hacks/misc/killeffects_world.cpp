@@ -2,7 +2,7 @@
 #include "../../render/render.h"       // W2S_Project
 #include "../movement/movement.h"     // Vec3, Ray_mv, GameTrace_t, kTrace_TraceRay
 #include "../movement/prediction.h"   // EntV3
-#include "unitE_logic.h"  // n_unitE::McXpValue/McXpIcon
+#include "misc_util.h"  // n_util::McXpValue/McXpIcon
 #include "mc_xp_orb.h"    // botox hacks/misc/mc_xp_orb.h, verbatim (experience_orb.png)
 #include <vector>
 #include <random>
@@ -289,7 +289,7 @@ void KfxPush_Mc(const Vec3& feet, const Vec3& obbMins, const Vec3& obbMaxs)
             orb.vel   = Vec3((Rand01() * 0.2f - 0.1f) * 2.f, (Rand01() * 0.2f - 0.1f) * 2.f, Rand01() * 0.2f * 2.f) * kMcBlock;
             orb.size  = size;
             orb.floorZ = feet.z;
-            orb.icon  = n_unitE::McXpIcon(n_unitE::McXpValue(std::uniform_int_distribution<int>(1, 40)(g_rng)));
+            orb.icon  = n_util::McXpIcon(n_util::McXpValue(std::uniform_int_distribution<int>(1, 40)(g_rng)));
             Push(orb);
         }
     }

@@ -1,6 +1,6 @@
-#include "movement_tricks2_pure.h"   // Unit A3: pure decisions (bounce tangent/tung band/eb style), gate-tested
+#include "movement_tricks2_pure.h"   // pure decisions (bounce tangent/tung band/eb style), gate-tested
 
-// Unit A3 port: small/medium movement tricks from botox csgo-sdk, adapted to TF2's gamemovement.
+// small/medium movement tricks from botox csgo-sdk, adapted to TF2's gamemovement.
 // Textually included by movement.cpp (same convention as movement_ex.inl, right after it) --
 // shares every helper/static already defined above it in the same TU: On/EntV3/EntGround/
 // TraceHull/TraceFilterWorldProps/IN_*/FL_*/MASK_PLAYERSOLID, and s_textureBugHit/s_headSurfHit/
@@ -9,7 +9,7 @@
 //
 // fireman REMOVED (not ported): botox fireman.cpp is built on CGameMovement::LadderMove, and
 // TF2 has no ladders -- there is no non-ladder analog worth re-deriving, so this is a dropped
-// row, not a simplified one. See gap.md Unit A.
+// row, not a simplified one. See gap.md movement.
 //
 // Ported as OPTIONS of what already works, not as second engines, where the botox source is
 // itself a full sim-planner or a second search algorithm:

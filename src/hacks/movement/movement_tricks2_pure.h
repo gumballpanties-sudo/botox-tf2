@@ -1,5 +1,5 @@
 #pragma once
-// Unit A3 port: the pure-math decisions out of movement_tricks2.inl, pulled out so they're
+// the pure-math decisions out of movement_tricks2.inl, pulled out so they're
 // testable without the engine (see tests/movementtricks2_test.cpp). No engine types, no
 // includes -- plain in/out, same idiom as movement_ex_pure.h.
 

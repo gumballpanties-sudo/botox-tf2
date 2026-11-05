@@ -1,8 +1,8 @@
 #include "sdk.h"
-#include "../menu/cfg/u_wm.h"
+#include "../menu/cfg/vars_wm.h"
 #include <cstring>
 
-// Unit wm: the two engine reads the botox watermark styles need that only the aim SDK layer has.
+// Watermark: the two engine reads the botox watermark styles need that only the aim SDK layer has.
 
 // botox draw_watermark_onetap: client_state->m_choked_commands. Amalgam CClientState::chokedcommands
 // (defs.h), the same field hooks.cpp feeds CPrediction::Update with. A plain int read off the render

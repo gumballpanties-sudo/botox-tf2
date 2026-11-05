@@ -1,7 +1,7 @@
 #pragma once
 #include "sdk.h"
 
-// Per-weapon-slot aim FOV (gap.md Unit F: "MISSING per-TF2-weapon-slot granularity"). Narrow
+// Per-weapon-slot aim FOV (gap.md "MISSING per-TF2-weapon-slot granularity"). Narrow
 // on purpose -- the 3 weapons the gap analysis names (sniper/minigun/scattergun), not a generic
 // N-weapon table nobody asked for. FOV only: it's the knob that actually differs per weapon
 // class (a sniper wants a tiny cone, a minigun a wide one); smooth (AssistStrength) and

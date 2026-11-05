@@ -140,7 +140,7 @@ static int   s_pfVoid = 0;           // cells skipped -- the spot is inside a br
 struct PfFallMemo { Vec3 at; bool duck; bool ok; };
 static std::vector<PfFallMemo> s_pfFallMemo;
 
-// Unit A3 port: PixelFinder's two MISSING detection sub-modes (gap.md). Own lists -- mixing
+// PixelFinder's two MISSING detection sub-modes (gap.md). Own lists -- mixing
 // either into s_pfFound would read as a plain pixel-surf pin to the render side.
 static std::vector<Vec3> s_pfJumpPts;        // g_psFinderJumpSurf: pins no FALL catches, kept instead of dropped
 static std::vector<Vec3> s_pfHeadbouncePts;  // g_psFinderHeadbounce: ascent (ceiling) pins

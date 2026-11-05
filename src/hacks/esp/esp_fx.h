@@ -3,7 +3,7 @@
 #include <chrono>
 #include <cstdint>
 
-// Unit C2 cross-thread ESP extra: sound pings (CSoundEmitterSystem_EmitSound hook, visuals.cpp),
+// Cross-thread ESP extra: sound pings (CSoundEmitterSystem_EmitSound hook, visuals.cpp),
 // pushed from the GAME thread;
 // esp.cpp's Draw() runs off the render-thread IEngineVGui::Paint hook -- same cross-thread shape
 // flipworld.cpp's SRWLOCK core already solves in this tree. A spinlock is used here instead so

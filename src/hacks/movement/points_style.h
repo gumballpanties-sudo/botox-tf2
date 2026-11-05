@@ -9,7 +9,7 @@
 #include <cmath>
 #include <initializer_list>
 #include "../../dependencies/imgui/imgui.h"
-#include "../menu/cfg/u_points.h"
+#include "../menu/cfg/vars_points.h"
 
 extern float g_accentColor[4];
 

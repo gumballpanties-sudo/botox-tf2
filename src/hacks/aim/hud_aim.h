@@ -1,6 +1,6 @@
 #pragma once
 
-// Unit hud, game thread half (hud_aim.cpp): fills hud/hud_snap.h for the botox hud group.
+// HUD extras, game thread half (hud_aim.cpp): fills hud/hud_snap.h for the botox hud group.
 class CTFPlayer;
 
 void HudAim_Collect(CTFPlayer* pLocal);                 // hooks.cpp IEngineVGui_Paint, every paint

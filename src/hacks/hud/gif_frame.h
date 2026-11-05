@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <vector>
 
-// Unit E5: which GIF frame is showing at `elapsedMs` into playback, given each frame's
+// which GIF frame is showing at `elapsedMs` into playback, given each frame's
 // delay in ms and infinite looping. Split out of gif_tex.h/.cpp so it is testable without
 // GDI+ or d3d9 -- same shape as mp_time.h/mp_art.h for the media player.
 // Gate test: tests/giftex_test.cpp.

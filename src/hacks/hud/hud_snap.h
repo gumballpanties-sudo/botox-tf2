@@ -2,7 +2,7 @@
 #include <atomic>
 #include <cstdint>
 
-// Unit hud (11-01): what the botox hud group draws, read on the GAME thread by aim/hud_aim.cpp
+// HUD extras: what the botox hud group draws, read on the GAME thread by aim/hud_aim.cpp
 // (IEngineVGui::Paint, where the aim SDK's typed interfaces live) and drawn on whichever thread
 // builds the ImGui frame (hud_extra.cpp, crosshair.cpp). BuildImGuiFrame can run on
 // the render thread under multicore, which must not walk entities, so the game thread copies the

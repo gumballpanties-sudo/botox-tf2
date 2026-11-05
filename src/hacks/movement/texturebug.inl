@@ -1296,7 +1296,7 @@ static void TextureBug(void* pLocal, UserCmd_t* pCmd)
         s_tbFaceValid = false; s_tbEdgeValid = false; s_tbRideTanValid = false;
     };
 
-    // Unit A3 port: TUNG SURF, as an option of this catch rather than a second engine (botox
+    // TUNG SURF, as an option of this catch rather than a second engine (botox
     // movement.cpp tung_surf is its own ~700-line sim/replay/learn machine, itself flagged
     // UNTESTED upstream and "low priority" per gap.md -- re-deriving a second engine was not
     // worth the risk). What tung surf actually buys over a plain texture bug is tolerance: it

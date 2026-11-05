@@ -909,7 +909,7 @@ static void Hold(HeldCvar& h, const char* name, bool on, float value)
 static HeldCvar s_cv3dSky, s_cvVmFov;
 
 // r_3dsky (viewrender.cpp:113, no FCVAR_CHEAT; 1 hit in the TF2 x64 client.dll) and viewmodel_fov
-// (view.cpp:111) both exist; CS:GO's mat_postprocess_enable does not (unit screen's world_fx.cpp).
+// (view.cpp:111) both exist; CS:GO's mat_postprocess_enable does not (screen's world_fx.cpp).
 static void Cvars_Tick(bool release)
 {
     Hold(s_cv3dSky, "r_3dsky", !release && g_wdNo3dSky, 0.f);

@@ -1,14 +1,14 @@
 #include "config.h"
-#include "../hud/indicators.h"   // botox indicators vars (rows in cfg/u_ind.inc)
+#include "../hud/indicators.h"   // botox indicators vars (rows in cfg/vars_ind.inc)
 #include "../screen/colorcorrect.h"   // CcResetCurve -- a curve that fails to parse goes back to identity
 #include "../aim/aim.h"   // the aimbot's vars ride in this same file
 #include "../visuals/skins.h"     // and so does the skinchanger's per-weapon block
 #include "../visuals/hats.h"      // and the hat changer's slots
 #include "../visuals/skinshare.h" // and the sharing toggles
 #include "../misc/names.h"        // and custom names' cycle lists + aliases
-#include "../movement/detections.h"    // unit B
-#include "../movement/ps_lines.h"      // unit B
-#include "../movement/recorder.h"      // unit B
+#include "../movement/detections.h"    // movement extras
+#include "../movement/ps_lines.h"      // movement extras
+#include "../movement/recorder.h"      // movement extras
 #include "fonts.h"         // fonts tab
 #include "visual_keys.h"   // settings tab "visuals config"
 #include <cfloat>      // FLT_MAX -- the "this end was never bounded" sentinel below
@@ -220,7 +220,7 @@ static const CfgEntry kEntries[] = {
     { "ccCurveG",         CfgEntry::CURVE,  &g_ccCurve[2], 0 },
     { "ccCurveB",         CfgEntry::CURVE,  &g_ccCurve[3], 0 },
 
-    // -- Unit D: simple screen post-fx --------------------------------------------------
+    // -- simple screen post-fx --------------------------------------------------
     { "sharpenEnable",     CfgEntry::BOOL,   &g_sharpenEnable, 0 },
     { "sharpenAmount",     CfgEntry::FLOAT,  &g_sharpenAmount, 0 },
     { "filmGrainEnable",   CfgEntry::BOOL,   &g_filmGrainEnable, 0 },
@@ -315,7 +315,7 @@ static const CfgEntry kEntries[] = {
     { "showDepthFarPlane",    CfgEntry::FLOAT,  &g_showDepthFarPlane, 0 },
     { "showDepthMultiplier",  CfgEntry::FLOAT,  &g_showDepthMultiplier, 0 },
 
-    // -- Unit D: world fx ----------------------------------------------------------------
+    // -- world fx ----------------------------------------------------------------
     { "fullbrightEnable",    CfgEntry::BOOL,  &g_fullbrightEnable, 0 },
     { "disableInterpEnable", CfgEntry::BOOL,  &g_disableInterpEnable, 0 },
     { "aspectRatioEnable",   CfgEntry::BOOL,  &g_aspectRatioEnable, 0 },
@@ -325,7 +325,7 @@ static const CfgEntry kEntries[] = {
     { "thirdPersonEnable",   CfgEntry::BOOL,  &g_thirdPersonEnable, 0 },
     { "thirdPersonDistance", CfgEntry::FLOAT, &g_thirdPersonDistance, 0 },
 
-    // -- Unit D2: world fx 2 ---------------------------------------------------------------
+    // -- world fx 2 ---------------------------------------------------------------
     { "removeVisualRecoilEnable", CfgEntry::BOOL,   &g_removeVisualRecoilEnable, 0 },
     { "dlightEnable",             CfgEntry::BOOL,   &g_dlightEnable, 0 },
     { "dlightRadius",             CfgEntry::FLOAT,  &g_dlightRadius, 0 },
@@ -343,7 +343,7 @@ static const CfgEntry kEntries[] = {
     { "skyEnable",        CfgEntry::BOOL,   &g_skyEnable, 0 },
     { "skyName",          CfgEntry::STR,    g_skyName, sizeof(g_skyName) },
 
-    // -- Unit D3: reflections + minecraft sky/clouds -------------------------------------
+    // -- reflections + minecraft sky/clouds -------------------------------------
     { "reflEnable",       CfgEntry::BOOL,   &g_reflEnable, 0 },
     { "reflIntensity",    CfgEntry::FLOAT,  &g_reflIntensity, 0 },
     { "reflDistance",     CfgEntry::FLOAT,  &g_reflDistance, 0 },
@@ -519,7 +519,7 @@ static const CfgEntry kEntries[] = {
     { "airStuckKey",      CfgEntry::INT,    &g_airStuckKey, 0 },
     { "airStuckMode",     CfgEntry::INT,    &g_airStuckMode, 0 },
 
-    // -- Unit A port: small tricks from botox csgo-sdk --
+    // -- small tricks from botox csgo-sdk --
     { "nulls",            CfgEntry::BOOL,   &g_nulls, 0 },
     { "hsw",               CfgEntry::BOOL,  &g_hsw, 0 },
     { "hswKey",            CfgEntry::INT,   &g_hswKey, 0 },
@@ -548,7 +548,7 @@ static const CfgEntry kEntries[] = {
     { "jumpstats",         CfgEntry::BOOL,  &g_jumpstats, 0 },
     { "jumpstatsShowFails", CfgEntry::BOOL, &g_jumpstatsShowFails, 0 },
 
-    // -- Unit A3 port: tung/bounce/pf modes/eb presets/ps fix --
+    // -- tung/bounce/pf modes/eb presets/ps fix --
     { "tungSurf",          CfgEntry::BOOL,  &g_tungSurf, 0 },
     { "tungSurfKey",       CfgEntry::INT,   &g_tungSurfKey, 0 },
     { "tungSurfMode",      CfgEntry::INT,   &g_tungSurfMode, 0 },
@@ -577,7 +577,7 @@ static const CfgEntry kEntries[] = {
     { "edgeBugMouseLock",  CfgEntry::BOOL,  &g_edgeBugMouseLock, 0 },
     { "edgeBugSound",      CfgEntry::BOOL,  &g_edgeBugSound, 0 },
     { "edgeBugSoundId",    CfgEntry::INT,   &g_edgeBugSoundId, 0 },
-    // -- Unit A2 port: edge skip + blockbot from botox csgo-sdk --
+    // -- edge skip + blockbot from botox csgo-sdk --
     { "edgeSkip",          CfgEntry::BOOL,  &g_edgeSkip, 0 },
     { "edgeSkipKey",       CfgEntry::INT,   &g_edgeSkipKey, 0 },
     { "edgeSkipMode",      CfgEntry::INT,   &g_edgeSkipMode, 0 },
@@ -948,19 +948,19 @@ static const CfgEntry kEntries[] = {
 
     { "equipRegionUnlock", CfgEntry::BOOL,  &g_equipRegionUnlock, 0 },
 
-    // ---- unit B: detections ----
+    // ---- detections ----
     { "detections",         CfgEntry::BOOL,   &g_detections, 0 },
     { "detectionStackEb",   CfgEntry::BOOL,   &g_detectionStackEb, 0 },
     { "detectionTypes",     CfgEntry::INT,    &g_detectionTypes, 0 },
     { "detectionLabel",     CfgEntry::STR,    g_detectionLabel, sizeof(g_detectionLabel) },
 
-    // ---- unit B: pixelsurf lines ----
+    // ---- pixelsurf lines ----
     { "psLinesEnable",     CfgEntry::BOOL,   &g_psLinesEnable, 0 },
     { "psLinesFull",       CfgEntry::BOOL,   &g_psLinesFull, 0 },
     { "psLinesColor",      CfgEntry::FLOAT4, g_psLinesColor, 0 },
     { "psLinesFullColor",  CfgEntry::FLOAT4, g_psLinesFullColor, 0 },
 
-    // ---- unit B: movement recorder ----
+    // ---- movement recorder ----
     { "recEnable",          CfgEntry::BOOL, &g_recEnable, 0 },
     { "recShowLine",        CfgEntry::BOOL, &g_recShowLine, 0 },
     { "recRender",          CfgEntry::BOOL, &g_recRender, 0 },
@@ -983,19 +983,19 @@ static const CfgEntry kEntries[] = {
     { "recKeyStopPlay",     CfgEntry::INT,  &g_recKeyStopPlay, 0 },
     { "recKeyClear",        CfgEntry::INT,  &g_recKeyClear, 0 },
     { "recKeyClip",         CfgEntry::INT,  &g_recKeyClip, 0 },
-    // 11-01 port round: one row file per unit (cfg/units.h declares the vars)
-#include "cfg/u_ind.inc"
-#include "cfg/u_esp.inc"
-#include "cfg/u_world.inc"
-#include "cfg/u_screen.inc"
-#include "cfg/u_post.inc"
-#include "cfg/u_hud.inc"
-#include "cfg/u_wm.inc"
-#include "cfg/u_spec.inc"
-#include "cfg/u_misc.inc"
-#include "cfg/u_game.inc"
-#include "cfg/u_btchams.inc"
-#include "cfg/u_points.inc"
+    // 11-01 port round: one row file per feature (cfg/all_vars.h declares the vars)
+#include "cfg/vars_ind.inc"
+#include "cfg/vars_esp.inc"
+#include "cfg/vars_world.inc"
+#include "cfg/vars_screen.inc"
+#include "cfg/vars_post.inc"
+#include "cfg/vars_hud.inc"
+#include "cfg/vars_wm.inc"
+#include "cfg/vars_spec.inc"
+#include "cfg/vars_misc.inc"
+#include "cfg/vars_game.inc"
+#include "cfg/vars_btchams.inc"
+#include "cfg/vars_points.inc"
 };
 
 // botox g_config.folder(visuals): visuals files live one folder down

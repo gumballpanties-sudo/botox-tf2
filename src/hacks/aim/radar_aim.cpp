@@ -1,6 +1,6 @@
 #include "sdk.h"
 #include "../hud/radar_snap.h"
-#include "../menu/cfg/u_hud.h"
+#include "../menu/cfg/vars_hud.h"
 #include <cmath>
 #include <cstring>
 #include <string>

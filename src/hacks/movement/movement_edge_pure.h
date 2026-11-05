@@ -1,6 +1,6 @@
 #pragma once
 #include <cmath>
-// Unit A2 port: the pure-math decisions out of movement_edge.inl (edge skip + blockbot),
+// the pure-math decisions out of movement_edge.inl (edge skip + blockbot),
 // pulled out so they're testable without the engine (see tests/movementedge_test.cpp). No
 // engine types, no includes -- plain in/out, same split as movement_ex_pure.h.
 

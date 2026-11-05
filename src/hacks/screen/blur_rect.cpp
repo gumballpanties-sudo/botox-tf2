@@ -248,7 +248,7 @@ static void BlurRectDraw(IDirect3DDevice9* dev, ImVec2 mn, ImVec2 mx, float stre
             }
             else
             {
-                // BlurRectFade (unit game): botox screen_blur tint alpha = crossfade over the
+                // BlurRectFade (game extras): botox screen_blur tint alpha = crossfade over the
                 // sharp frame through the blend factor. SRCBLEND/ALPHABLEND go back in BlurRestore.
                 DWORD dst = 0, op = 0, factor = 0;
                 dev->GetRenderState(D3DRS_DESTBLEND, &dst);

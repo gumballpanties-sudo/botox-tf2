@@ -6,7 +6,7 @@
 #include "core.h"
 #include "aimbot.h"
 #include "menu.h"
-#include "hud_aim.h"   // unit hud: HudAim_Restore on unload
+#include "hud_aim.h"   // HudAim_Restore on unload
 
 #include "../../dependencies/imgui/imgui.h"
 
@@ -150,7 +150,7 @@ void Aim_Unload()
 		return;
 
 	G::Unload = true;
-	HudAim_Restore();   // unit hud: net_graphtext back to the player's value
+	HudAim_Restore();   // net_graphtext back to the player's value
 	U::Hooks.Unload();
 	F::Backtrack.Release();   // after the hooks: no FSN / CreateMove writes into the rings
 	H::Events.Unload();
@@ -303,7 +303,7 @@ namespace ImGui
 	void OptionPopup(const char* str_id, const std::function<void()>& function, const ImVec2& window_size);
 	bool Keybind(const char* label, int* key, int* mode, bool has_style = true);
 }
-void UnitF_Menu_aimbot_config();   // unitF_menu.cpp
+void Menu_Aimbot_Config();   // menu_aimbot.cpp
 
 // Rest of dih's menu is all lowercase, so every label the var metadata hands us gets folded
 // here rather than in the declarations -- the vars keep their own capitalisation.
@@ -478,7 +478,7 @@ void Aim_RenderMenuTab()
 	}
 	menu_group_end();
 
-	UnitF_Menu_aimbot_config();
+	Menu_Aimbot_Config();
 
 	menu_columns_next();
 

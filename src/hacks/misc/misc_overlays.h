@@ -1,7 +1,7 @@
 #pragma once
 #include "../../globals/globals.h"
 
-// botox overlays group, the small ones (unit misc):
+// botox overlays group, the small ones (misc):
 //  - healthshot effect: botox sets CS:GO's m_flHealthShotBoostExpirationTime and the engine draws
 //    its effects/healthboost screen overlay. TF2 has neither the netvar nor the material, so the
 //    overlay is drawn here (edge vignette + pulse) for the same duration. Triggers = botox's:

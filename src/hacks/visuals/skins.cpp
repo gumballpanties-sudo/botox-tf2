@@ -9,7 +9,7 @@
 #include "flipworld.h"
 #include "../hud/demostreak.h"
 #include "../movement/recorder.h"   // Recorder_FrameStart
-#include "../misc/game_extras.h"     // GameExtras_Frame -- unit game, game-thread tick
+#include "../misc/game_extras.h"     // GameExtras_Frame -- game-thread tick
 #include "../../dependencies/data/skindata.h"
 #include <cstdlib>
 
@@ -1773,7 +1773,7 @@ static void __fastcall h_FrameStageNotify(int stage)
     if (stage == 5) { CrashSpan _s("fsn/rain"); Rain_Tick(); }
 
     o_FrameStageNotify(stage);
-    { CrashSpan _s("fsn/extras"); GameExtras_Frame(stage); }   // unit game: chat translator print, bot ping, performance, cvar list (restores itself on g_eject)
+    { CrashSpan _s("fsn/extras"); GameExtras_Frame(stage); }   // chat translator print, bot ping, performance, cvar list (restores itself on g_eject)
     // Skin sharing: steam p2p probes / receive, player list. Game thread, in or out of a match
     // (it closes its sessions itself on leave and on eject).
     if (stage == 5) { CrashSpan _s("fsn/share"); SkinShare_Tick(); }

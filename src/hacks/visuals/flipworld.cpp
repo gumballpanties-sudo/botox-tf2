@@ -2,7 +2,7 @@
 #include "flipworld.h"
 #include "../screen/screenfx.h"   // ScreenFx_FindClientMode
 #include "visuals.h"    // Chams_LevelInit/LevelUnload -- piggybacked on this file's LevelInit hook
-#include "../hud/avatar_cache.h"   // unit E5: Avatar_OnMapChange piggybacks the same hook
+#include "../hud/avatar_cache.h"   // Avatar_OnMapChange piggybacks the same hook
 
 // Port of fpsoverlay's flipworld.cpp (itself Aletherium's CFlipWorld + CMisc::FlipWorldInput).
 // Every engine number used here is a flipslot:: constant (flipmath.h); fpsoverlay's
@@ -529,7 +529,7 @@ static void __fastcall h_FlipLevelInit(void* rcx)
     if (!g_eject) Chams_LevelInit();
     // Glow (visuals.cpp) rides the same hook for the same reason.
     if (!g_eject) Glow_LevelInit();
-    // unit E5: old map's steamids are stale -- drop the avatar cache next Avatar_Tick.
+    // old map's steamids are stale -- drop the avatar cache next Avatar_Tick.
     if (!g_eject) Avatar_OnMapChange();
 }
 

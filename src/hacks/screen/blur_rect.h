@@ -1,7 +1,7 @@
 #pragma once
 #include "../../globals/globals.h"
 
-// Unit E5: blurs the backbuffer under a panel rect. Call during imgui frame build, same
+// blurs the backbuffer under a panel rect. Call during imgui frame build, same
 // call shape as AddImage/AddRectFilled -- the actual blit+blur runs later, when
 // ImGui_ImplDX9_RenderDrawData replays the draw list on the render thread (an ImDrawList
 // callback). Reuses bloom's blur shader (fx_bloom_blur.h / fx_bloom_blur.hlsl), straight

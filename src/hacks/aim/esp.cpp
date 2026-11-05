@@ -5,7 +5,7 @@
 #include "../esp/esp_vars.h"
 #include "../visuals/chams_layers.h"   // ChamsLayers::SoundAlpha = botox n_sound_esp::alpha
 #include "../hud/avatar_pure.h"        // n_avatar::FriendIdToSteam64 -- plain arithmetic, no Steam/d3d9 types
-#include "../menu/cfg/u_esp.h"         // 11-01 vars: edicts group (primitives only)
+#include "../menu/cfg/vars_esp.h"         // 11-01 vars: edicts group (primitives only)
 #include <cfloat>
 #include <cstdio>
 

@@ -127,7 +127,7 @@ extern bool g_mpSimple;        // m_media_player_simple -- one line "title - art
 extern bool g_mpTime;          // m_media_player_time -- "precise time" 1:23 / 4:56 row
 extern int  g_mpPos;           // WatermarkPos; under the watermark box when it shares the column
 
-// -- Unit E: misc HUD (hit marker/sound, death particles, points, spectator list,
+// -- misc HUD (hit marker/sound, death particles, points, spectator list,
 //    watermark style skins, discord rpc, debug menu, console color) -----------------
 extern bool  g_hmEnable;
 extern float g_hmColor[4];
@@ -311,7 +311,7 @@ extern float g_ccHighlights;   // highlight lift     [-1..1]
 extern float g_ccShadows;      // shadow lift        [-1..1]
 extern CcCurve g_ccCurve[4];   // 0 = master, 1 = R, 2 = G, 3 = B
 
-// -- Unit D: simple screen post-fx (hacks/screen/screenfx_passes.cpp), ported from botox's
+// -- simple screen post-fx (hacks/screen/screenfx_passes.cpp), ported from botox's
 // hacks/visuals/screen/*.cpp -- one shader, appended into the already-shared screen-fx
 // pipeline (no new hook). Each pass is identity at amount 0 except show depth, which
 // overrides the rest outright while it is on.
@@ -404,7 +404,7 @@ extern int   g_showDepthOffsetY;
 extern float g_showDepthFarPlane;
 extern float g_showDepthMultiplier;
 
-// -- Unit D: world fx (hacks/visuals/world_fx.cpp) -------------------------------------------
+// -- world fx (hacks/visuals/world_fx.cpp) -------------------------------------------
 extern bool  g_fullbrightEnable;     // mat_fullbright poke, no hook
 extern bool  g_disableInterpEnable;  // aim G::RemoveInterp: Interpolate/anim hooks, remote players (aim/hooks.cpp)
 extern bool  g_aspectRatioEnable;    // letterbox/pillarbox via the existing Present dest rect
@@ -418,7 +418,7 @@ extern float g_worldFovAmount;       // degrees, overrides CViewSetup::fov outri
 extern bool  g_thirdPersonEnable;
 extern float g_thirdPersonDistance;  // units behind the eye. no wall-collision sub-toggle yet
 
-// -- Unit D2: world fx 2 (hacks/visuals/world_fx2.cpp) ---------------------------------------
+// -- world fx 2 (hacks/visuals/world_fx2.cpp) ---------------------------------------
 extern bool  g_removeVisualRecoilEnable;   // CBasePlayer::CalcView, zeroes m_vecPunchAngle
 
 extern bool  g_dlightEnable;               // IVEfx::CL_AllocDlight, keyed to the local player
@@ -440,14 +440,14 @@ extern float g_weatherTintColor[4];
 extern bool  g_skyEnable;
 extern char  g_skyName[64];
 
-// -- Unit D3: reflections (hacks/visuals/reflections.cpp), ported from botox's
+// -- reflections (hacks/visuals/reflections.cpp), ported from botox's
 // hacks/visuals/screen/reflections.cpp (single-pass version, see fx_refl.hlsl). Reads
 // screenfx.cpp's already-resolved depth texture, no new hook.
 extern bool  g_reflEnable;
 extern float g_reflIntensity;   // 0..1, schlick fresnel scale
 extern float g_reflDistance;    // 0..1, maps to a 300..3000 unit ray budget
 
-// -- Unit D3: minecraft sky + clouds (hacks/visuals/mc_world.cpp), ported from botox's
+// -- minecraft sky + clouds (hacks/visuals/mc_world.cpp), ported from botox's
 // hacks/visuals/screen/mc_clouds.cpp + hacks/visuals/edicts/mc_sky.h as a screen pass over
 // sky pixels (same depth source), not a baked skybox replacement.
 extern bool  g_mcWorldEnable;
@@ -623,7 +623,7 @@ extern bool g_jumpbug;     extern int g_jumpbugKey;     extern int g_jumpbugMode
 extern bool g_jbYieldSurf;         // jumpbug yields the cmd while a pixel surf ride is live
 extern bool g_jbPredict;           // fly the fall first -- no band tick ahead = never press (bhop lives)
 extern bool g_autoStrafe;  extern int g_autoStrafeKey;  extern int g_autoStrafeMode;
-extern bool  g_autoStrafeAvoidWalls;  // unit A: steer the other way if the heading is blocked
+extern bool  g_autoStrafeAvoidWalls;  // steer the other way if the heading is blocked
 extern float g_autoStrafeAvoidDist;   // trace reach for the above (def 50, 0-200)
 extern bool g_strafeOpt;   // plain on/off, no bind
 extern float g_strafeOptGain;      // % of optimal correction (Aletherium default 100)
@@ -631,7 +631,7 @@ extern float g_strafeOptMinSpeed;  // 2D speed floor (Aletherium default 30)
 extern bool g_edgeJump;    extern int g_edgeJumpKey;    extern int g_edgeJumpMode;
 extern bool g_longJump;    extern int g_longJumpKey;    extern int g_longJumpMode;
 extern bool g_longJumpEdge;        // edgejump on lj: walk-off edgejump while long jump active
-extern bool  g_longJumpAdaptive;       // unit A: cancel the duck hold early instead of a fixed 2 ticks
+extern bool  g_longJumpAdaptive;       // cancel the duck hold early instead of a fixed 2 ticks
 extern bool  g_longJumpAdaptiveLetGo;  // cancel reason: key released
 extern bool  g_longJumpAdaptiveLanded; // cancel reason: touched ground
 extern bool  g_longJumpAdaptiveTimed;  // cancel reason: timer elapsed
@@ -692,7 +692,7 @@ extern bool g_wcViz;           // botox m_wall_climb_visualize
 extern float g_wcVizColor[4];
 extern bool g_airStuck;    extern int g_airStuckKey;    extern int g_airStuckMode;
 
-// -- Unit A port (movement_ex.inl): small tricks from botox csgo-sdk, defaults OFF ---------------
+// -- Movement tricks port (movement_ex.inl): small tricks from botox csgo-sdk, defaults OFF ---------------
 extern bool g_nulls;
 extern bool g_hsw;         extern int g_hswKey;         extern int g_hswMode;
 extern int  g_hswSide;          // 0 = right-biased, 1 = left-biased
@@ -710,7 +710,7 @@ extern bool g_djStrafe;    extern int g_djStrafeKey;    extern int g_djStrafeMod
 extern bool g_silentView;       // smooth demo view: lock recorded viewangles during demo playback
 extern bool g_jumpstats;        // botox jump stats: clean landing -> chat line (detections.cpp)
 
-// -- Unit A3 port (movement_tricks2.inl + small hooks): tung/bounce/pf modes/eb presets/
+// -- Movement tricks 2 port (movement_tricks2.inl + small hooks): tung/bounce/pf modes/eb presets/
 // ps fix, from botox csgo-sdk. Simplified where the botox source is a full sim-planner or a
 // second search engine (see movement_tricks2.inl's header comment) -- defaults OFF.
 extern bool g_tungSurf;    extern int g_tungSurfKey;    extern int g_tungSurfMode;
@@ -737,7 +737,7 @@ extern bool g_edgeBugSound;     // TF2 game sound the tick after a real edgebug
 extern int  g_edgeBugSoundId;   // which TF2 game sound plays on a real EB
 void EdgeBug_MouseInput(float* x, float* y);   // IClientMode::OverrideMouseInput hook body
 void EdgeBug_InstallMouseHook();
-// -- Unit A2 port (movement_edge.inl): edge skip + blockbot, defaults OFF ------------------------
+// -- Edge skip port (movement_edge.inl): edge skip + blockbot, defaults OFF ------------------------
 extern bool g_edgeSkip;    extern int g_edgeSkipKey;    extern int g_edgeSkipMode;
 extern int  g_edgeSkipTicks;     // search window, ticks (def 23, ~botox's 0.35s predict_time)
 extern int  g_edgeSkipDepth;     // budget multiplier 1-4 (botox m_edge_skip_search_amount, def 2)
@@ -980,13 +980,13 @@ void Movement_ResolveExtraNetvars();
 
 extern bool g_netvarsReady;
 
-// -- Unit C: ESP (src/hacks/aim/esp.cpp draws these; values read via plain extern, same
+// -- ESP (src/hacks/aim/esp.cpp draws these; values read via plain extern, same
 // primitive-only declarations duplicated there -- see esp.h's banner comment for why esp.cpp
 // does not include this header) ----------------------------------------------------------
 #include "../hacks/esp/esp_vars.h"
-#include "../hacks/menu/cfg/units.h"   // 11-01 port round: per-unit inline vars
+#include "../hacks/menu/cfg/all_vars.h"   // 11-01 port round: per-feature inline vars
 
-// -- Unit C2: chams (visuals.cpp, piggybacked on the existing h_DrawModelExecute hook --
+// -- chams (visuals.cpp, piggybacked on the existing h_DrawModelExecute hook --
 // no 2nd MinHook on DrawModelExecute). Players only: colour-modulated ForcedMaterialOverride,
 // same technique Amalgam's CChams::DrawModel uses. Weapon/viewmodel chams are OUT of this
 // pass's scope (see visuals.cpp's Chams_WantsEntity comment) -- colors double as rgba, a[3] is
@@ -997,7 +997,7 @@ extern bool  g_chamsTeam;
 extern float g_chamsEnemyColor[4];
 extern float g_chamsTeamColor[4];
 
-// -- Unit C4: glow (visuals.cpp, same DrawModelExecute hook as chams -- extra $ignorez
+// -- glow (visuals.cpp, same DrawModelExecute hook as chams -- extra $ignorez
 // overlay pass, no 2nd MinHook). Players + buildings, same team/enemy split as chams.
 // Tint only: TF2's native CGlowObjectManager outline has no verified slot/pattern yet.
 extern bool  g_glowEnable;
@@ -1009,7 +1009,7 @@ extern bool  g_glowBuildings;
 extern float g_glowBuildingColor[4];
 extern float g_glowAlpha;          // 0..1, multiplies every glow pass's alpha
 
-// -- 10-31 chams/glow rework: src/hacks/aim/chams.cpp draws, unitC_menu.cpp edits. The
+// -- 10-31 chams/glow rework: src/hacks/aim/chams.cpp draws, menu_visuals_esp.cpp edits. The
 // C2/C4 enemy/team colours + glow enemy/team/buildings/alpha above are no longer read.
 // Layer lists = config strings (src/hacks/visuals/chams_layers.h, 160 = ChamsLayers::kCfgLen).
 extern bool  g_chamsLocalEnable;

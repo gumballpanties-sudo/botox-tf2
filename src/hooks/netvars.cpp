@@ -64,7 +64,7 @@ int  g_offActiveWeapon = 0;  // m_hActiveWeapon
 int  g_offMyWeapons    = 0;  // m_hMyWeapons[0] (DT_BaseCombatCharacter via DT_TFPlayer) --
                               // CHandle<CTFWeaponBase>[MAX_WEAPONS=48] (confirmed, Amalgam
                               // SDK CBaseCombatCharacter.h); index IS the weapon slot --
-                              // unit B's recorder "force same weapons" reads this
+                              // movement extras' recorder "force same weapons" reads this
 int  g_offFlags        = 0;  // m_fFlags (FL_ONGROUND/FL_DUCKING)
 int  g_offGroundEntity = 0;  // m_hGroundEntity -- Aletherium ground check
 int  g_offCachedBones  = 0;  // m_CachedBoneData = m_hLightingOrigin - 88 (netvar-relative)

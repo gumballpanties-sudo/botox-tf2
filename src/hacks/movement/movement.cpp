@@ -1,18 +1,18 @@
 #include "../../globals/globals.h"
 #include "../../globals/pinned_thread.h"   // routecalc.inl solver worker
 #include "movement.h"
-#include "../hud/avatar_cache.h"   // unit E5: Avatar_Pump piggybacks this game-thread tick
+#include "../hud/avatar_cache.h"   // Avatar_Pump piggybacks this game-thread tick
 #include "prediction.h"   // engine prediction core (Pred_*, restore, sim pool, snapshots)
-#include "recorder.h"      // unit B: movement recorder (record/play owns the cmd before features run)
+#include "recorder.h"      // movement recorder (record/play owns the cmd before features run)
 #include "eb_stance.h"    // edge bug stance filter (pure, gate-tested)
 #include "airlean.h"      // AirAccelerate geometry: best-gain / free-turn wish angle (gate-tested)
 #include "routesim.h"     // z-only CTFGameMovement port: AutoJumpbug's policy + its look-ahead
 #include "ps_surf.h"      // "is this pin a surf or a stuck hull" -- the ps indicator's rule (gate-tested)
 #include "ps_map.h"       // whole-map scan candidates: a brush wall face's top edge (gate-tested)
 #include "mv_scanbound.h" // MV_DetectWallLines broadphase box (pure, gate-tested)
-#include "movement_ex_pure.h" // Unit A port: pure decisions (hsw/delay hop/lj adaptive cancel), gate-tested
-#include "movement_tricks2_pure.h" // Unit A3 port: pure decisions (bounce tangent/tung band/eb style), gate-tested
-#include "movement_edge_pure.h" // Unit A2 port: pure decisions (edge skip duck gate, blockbot wish/sign), gate-tested
+#include "movement_ex_pure.h" // pure decisions (hsw/delay hop/lj adaptive cancel), gate-tested
+#include "movement_tricks2_pure.h" // pure decisions (bounce tangent/tung band/eb style), gate-tested
+#include "movement_edge_pure.h" // pure decisions (edge skip duck gate, blockbot wish/sign), gate-tested
 #include "detections.h"   // botox chat detections, fed the cmd start state at the publish point
 #include "../hud/points.h" // g_esFired: edge skip's lip landing, the keybind indicator particle count
 #include <mutex>
@@ -1141,7 +1141,7 @@ static void AutoStrafe(void* pLocal, UserCmd_t* pCmd)
     else if (bLeft) { flAngleOffset = 90.f;   if (bForward) flAngleOffset -= 45.f; }
     else if (bRight){ flAngleOffset = -90.f;  if (bForward) flAngleOffset += 45.f; }
 
-    // Unit A port: avoid wall collisions -- flip the strafe side if the heading it's about
+    // avoid wall collisions -- flip the strafe side if the heading it's about
     // to weave into is blocked within g_autoStrafeAvoidDist (botox movement.cpp avoid_walls).
     if (g_autoStrafeAvoidWalls && g_offOrigin > 0 && g_offMins > 0 && g_offMaxs > 0 && g_engineTrace)
     {
@@ -1382,7 +1382,7 @@ static void LongJump(void* pLocal, UserCmd_t* pCmd)
         longjumpTick = g_globalVars->tickcount + 2;
     }
 
-    // Unit A port: adaptive cancel -- end the duck hold on the first reason the user picked,
+    // adaptive cancel -- end the duck hold on the first reason the user picked,
     // instead of always waiting out the fixed 2-tick window (botox movement.cpp:1682 adaptive).
     if (ljbool && g_longJumpAdaptive)
     {
@@ -2039,7 +2039,7 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
 // bot on a player's HEAD instead of inside him.
 #include "practice.inl"
 
-// Unit A port: small tricks (nulls/hsw/delay hop/auto crouch/smooth
+// small tricks (nulls/hsw/delay hop/auto crouch/smooth
 // demo view/jumpstats). After everything else -- it only reads helpers already defined above.
 #include "movement_ex.inl"
 
@@ -2047,10 +2047,10 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
 // movement_tricks2.inl (bounce assist yields to s_ab.ownsCmd)
 #include "autobounce.inl"
 
-// Unit A3 port: tung/bounce/pf modes/eb presets/ps fix. After movement_ex.inl (needs
+// tung/bounce/pf modes/eb presets/ps fix. After movement_ex.inl (needs
 // edgebug.inl's s_eb* statics and this file's own s_*Hit flags, all already defined above).
 #include "movement_tricks2.inl"
-// Unit A2 port: edge skip + blockbot. After movement_ex.inl -- reuses its AutoCrouch-shaped
+// edge skip + blockbot. After movement_ex.inl -- reuses its AutoCrouch-shaped
 // trace helpers conceptually but shares nothing directly, just the file's own statics.
 #include "movement_edge.inl"
 
@@ -2118,7 +2118,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     s_edgeJumpFired = false;   // per-cmd: only the post-pred EdgeJump call sets it
     if (!bMoveBlocked)   // movement features only. The raw button reads above are shared
     {
-        // Unit A2: blockbot PRE, before every other assist gets a say over forwardmove/sidemove
+        // blockbot PRE, before every other assist gets a say over forwardmove/sidemove
         BlockBot(pLocal, pCmd);
         EsPre(pLocal, pCmd);   // edge skip's own pre-prediction snapshot, same timing as EdgeBugPre
         EdgeBugPre(pLocal, pCmd);
@@ -2128,7 +2128,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         AutoJumpbug(pLocal, pCmd);
         AutoStrafe(pLocal, pCmd);
         StrafeOptimizer(pLocal, pCmd);
-        // Unit A port -- pure usercmd math/traces, same tier as the calls above
+        // Movement tricks port -- pure usercmd math/traces, same tier as the calls above
         Nulls(pLocal, pCmd);
         Hsw(pLocal, pCmd);
         DelayHop(pLocal, pCmd);
@@ -2236,7 +2236,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             }
             if (s_psShouldSurf)        pCmd->buttons |= IN_DUCK;
             else if (s_psShouldUnduck) pCmd->buttons &= ~IN_DUCK;
-            PsSurfFixTick(pLocal, pCmd);   // Unit A3: hold duck a couple ticks into a fresh ride
+            PsSurfFixTick(pLocal, pCmd);   // hold duck a couple ticks into a fresh ride
             AutoAlign(pLocal, pCmd);
             s_wcPreTbFwd = pCmd->forwardmove; s_wcPreTbSide = pCmd->sidemove; s_wcPreTbButtons = pCmd->buttons;
             TextureBug(pLocal, pCmd);
@@ -2251,7 +2251,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             AirStuckTick(pLocal, pCmd);
             WallClimb(pLocal, pCmd);
             AutoBounce(pLocal, pCmd);   // botox auto_bounce: yields to every s_*Hit flag above
-            BounceAssist(pLocal, pCmd); // Unit A3 wall redirect: yields to auto bounce too
+            BounceAssist(pLocal, pCmd); // Bounce wall redirect: yields to auto bounce too
             // botox on_create_move_post:1267 -- pixel_surf is the last mover: it yields to this
             // cmd's AS / TB / WC flags (not last tick's) and its hold re-proves the final move
             PixelSurf(pLocal, pCmd);
@@ -2595,7 +2595,7 @@ static void __fastcall h_CreateMove_impl(void* rcx, int seq, float frametime, bo
     // inside Movement_Run to swallow the fault instead.
     if (g_eject || !g_input || !g_predReady || seq < 0) return;
 
-    Avatar_Pump();   // unit E5: game-thread Steam calls, rate-limited internally
+    Avatar_Pump();   // game-thread Steam calls, rate-limited internally
 
     UserCmd_t* pCmd = nullptr;
     __try {

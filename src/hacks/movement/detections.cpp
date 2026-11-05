@@ -92,11 +92,11 @@ void Detections_Tick(const DetTick& t)
     {
         ++chain;
         if (!g_detectionStackEb) PrintEb(chain);
-        Healthshot_Trigger(1);                 // unit misc: botox on_healthshot( 1 ) + points_on_trick
+        Healthshot_Trigger(1);                 // botox on_healthshot( 1 ) + points_on_trick
         Points_OnTrick(PTS_EDGE_BUG);
     }
 
-    // unit misc: botox detect() -- fresh = the trick (points + print), still held = its ride bonus
+    // botox detect() -- fresh = the trick (points + print), still held = its ride bonus
     const auto det = [](bool now, int& off, int trick) {
         if (DetFresh(now, off)) { Points_OnTrick(trick); return true; }
         if (now) Points_OnTrick(trick + (PTS_PIXEL_SURF_RIDE - PTS_PIXEL_SURF));

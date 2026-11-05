@@ -18,8 +18,8 @@
 #include "../visuals/chams_layers.h"
 #include "../visuals/lsd_chams.h"   // LsdChams_Begin/End: the "lsd" layer
 #include "../visuals/player_stencil.h"   // botox player stencil / internal glow / full-res glow (d3d9 pass)
-#include "../menu/cfg/u_esp.h"            // g_esx* stencil + inner glow vars (primitives only)
-#include "../menu/cfg/u_btchams.h"   // g_chamsBacktrack*
+#include "../menu/cfg/vars_esp.h"            // g_esx* stencil + inner glow vars (primitives only)
+#include "../menu/cfg/vars_btchams.h"   // g_chamsBacktrack*
 #include "backtrack.h"
 #include "../esp/esp_fx.h"   // EspFx_NowMs: one clock for the sound stamp (game thread) and the draw
 #include <cmath>

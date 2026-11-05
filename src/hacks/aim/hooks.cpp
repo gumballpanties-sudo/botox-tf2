@@ -14,7 +14,7 @@
 #include "esp.h"
 #include "backtrack.h"
 #include "scope_fov.h"
-#include "hud_aim.h"   // unit hud: botox hud group data, collected in IEngineVGui_Paint
+#include "hud_aim.h"   // botox hud group data, collected in IEngineVGui_Paint
 
 // Remove interp targets: remote players + the viewmodel. Amalgam hits every non-local entity;
 // projectiles / props / the local player model stay smooth here.
@@ -1168,9 +1168,9 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 			F::NoSpreadHitscan.Draw(pLocal);
 			F::CritHack.Draw(pLocal);
 			F::Ticks.Draw(pLocal);
-			F::Esp.Draw(pLocal);   // Unit C: player/world ESP, piggybacks this hook, no new install
-			HudAim_Collect(pLocal);   // unit hud: snapshot for the ImGui hud overlays (hud/hud_snap.h)
-			void WmAim_Tick(CTFPlayer*); WmAim_Tick(pLocal);   // unit wm: dna watermark "spotted" (wm_aim.cpp)
+			F::Esp.Draw(pLocal);   // player/world ESP, piggybacks this hook, no new install
+			HudAim_Collect(pLocal);   // snapshot for the ImGui hud overlays (hud/hud_snap.h)
+			void WmAim_Tick(CTFPlayer*); WmAim_Tick(pLocal);   // dna watermark "spotted" (wm_aim.cpp)
 			void RadarAim_Tick(CTFPlayer*); RadarAim_Tick(pLocal);   // csgo radar: overview bake + player snapshot (radar_aim.cpp)
 		}
 		H::Draw.End();

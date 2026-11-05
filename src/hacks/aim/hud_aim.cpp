@@ -3,7 +3,7 @@
 #include "aimbot.h"       // F::Aimbot.m_bToggled: the aim key's toggle latch
 #include "aim_record.h"   // BacktrackLerp: m_fLerpTime as the server computes it
 #include "../hud/hud_snap.h"
-#include "../menu/cfg/u_hud.h"
+#include "../menu/cfg/vars_hud.h"
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -12,7 +12,7 @@
 void DebugLog(const char* fmt, ...);   // dllmain.cpp
 
 // ============================================================================================
-// Unit hud, game thread half. botox reads these straight off g_ctx/g_interfaces inside its
+// HUD extras, game thread half. botox reads these straight off g_ctx/g_interfaces inside its
 // paint; here the frame may be built on the render thread, so the numbers are taken where the
 // typed SDK is (IEngineVGui::Paint, hooks.cpp) and published as a POD copy (hud/hud_snap.h).
 //   sniper crosshair  botox indicators.cpp sniper_crosshair gate (sniper weapon, not scoped)

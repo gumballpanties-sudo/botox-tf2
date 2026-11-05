@@ -216,7 +216,7 @@ struct MvInd_t
     float curtime = 0.f;
     int   wjSeq = 0;       // fake wall jump count: a change = takeoff at wjSpeed
     float wjSpeed = 0.f;
-    // raw input, for the keystroke indicator (unit B). Same publish point, same safety:
+    // raw input, for the keystroke indicator (movement extras). Same publish point, same safety:
     // a torn read is one stale frame of a display-only overlay.
     int   buttons = 0;
     short mouseDx = 0, mouseDy = 0;

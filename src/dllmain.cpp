@@ -85,7 +85,7 @@ bool  g_mpSimple       = false;
 bool  g_mpTime         = false;
 int   g_mpPos          = WM_TOP_RIGHT;   // same corner as the watermark = stacked under it
 
-// -- Unit E: misc HUD ---------------------------------------------------------------
+// -- misc HUD ---------------------------------------------------------------
 bool  g_hmEnable        = false;
 float g_hmColor[4]      = { 1.f, 1.f, 1.f, 1.f };
 float g_hmSize          = 10.f;   // botox m_hit_marker_size default
@@ -245,7 +245,7 @@ CcCurve g_ccCurve[4] = {
     { 2, { 0.f, 1.f }, { 0.f, 1.f } },
 };
 
-// -- Unit D: simple screen post-fx (hacks/screen/screenfx_passes.cpp) -----------------------
+// -- simple screen post-fx (hacks/screen/screenfx_passes.cpp) -----------------------
 bool  g_sharpenEnable      = false;
 float g_sharpenAmount      = 0.5f;
 bool  g_filmGrainEnable    = false;
@@ -335,7 +335,7 @@ int   g_showDepthOffsetY     = 0;
 float g_showDepthFarPlane    = 1000.f;
 float g_showDepthMultiplier  = 1.f;
 
-// -- Unit D: world fx (hacks/visuals/world_fx.cpp) --------------------------------------------
+// -- world fx (hacks/visuals/world_fx.cpp) --------------------------------------------
 bool  g_fullbrightEnable    = false;
 bool  g_disableInterpEnable = false;
 bool  g_aspectRatioEnable   = false;
@@ -345,12 +345,12 @@ float g_worldFovAmount      = 90.f;
 bool  g_thirdPersonEnable   = false;
 float g_thirdPersonDistance = 100.f;
 
-// -- Unit D3: reflections + minecraft sky/clouds -----------------------------------------
+// -- reflections + minecraft sky/clouds -----------------------------------------
 bool  g_reflEnable    = false;
 float g_reflIntensity = 1.f;    // botox m_reflections_intensity
 float g_reflDistance  = 0.8f;   // botox m_reflections_distance
 bool  g_mcWorldEnable = false;
-// -- Unit D2: world fx 2 (hacks/visuals/world_fx2.cpp) ----------------------------------------
+// -- world fx 2 (hacks/visuals/world_fx2.cpp) ----------------------------------------
 bool  g_removeVisualRecoilEnable = false;
 
 bool  g_dlightEnable  = false;
@@ -639,7 +639,7 @@ bool g_wcPreventSlow = true;  bool g_wcDuck = true;   // botox wall climb defaul
 bool g_wcViz = false;  float g_wcVizColor[4] = { 1.f, 190 / 255.f, 90 / 255.f, 1.f };
 bool g_airStuck = false;    int g_airStuckKey = 0;    int g_airStuckMode = 1;
 
-// -- Unit A port (movement_ex.inl): small tricks from botox csgo-sdk, defaults OFF ---------------
+// -- Movement tricks port (movement_ex.inl): small tricks from botox csgo-sdk, defaults OFF ---------------
 bool g_nulls = false;
 bool g_hsw = false;        int g_hswKey = 0;        int g_hswMode = 1;
 int  g_hswSide = 0;
@@ -656,7 +656,7 @@ bool g_djStrafe = false;   int g_djStrafeKey = 0;   int g_djStrafeMode = 1;
 bool g_silentView = false;
 bool g_jumpstats = false;
 
-// -- Unit A3 port (movement_tricks2.inl): tung/bounce/pf modes/eb presets/ps fix ---------
+// -- Movement tricks 2 port (movement_tricks2.inl): tung/bounce/pf modes/eb presets/ps fix ---------
 bool g_tungSurf = false;   int g_tungSurfKey = 0;   int g_tungSurfMode = 1;
 float g_tungMaxNz = 0.25f;
 bool g_autoBounce = false; int g_autoBounceKey = 0; int g_autoBounceMode = 1;
@@ -680,7 +680,7 @@ int  g_edgeBugStyle = 0;
 bool g_edgeBugMouseLock = false;
 bool g_edgeBugSound = false;
 int  g_edgeBugSoundId = 0;   // index into movement_tricks2.inl kEbSounds
-// -- Unit A2 port (movement_edge.inl): edge skip + blockbot, defaults OFF ------------------------
+// -- Edge skip port (movement_edge.inl): edge skip + blockbot, defaults OFF ------------------------
 bool g_edgeSkip = false;   int g_edgeSkipKey = 0;   int g_edgeSkipMode = 1;
 int   g_edgeSkipTicks = 23;
 int   g_edgeSkipDepth = 2;
@@ -796,7 +796,7 @@ int  g_prTeleporterKey = 0;
 std::atomic<int> g_prMenuReq{0};
 int  g_prBotClass = 5;        // index into k_prClassArg -- 5 = heavy (biggest dummy)
 
-// -- Unit C: ESP (src/hacks/aim/esp.cpp, extern list hacks/esp/esp_vars.h) -- botox defaults --
+// -- ESP (src/hacks/aim/esp.cpp, extern list hacks/esp/esp_vars.h) -- botox defaults --
 bool  g_espEnable = false;
 bool  g_espTeammates = false;
 float g_espMaxDistance = 0.f;
@@ -907,14 +907,14 @@ float g_espProjPathColor[4] = { 1.f, 0.9f, 0.3f, 1.f };
 float g_espItemColor[4] = { 1.f, 0.9f, 0.47f, 1.f };
 float g_espProjColor[4] = { 1.f, 1.f, 1.f, 0.78f };
 
-// -- Unit C2: chams (src/hacks/visuals/visuals.cpp) -- defaults OFF ------------------------------
+// -- chams (src/hacks/visuals/visuals.cpp) -- defaults OFF ------------------------------
 bool  g_chamsEnable = false;
 bool  g_chamsEnemy = true;
 bool  g_chamsTeam = false;
 float g_chamsEnemyColor[4] = { 1.f, 0.15f, 0.1f, 1.f };
 float g_chamsTeamColor[4]  = { 0.1f, 0.5f, 1.f, 1.f };
 
-// -- Unit C3: glow (src/hacks/visuals/visuals.cpp) -- defaults OFF --------------------------------
+// -- glow (src/hacks/visuals/visuals.cpp) -- defaults OFF --------------------------------
 bool  g_glowEnable = false;
 bool  g_glowEnemy = true;
 bool  g_glowTeam = false;

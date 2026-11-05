@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-// Unit hud (11-01), render side of botox's "hud" group. Data comes from the game thread through
+// HUD extras, render side of botox's "hud" group. Data comes from the game thread through
 // hud_snap.h (aim/hud_aim.cpp); everything here only draws.
 struct ImFont;
 

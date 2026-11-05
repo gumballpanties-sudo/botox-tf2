@@ -465,14 +465,14 @@ namespace Vars
 			CVar(TimeLimit, "Backtrack time", 200, SLIDER_CLAMP, 0, 200, 1, "%d ms");
 		SUBNAMESPACE_END(Backtrack);
 
-		// Sniper scope FOV scale (gap.md Unit F) -- TF2's scope zoom is one fixed FOV per
+		// Sniper scope FOV scale (gap.md aim extras) -- TF2's scope zoom is one fixed FOV per
 		// zoom level; this scales it client-side. See CHLClient_CreateMove (hooks.cpp).
 		SUBNAMESPACE_BEGIN(ScopeFOV, Aimbot)
 			CVar(Enabled, "Scope FOV scale", false);
 			CVar(Scale, "Scope FOV scale", 100.f, SLIDER_CLAMP | SLIDER_PRECISION, 50.f, 200.f, 5.f, "%g%%");
 		SUBNAMESPACE_END(ScopeFOV);
 
-		// Per-weapon-slot aim tuning (gap.md Unit F) -- deliberately the 3 weapons the gap
+		// Per-weapon-slot aim tuning (gap.md aim extras) -- deliberately the 3 weapons the gap
 		// analysis names (sniper/minigun/scattergun), not a generic N-weapon table. FOV only --
 		// see weapon_tuning.h for why smooth/hitboxes stayed out.
 		SUBNAMESPACE_BEGIN(WeaponTuning, Aimbot)

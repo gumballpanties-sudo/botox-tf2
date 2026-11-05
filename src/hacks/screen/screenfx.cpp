@@ -6,8 +6,8 @@
 #include "../visuals/chams_api.h"    // Glow_Render -- Amalgam glow pass, before the original post slot
 #include "shaders/fx_probe.h"     // k_fxProbeBytes    -- compiled from fx_probe.hlsl by fxc
 #include "shaders/fx_quad_vs.h"   // k_fxQuadVsBytes   -- compiled from fx_quad_vs.hlsl by fxc
-#include "../visuals/reflections.h"  // unit D3: Reflections_Draw -- same depth source, same draw point
-#include "../visuals/mc_world.h"      // unit D3: MCWorld_UpdateView -- cloud drift off this view setup
+#include "../visuals/reflections.h"  // Reflections_Draw -- same depth source, same draw point
+#include "../visuals/mc_world.h"      // MCWorld_UpdateView -- cloud drift off this view setup
 #include "screenfx_passes.h" // ScreenFxPasses_DepthView -- emphasize/show depth, same draw point
 
 // ==== the depth source ==============================================================
@@ -1187,7 +1187,7 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
     const bool wantDof   = g_dofEnable;
     const bool wantFb    = g_fbEnable;
     const bool wantProbe = g_fxDepthProbe;
-    const bool wantRefl  = g_reflEnable;                          // unit D3
+    const bool wantRefl  = g_reflEnable;                          // reflections
     const bool wantDv    = g_emphasizeEnable || g_showDepthEnable; // botox depth_view
     const bool wantWarp  = ScreenFxPasses_WarpWanted();            // depth distort + depth channel shift
     const bool wantPass  = FxWantDepthPass();
@@ -1584,7 +1584,7 @@ void ScreenFx_RestoreQueueMode()
     DebugLog("screenfx: eject -- mat_queue_mode put back to %d", s_queueOriginal);
 }
 
-bool ScreenFx_QueueForced() { return s_queueForced; }   // unit game: misc performance "multicore rendering" yields to it
+bool ScreenFx_QueueForced() { return s_queueForced; }   // misc performance "multicore rendering" yields to it
 
 // ==== IClientMode::DoPostScreenSpaceEffects =========================================
 // The game's own screen-space slot: the 3D scene and the engine's post are done, the HUD
@@ -1679,11 +1679,11 @@ static void FxReadViewSetup(const void* setup)
     const float fbAngles[3] = { angles.x, angles.y, angles.z };
     FrameBlend_UpdateView(fbOrigin, fbAngles, fov, fovVm, s_viewNearVm, s_viewFarVm);
 
-    // unit D3: the sky/clouds pass's world-space cloud drift -- same thread, same reason
+    // the sky/clouds pass's world-space cloud drift -- same thread, same reason
     // (g_globalVars->curtime and the player's own origin are main-thread only).
     MCWorld_UpdateView(fbOrigin);
 
-    // unit screen: reflections' nearest env_cubemap pick + file loads (botox pick_cubemap, main thread)
+    // reflections' nearest env_cubemap pick + file loads (botox pick_cubemap, main thread)
     Reflections_UpdateView(fbOrigin, fbAngles);
 }
 

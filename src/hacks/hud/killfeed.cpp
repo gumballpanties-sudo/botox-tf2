@@ -1,7 +1,7 @@
 #include "killfeed.h"
 #include "../visuals/skins.h"
 #include "../visuals/hats.h"       // Hats_OnGameEvent: spawn / resupply snapshot
-#include "../misc/unitE_events.h"   // hit marker/sound, death particles, score popup -- piggyback, no new hook
+#include "../misc/game_events.h"   // hit marker/sound, death particles, score popup -- piggyback, no new hook
 #include "../misc/names.h"          // custom names: on-kill cycle trigger
 
 // Server events (player_death etc.) reach CHudBaseDeathNotice through slot 8, which in TF2 x64
@@ -76,7 +76,7 @@ bool __fastcall h_FireEvent(void* thisptr, void* pEvent, bool bDontBroadcast)
     // whether the notice is shown.
     Skins_OnGameEvent(pEvent);
     Hats_OnGameEvent(pEvent);   // spawn / resupply: the hat changer takes its loadout snapshot
-    UnitE_OnGameEvent(pEvent);
+    GameEvents_Dispatch(pEvent);
     Names_OnGameEvent(pEvent);   // custom names: on-kill cycle
     return h_FireEvent_impl(thisptr, pEvent, bDontBroadcast);
 }

@@ -1,5 +1,5 @@
 #pragma once
-// Unit A port: the handful of pure-math decisions out of movement_ex.inl / LongJump's
+// the handful of pure-math decisions out of movement_ex.inl / LongJump's
 // adaptive-cancel append, pulled out so they're testable without the engine (see
 // tests/movementex_test.cpp). No engine types, no includes -- plain in/out.
 

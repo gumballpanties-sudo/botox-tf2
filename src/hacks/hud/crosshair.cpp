@@ -2,7 +2,7 @@
 #include "ch_blend_modes.h"
 #include "../screen/shaders/fx_chblend_vs.h"   // k_fxChBlendVsBytes -- fx_chblend_build.sh
 #include "../screen/shaders/fx_chblend_ps.h"   // k_fxChBlendPs[]    -- one ps_3_0 per blend mode
-#include "hud_snap.h"   // unit hud: sniper crosshair gate from the game thread
+#include "hud_snap.h"   // sniper crosshair gate from the game thread
 #include "hud_math.h"
 #include <algorithm>
 #include <vector>

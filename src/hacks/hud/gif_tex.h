@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 
-// Unit E5: cache of decoded embedded GIFs (spectator_list/airflow icons), one reused
+// cache of decoded embedded GIFs (spectator_list/airflow icons), one reused
 // IDirect3DTexture9 per GIF re-uploaded on frame change -- same approach spectator_list.cpp
 // already uses, not a texture per frame (a 1.4MB donor GIF can run 50+ frames; keeping all
 // of them resident would be hundreds of MB for an animation nobody looks at closely).

@@ -67,7 +67,7 @@ namespace
 
 void Points_OnTrick(int trick)
 {
-    g_wmTrickMs.store(GetTickCount64());   // unit wm: botox points_on_trick g_trick_time (dna / lumi watermark glow)
+    g_wmTrickMs.store(GetTickCount64());   // botox points_on_trick g_trick_time (dna / lumi watermark glow)
     if (trick >= 0 && trick < PTS_PIXEL_SURF_RIDE) g_trickFired[trick].fetch_add(1);
     if (!g_ptsEnable || g_showMenu || trick < 0 || trick > PTS_WALL_CLIMB_RIDE) return;
 

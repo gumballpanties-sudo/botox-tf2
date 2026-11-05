@@ -1,6 +1,6 @@
 #include "watermark_styles.h"
 #include "watermark.h"            // g_wmBox
-#include "../misc/unitE_logic.h"
+#include "../misc/misc_util.h"
 #include "../movement/prediction.h"   // g_globalVars (interval_per_tick), MV_GetIndicators (local speed)
 #include "avatar_cache.h"
 #include "avatar_pure.h"   // n_avatar::FriendIdToSteam64
@@ -389,7 +389,7 @@ static void DrawDelusional(ImDrawList* dl, ImGuiIO& io)
 // style 5: interwebz -- misc.cpp draw_watermark_interwebz(). calibri 16 mono, uppercase brand +
 // game tag + label, 8-way black outline, white, centred on (250, 36) of botox's 640x480 stretch
 // block. TF2 has no such canvas (render.cpp draws in io.DisplaySize px), so the point is scaled
-// (n_unitE::ScaleVirtual640x480). "CS:GO" -> "TF2": the one thing the game forces.
+// (n_util::ScaleVirtual640x480). "CS:GO" -> "TF2": the one thing the game forces.
 static void DrawInterwebz(ImDrawList* dl, ImGuiIO& io)
 {
     ImFont* font = Or(g_fontInterwebzCalibri);
@@ -402,7 +402,7 @@ static void DrawInterwebz(ImDrawList* dl, ImGuiIO& io)
 
     const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, line.c_str());
     float vx, vy;
-    n_unitE::ScaleVirtual640x480(io.DisplaySize.x, io.DisplaySize.y, 250.f, 36.f, vx, vy);
+    n_util::ScaleVirtual640x480(io.DisplaySize.x, io.DisplaySize.y, 250.f, 36.f, vx, vy);
     const ImVec2 pos(vx - floorf(ts.x * 0.5f), vy - roundf(font->Ascent));
     SetBox(pos.x, pos.y, pos.x + ts.x, pos.y + ts.y);
 

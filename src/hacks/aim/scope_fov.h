@@ -1,7 +1,7 @@
 #pragma once
 #include "sdk.h"
 
-// Sniper scope FOV scale (gap.md Unit F): TF2's scope zoom is one fixed FOV per zoom level,
+// Sniper scope FOV scale (gap.md aim extras): TF2's scope zoom is one fixed FOV per zoom level,
 // server-set into CBasePlayer::m_iFOV (netvar) and replicated once per zoom-state change --
 // confirmed in tf_weapon_sniperrifle.cpp's Zoom()/ZoomIn()/ZoomOut(). Scaling it here is the
 // same trick CTFWeaponBase::CanFireCriticalShot already uses on the same var (defs.cpp,

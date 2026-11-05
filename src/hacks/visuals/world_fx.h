@@ -1,13 +1,13 @@
 #pragma once
 #include "../../globals/globals.h"
 
-// Unit D port: fullbright + disable interp + aspect ratio stretch (r_aspectratio, botox's
+// fullbright + disable interp + aspect ratio stretch (r_aspectratio, botox's
 // own convar route) -- all convar pokes, no hook.
 //
 // world fov / sun angle / dlight / custom blood+precip particle colour / third person /
 // world+prop texture replace / reflections / minecraft hud / web on surface / remove hud
-// elements / remove visual recoil are NOT here -- see the Unit D return report for why
-// each one is blocked (new hook needed, or a file this unit does not own).
+// elements / remove visual recoil are NOT here -- see the world fx port notes for why
+// each one is blocked (new hook needed, or a file this file does not own).
 
 // 100ms tick, called from visuals.cpp's UpdateVisualsCvars -- same cadence fog/sway ride.
 void WorldFx_Tick();

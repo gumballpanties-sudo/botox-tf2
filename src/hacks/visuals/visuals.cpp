@@ -7,12 +7,12 @@
 #include "../screen/screenfx.h"     // FrameBlend_CollectBones -- the gun's bones, taken at the draw
 #include "viewmodel_fps.h"          // g_vmFps.Apply -- low fps viewmodel, swaps the gun's bones
 #include "flipmath.h"     // flipslot:: -- IMaterialSystem FindMaterial/DecRef/IsErrorMaterial slots
-#include "../esp/esp_fx.h"   // Unit C2: sound-ping ring, written from h_EmitSound below
+#include "../esp/esp_fx.h"   // sound-ping ring, written from h_EmitSound below
 #include "chams_api.h"    // 10-31: chams + glow passes (aim/chams.cpp)
-#include "world_fx.h"     // WorldFx_Tick -- unit D: fullbright + disable interp pokes
-#include "world_fx2.h"    // WorldFx2_Tick/_OnFindMaterial -- unit D2: dlight, sun angle, tints
+#include "world_fx.h"     // WorldFx_Tick -- fullbright + disable interp pokes
+#include "world_fx2.h"    // WorldFx2_Tick/_OnFindMaterial -- dlight, sun angle, tints
 #include "mc_world.h"     // MCWorld_OnSkyBoxDrawn -- minecraft sky behind the 2D sky draw
-#include "../misc/game_extras.h"   // ChatTranslator_OnUserMessage -- unit game, DispatchUserMessage
+#include "../misc/game_extras.h"   // ChatTranslator_OnUserMessage -- DispatchUserMessage
 #include <intrin.h>       // _ReturnAddress -- net_graph must still read the real lerp
 
 // ConVar-string redirect scratch, file-local because nothing outside this file has ever
@@ -184,8 +184,8 @@ void UpdateVisualsCvars()
     // and (b) forced crosshair back to 1 for players who run it at 0 with no feature
     // of ours enabled at all. One writer only.
 
-    WorldFx_Tick();   // unit D: fullbright + disable interp pokes, same 100ms tick
-    WorldFx2_Tick();  // unit D2: dlight + sun angle, same 100ms tick
+    WorldFx_Tick();   // fullbright + disable interp pokes, same 100ms tick
+    WorldFx2_Tick();  // dlight + sun angle, same 100ms tick
 }
 
 // ==== Net stats ==================================================================
@@ -1624,11 +1624,11 @@ void* __fastcall h_FindMaterial(
             pName = "particle/snow";
     }
     void* pMat = o_FindMaterial(rcx, pName, pTextureGroup, bComplain, pComplainPrefix);
-    WorldFx2_OnFindMaterial(pMat, pTextureGroup, pName);   // unit D2: world/prop/weather tint
+    WorldFx2_OnFindMaterial(pMat, pTextureGroup, pName);   // world/prop/weather tint
     return pMat;
 }
 
-// -- Unit C2: Sound ESP -----------------------------------------------------------------
+// -- Sound ESP -----------------------------------------------------------------
 // Overlays only the leading fields of the real engine EmitSound_t (Amalgam's
 // Hooks/CSoundEmitterSystem_EmitSound.cpp has the full struct: int m_nChannel then
 // char const* m_pSoundName) -- channel(4)+pad(4)+pSoundName(8) is all this hook reads, so a
@@ -1834,7 +1834,7 @@ DispatchUserMessage_t o_DispatchUserMessage = nullptr;
 bool __fastcall h_DispatchUserMessage(void* rcx, int type, void* msgData)
 {
     MiscHookGuard _g;
-    ChatTranslator_OnUserMessage(type, msgData);   // unit game: reads SayText/SayText2 before the original does
+    ChatTranslator_OnUserMessage(type, msgData);   // reads SayText/SayText2 before the original does
     if (g_removeScreenEffects && !g_eject && (type == 10 || type == 11 || type == 13))
         return true; // swallow -> effect never plays
     return o_DispatchUserMessage(rcx, type, msgData);

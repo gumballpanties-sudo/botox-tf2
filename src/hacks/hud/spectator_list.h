@@ -9,7 +9,7 @@
 // 21 chillware v2 (real ImGui window, position saved), 22 skebob, 23 cumidere, 24 illusory, 25 lumi
 // (default / new + mascot / interwebz), 26 billware, 27 inkabanium, 28 dna, 29 cucumber,
 // 30 howeweware, 31 gamesense, 32 kamidere.
-// Popup vars: src/hacks/menu/cfg/u_spec.h. Netvars: m_iObserverMode / m_hObserverTarget on
+// Popup vars: src/hacks/menu/cfg/vars_spec.h. Netvars: m_iObserverMode / m_hObserverTarget on
 // DT_BasePlayer, m_lifeState (netvars.cpp g_offLifeState), resolved lazily.
 void RenderSpectatorList();
 

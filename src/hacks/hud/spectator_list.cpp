@@ -3,7 +3,7 @@
 #include "../../render/dpi.h"      // botox stretch blocks + panel mouse (dpi scale panels)
 #include "watermark_styles.h"      // Watermark_GamesenseFrame
 #include "mediaplayer.h"           // MediaPlayer_HasSession (illusory track line)
-#include "../misc/unitE_logic.h"
+#include "../misc/misc_util.h"
 #include "avatar_cache.h"
 #include "avatar_pure.h"   // n_avatar::FriendIdToSteam64
 #include "spec_pure.h"     // Utf8Truncate, UrlDirect, UrlHash, MakeEyeLayout (tests/specpure_test.cpp)
@@ -133,7 +133,7 @@ static const std::vector<SpecEntry>& RawEntries()
         unsigned int handle = 0xFFFFFFFFu;
         if (!ReadObsState(pEnt, mode, handle, life) || life == 0) continue;   // alive = not a spectator
 
-        const int target = n_unitE::DecodeEHandleIndex(handle);
+        const int target = n_util::DecodeEHandleIndex(handle);
         if (target < 1 || target > 64) continue;
         void* pTarget = GetClientEntity(target);
         int targetLife = 1;
@@ -191,7 +191,7 @@ static int LocalObserverTarget()
     int mode = 0, life = 0;
     unsigned int handle = 0xFFFFFFFFu;
     if (!ReadObsState(pLocal, mode, handle, life)) return -1;
-    const int t = n_unitE::DecodeEHandleIndex(handle);
+    const int t = n_util::DecodeEHandleIndex(handle);
     return (t >= 1 && t <= 64 && GetClientEntity(t)) ? t : -1;
 }
 
@@ -2416,7 +2416,7 @@ static std::vector<HeroinRow> HeroinRows()
         int mode = 0, life = 0;
         unsigned int handle = 0xFFFFFFFFu;
         if (ReadObsState(pLocal, mode, handle, life) && life != 0 && (mode == OBS_IN_EYE || mode == OBS_CHASE)) {
-            const int t = n_unitE::DecodeEHandleIndex(handle);
+            const int t = n_util::DecodeEHandleIndex(handle);
             if (t >= 1 && t <= 64) ref = t;
         }
     }

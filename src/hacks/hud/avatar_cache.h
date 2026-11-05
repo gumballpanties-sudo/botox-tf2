@@ -2,7 +2,7 @@
 #include "../../globals/globals.h"
 #include <cstdint>
 
-// Unit E5: cached Steam avatar textures by steamid64. Steam calls only happen on the GAME
+// cached Steam avatar textures by steamid64. Steam calls only happen on the GAME
 // thread (Avatar_Pump, e.g. from h_CreateMove); the render thread never touches
 // ISteamFriends/ISteamUtils and never reads a game-thread vector/string directly -- pixels
 // cross over as a mutex-protected byte copy, same pattern mediaplayer.cpp's poll thread uses.

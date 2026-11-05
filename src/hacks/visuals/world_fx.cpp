@@ -215,7 +215,7 @@ static void __fastcall h_OverrideView(void* rcx, void* pView)
 
     o_OverrideView(rcx, pView);
 
-    // unit world: main thread, once a frame, before any model draw
+    // main thread, once a frame, before any model draw
     WorldFx2_Frame();   // sun angle + shadow_control
     WorldFx3_Frame();   // movement trail, dlights, world/prop/skybox modulation walk
     const bool fovOn = WorldFov_Wanted();

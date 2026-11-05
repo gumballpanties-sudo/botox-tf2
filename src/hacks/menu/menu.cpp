@@ -7,7 +7,7 @@
 #include "../hud/scoreboard.h"
 #include "../screen/colorcorrect.h"
 #include "../hud/crosshair.h"   // Crosshair_BlendCombo
-#include "../hud/hud_extra.h"   // unit hud: fonts tab net graph page reset
+#include "../hud/hud_extra.h"   // fonts tab net graph page reset
 #include "../hud/radar_snap.h"  // csgo radar: overview source / bake status line
 #include "../visuals/lagres.h"
 #include "../movement/movement.h"   // RC_* marker access for the route calculator's marker list
@@ -25,14 +25,14 @@
 #include <ctime>     // BuildDateText: localtime_s off the PE timestamp
 #include <cstdint>
 #include <string>
-#include "unitA_menu.h"
-#include "unitB_menu.h"
-#include "unitC_menu.h"
-#include "unitD_menu.h"
-#include "unitD3_menu.h"
-#include "../visuals/world_fx3_math.h"   // unit world: remove hud elements list (k_hudElems)
-#include "unitE_menu.h"
-#include "unitF_menu.h"
+#include "menu_movement.h"
+#include "menu_movement_extra.h"
+#include "menu_visuals_esp.h"
+#include "menu_visuals_world.h"
+#include "menu_visuals_screenfx.h"
+#include "../visuals/world_fx3_math.h"   // remove hud elements list (k_hudElems)
+#include "menu_misc.h"
+#include "menu_aimbot.h"
 
 static void MenuClientCmd(const char* cmd);   // below the fonts tab; the hud group's radar button uses it
 
@@ -49,7 +49,7 @@ static void MenuTooltip(const char* fmt, ...)
 }
 
 // ==== botox imgui fork widgets (dependencies/imgui/imgui_widgets.cpp), ported 1:1 =========
-// Declared in menu.h so unit menus and aim.cpp port botox tab code verbatim. Fonts:
+// Declared in menu.h so menu_* pages and aim.cpp port botox tab code verbatim. Fonts:
 // BoldFont() = font_name_verdana_bd_11, g_fontIcon13 = font_name_icon_13.
 
 // botox key_names, 256 entries, one per vk
@@ -436,19 +436,19 @@ static void Page_VisualsEsp()
     menu_columns_begin();
     if (menu_group_begin("players"))
     {
-        // UNIT_MENU_SLOT visuals_esp
-        UnitC_Menu_visuals_esp();
+        // MENU_SLOT visuals_esp
+        Menu_Visuals_Esp();
     }
     menu_group_end();
 
     // botox "edicts" group under "players" (dropped weapons, thrown projectiles, grenade path + TF2 buildings)
     if (menu_group_begin("edicts"))
-        UnitC_Menu_visuals_world();
+        Menu_Visuals_WorldEsp();
     menu_group_end();
 
     menu_columns_next();
     if (menu_group_begin("chams"))
-        UnitC_Menu_visuals_chams();
+        Menu_Visuals_Chams();
     menu_group_end();
     menu_columns_end();
 }
@@ -510,7 +510,7 @@ static void Page_VisualsWorld()
     if (menu_group_begin("world"))
     {
         // botox menu_tab_visuals.cpp world group, verbatim order / labels / ranges. TF2 cuts are
-        // listed in unitD_menu.cpp (UnitD_Menu_visuals_world, which carries the rows from dlight on).
+        // listed in menu_visuals_world.cpp (Menu_Visuals_World, which carries the rows from dlight on).
         ImGui::Checkbox("world fov", &g_worldFovEnable);
         if (g_worldFovEnable)
             ImGui::SliderFloat("fov##world", &g_wdWorldFov, -30.f, 60.f, "%.1f");
@@ -582,8 +582,8 @@ static void Page_VisualsWorld()
         if (g_flipWorld)
             ImGui::Checkbox("gun other side##flip world", &g_wdFlipGunOtherSide);
 
-        // UNIT_MENU_SLOT visuals_world: dlight .. world hit marker, then minecraft sky
-        UnitD_Menu_visuals_world();
+        // MENU_SLOT visuals_world: dlight .. world hit marker, then minecraft sky
+        Menu_Visuals_World();
     }
     menu_group_end();
 
@@ -733,8 +733,8 @@ static void Page_VisualsScreen()
     menu_columns_begin();
     if (menu_group_begin("screen"))
     {
-        // UNIT_MENU_SLOT visuals_screen (third person, aspect ratio)
-        UnitD_Menu_visuals_screen();
+        // MENU_SLOT visuals_screen (third person, aspect ratio)
+        Menu_Visuals_Camera();
 
         // botox menu_tab_visuals.cpp 1181-1237, 1:1 (one shader pass with the screen filters,
         // colorcorrect.cpp / fx_grade.hlsl)
@@ -772,10 +772,10 @@ static void Page_VisualsScreen()
                 if (ImGui::Button("reset##color correction", ImVec2(-1.f, 15.f))) CcResetAll();
             }, ImVec2(260.f, -1.f));
 
-        // UNIT_MENU_SLOT visuals_screen (sharpen .. show depth, reflections between depth distort and emphasize)
-        UnitD3_Menu_visuals_screen();
+        // MENU_SLOT visuals_screen (sharpen .. show depth, reflections between depth distort and emphasize)
+        Menu_Visuals_ScreenFx();
 
-        // unit post: botox menu_tab_visuals.cpp:1627-1856, same order (dof, ao, motion blur, true
+        // botox menu_tab_visuals.cpp:1627-1856, same order (dof, ao, motion blur, true
         // motion blur, bloom), same labels. Our own knobs ride after botox's rows in each popup.
         const char* ScreenFx_RouteName();    // hacks/screen/screenfx.cpp -- the depth readout
         const char* ScreenFx_VerifyName();
@@ -926,7 +926,7 @@ static void Page_VisualsScreen()
     menu_columns_next();
     if (menu_group_begin("hud"))
     {
-        // ---- botox menu_tab_visuals.cpp "hud" group, botox order (unit hud, 11-01) ----------
+        // ---- botox menu_tab_visuals.cpp "hud" group, botox order (hud, 11-01) ----------
         // skipped rows: force crosshair (CS:GO weapon_debug_spread_show; TF2 already draws its
         // crosshair on an unscoped sniper rifle), classic crosshair (outline) color (CS:GO's vgui
         // bar crosshair), default crosshair color, chud hud (removed), hud color / keep
@@ -1455,8 +1455,8 @@ static void Page_MovementMain()
         ImGui::Checkbox("fast accelerate", &g_fastAccel);
         ImGui::Checkbox("no push", &g_noPush);
 
-        // UNIT_MENU_SLOT movement_main
-        UnitA_Menu_movement_main();
+        // MENU_SLOT movement_main
+        Menu_Movement_Main();
     }
     menu_group_end();
 
@@ -1703,15 +1703,15 @@ static void Page_MovementIndicators()
 
     if (menu_group_begin("indicators"))
     {
-        // UNIT_MENU_SLOT movement_indicators
-        UnitB_Menu_movement_indicators();
+        // MENU_SLOT movement_indicators
+        Menu_Movement_Indicators();
     }
     menu_group_end();
 
     menu_columns_next();
 
     if (menu_group_begin("detections"))
-        UnitB_Menu_movement_detections();
+        Menu_Movement_Detections();
     menu_group_end();
 
     menu_columns_end();
@@ -1872,12 +1872,12 @@ static void Page_MovementCalculator()
 
 static void Page_MovementRecorder()
 {
-    // UNIT_MENU_SLOT movement_recorder -- botox case 3: the unit fn owns its columns + groups
-    UnitB_Menu_movement_recorder();
+    // MENU_SLOT movement_recorder -- botox case 3: the page fn owns its columns + groups
+    Menu_Movement_Recorder();
 }
 
 // botox menu_tab_movement.cpp points_page 1:1 ("lumi points page: global look | per kind design,
-// preview right"). Vars cfg/u_points.h, look movement/points_style.h, drawn by render.cpp
+// preview right"). Vars cfg/vars_points.h, look movement/points_style.h, drawn by render.cpp
 static void Page_MovementPoints()
 {
     constexpr ImGuiColorEditFlags alphaFlags = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
@@ -1984,7 +1984,7 @@ static void Tab_MovementRoot()
 #include "fonts.h"
 #include <functional>
 #include <shellapi.h>   // ShellExecuteA -- settings "open folder" (WIN32_LEAN_AND_MEAN drops it)
-#include "../misc/game_extras.h"   // unit game: chat translator / bot names / cvar list / image url box
+#include "../misc/game_extras.h"   // chat translator / bot names / cvar list / image url box
 #include "../misc/names.h"         // custom names: cycle lists + misc > player list (aliases)
 #include "../misc/game_pure.h"     // n_game::SplitCvars -- cvars "add" splits on ';'
 #include "../screen/blur_rect.h"   // BlurRectFade -- settings "background blur"
@@ -2131,8 +2131,8 @@ static void Page_MiscMain()
     {
         ImGui::Checkbox("watermark", &g_wmEnable);
         if (g_wmEnable)
-            // unit wm: botox menu_tab_settings.cpp "watermark settings" 1:1 (rows, order, gates, ranges,
-            // width 220). Vars hacks/menu/cfg/u_wm.h; drawing hud/watermark.cpp + watermark_styles.cpp.
+            // botox menu_tab_settings.cpp "watermark settings" 1:1 (rows, order, gates, ranges,
+            // width 220). Vars hacks/menu/cfg/vars_wm.h; drawing hud/watermark.cpp + watermark_styles.cpp.
             ImGui::OptionPopup("watermark settings", []() {
                 constexpr ImGuiColorEditFlags alphaFlags = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
                     ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs |
@@ -2444,7 +2444,7 @@ static void Page_MiscMain()
                     ImGui::Checkbox("always show##spectatorlist clarity v2", &g_specClarityAlwaysShow);
             }, ImVec2(220.f, -1.f));
 
-        // ---- unit misc: botox menu_tab_settings.cpp 1589..1788, media player .. displayed logs ----
+        // ---- botox menu_tab_settings.cpp 1589..1788, media player .. displayed logs ----
         ImGui::Checkbox("media player", &g_mpEnable);
         if (g_mpEnable)
             ImGui::OptionPopup("media player settings", []() {
@@ -2591,7 +2591,7 @@ static void Page_MiscMain()
 
         // TF2: killfeed filter (no botox row; keep killfeed is CS:GO only)
         ImGui::Checkbox("only your killfeed", &g_selfKillfeedOnly);
-        // ---- unit misc end ----
+        // ---- misc end ----
     }
     menu_group_end();
 
@@ -2774,8 +2774,8 @@ static void Page_MiscMain()
 
     menu_columns_end();
 
-    // UNIT_MENU_SLOT misc_main
-    UnitE_Menu_misc_main();
+    // MENU_SLOT misc_main
+    Menu_Misc_Main();
 }
 
 // botox menu_tab_settings.cpp cvars_page 1:1: one full-height "cvars" box, input + "add" on
@@ -3456,7 +3456,7 @@ static void Tab_InventoryRoot()
 // indicators / esp map to TF2 (fonts.h); its chud hud / default hud pages rewrite CS:GO's
 // panorama fonts.conf and have no TF2 equivalent. Applies live: render.cpp rebuilds the atlas
 // (indicators) and aim/helpers.cpp recreates the vgui face (esp) once the pick settles.
-static const char* kFontsSub[3] = { "indicators", "esp", "net graph" };   // botox case 4 = net graph (unit hud)
+static const char* kFontsSub[3] = { "indicators", "esp", "net graph" };   // botox case 4 = net graph (hud)
 static int s_fontsSub = 0;
 static const char* const kFontFlagNames[FF_COUNT] = {
     "no hinting", "no autohint", "force autohint", "light hinting", "monohinting", "bold", "oblique", "monochrome" };
@@ -3501,7 +3501,7 @@ static void Tab_Fonts()
         FontPage("esp font", g_fontEspName, sizeof(g_fontEspName), &g_fontEspSize, &g_fontEspFlags,
                  Fonts_ResetEsp, Fonts_Families(), s_espFilter);
     }
-    else if (s_fontsSub == 2)   // unit hud: custom net graph face (hud_extra.cpp rebuilds the atlas)
+    else if (s_fontsSub == 2)   // custom net graph face (hud_extra.cpp rebuilds the atlas)
     {
         static ImGuiTextFilter s_ngFilter;
         FontPage("net graph font", g_hudNgFontName, sizeof(g_hudNgFontName), &g_hudNgFontSize, &g_hudNgFontFlags,
@@ -3513,7 +3513,7 @@ static void Tab_Fonts()
         FontPage("indicator font", g_fontIndName, sizeof(g_fontIndName), &g_fontIndSize, &g_fontIndFlags,
                  Fonts_ResetIndicator, Fonts_FileNames(), s_indFilter);
     }
-    // UNIT_MENU_SLOT fonts
+    // MENU_SLOT fonts
 }
 
 // botox config_panel(visuals, ..., list_rows 12): file name, list, then create / save / load /
@@ -3726,7 +3726,7 @@ static void Tab_Settings()
     menu_group_end();
 
     menu_columns_end();
-    // UNIT_MENU_SLOT settings
+    // MENU_SLOT settings
 }
 
 // ==== tab bar =======================================================================
@@ -4086,7 +4086,7 @@ void RenderMenu()
     {
     // Aimbot / triggerbot / melee. The body lives in src/hacks/aim/aim.cpp because it
     // reads that tree's ConfigVar metadata.
-    case TAB_AIMBOT:    Aim_RenderMenuTab(); break;   // unitF groups render inside its columns
+    case TAB_AIMBOT:    Aim_RenderMenuTab(); break;   // aim extras groups render inside its columns
     case TAB_VISUALS:   Tab_VisualsRoot();    break;
     case TAB_MOVEMENT:  Tab_MovementRoot();   break;
     case TAB_MISC:      Tab_MiscRoot();       break;

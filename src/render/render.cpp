@@ -5,12 +5,12 @@
 #include "../hacks/misc/boot_screen.h"
 #include "../dependencies/fonts/icon_font.h"   // botox icon_font_compressed_data (cog glyph)
 #include "../hacks/hud/mediaplayer.h"
-#include "../hacks/hud/avatar_cache.h"   // unit E5: steam avatar textures
-#include "../hacks/hud/gif_tex.h"        // unit E5: embedded gif cache
-#include "../hacks/screen/blur_rect.h"      // unit E5: panel background blur
+#include "../hacks/hud/avatar_cache.h"   // steam avatar textures
+#include "../hacks/hud/gif_tex.h"        // embedded gif cache
+#include "../hacks/screen/blur_rect.h"      // panel background blur
 #include "../hacks/hud/indicators.h"   // botox indicators.cpp: velocity, graph, keybinds, keystrokes
 #include "../hacks/hud/crosshair.h"
-#include "../hacks/hud/hud_extra.h"   // unit hud: fov circle, net graph, their fonts
+#include "../hacks/hud/hud_extra.h"   // fov circle, net graph, their fonts
 #include "../hacks/hud/radar.h"       // csgo radar
 #include "../hacks/menu/menu.h"
 #include "../hacks/movement/movement.h"
@@ -20,13 +20,13 @@
 #include "../hacks/screen/colorcorrect.h"
 #include "../hacks/screen/bloom.h"
 #include "../hacks/screen/screenfx.h"
-#include "../hacks/movement/detections.h"    // unit B
-#include "../hacks/movement/recorder.h"      // unit B
-#include "../hacks/movement/ps_lines.h"      // unit B (vars only, draw loop appended into RenderPsOverlay below)
+#include "../hacks/movement/detections.h"    // movement extras
+#include "../hacks/movement/recorder.h"      // movement extras
+#include "../hacks/movement/ps_lines.h"      // movement extras (vars only, draw loop appended into RenderPsOverlay below)
 #include "../hacks/movement/points_style.h"  // movement > points page look (botox points_ui.cpp styles)
-#include "../hacks/screen/screenfx_passes.h"   // unit D: sharpen/grain/vignette/invert/posterize/deband/channel-shift/emphasize/show-depth
-#include "../hacks/visuals/world_fx.h"          // unit D: fullbright/disable-interp tick + aspect ratio dest rect
-#include "../hacks/hud/hitmarker.h"         // unit E: misc HUD
+#include "../hacks/screen/screenfx_passes.h"   // sharpen/grain/vignette/invert/posterize/deband/channel-shift/emphasize/show-depth
+#include "../hacks/visuals/world_fx.h"          // fullbright/disable-interp tick + aspect ratio dest rect
+#include "../hacks/hud/hitmarker.h"         // misc HUD
 #include "../hacks/misc/killeffects.h"
 #include "../hacks/hud/points.h"
 #include "../hacks/hud/spectator_list.h"
@@ -48,8 +48,8 @@
 #include "../dependencies/fonts/inter_medium.h"
 #include "../dependencies/fonts/sf_ui_display_semibold.h"
 #include "../dependencies/fonts/montserrat_regular.h"
-#include "../dependencies/fonts/montserrat_medium_italic.h"   // unit misc: points big font
-#include "../hacks/misc/misc_overlays.h"                      // unit misc: healthshot / low fps / logs / console color
+#include "../dependencies/fonts/montserrat_medium_italic.h"   // points big font
+#include "../hacks/misc/misc_overlays.h"                      // healthshot / low fps / logs / console color
 #include "../dependencies/fonts/sunflower_medium.h"
 #include "../dependencies/fonts/droid_sans_bold.h"
 #include "../dependencies/fonts/nunito_medium.h"
@@ -58,7 +58,7 @@
 #include "../dependencies/fonts/dna_clarity_icon.h"
 #include "../dependencies/fonts/minecraft_ttf.h"
 #include <timeapi.h>
-#include "../hacks/screen/aspect_stretch.h"   // unit screen: AspectStretch_Run (aspect ratio overlay stretch)
+#include "../hacks/screen/aspect_stretch.h"   // AspectStretch_Run (aspect ratio overlay stretch)
 #include "dpi.h"                              // botox dpi scale + dpi scale panels
 #pragma comment(lib, "winmm.lib")
 
@@ -108,7 +108,7 @@ constexpr float kPtRMin       = 3.0f;
 constexpr float kPtRingThick  = 0.5f;   // outlineThickness
 constexpr float kPtScaleSpeed = 10.0f;  // LerpFloat(current, target, dt * scaleSpeed)
 constexpr int   kSegments     = 32;     // both circles of both features
-// cull distance, fade, size, fill, hover size, colours: movement > points (cfg/u_points.h)
+// cull distance, fade, size, fill, hover size, colours: movement > points (cfg/vars_points.h)
 
 // botox AnimatedPoint. Render-thread only: the movement thread owns the point lists, this
 // owns how they animate, so there is nothing to lock.
@@ -461,7 +461,7 @@ static void RenderPsOverlay()
     }
 
     // ---- saved points: botox points_ui.cpp RenderPoints 1:1, look from movement > points ----
-    // (vars cfg/u_points.h, styles movement/points_style.h). Not ported: botox's per-point
+    // (vars cfg/vars_points.h, styles movement/points_style.h). Not ported: botox's per-point
     // "3d radius ring" + free points (TF2 points have neither field), assist render height.
     const float maxDrawDist = std::max(g_pointsMaxDist, 1.f);
     const float fadeStart   = maxDrawDist * 0.6f;
@@ -561,7 +561,7 @@ static void RenderPsOverlay()
         PointLabelEmit(dl, labelFont, PS_STYLE_PS, s, r, aMul);
     }
 
-    // ---- pixelsurf lines (unit B): connect the saved targets in index order, a route line
+    // ---- pixelsurf lines (movement extras): connect the saved targets in index order, a route line
     // distinct from the points above. "full trajectory" also connects the finder's live hits
     // in scan order -- reuses this function's own W2S/dl, no second projection copy.
     if (g_psLinesEnable)
@@ -1568,7 +1568,7 @@ static void BuildFontAtlas()
 
     g_fontCumhacck35    = sys("verdanab.ttf", 35.f, mono);                   orElse(g_fontCumhacck35, g_fontBold);
     g_fontAirplaneTitle = donor(montserrat_regular, sizeof(montserrat_regular), 10.f, 0); orElse(g_fontAirplaneTitle, g_fontBold);
-    g_fontPoints18 = donor(montserrat_medium_italic, sizeof(montserrat_medium_italic), 18.f, ImGuiFreeTypeBuilderFlags_Bitmap); orElse(g_fontPoints18, g_fontBold);   // unit misc
+    g_fontPoints18 = donor(montserrat_medium_italic, sizeof(montserrat_medium_italic), 18.f, ImGuiFreeTypeBuilderFlags_Bitmap); orElse(g_fontPoints18, g_fontBold);   // misc
     g_fontAirplaneRows  = sys("tahomabd.ttf", 11.f, flagged(ImGuiFreeTypeBuilderFlags_MonoHinting)); orElse(g_fontAirplaneRows, g_fontBold);
 
     g_fontClarityIcon  = donor(clarity_icon_font, sizeof(clarity_icon_font), 50.f, ImGuiFreeTypeBuilderFlags_NoHinting);
@@ -1651,7 +1651,7 @@ static void BuildFontAtlas()
     static const ImWchar kIconRanges[] = { 0xe005, 0xf8ff, 0 };
     g_fontIcon13 = io.Fonts->AddFontFromMemoryCompressedTTF(icon_font_compressed_data, icon_font_compressed_size, 13.f, nullptr, kIconRanges);
 
-    HudFonts_Build();   // unit hud: net graph face
+    HudFonts_Build();   // net graph face
 
     io.Fonts->Build();
 }
@@ -1803,7 +1803,7 @@ static void RenderEspQueue()
 // vgui pass normally, h_EndScene when vgui never painted (loading screens, minimised).
 // Everything is built in ONE frame even though the two halves render at different times --
 // splitting the BUILD is what broke input the last time.
-void RenderWorldFx3();   // unit world (visuals/world_fx3.cpp): bullet impact boxes + world hit markers
+void RenderWorldFx3();   // world (visuals/world_fx3.cpp): bullet impact boxes + world hit markers
 
 // The crosshair draws through ImGui::GetBackgroundDrawList() like every overlay, so for its call
 // the viewport's background slot points at s_chList instead: every crosshair style (and the
@@ -1850,7 +1850,7 @@ static void BuildImGuiFrame()
     if (s_indScaleSettle.Due(IndScaleSig(WantedIndScales()), IndScaleSig(s_indBuilt), GetTickCount64()) ||
         s_indSettle.Due(Fonts_IndSig(), s_indApplied, GetTickCount64()) ||
         s_espSettle.Due(Fonts_EspSig(), s_espImApplied, GetTickCount64()) ||
-        HudFonts_Due())   // unit hud: fonts tab > net graph
+        HudFonts_Due())   // fonts tab > net graph
     {
         BuildFontAtlas();
         ImGui_ImplDX9_InvalidateDeviceObjects();   // NewFrame re-uploads the atlas texture
@@ -1872,7 +1872,7 @@ static void BuildImGuiFrame()
     ImGui::GetIO().MouseDrawCursor = menuUp;
 
     RenderEspQueue();     // botox: esp under every other overlay (background list, first in)
-    RenderWorldFx3();     // unit world: background list too, under the HUD overlays
+    RenderWorldFx3();     // background list too, under the HUD overlays
     s_chOverBlur = RenderMenuBlur();   // menu bg blur: blurs game + esp + world fx above, every HUD panel below stays sharp
     RenderBootScreen();   // foreground draw list draws last regardless of call order: always on top
     RenderPsOverlay();
@@ -1880,20 +1880,20 @@ static void BuildImGuiFrame()
     RenderEdgeBugOverlay();
     RenderAutoBounceOverlay();
     RenderWallClimbOverlay();
-    // unit screen: AspectStretch_Run = botox aspect ratio "stretch cheat overlays" / "stretch
+    // AspectStretch_Run = botox aspect ratio "stretch cheat overlays" / "stretch
     // crosshair" (screen-space panels only; draws straight through while those are off)
     AspectStretch_Run(RenderWatermark, AsPanel);
     AspectStretch_Run(RenderMediaPlayer, AsPanel);         // after the watermark: it stacks under the box that just drew
     AspectStretch_Run(RenderIndicators, AsPanel);   // botox order: velocity, graph, keybinds, particles, keystrokes
-    Recorder_Render();           // unit B: path, route starts, timer, clipper box, clip editor
-    RenderHudExtras();           // unit hud: aimbot fov circle + custom net graph
+    Recorder_Render();           // path, route starts, timer, clipper box, clip editor
+    RenderHudExtras();           // aimbot fov circle + custom net graph
     AspectStretch_Run(RenderRadar, AsPanel);   // csgo radar (hud/radar.cpp)
     RenderCrosshairList();       // own list: the one overlay drawn inside the game's frame
-    AspectStretch_Run(RenderSpectatorList, AsPanel);       // unit E: misc HUD
+    AspectStretch_Run(RenderSpectatorList, AsPanel);       // misc HUD
     AspectStretch_Run(RenderHitMarker, AsPanel);
     RenderKillEffects();
     AspectStretch_Run(RenderPoints, AsPanel);
-    RenderMiscOverlays();        // unit misc: healthshot effect, low fps warning, displayed logs
+    RenderMiscOverlays();        // healthshot effect, low fps warning, displayed logs
     RenderDebugMenu();
     RenderPsPointWindow();
     RenderMenu();   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
@@ -1902,7 +1902,7 @@ static void BuildImGuiFrame()
     Dpi_BeforeRender();    // the software cursor is drawn by Render on the 1:1 foreground list: screen mouse
     ImGui::Render();
     Dpi_ScaleDrawData(ImGui::GetDrawData());       // windows grow by the dpi scale (panels did at their block end)
-    BootScreen_FadeOthers(ImGui::GetDrawData());   // unit game: overlay fades in after the boot splash
+    BootScreen_FadeOthers(ImGui::GetDrawData());   // overlay fades in after the boot splash
     SplitDrawData();
 }
 
@@ -1974,7 +1974,7 @@ static void __fastcall OvFn_Call(void* self)
 
     Bloom_Frame(dev);       // the glow goes under the grade -- lens first, film after
     ColorCorr_Frame(dev);   // grade BEFORE the overlay, as the vgui pass does (latched once a frame)
-    ScreenFxPasses_Frame(dev);   // unit D: sharpen/grain/vignette/invert/posterize/deband/channel-shift/emphasize/show-depth, same latch
+    ScreenFxPasses_Frame(dev);   // sharpen/grain/vignette/invert/posterize/deband/channel-shift/emphasize/show-depth, same latch
 
     const OvFunctor* f = static_cast<const OvFunctor*>(self);
     if (f->ok) { memcpy(s_rtMatrix, f->m, sizeof(s_rtMatrix)); s_rtMatrixOk = true; }
@@ -1998,13 +1998,13 @@ static bool OvQueue()
     return ScreenFx_QueueFunctor(&f);
 }
 
-bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel);   // unit world: remove hud elements (world_fx3.cpp)
+bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel);   // remove hud elements (world_fx3.cpp)
 
 void h_PaintTraverse(void* panels, VPANEL_t vpanel, bool forceRepaint, bool allowForce)
 {
     if (WorldFx3_SkipPanel(panels, vpanel)) return;   // a removed HUD panel: it and its children unpainted
     ScopeCsgo_PrePaintTraverse(panels, vpanel);   // csgo scope: just before the HUD root, under the HUD
-    const bool consoleTint = ConsoleTint_Begin(panels, vpanel);   // unit misc: botox console color
+    const bool consoleTint = ConsoleTint_Begin(panels, vpanel);   // botox console color
     o_PaintTraverse(panels, vpanel, forceRepaint, allowForce);
     if (consoleTint) ConsoleTint_End();
 
@@ -2309,7 +2309,7 @@ chain:
         // Cover art upload. Here and not in the frame build: the build can run from the vgui
         // pass on the MAIN thread, and CreateTexture/LockRect there would race Present.
         MediaPlayer_Tick(dev);
-        Avatar_Tick(dev);   // unit E5: uploads any avatar pixels Avatar_Pump fetched on the game thread
+        Avatar_Tick(dev);   // uploads any avatar pixels Avatar_Pump fetched on the game thread
         SheenNormal_Tick(); // normal blend sheen: lazy DIP hook the first frame it is on
 
         // No unusual: suppression sweep on the 100ms tick, restore on the off-transition.
@@ -2359,8 +2359,8 @@ chain:
     ColorCorr_NewFrame();   // clears the once-a-frame latch the two call sites share
     Bloom_NewFrame();       // same latch, same three call sites
     ScreenFx_NewFrame();    // same latch for the depth resolve: one copy per frame
-    ScreenFxPasses_NewFrame();   // unit D: same latch, same three call sites
-    BlurRect_NewFrame();         // unit E5: clears this frame's blur job slots
+    ScreenFxPasses_NewFrame();   // same latch, same three call sites
+    BlurRect_NewFrame();         // clears this frame's blur job slots
 
     return hr;
 }
@@ -2372,15 +2372,15 @@ HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     ColorCorr_Destroy();               // shader + two DEFAULT-pool textures, remade on the next graded frame
     Bloom_Destroy();                   // same story: two shaders and three DEFAULT-pool targets
     ScreenFx_Destroy();                // INTZ + probe targets, all DEFAULT-pool: a live one fails the Reset
-    ScreenFxPasses_Destroy();          // unit D: one shader + one DEFAULT-pool scene copy
+    ScreenFxPasses_Destroy();          // one shader + one DEFAULT-pool scene copy
     MediaPlayer_ReleaseTexture();      // cover art is DEFAULT-pool too; the decoded pixels rebuild it
     Indicators_ReleaseTextures();         // mitosis morph texture; rebuilt on the next split
-    Avatar_ReleaseAll();               // unit E5: avatar textures are DEFAULT-pool too
-    PlayerStencil_ReleaseTargets();    // esp unit: player stencil mask/blur targets, DEFAULT-pool
-    GifTex_ReleaseAll();               // unit E5: gif frame texture, GDI+ bitmap survives the reset
-    SpectatorList_ReleaseTextures();   // spec unit: eyes style row textures, DEFAULT-pool
+    Avatar_ReleaseAll();               // avatar textures are DEFAULT-pool too
+    PlayerStencil_ReleaseTargets();    // esp: player stencil mask/blur targets, DEFAULT-pool
+    GifTex_ReleaseAll();               // gif frame texture, GDI+ bitmap survives the reset
+    SpectatorList_ReleaseTextures();   // spectator list: eyes style row textures, DEFAULT-pool
     Radar_ReleaseTextures();           // csgo radar overview, DEFAULT-pool; the baked pixels rebuild it
-    BlurRect_Destroy();               // unit E5: blur scratch targets + shader
+    BlurRect_Destroy();               // blur scratch targets + shader
     if (g_imguiInit) ImGui_ImplDX9_InvalidateDeviceObjects();
     // The split arrays point at draw lists from the frame being dropped -- a Present that
     // renders them after a Reset would submit freed geometry.

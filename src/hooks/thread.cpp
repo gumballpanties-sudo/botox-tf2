@@ -17,14 +17,14 @@
 #include "../hacks/screen/screenfx.h"
 #include "../hacks/visuals/world_fx.h"
 #include "../hacks/visuals/world_fx2.h"
-#include "../hacks/visuals/world_fx3.h"   // unit world: eject restore (ragdoll proxy, cvars, modulation)
+#include "../hacks/visuals/world_fx3.h"   // eject restore (ragdoll proxy, cvars, modulation)
 #include "../hacks/visuals/skins.h"
 #include "../hacks/visuals/hats.h"
 #include "../hacks/visuals/flipworld.h"
 #include "../hacks/hud/mediaplayer.h"
-#include "../hacks/misc/misc_overlays.h"   // unit misc: ConsoleTint_Install
-#include "../hacks/misc/discord_ex.h"   // unit E: discord rich presence, its own IPC thread
-#include "../hacks/misc/game_extras.h"  // unit game: bot names GetPlayerInfo hook + eject restore
+#include "../hacks/misc/misc_overlays.h"   // ConsoleTint_Install
+#include "../hacks/misc/discord_ex.h"   // discord rich presence, its own IPC thread
+#include "../hacks/misc/game_extras.h"  // bot names GetPlayerInfo hook + eject restore
 #include "../hacks/misc/names.h"        // custom names: C_PlayerResource::GetPlayerName hook
 #include "../hacks/visuals/skinshare.h" // SkinShare_Shutdown: steam networking worker joined at eject
 #include "../hacks/aim/aim.h"
@@ -218,7 +218,7 @@ static void PollThread()
         InstallVTableHook(panels, 41, "vgui: PaintTraverse", (void*)&h_PaintTraverse,
                           (void**)&o_PaintTraverse);
     else DebugLog("vgui: VGUI_Panel009 not found -- crosshair falls back to EndScene");
-    ConsoleTint_Install();   // unit misc: botox console color (ISurface::DrawSetColor)
+    ConsoleTint_Install();   // botox console color (ISurface::DrawSetColor)
 
     InstallVTableHook(g_modelRender, 19, "nohats: DrawModelExecute",
                       (void*)h_DrawModelExecute, (void**)&o_DrawModelExecute);
@@ -320,20 +320,20 @@ static void PollThread()
             // UpdatePlayerList / CTFPlayerPanel::GetTeam sigs -- reveal scoreboard
             Scoreboard_Install();
 
-            // IVEngineClient::GetPlayerInfo (slot 8) -- unit game: bot names
+            // IVEngineClient::GetPlayerInfo (slot 8) -- bot names
             GameExtras_Install();
 
             // IClientMode::DoPostScreenSpaceEffects (slot 39) -- the view setup the depth
             // passes need, and the thread the game's own screen-space slot runs on.
             ScreenFx_Install();
 
-            // IClientMode::OverrideView (slot 16) -- unit D: world fov + third person
+            // IClientMode::OverrideView (slot 16) -- world fov + third person
             WorldFx_InstallViewHook();
 
             // IClientMode::OverrideMouseInput (slot 20) -- edge bug mouse steer + mouse lock
             EdgeBug_InstallMouseHook();
 
-            // CBasePlayer::CalcView, pattern-hooked -- unit D2: remove visual recoil
+            // CBasePlayer::CalcView, pattern-hooked -- remove visual recoil
             WorldFx2_InstallHooks();
 
             // Flip world: WorldToScreenMatrix (HUD), ClientModeShared::CreateMove (A/D + hand),
@@ -428,7 +428,7 @@ static void MainThread()
     // UpdateFullScreenDepthTexture, which is the instant opaque geometry finishes and no
     // particle has drawn yet -- where the pre-translucent frame copy is taken.
     ScreenFx_InstallRenderStateHook(vt[57]);
-    ScreenFx_InstallDepthStencilHooks(vt[39], vt[40]);   // unit post: "universal depth" z swap (d3d9.h slots 39/40)
+    ScreenFx_InstallDepthStencilHooks(vt[39], vt[40]);   // "universal depth" z swap (d3d9.h slots 39/40)
 
     // PaintTraverse moved to PollThread (vgui2.dll may not be loaded yet here).
 
@@ -532,7 +532,7 @@ static void MainThread()
     // Safe here and not earlier: releases the D3D event query, and the render thread is
     // provably out of h_Present by this point.
     Perf_Shutdown();
-    GameExtras_Shutdown();   // unit game: knobs/pings back if no frame did it, http aborted, workers joined
+    GameExtras_Shutdown();   // knobs/pings back if no frame did it, http aborted, workers joined
     SkinShare_Shutdown();    // skin sharing: the steam networking worker stopped + joined
     ScreenFx_RestoreQueueMode();   // hand mat_queue_mode back before the hooks come off
 

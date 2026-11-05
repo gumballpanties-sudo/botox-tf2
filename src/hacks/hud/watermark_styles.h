@@ -2,7 +2,7 @@
 #include "../../globals/globals.h"
 
 // botox watermark styles, ported 1:1: layout, colours, position, animation, the donor's own font
-// (render.cpp BuildFontAtlas = botox build_fonts) AND botox's own knobs (hacks/menu/cfg/u_wm.h:
+// (render.cpp BuildFontAtlas = botox build_fonts) AND botox's own knobs (hacks/menu/cfg/vars_wm.h:
 // user / tickrate / fps / time / ping / velocity, label combo, user name, per-style rows).
 // g_wmStyle = botox's own index so numbering matches the donor exactly:
 //   0 default (verdana 11 / verdana bd 11)

@@ -1,4 +1,4 @@
-// Unit A port: small movement tricks from botox csgo-sdk, adapted to TF2's gamemovement.
+// small movement tricks from botox csgo-sdk, adapted to TF2's gamemovement.
 // Textually included by movement.cpp (same convention as edgebug.inl/texturebug.inl) --
 // shares every helper/static in that TU (On, EntV3/EntI/EntF, TraceHull, IN_*, FL_*...).
 // Ported: nulls, hsw, delay hop, auto crouch, smooth demo

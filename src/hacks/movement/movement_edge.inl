@@ -1,4 +1,4 @@
-// Unit A2 port: edge skip + blockbot from botox csgo-sdk, adapted to TF2's gamemovement.
+// edge skip + blockbot from botox csgo-sdk, adapted to TF2's gamemovement.
 // Textually included by movement.cpp right after movement_ex.inl AND after edgebug.inl (edge
 // skip reuses edgebug.inl's own proven sim/budget primitives: EbBudget_t, TraceFilterWorldProps,
 // GameTrace_t, TraceHull, MASK_PLAYERSOLID -- same file-scope statics, same TU).

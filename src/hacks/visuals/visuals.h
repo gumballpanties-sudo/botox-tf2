@@ -125,20 +125,20 @@ using SetupBones_t = bool(__fastcall*)(void*, void*, int, int, float);
 extern SetupBones_t o_SetupBones;
 bool __fastcall h_SetupBones(void* rcx, void* pBoneToWorldOut, int nMaxBones, int boneMask, float currentTime);
 
-// -- Unit C2: Sound ESP (CSoundEmitterSystem_EmitSound, client.dll; pattern verified against
+// -- Sound ESP (CSoundEmitterSystem_EmitSound, client.dll; pattern verified against
 // Amalgam's Hooks/CSoundEmitterSystem_EmitSound.cpp). Observe-only: filter/ep are read-only
 // peeks and the original is ALWAYS called, so no sound (including SND_STOP) is ever dropped.
 using EmitSound_t = void(__fastcall*)(void*, void*, int, const void*);
 extern EmitSound_t o_EmitSound;
 void __fastcall h_EmitSound(void* rcx, void* filter, int entindex, const void* ep);
 
-// -- Unit C2: Chams, piggybacked on this file's own DrawModelExecute hook (no 2nd MinHook on
+// -- Chams, piggybacked on this file's own DrawModelExecute hook (no 2nd MinHook on
 // the target). Lifecycle rides CViewRender::LevelInit/LevelShutdown, which flipworld.cpp
 // already hooks for its own RT -- called from there, not a new hook.
 void Chams_LevelInit();
 void Chams_LevelUnload();
 
-// -- Unit C3: Glow, piggybacked on the same DrawModelExecute hook as chams (extra
+// -- Glow, piggybacked on the same DrawModelExecute hook as chams (extra
 // $ignorez overlay pass, no 2nd MinHook). Lifecycle rides the same LevelInit/LevelShutdown
 // flipworld.cpp already hooks, called from there right next to Chams_LevelInit/Unload.
 void Glow_LevelInit();

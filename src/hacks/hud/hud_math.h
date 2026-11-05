@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstring>
 
-// Unit hud pure logic, shared by hud_extra.cpp (render) and aim/hud_aim.cpp (game thread).
+// HUD extras pure logic, shared by hud_extra.cpp (render) and aim/hud_aim.cpp (game thread).
 // Gate test: tests/hudmath_test.cpp.
 namespace hudm
 {
