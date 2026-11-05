@@ -1074,7 +1074,7 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	int nBack = Vars::Aimbot::Melee::BackstabBacktrack.Value
 		? BsMath::RewindBackTicks(m_flTDue, flTRewind0, BacktrackCorrect(), TICK_INTERVAL)
 		: 0;
-	if (nBack && F::Backtrack.Enabled())
+	if (nBack && F::Backtrack.Enabled() && !Vars::Aimbot::Backtrack::IgnoreMelee.Value)
 		nBack = std::min(nBack, TIME_TO_TICKS(F::Backtrack.TimeLimit()));
 
 	// bs19: every tick is judged and the BEST shot is taken, not the first. bs18's first-fire picked

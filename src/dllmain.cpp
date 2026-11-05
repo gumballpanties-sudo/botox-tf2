@@ -620,6 +620,7 @@ bool g_autoAlign = false;   // plain on/off, no bind
 bool g_textureBug = false;  int g_textureBugKey = 0;  int g_textureBugMode = 1;
 int g_tbStyle = 0;             // 0 cumidere (TF2 dll port) / 1 botox (the big search)
 bool g_tbcAlign = true;        // cumidere style: run cumidere misc_auto_align (ride steer) before the tb
+bool g_tbcAutoCrouch = false;  // cumidere style: duck grid pass when standing misses, latched through the ride
 float g_tbReach = 2.f;         // how far out of the hull the wall scan looks
 float g_tbScanStep = 1.f;      // z resolution of the scan's line grid
 float g_tbRampNz = 0.05f;      // coldtires ramp_nz_band() default -- 2.9 deg off vertical = a surf

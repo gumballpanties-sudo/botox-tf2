@@ -909,6 +909,7 @@ static int s_hbDiagTick = -1000;
 static float s_tbcScanStart = 0.f;   // DAT_1804d6f30: direction the last wall was found at
 static int   s_tbcDiagTick  = -1000;
 static int   s_tbcRun       = 0;     // consecutive pinned ticks
+static bool  s_tbcDuck      = false; // NOT cumidere: auto crouch latch, a confirmed duck pin holds IN_DUCK
 
 // FUN_1801cb3c0. Line traces every 1u of hull height, centre out to the hull edge + 2 along
 // each of 16 dirs starting at `start`; first dir with a facing near-vertical face wins, its
@@ -1119,16 +1120,20 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
     s_tbOwnsCmd = false;
     s_tbRideHold = 0;
     s_tbIndD = s_tbIndVin = s_tbIndAim = 0.f;   // botox-style band numbers, nothing here
-    if (!EntAlive(pLocal)) { s_tbPhase = TBP_OFF; s_tbRideLen = s_tbcRun = 0; return; }
+    if (!g_tbcAutoCrouch) s_tbcDuck = false;
+    if (!EntAlive(pLocal)) { s_tbPhase = TBP_OFF; s_tbRideLen = s_tbcRun = 0; s_tbcDuck = false; return; }
 
     const int  nBase = PredCommandsPredicted();
     const auto Restore = [&]() { RestoreToFrame(nBase - 1); };
     Restore();   // cumidere's view of the world: before this cmd ran
 
     if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK)
-        { s_tbPhase = TBP_OFF; s_tbRideLen = s_tbcRun = 0; return; }
+        { s_tbPhase = TBP_OFF; s_tbRideLen = s_tbcRun = 0; s_tbcDuck = false; return; }
 
     const float user_fwd = pCmd->forwardmove, user_side = pCmd->sidemove;   // pre-align, for no-park
+    const int   user_buttons = pCmd->buttons;
+    // latched duck ride: every sim below (align, natural, grid) runs on the crouch hull
+    if (s_tbcDuck) pCmd->buttons |= IN_DUCK;
     const int al = g_tbcAlign ? TBC_Align(pLocal, pCmd, nBase) : 0;
 
     const Vec3 org  = EntV3(pLocal, g_offOrigin);
@@ -1139,7 +1144,11 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
     GameTrace_t wall{};
     float ang = 0.f;
     if (!TBC_FindWall(pLocal, org, mins, maxs, s_tbcScanStart, wall, ang))
-        { s_tbcScanStart = 0.f; s_tbPhase = TBP_OFF; s_tbRideLen = s_tbcRun = 0; return; }
+    {
+        s_tbcScanStart = 0.f; s_tbPhase = TBP_OFF; s_tbRideLen = s_tbcRun = 0;
+        s_tbcDuck = false; pCmd->buttons = user_buttons;   // no wall = ride over, stand back up
+        return;
+    }
     s_tbcScanStart = ang;
 
     const float wall_yaw = NormalizeAngle(RAD2DEGF(atan2f(-wall.plane.normal.y, -wall.plane.normal.x)));
@@ -1171,38 +1180,75 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
         natural = found = fabsf(last_vz - half) < 0.1f || fabsf(last_vz + half) < 0.1f;
     }
 
-    for (int i = 0; i < 10 && !found; ++i)
+    const auto grid = [&](int buttons)
     {
-        for (float off = 85.999f; off < 90.f; off += 1.f)
+        for (int i = 0; i < 10 && !found; ++i)
         {
+            for (float off = 85.999f; off < 90.f; off += 1.f)
+            {
+                if (SimsLeft() <= 0) break;
+                UserCmd_t fake = *pCmd;
+                fake.buttons     = buttons;
+                fake.forwardmove = k_fwd[i];
+                fake.sidemove    = 0.f;
+                Vec3 wish = view; wish.y = wall_yaw + off * sign;
+                CorrectMovement(&fake, wish, view);
+                fake.viewangles = view;
+    
+                Restore();
+                Pred_Simulate(pLocal, &fake);
+                ++sims;
+                const float vz  = EntV3(pLocal, g_offVelocity).z;
+                const float gap = TBC_Gap(pLocal, wall);
+                last_vz = vz;
+    
+                if (fabsf(vz - half) < 0.1f || fabsf(vz + half) < 0.1f)
+                {
+                    found = true;
+                    out_fwd = fake.forwardmove; out_side = fake.sidemove; out_off = off;
+                    break;
+                }
+                if (gap < best_gap)
+                {
+                    best_gap = gap;
+                    out_fwd = fake.forwardmove; out_side = fake.sidemove; out_off = off;
+                }
+            }
             if (SimsLeft() <= 0) break;
-            UserCmd_t fake = *pCmd;
-            fake.forwardmove = k_fwd[i];
-            fake.sidemove    = 0.f;
-            Vec3 wish = view; wish.y = wall_yaw + off * sign;
-            CorrectMovement(&fake, wish, view);
-            fake.viewangles = view;
-
-            Restore();
-            Pred_Simulate(pLocal, &fake);
-            ++sims;
-            const float vz  = EntV3(pLocal, g_offVelocity).z;
-            const float gap = TBC_Gap(pLocal, wall);
-            last_vz = vz;
-
-            if (fabsf(vz - half) < 0.1f || fabsf(vz + half) < 0.1f)
-            {
-                found = true;
-                out_fwd = fake.forwardmove; out_side = fake.sidemove; out_off = off;
-                break;
-            }
-            if (gap < best_gap)
-            {
-                best_gap = gap;
-                out_fwd = fake.forwardmove; out_side = fake.sidemove; out_off = off;
-            }
         }
-        if (SimsLeft() <= 0) break;
+    };
+    grid(pCmd->buttons);
+
+    // NOT cumidere: auto crouch, botox style's pass 2. Standing missed on every variant ->
+    // same grid on the duck hull. An air duck lifts the origin by the hull delta, so a duck
+    // win can carry the hull off the seam it caught: 2-tick probe first, a lost pin is two
+    // gravity steps down by then (k_tbDuckConfirmDz). Miss or reject = standing picks back
+    bool duck_won = false;
+    int  duck_rej = 0;
+    if (!found && g_tbcAutoCrouch && !(pCmd->buttons & IN_DUCK) && SimsLeft() > 0)
+    {
+        const float s_gap = best_gap, s_fwd = out_fwd, s_side = out_side, s_off = out_off;
+        grid(pCmd->buttons | IN_DUCK);
+        if (found)
+        {
+            float dz = 1e30f;
+            if (SimsLeft() > 1)
+            {
+                UserCmd_t probe = *pCmd;
+                probe.forwardmove = out_fwd;
+                probe.sidemove    = out_side;
+                probe.buttons    |= IN_DUCK;
+                Restore();
+                Pred_Simulate(pLocal, &probe);
+                Pred_Simulate(pLocal, &probe);
+                sims += 2;
+                const float vz2 = EntV3(pLocal, g_offVelocity).z;
+                dz = fminf(fabsf(vz2 - half), fabsf(vz2 + half));
+            }
+            if (dz > k_tbDuckConfirmDz) { found = false; duck_rej = 1; }
+        }
+        duck_won = found;
+        if (!found) { best_gap = s_gap; out_fwd = s_fwd; out_side = s_side; out_off = s_off; }
     }
     Restore();   // hand the entity back on the base, like the botox style does
 
@@ -1226,6 +1272,12 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
         pCmd->forwardmove = out_fwd;
         pCmd->sidemove    = out_side;
     }
+    // duck latch: set by a confirmed duck pin, held while pinned or hugging (those sims ran
+    // ducked), dropped on a full miss -> the player's own duck bit back
+    if (duck_won) s_tbcDuck = true;
+    if (!found && !hug) s_tbcDuck = false;
+    pCmd->buttons = s_tbcDuck ? (pCmd->buttons | IN_DUCK)
+                              : ((pCmd->buttons & ~IN_DUCK) | (user_buttons & IN_DUCK));
     s_textureBugHit = found;
     s_tbOwnsCmd     = hug;
     s_tbcRun        = found ? s_tbcRun + 1 : 0;   // own count: TextureBug's drop_ride zeroes s_tbRideLen
@@ -1235,10 +1287,10 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
     if (g_debugLogEnable && DiagOk(s_tbcDiagTick, found || hug || no_park))
         // al = TBC_Align bits: 1 wall, 2 press pinned, 4 riding, 8 key steer pinned, 16 speed gain
         DebugLog("TBC: pin=%d nat=%d al=%d hug=%d gap=%.3f off=%.3f fwd=%.3f side=%.3f vz=%.1f lvz=%.2f "
-                 "sims=%d xy=%.0f ang=%.2f n=%.2f %.2f %.2f sign=%.0f ride=%d og=%d np=%d", (int)found,
-                 (int)natural, al, (int)hug, best_gap, out_off, out_fwd, out_side, vel.z, last_vz, sims,
-                 vel.Length2D(), ang, wall.plane.normal.x, wall.plane.normal.y, wall.plane.normal.z,
-                 sign, s_tbRideLen, (int)off_grid, (int)no_park);
+                 "sims=%d xy=%.0f ang=%.2f n=%.2f %.2f %.2f sign=%.0f ride=%d og=%d np=%d duck=%d dwon=%d drej=%d",
+                 (int)found, (int)natural, al, (int)hug, best_gap, out_off, out_fwd, out_side, vel.z, last_vz,
+                 sims, vel.Length2D(), ang, wall.plane.normal.x, wall.plane.normal.y, wall.plane.normal.z,
+                 sign, s_tbRideLen, (int)off_grid, (int)no_park, (int)s_tbcDuck, (int)duck_won, duck_rej);
 }
 
 // ============================================================================

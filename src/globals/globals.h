@@ -671,6 +671,7 @@ extern bool g_autoAlign;   // plain on/off, no bind
 extern bool g_textureBug;  extern int g_textureBugKey;  extern int g_textureBugMode;
 extern int g_tbStyle;              // 0 cumidere (texturebug.inl TextureBugCumidere) / 1 botox
 extern bool g_tbcAlign;            // cumidere style: cumidere auto align first (texturebug.inl TBC_Align)
+extern bool g_tbcAutoCrouch;       // cumidere style: duck pass on a standing miss (texturebug.inl TextureBugCumidere)
 extern float g_tbReach;            // wall scan reach on top of the 1-tick lookahead (def 2 = base, 1-48)
 extern float g_tbScanStep;         // wall scan z step (def 1 = base, 1-8) -- perf lever, >1 misses thin seams
 extern float g_tbRampNz;           // |plane.normal.z| past this = a RAMP: TB hands the cmd back (def 0.05)

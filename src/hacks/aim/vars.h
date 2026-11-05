@@ -462,6 +462,7 @@ namespace Vars
 		SUBNAMESPACE_BEGIN(Backtrack, Aimbot)
 			CVar(Enabled, "Backtrack", false);
 			CVar(AimAt, "Aim at backtrack", false);
+			CVar(IgnoreMelee, "Ignore melee", false);   // RunMeleeSmack off; knife = Melee::BackstabBacktrack
 			CVar(TimeLimit, "Backtrack time", 200, SLIDER_CLAMP, 0, 200, 1, "%d ms");
 		SUBNAMESPACE_END(Backtrack);
 

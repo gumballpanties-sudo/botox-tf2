@@ -462,6 +462,7 @@ void Aim_RenderMenuTab()
 			ImGui::OptionPopup("backtrack settings", [&]()
 			{
 				VarToggle(Aimbot::Backtrack::AimAt);
+				VarToggle(Aimbot::Backtrack::IgnoreMelee);
 				VarSlider(Aimbot::Backtrack::TimeLimit);
 			}, ImVec2(220.f, -1));
 

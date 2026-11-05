@@ -486,6 +486,7 @@ static const CfgEntry kEntries[] = {
     { "textureBugMode",   CfgEntry::INT,    &g_textureBugMode, 0 },
     { "tbStyle",          CfgEntry::INT,    &g_tbStyle, 0 },
     { "tbcAlign",         CfgEntry::BOOL,   &g_tbcAlign, 0 },
+    { "tbcAutoCrouch",    CfgEntry::BOOL,   &g_tbcAutoCrouch, 0 },
     { "tbReach",          CfgEntry::FLOAT,  &g_tbReach, 0 },
     { "tbScanStep",       CfgEntry::FLOAT,  &g_tbScanStep, 0 },
     { "tbRampNz",         CfgEntry::FLOAT,  &g_tbRampNz, 0 },

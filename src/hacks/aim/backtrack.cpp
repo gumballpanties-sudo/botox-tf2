@@ -368,7 +368,7 @@ void CBacktrack::RunBacktrack(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCm
 // swing meets first goes out as tick_count. Knife = own path (aim_melee.cpp RunBackstab).
 void CBacktrack::RunMeleeSmack(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 {
-	if (!Enabled() || m_eShot != EShot::None || !pLocal || !pWeapon || G::PrimaryWeaponType != EWeaponType::MELEE
+	if (!Enabled() || Vars::Aimbot::Backtrack::IgnoreMelee.Value || m_eShot != EShot::None || !pLocal || !pWeapon || G::PrimaryWeaponType != EWeaponType::MELEE
 		|| pWeapon->GetWeaponID() == TF_WEAPON_KNIFE)
 		return;
 

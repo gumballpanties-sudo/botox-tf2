@@ -1404,6 +1404,7 @@ static void Page_MovementMain()
                 if (g_tbStyle == 0)
                 {
                     ImGui::Checkbox("ride assist##tbcalign", &g_tbcAlign);   // cumidere misc_auto_align
+                    ImGui::Checkbox("auto crouch##tbcduck", &g_tbcAutoCrouch);
                     ImGui::Checkbox("no park on off-grid walls##tbc", &g_tbNoOffgridStick);
                     return;
                 }
