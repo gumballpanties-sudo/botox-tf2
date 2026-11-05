@@ -1171,6 +1171,7 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 			F::Esp.Draw(pLocal);   // Unit C: player/world ESP, piggybacks this hook, no new install
 			HudAim_Collect(pLocal);   // unit hud: snapshot for the ImGui hud overlays (hud/hud_snap.h)
 			void WmAim_Tick(CTFPlayer*); WmAim_Tick(pLocal);   // unit wm: dna watermark "spotted" (wm_aim.cpp)
+			void RadarAim_Tick(CTFPlayer*); RadarAim_Tick(pLocal);   // csgo radar: overview bake + player snapshot (radar_aim.cpp)
 		}
 		H::Draw.End();
 	}

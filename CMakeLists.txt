@@ -89,6 +89,7 @@ add_library(botox SHARED
     src/hacks/hud/avatar_cache.cpp
     src/hacks/screen/blur_rect.cpp
     src/hacks/hud/hud_extra.cpp   # unit hud: fov circle, net graph, hud fonts
+    src/hacks/hud/radar.cpp       # csgo radar (game thread half: aim/radar_aim.cpp, globbed)
     src/hacks/menu/fonts.cpp
     src/hacks/visuals/lsd_chams.cpp
     src/hacks/visuals/player_stencil.cpp
@@ -273,6 +274,11 @@ add_executable(giftex_test tests/giftex_test.cpp)
 # position, interwebz sniper crosshair band.
 # Build + run: cmake --build build --config Release --target hudmath_test && build\Release\hudmath_test.exe
 add_executable(hudmath_test tests/hudmath_test.cpp)
+
+# Gate test for the csgo radar's pure halves (src/hacks/hud/radar_pure.h): nav mesh reader on a
+# synthetic v16 / TF sub-version 2 file, overview fit, CS:GO radar transforms, icon states, shading.
+# Build + run: cmake --build build --config Release --target radar_test && build\Release\radar_test.exe
+add_executable(radar_test tests/radar_test.cpp)
 
 # Gate test for unit wm's watermark pure halves (src/hacks/hud/wm_pure.h): imgur url rewrite,
 # fnv-1a cache name, utf8 truncate, gif-next-to-watermark placement.

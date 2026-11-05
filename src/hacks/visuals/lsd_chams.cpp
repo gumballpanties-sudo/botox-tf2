@@ -88,6 +88,35 @@ namespace
 		return result;
 	}
 
+	// diag: one line per new vertex decl seen while lsd / two tone is armed. viewport maxz 0.1 = the
+	// viewmodel pass (viewrender.cpp:1109 DepthRange hack), so local vs enemy draws read apart
+	void DeclDiag(IDirect3DDevice9* dev, const char* tag, int compressed)
+	{
+		static IDirect3DVertexDeclaration9* seen[48] = {};
+		static int nSeen = 0;
+		if (nSeen >= 48) return;
+		IDirect3DVertexDeclaration9* decl = nullptr;
+		if (FAILED(dev->GetVertexDeclaration(&decl)) || !decl) { DebugLog("%s: diag no decl", tag); nSeen = 48; return; }
+		for (int i = 0; i < nSeen; i++) if (seen[i] == decl) { decl->Release(); return; }
+		seen[nSeen++] = decl;
+		D3DVERTEXELEMENT9 el[MAXD3DDECLLENGTH + 1] = {};
+		UINT n = 0;
+		int normal = -1, weight = -1, index = -1;
+		if (SUCCEEDED(decl->GetDeclaration(nullptr, &n)) && n <= MAXD3DDECLLENGTH + 1 && SUCCEEDED(decl->GetDeclaration(el, &n)))
+			for (UINT i = 0; i < n && el[i].Stream != 0xFF; i++)
+			{
+				if (el[i].UsageIndex) continue;
+				if (el[i].Usage == D3DDECLUSAGE_NORMAL)       normal = el[i].Type;
+				if (el[i].Usage == D3DDECLUSAGE_BLENDWEIGHT)  weight = el[i].Type;
+				if (el[i].Usage == D3DDECLUSAGE_BLENDINDICES) index  = el[i].Type;
+			}
+		decl->Release();
+		D3DVIEWPORT9 vp = {};
+		dev->GetViewport(&vp);
+		DebugLog("%s: decl %p compressed %d (normal type %d weight %d index %d, -1 absent) maxz %.2f %s",
+			tag, (void*)decl, compressed, normal, weight, index, vp.MaxZ, vp.MaxZ < 0.5f ? "VIEWMODEL" : "world");
+	}
+
 	struct Saved { int kind, reg; float v[4]; };
 	void SaveConsts(IDirect3DDevice9* d, bool vs, const Defs& defs, std::vector<Saved>& out)
 	{
@@ -143,6 +172,7 @@ namespace
 	{
 		// no shader / unreadable decl = the carrier draws as plain flat chams
 		const int compressed = GpuReady(dev) ? VertexCompression(dev) : -1;
+		DeclDiag(dev, "LSD", compressed);
 		if (compressed < 0)
 			return o_DIP(dev, type, base, minV, nV, start, prims);
 
@@ -304,6 +334,7 @@ namespace
 	{
 		// no shader / not a studio mesh = the model's own material draws as is
 		const int compressed = TwoToneGpuReady(dev) ? VertexCompression(dev) : -1;
+		DeclDiag(dev, "TWO", compressed);
 		if (compressed < 0)
 			return o_DIP(dev, type, base, minV, nV, start, prims);
 

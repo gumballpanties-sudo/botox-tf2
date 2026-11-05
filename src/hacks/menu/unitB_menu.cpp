@@ -40,7 +40,7 @@ void UnitB_Menu_movement_indicators()
             }
 
             ImGui::Checkbox("show pre speed##velocity indicator", &g_viPreSpeed);
-            if (g_viPreSpeed)
+            if (g_viPreSpeed && g_viStyle != IND_STYLE_KAMIBEBRA)
             {
                 ImGui::Combo("pre speed position##velocity indicator", &g_viPreLayout, kPreLayoutNames);
                 ImGui::SliderFloat("pre speed scale##velocity indicator", &g_viPreScale, 0.25f, 2.f, "%.2fx");
@@ -52,8 +52,9 @@ void UnitB_Menu_movement_indicators()
 
             ImGui::Checkbox("custom color##velocity indicator", &g_viCustomColor);
 
-            ImGui::Checkbox("shadow##velocity indicator", &g_viShadow);
-            if (g_viShadow)
+            if (g_viStyle != IND_STYLE_KAMIBEBRA)
+                ImGui::Checkbox("shadow##velocity indicator", &g_viShadow);
+            if (g_viShadow && g_viStyle != IND_STYLE_KAMIBEBRA)
             {
                 ImGui::SliderFloat("shadow blur##velocity indicator", &g_viShadowBlur, 0.f, 20.f, "%.1f");
                 if (g_viStyle != IND_STYLE_KAMIDERE)
@@ -62,8 +63,9 @@ void UnitB_Menu_movement_indicators()
                 ImGui::SliderInt("shadow y##velocity indicator", &g_viShadowY, -10, 10, "%d px");
             }
 
-            ImGui::Checkbox("outline##velocity indicator", &g_viOutline);
-            if (g_viOutline)
+            if (g_viStyle != IND_STYLE_KAMIBEBRA)
+                ImGui::Checkbox("outline##velocity indicator", &g_viOutline);
+            if (g_viOutline && g_viStyle != IND_STYLE_KAMIBEBRA)
             {
                 ImGui::ColorRow("outline color##velocity indicator", g_viOutlineColor);
                 ImGui::SliderInt("outline thickness##velocity indicator", &g_viOutlinePx, 1, 5, "%d px");
@@ -126,18 +128,24 @@ void UnitB_Menu_movement_indicators()
             if (g_kiStyle == IND_STYLE_KAMIDERE)
                 ImGui::ColorRow("kami shadow color##keybind indicator", g_indKamiShadowColor);
 
+            const bool kamibebra_keys = g_kiStyle == IND_STYLE_KAMIBEBRA;
+            if (kamibebra_keys)
+                ImGui::ColorRow("detect accent##keybind indicator", g_indKamibebraAccent);
+
             ImGui::ColorRow("keybind colors##keybind color", g_kiColor);
             ImGui::SameLine();
             ImGui::ColorRow("##keybind success color", g_kiColorSuccess, 0, 1);
 
             ImGui::ColorRow("in prediction color##keybind predict color", g_kiColorPredict);
 
-            ImGui::Checkbox("horizontal layout", &g_kiHorizontal);
+            if (!kamibebra_keys)
+                ImGui::Checkbox("horizontal layout", &g_kiHorizontal);
 
             ImGui::SliderInt("spacing##keybind indicators", &g_kiSpacing, -10, 40, "%d px");
 
-            ImGui::Checkbox("shadow##keybind indicators", &g_kiShadow);
-            if (g_kiShadow)
+            if (!kamibebra_keys)
+                ImGui::Checkbox("shadow##keybind indicators", &g_kiShadow);
+            if (g_kiShadow && !kamibebra_keys)
             {
                 ImGui::SliderFloat("shadow blur##keybind indicators", &g_kiShadowBlur, 0.f, 20.f, "%.1f");
 
@@ -149,8 +157,9 @@ void UnitB_Menu_movement_indicators()
                 ImGui::SliderInt("shadow y##keybind indicators", &g_kiShadowY, -10, 10, "%d px");
             }
 
-            ImGui::Checkbox("outline##keybind indicators", &g_kiOutline);
-            if (g_kiOutline)
+            if (!kamibebra_keys)
+                ImGui::Checkbox("outline##keybind indicators", &g_kiOutline);
+            if (g_kiOutline && !kamibebra_keys)
             {
                 ImGui::ColorRow("outline color##keybind indicators", g_kiOutlineColor);
                 ImGui::SliderInt("outline thickness##keybind indicators", &g_kiOutlinePx, 1, 5, "%d px");

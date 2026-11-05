@@ -8,8 +8,8 @@
 // game thread and replays; here the imgui frame build IS the paint pass).
 
 // ---- botox variables.h enums ----------------------------------------------------------------
-enum IndStyle { IND_STYLE_DEFAULT = 0, IND_STYLE_STATIC, IND_STYLE_SMOOTH, IND_STYLE_MITOSIS, IND_STYLE_KAMIDERE, IND_STYLE_SQUASH };
-inline constexpr const char* kIndStyleNames = "default\0static\0smooth\0mitosis\0kamidere\0squash & stretch\0";
+enum IndStyle { IND_STYLE_DEFAULT = 0, IND_STYLE_STATIC, IND_STYLE_SMOOTH, IND_STYLE_MITOSIS, IND_STYLE_KAMIDERE, IND_STYLE_SQUASH, IND_STYLE_KAMIBEBRA };
+inline constexpr const char* kIndStyleNames = "default\0static\0smooth\0mitosis\0kamidere\0squash & stretch\0kamibebra\0";
 
 enum IndSmoothOrigin { SMOOTH_ORIGIN_AUTO = 0, SMOOTH_ORIGIN_RIGHT, SMOOTH_ORIGIN_BOTTOM };
 inline constexpr const char* kSmoothOriginNames = "auto\0right\0bottom\0";
@@ -45,6 +45,7 @@ inline constexpr const char* kKiLabels[LBL_COUNT][2] = {
 
 // ---- shared ---------------------------------------------------------------------------------
 inline float g_indKamiShadowColor[4] = { 252 / 255.f, 193 / 255.f, 1.f, 1.f };   // m_indicator_kami_shadow_color
+inline float g_indKamibebraAccent[4] = { 252 / 255.f, 194 / 255.f, 1.f, 1.f };   // m_indicator_kamibebra_accent
 
 // ---- velocity indicator ---------------------------------------------------------------------
 inline bool  g_viEnable       = false;

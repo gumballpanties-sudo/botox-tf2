@@ -8,6 +8,7 @@
 #include "../screen/colorcorrect.h"
 #include "../hud/crosshair.h"   // Crosshair_BlendCombo
 #include "../hud/hud_extra.h"   // unit hud: fonts tab net graph page reset
+#include "../hud/radar_snap.h"  // csgo radar: overview source / bake status line
 #include "../visuals/lagres.h"
 #include "../movement/movement.h"   // RC_* marker access for the route calculator's marker list
 #include "../movement/points_style.h"   // movement > points page: styles + preview
@@ -32,6 +33,8 @@
 #include "../visuals/world_fx3_math.h"   // unit world: remove hud elements list (k_hudElems)
 #include "unitE_menu.h"
 #include "unitF_menu.h"
+
+static void MenuClientCmd(const char* cmd);   // below the fonts tab; the hud group's radar button uses it
 
 // ==== tooltips: OFF ==============================================================
 // Every menu tooltip goes through here instead of ImGui::SetTooltip. Body is empty, so
@@ -926,9 +929,10 @@ static void Page_VisualsScreen()
         // ---- botox menu_tab_visuals.cpp "hud" group, botox order (unit hud, 11-01) ----------
         // skipped rows: force crosshair (CS:GO weapon_debug_spread_show; TF2 already draws its
         // crosshair on an unscoped sniper rifle), classic crosshair (outline) color (CS:GO's vgui
-        // bar crosshair), default crosshair color, chud hud (removed), square
-        // radar / hud color / keep killfeed / scaleform / web on surface / force hud update
-        // (panorama + scaleform only), minecraft + call of duty 4 hud (cancelled).
+        // bar crosshair), default crosshair color, chud hud (removed), hud color / keep
+        // killfeed / scaleform / web on surface / force hud update
+        // (panorama + scaleform only), minecraft + call of duty 4 hud (cancelled). square radar
+        // lives in the csgo radar popup below.
         ImGui::Checkbox("sniper crosshair", &g_hudSniperCh);
         if (g_hudSniperCh)
             ImGui::OptionPopup("sniper crosshair settings", [&]() {
@@ -965,6 +969,33 @@ static void Page_VisualsScreen()
                 ImGui::ColorRow("color##aimbot fov circle", g_hudFovCircleColor);
                 SliderF("thickness##aimbot fov circle", &g_hudFovCircleThick, 0.5f, 5.f, "%.1f");
                 ImGui::Checkbox("only while aim key held##aimbot fov circle", &g_hudFovCircleKeyOnly);
+            }, ImVec2(220.f, -1.f));
+
+        // csgo radar (hud/radar.cpp): CS:GO's panorama radar, bounds from the bot nav mesh,
+        // overview traced from the world. Defaults = the cl_radar_* cvars.
+        ImGui::Checkbox("csgo radar", &g_hudRadar);
+        if (g_hudRadar)
+            ImGui::OptionPopup("csgo radar settings", [&]() {
+                ImGui::Checkbox("square##csgo radar", &g_hudRadarSquare);
+                ImGui::Checkbox("rotate##csgo radar", &g_hudRadarRotate);
+                SliderF("scale##csgo radar", &g_hudRadarScale, 0.25f, 1.f, "%.2f");
+                SliderF("icon scale min##csgo radar", &g_hudRadarIconMin, 0.4f, 1.25f, "%.2f");
+                SliderF("hud scale##csgo radar", &g_hudRadarHudScale, 0.8f, 1.3f, "%.2f");
+                // same offsets the menu-open drag writes (layout px from the top-left default)
+                SliderF("x offset##csgo radar", &g_hudRadarOffX, 0.f, 2560.f, "%.0f px");
+                SliderF("y offset##csgo radar", &g_hudRadarOffY, -60.f, 1440.f, "%.0f px");
+                ImGui::Checkbox("show all enemies##csgo radar", &g_hudRadarShowAll);
+                ImGui::ColorRow("blu color##csgo radar", g_hudRadarColorBlu);
+                ImGui::ColorRow("red color##csgo radar", g_hudRadarColorRed);
+                ImGui::ColorRow("enemy color##csgo radar", g_hudRadarColorEnemy);
+                const int src = g_radarSource.load(), pct = g_radarBakePct.load();
+                if (src == 1)      ImGui::Label("nav mesh, %d areas%s", g_radarAreas.load(), pct >= 0 && pct < 100 ? " (tracing)" : "");
+                else if (src == 2) ImGui::Label("no nav mesh: world bounds%s", pct >= 0 && pct < 100 ? " (tracing)" : "");
+                else               ImGui::Label("not in a map");
+                // nav_generate needs sv_cheats on a listen server; it writes tf/maps/<map>.nav and
+                // reloads the map, and the radar rebakes on the new mesh
+                if (src == 2 && ImGui::Button("generate nav mesh##csgo radar", ImVec2(-1.f, 0.f)))
+                    MenuClientCmd("sv_cheats 1; nav_generate");
             }, ImVec2(220.f, -1.f));
 
         ImGui::Checkbox("custom net graph", &g_hudNg);
@@ -1314,14 +1345,6 @@ static void Page_MovementMain()
                 ImGui::Checkbox("park at end of surf##ps", &g_psParkAtEnd);
             }, ImVec2(220.f, -1));
 
-        ImGui::Checkbox("tung surf", &g_tungSurf);
-        if (g_tungSurf)
-            ImGui::OptionPopup("tung surf settings", [&]() {
-                ImGui::Label("tung surf keybind");
-                ImGui::Keybind("tung surf key", &g_tungSurfKey, &g_tungSurfMode);
-                SliderF("max surface tilt", &g_tungMaxNz, 0.05f, 0.5f, "%.2f nz");
-            }, ImVec2(220.f, -1));
-
         ImGui::Checkbox("auto bounce", &g_autoBounce);
         if (g_autoBounce)
             ImGui::OptionPopup("auto bounce settings", [&]() {
@@ -1524,6 +1547,15 @@ static void Page_MovementMain()
             }, ImVec2(240.f, -1));
 
         ImGui::EndDisabled();
+
+        // not gated by "enabled" -- runs on its own toggle
+        ImGui::Checkbox("tung surf", &g_tungSurf);
+        if (g_tungSurf)
+            ImGui::OptionPopup("tung surf settings", [&]() {
+                ImGui::Label("tung surf keybind");
+                ImGui::Keybind("tung surf key", &g_tungSurfKey, &g_tungSurfMode);
+                SliderF("max surface tilt", &g_tungMaxNz, 0.05f, 0.5f, "%.2f nz");
+            }, ImVec2(220.f, -1));
     }
     menu_group_end();
 

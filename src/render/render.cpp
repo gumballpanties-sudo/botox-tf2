@@ -11,6 +11,7 @@
 #include "../hacks/hud/indicators.h"   // botox indicators.cpp: velocity, graph, keybinds, keystrokes
 #include "../hacks/hud/crosshair.h"
 #include "../hacks/hud/hud_extra.h"   // unit hud: fov circle, net graph, their fonts
+#include "../hacks/hud/radar.h"       // csgo radar
 #include "../hacks/menu/menu.h"
 #include "../hacks/movement/movement.h"
 #include "../hacks/network/netregion.h"
@@ -1563,6 +1564,7 @@ static void BuildFontAtlas()
     g_fontKamibebraBold13 = donor(rubik_medium, sizeof(rubik_medium), 13.f, ImGuiFreeTypeBuilderFlags_Bitmap | ImGuiFreeTypeBuilderFlags_LightHinting);
     orElse(g_fontLobotomy13, g_fontBold); orElse(g_fontLobotomyBold13, g_fontLobotomy13);
     orElse(g_fontKamibebra13, g_fontBold); orElse(g_fontKamibebraBold13, g_fontKamibebra13);
+    g_fontKamibebra22 = donor(rubik_regular, sizeof(rubik_regular), 22.f, ImGuiFreeTypeBuilderFlags_Bitmap); orElse(g_fontKamibebra22, g_fontKamibebra13);
 
     g_fontCumhacck35    = sys("verdanab.ttf", 35.f, mono);                   orElse(g_fontCumhacck35, g_fontBold);
     g_fontAirplaneTitle = donor(montserrat_regular, sizeof(montserrat_regular), 10.f, 0); orElse(g_fontAirplaneTitle, g_fontBold);
@@ -1885,6 +1887,7 @@ static void BuildImGuiFrame()
     AspectStretch_Run(RenderIndicators, AsPanel);   // botox order: velocity, graph, keybinds, particles, keystrokes
     Recorder_Render();           // unit B: path, route starts, timer, clipper box, clip editor
     RenderHudExtras();           // unit hud: aimbot fov circle + custom net graph
+    AspectStretch_Run(RenderRadar, AsPanel);   // csgo radar (hud/radar.cpp)
     RenderCrosshairList();       // own list: the one overlay drawn inside the game's frame
     AspectStretch_Run(RenderSpectatorList, AsPanel);       // unit E: misc HUD
     AspectStretch_Run(RenderHitMarker, AsPanel);
@@ -2376,7 +2379,8 @@ HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     PlayerStencil_ReleaseTargets();    // esp unit: player stencil mask/blur targets, DEFAULT-pool
     GifTex_ReleaseAll();               // unit E5: gif frame texture, GDI+ bitmap survives the reset
     SpectatorList_ReleaseTextures();   // spec unit: eyes style row textures, DEFAULT-pool
-    BlurRect_Destroy();                // unit E5: blur scratch targets + shader
+    Radar_ReleaseTextures();           // csgo radar overview, DEFAULT-pool; the baked pixels rebuild it
+    BlurRect_Destroy();               // unit E5: blur scratch targets + shader
     if (g_imguiInit) ImGui_ImplDX9_InvalidateDeviceObjects();
     // The split arrays point at draw lists from the frame being dropped -- a Present that
     // renders them after a Reset would submit freed geometry.

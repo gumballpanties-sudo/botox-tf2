@@ -2,6 +2,7 @@
 // Keys kept from the old port where the meaning held (miEnable, viColor1, vg*, ks* ...); the old
 // rows whose shape changed are read once by Ind_LoadLegacy (config.cpp).
     { "indKamiShadowColor", CfgEntry::FLOAT4, g_indKamiShadowColor, 0 },
+    { "indKamibebraAccent", CfgEntry::FLOAT4, g_indKamibebraAccent, 0 },
 
     { "viEnable",         CfgEntry::BOOL,   &g_viEnable, 0 },
     { "viPreSpeed",       CfgEntry::BOOL,   &g_viPreSpeed, 0 },

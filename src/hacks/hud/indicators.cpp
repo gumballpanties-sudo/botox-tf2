@@ -1246,6 +1246,210 @@ static void keybinds_mitosis(const std::vector<key_pending_t>& pending, ImFont* 
     mitosis_queue(f);
 }
 
+static ImFont* kamibebra_font(const float scale, float& fs, float& s)
+{
+    ImFont* const font = g_fontKamibebra22;
+    s  = std::clamp(scale, kIndScaleMin, kIndScaleMax);
+    fs = font ? font->FontSize * s : 0.f;
+    return font;
+}
+
+static void kamibebra_text(ImFont* font, const float fs, const float x, const float y, const std::string& text, const ImVec4& color)
+{
+    push_label(font, fs, ImVec2(std::round(x), std::round(y)), text, u32(color), 0u, { false, 0.f });
+}
+
+static void kamibebra_shadowed(ImFont* font, const float fs, const float s, const float x, const float y, const std::string& text, const ImVec4& color)
+{
+    const float a = (200.f / 255.f) * color.w;
+    kamibebra_text(font, fs, x + std::round(s), y + std::round(s), text, ImVec4(0.f, 0.f, 0.f, a));
+    kamibebra_text(font, fs, x + std::round(2.f * s), y + std::round(2.f * s), text, ImVec4(0.f, 0.f, 0.f, a * 0.25f));
+    kamibebra_text(font, fs, x, y, text, color);
+}
+
+struct kamibebra_tag_t {
+    int         m_id   = 0;
+    std::string m_text = {};
+    ImVec2      m_size = {};
+    float m_opacity = 0.f, m_target_opacity = 1.f;
+    float m_x = 0.f, m_target_x = 0.f, m_spawn_x = 0.f;
+    bool  m_removing = false, m_detect = false;
+    float m_detect_t = 0.f, m_target_detect = 0.f;
+    float m_appear_until = 0.f, m_detect_hold_until = 0.f;
+};
+
+static std::vector<kamibebra_tag_t> s_kamibebra_tags;
+static float s_kamibebra_clock = 0.f;
+
+static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const float scale, const float dt, const float base)
+{
+    constexpr float k_opacity = 10.f, k_position = 9.5f, k_detect = 4.5f, k_detect_hold = 0.25f, k_detect_max = 0.75f, k_appear = 0.09f,
+                    k_remove_opacity = 2.35f, k_spacing = 4.f;
+
+    float fs = 0.f, s = 1.f;
+    ImFont* const font = kamibebra_font(scale, fs, s);
+    if (!font)
+        return;
+
+    s_kamibebra_clock += dt;
+    const float now = s_kamibebra_clock;
+    const float W   = screen_w();
+    const float gap = (float)g_kiSpacing;
+
+    const auto find = [&](const int id) -> kamibebra_tag_t* {
+        for (auto& t : s_kamibebra_tags)
+            if (t.m_id == id)
+                return &t;
+        return nullptr;
+    };
+
+    const auto live_count = [&]() {
+        size_t count = 0;
+        for (const auto& t : s_kamibebra_tags)
+            if (!t.m_removing)
+                ++count;
+        return count;
+    };
+
+    const auto recalc = [&]() {
+        const float spacing = std::round(k_spacing * s) + gap;
+        float total = -spacing;
+        for (const auto& t : s_kamibebra_tags)
+            if (!t.m_removing)
+                total += t.m_size.x + spacing;
+
+        float x = W * 0.5f - total * 0.5f;
+        for (auto& t : s_kamibebra_tags) {
+            if (t.m_removing)
+                continue;
+            t.m_target_x = x;
+            x += t.m_size.x + spacing;
+        }
+    };
+
+    const auto start_removing = [&](kamibebra_tag_t& t) {
+        t.m_removing       = true;
+        t.m_target_opacity = 0.f;
+        recalc();
+        t.m_target_x = t.m_spawn_x != 0.f ? t.m_spawn_x : smooth_spawn_x(live_count());
+    };
+
+    size_t final_active = live_count();
+    for (const auto& p : pending) {
+        if (!p.m_active)
+            continue;
+        const kamibebra_tag_t* const t = find(p.m_id);
+        if (!t || t->m_removing)
+            ++final_active;
+    }
+    const float batch_spawn = smooth_spawn_x(final_active);
+
+    bool listed[LBL_COUNT]{};
+    for (const auto& p : pending) {
+        listed[p.m_id]       = true;
+        kamibebra_tag_t* tag = find(p.m_id);
+
+        if (p.m_active) {
+            if (!tag) {
+                kamibebra_tag_t t{};
+                t.m_id                = p.m_id;
+                t.m_text              = p.m_text;
+                t.m_size              = font->CalcTextSizeA(fs, FLT_MAX, 0.f, t.m_text.c_str());
+                t.m_appear_until      = now + k_appear;
+                t.m_detect_hold_until = p.m_success ? now + k_detect_hold : 0.f;
+                t.m_target_detect     = p.m_success ? 1.f : 0.f;
+                t.m_x = t.m_target_x = t.m_spawn_x = batch_spawn;
+                s_kamibebra_tags.push_back(std::move(t));
+                recalc();
+                s_kamibebra_tags.back().m_x = batch_spawn;
+            } else {
+                if (tag->m_removing) {
+                    tag->m_removing       = false;
+                    tag->m_opacity        = 0.f;
+                    tag->m_target_opacity = 1.f;
+                    tag->m_appear_until   = now + k_appear;
+                    tag->m_spawn_x        = batch_spawn;
+                    recalc();
+                    tag->m_x = batch_spawn;
+                }
+                if (p.m_success)
+                    tag->m_detect_hold_until = now + k_detect_hold;
+                tag->m_detect        = p.m_success || tag->m_detect_hold_until > now;
+                tag->m_target_detect = tag->m_detect ? 1.f : 0.f;
+                tag->m_text          = p.m_text;
+            }
+        } else if (tag && !tag->m_removing)
+            start_removing(*tag);
+    }
+
+    for (auto& t : s_kamibebra_tags)
+        if (!listed[t.m_id] && !t.m_removing)
+            start_removing(t);
+
+    if (!s_kamibebra_tags.empty()) {
+        for (auto& t : s_kamibebra_tags)
+            t.m_size = font->CalcTextSizeA(fs, FLT_MAX, 0.f, t.m_text.c_str());
+        recalc();
+    }
+
+    size_t visible = 0;
+    for (const auto& t : s_kamibebra_tags)
+        if (t.m_opacity > 0.01f || !t.m_removing)
+            ++visible;
+
+    const col_t  key = col_of(g_kiColor);
+    const ImVec4 acc(g_indKamibebraAccent[0], g_indKamibebraAccent[1], g_indKamibebraAccent[2], 1.f);
+    const float  y   = screen_h() - base;
+
+    for (auto it = s_kamibebra_tags.begin(); it != s_kamibebra_tags.end();) {
+        kamibebra_tag_t& t = *it;
+
+        float position_smooth = k_position;
+        if (t.m_removing && visible > 1) {
+            const float total     = std::max(std::round(s), std::fabs(t.m_target_x - t.m_x) + 220.f * s);
+            const float remaining = std::clamp((t.m_target_x - t.m_x) / total, 0.f, 1.f);
+            position_smooth *= 0.7f + 1.5f * remaining;
+        }
+
+        const float opacity_target = (!t.m_removing && now < t.m_appear_until) ? 0.f : t.m_target_opacity;
+        t.m_opacity = rido_lerp(t.m_opacity, opacity_target, k_opacity * (t.m_removing ? k_remove_opacity : 1.f), dt);
+        t.m_x       = rido_lerp(t.m_x, t.m_target_x, position_smooth, dt);
+        if (std::fabs(t.m_target_x - t.m_x) <= std::round(0.75f * s))
+            t.m_x = t.m_target_x;
+        if (std::fabs(t.m_target_opacity - t.m_opacity) <= 0.015f)
+            t.m_opacity = t.m_target_opacity;
+        t.m_detect_t = rido_lerp(t.m_detect_t, t.m_target_detect, k_detect, dt);
+
+        const float tx = std::round(t.m_x + 0.2f * s), ty = std::round(y);
+        if (t.m_opacity > 0.01f) {
+            const float d = std::min(t.m_detect_t, k_detect_max);
+            ImVec4 shade(acc.x * d, acc.y * d, acc.z * d, (t.m_detect ? 0.85f : 200.f / 255.f) * t.m_opacity);
+            kamibebra_text(font, fs, tx + std::round(s), ty + std::round(s), t.m_text, shade);
+            shade.w *= d > 0.01f ? 0.45f : 0.25f;
+            kamibebra_text(font, fs, tx + std::round(2.f * s), ty + std::round(2.f * s), t.m_text, shade);
+
+            if (d > 0.01f) {
+                const float  a = d * t.m_opacity;
+                const ImVec4 accent_glow(acc.x, acc.y, acc.z, a * 0.2f), white_glow(1.f, 1.f, 1.f, a * 0.3f);
+                static constexpr float k_dirs[4][2] = { { -1.f, 0.f }, { 1.f, 0.f }, { 0.f, -1.f }, { 0.f, 1.f } };
+                for (const auto& dir : k_dirs) {
+                    kamibebra_text(font, fs, tx + dir[0] * 0.5f * s, ty + dir[1] * 0.5f * s, t.m_text, accent_glow);
+                    kamibebra_text(font, fs, tx + dir[0] * 0.25f * s, ty + dir[1] * 0.25f * s, t.m_text, white_glow);
+                }
+            }
+        }
+
+        kamibebra_text(font, fs, tx, ty, t.m_text, ImVec4(key.r, key.g, key.b, key.a * t.m_opacity));
+        if (!t.m_removing)
+            part_mark(t.m_id, tx, ty, t.m_size);
+
+        if (t.m_removing && t.m_opacity < 0.02f)
+            it = s_kamibebra_tags.erase(it);
+        else
+            ++it;
+    }
+}
+
 // ==== keybind indicators =======================================================================
 struct kami_ghost_t {
     std::string m_text;
@@ -1359,8 +1563,16 @@ static void keybind_indicators(const MvInd_t& s)
         std::fill(std::begin(s_kami_key_was), std::end(s_kami_key_was), false);
     }
 
+    if (style != IND_STYLE_KAMIBEBRA)
+        s_kamibebra_tags.clear();
+
     if (style == IND_STYLE_SMOOTH) {
         keybinds_smooth(pending, font, fs, dt, base, horizontal, shadow_detect, shadow);
+        return;
+    }
+
+    if (style == IND_STYLE_KAMIBEBRA) {
+        keybinds_kamibebra(pending, g_kiScale, dt, base);
         return;
     }
 
@@ -1633,11 +1845,22 @@ struct speed_kami_t {
     std::vector<speed_ghost_t> m_ghosts;
 };
 
+struct speed_kamibebra_t {
+    bool   m_init = false;
+    float  m_last_time = 0.f;
+    float  m_x = 0.f;
+    bool   m_has_pre = false, m_pre_removing = false;
+    std::string m_pre = {};
+    float  m_pre_opacity = 0.f, m_pre_x = 0.f, m_pre_target_x = 0.f;
+    ImVec4 m_pre_color = ImVec4(1.f, 1.f, 1.f, 0.f);
+};
+
 struct speed_pair_state_t {
     speed_smooth_t m_smooth;
     float m_show = 0.f;
     float m_slot = 0.f;
     speed_kami_t m_kami;
+    speed_kamibebra_t m_kamibebra;
 };
 
 static speed_pair_state_t s_velocity_pair;
@@ -1690,6 +1913,68 @@ static void speed_pair(speed_pair_state_t& st, const int style, const char* anim
         st.m_show = st.m_slot = 0.f;
     if (style != IND_STYLE_KAMIDERE)
         st.m_kami = {};
+    if (style != IND_STYLE_KAMIBEBRA)
+        st.m_kamibebra = {};
+
+    if (style == IND_STYLE_KAMIBEBRA) {
+        float kfs = 0.f, s = 1.f;
+        ImFont* const kfont = kamibebra_font(scale, kfs, s);
+        if (!kfont)
+            return;
+
+        speed_kamibebra_t& k = st.m_kamibebra;
+        const float real = real_time();
+        if (real - k.m_last_time > 0.25f || real < k.m_last_time)
+            k = {};
+        k.m_last_time = real;
+
+        if (opts.m_took_off && show_pre) {
+            if (!k.m_has_pre) {
+                k.m_pre_opacity = 0.f;
+                k.m_pre_color   = ImVec4(1.f, 1.f, 1.f, 0.f);
+            } else
+                k.m_pre_opacity = 1.f;
+            k.m_has_pre      = true;
+            k.m_pre_removing = false;
+            k.m_pre          = pre_value;
+        }
+        if (!show_pre && k.m_has_pre)
+            k.m_pre_removing = true;
+
+        const float spacing = 5.f * s;
+        const float main_w  = kfont->CalcTextSizeA(kfs, FLT_MAX, 0.f, main_text.c_str()).x;
+        const float pre_w   = k.m_has_pre ? kfont->CalcTextSizeA(kfs, FLT_MAX, 0.f, k.m_pre.c_str()).x : 0.f;
+
+        const float target_x = k.m_has_pre && !k.m_pre_removing ? (W - (main_w + std::round(spacing) + pre_w)) * 0.5f : (W - main_w) * 0.5f;
+        if (!k.m_init) {
+            k.m_x    = target_x;
+            k.m_init = true;
+        }
+        k.m_x = rido_lerp(k.m_x, target_x, 8.5f, dt);
+
+        kamibebra_shadowed(kfont, kfs, s, k.m_x + 0.2f * s, y, main_text, color);
+
+        if (k.m_has_pre) {
+            k.m_pre_opacity = rido_lerp(k.m_pre_opacity, k.m_pre_removing ? 0.f : 1.f, 16.f * (k.m_pre_removing ? 1.6f : 1.f), dt);
+            if (!k.m_pre_removing)
+                k.m_pre_x = k.m_pre_target_x = k.m_x + main_w + spacing;
+            else
+                k.m_pre_x = rido_lerp(k.m_pre_x, k.m_pre_target_x, 12.f, dt);
+
+            const ImVec4 target(color.x, color.y, color.z, k.m_pre_opacity * color.w);
+            k.m_pre_color.x = rido_lerp(k.m_pre_color.x, target.x, 14.f * 0.96f, dt);
+            k.m_pre_color.y = rido_lerp(k.m_pre_color.y, target.y, 14.f * 0.96f, dt);
+            k.m_pre_color.z = rido_lerp(k.m_pre_color.z, target.z, 14.f * 0.96f, dt);
+            k.m_pre_color.w = target.w;
+
+            if (k.m_pre_opacity > 0.01f)
+                kamibebra_shadowed(kfont, kfs, s, k.m_pre_x + 0.2f * s, y, k.m_pre, k.m_pre_color);
+
+            if (k.m_pre_removing && k.m_pre_opacity < 0.01f)
+                k.m_has_pre = k.m_pre_removing = false;
+        }
+        return;
+    }
 
     const bool        stacked   = opts.m_pre_layout == PRE_LAYOUT_ABOVE || opts.m_pre_layout == PRE_LAYOUT_BELOW;
     const std::string pre_text  = stacked ? pre_value : " " + pre_value;
@@ -1948,8 +2233,21 @@ static void velocity(const MvInd_t& s, const bool on_ground)
         took_off                   = true;
     }
 
-    const float alpha = std::min(s.speed / 250.f, 1.f);
-    const float fade  = g_viFadeAlpha ? alpha : 1.f;
+    const bool kamibebra = g_viStyle == IND_STYLE_KAMIBEBRA;
+
+    float alpha = std::min(s.speed / 250.f, 1.f);
+    if (kamibebra) {
+        alpha = 1.f;
+        if (g_viFadeAlpha) {
+            if (s.speed <= 0.f)
+                alpha = 0.f;
+            else if (s.speed < 30.f)
+                alpha = std::lerp(0.f, 0.12f, s.speed / 30.f);
+            else if (s.speed < 150.f)
+                alpha = std::lerp(0.12f, 1.f, std::pow((s.speed - 30.f) / 120.f, 2.8f));
+        }
+    }
+    const float fade = g_viFadeAlpha ? alpha : 1.f;
 
     // ImColor::Blend (botox imgui.h): per channel, alpha included, multiplier clamped
     ImVec4 blended_color;
@@ -1965,9 +2263,11 @@ static void velocity(const MvInd_t& s, const bool on_ground)
 
     const bool should_draw_take_off = (!on_ground || d.m_take_off_time_velocity > s.curtime) && g_viPreSpeed;
 
-    const ImVec4 text_color = g_viCustomColor
-                                  ? ImVec4(blended_color.x, blended_color.y, blended_color.z, blended_color.w * fade)
-                                  : speed_based_color;
+    ImVec4 text_color = g_viCustomColor
+                            ? ImVec4(blended_color.x, blended_color.y, blended_color.z, blended_color.w * fade)
+                            : speed_based_color;
+    if (kamibebra)
+        text_color.w = alpha;
 
     const float shadow_alpha = fade;
     const float y            = screen_h() - (float)g_viPadding;
@@ -1976,7 +2276,8 @@ static void velocity(const MvInd_t& s, const bool on_ground)
     std::snprintf(main_text, sizeof(main_text), "%d", velocity);
     std::snprintf(pre_text, sizeof(pre_text), "(%d)", d.m_take_off_velocity);
 
-    speed_pair(s_velocity_pair, g_viStyle, "velocity_pre_speed", main_text, pre_text, text_color, shadow_alpha, y, should_draw_take_off,
+    speed_pair(s_velocity_pair, g_viStyle, "velocity_pre_speed", main_text, pre_text, text_color, shadow_alpha, y,
+               kamibebra ? g_viPreSpeed && !on_ground : should_draw_take_off,
                shadow_opts_of(g_viShadow, g_viShadowBlur, g_viShadowColor, g_viOutline, g_viOutlineColor, g_viOutlinePx, g_viShadowX, g_viShadowY),
                g_viScale, { g_viPreLayout, g_viPreScale, g_viPreAlign, took_off, false, g_viSmoothOrigin });
 

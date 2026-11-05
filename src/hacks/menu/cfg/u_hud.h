@@ -48,4 +48,18 @@ inline char  g_hudNgFontName[64]        = "lucon";
 inline int   g_hudNgFontSize            = 14;
 inline int   g_hudNgFontFlags           = 0;
 
+// csgo radar (CS:GO panorama csgo_hudradar.cpp; defaults = the cl_radar_* cvars)
+inline bool  g_hudRadar                 = false;
+inline bool  g_hudRadarSquare           = false;   // round (CS:GO default) / square (whole map)
+inline bool  g_hudRadarRotate           = true;    // cl_radar_rotate 1
+inline float g_hudRadarScale            = 0.7f;    // cl_radar_scale, 0.25..1
+inline float g_hudRadarIconMin          = 0.6f;    // cl_radar_icon_scale_min, 0.4..1.25
+inline float g_hudRadarHudScale         = 1.f;     // cl_hud_radar_scale, 0.8..1.3
+inline bool  g_hudRadarShowAll          = false;   // enemies always shown, not only while spotted
+inline float g_hudRadarOffX             = 0.f;     // drag offset, 1080p layout px (menu open: LMB drag, RMB reset)
+inline float g_hudRadarOffY             = 0.f;
+inline float g_hudRadarColorBlu[4]      = { 0x1e / 255.f, 0xd2 / 255.f, 1.f, 1.f };           // PI_Color_CT
+inline float g_hudRadarColorRed[4]      = { 1.f, 0xdd / 255.f, 0x23 / 255.f, 1.f };           // PI_Color_T
+inline float g_hudRadarColorEnemy[4]    = { 1.f, 0x19 / 255.f, 0x19 / 255.f, 1.f };           // PI_Color_Enemy
+
 
