@@ -275,9 +275,14 @@ namespace
             const float k = Dpi_Scale();   // io.MouseDelta is logical px
             const ImVec2 d(fmaxf(-mn.x, fminf(io.MouseDelta.x * k, io.DisplaySize.x - mx.x)),
                            fmaxf(-mn.y, fminf(io.MouseDelta.y * k, io.DisplaySize.y - mx.y)));
-            const ImVec2 at = Dpi_PanelLayoutPos(ImVec2(mn.x + d.x, mn.y + d.y), ImVec2(lmx.x - lmn.x, lmx.y - lmn.y));
-            g_hudRadarOffX += at.x - lmn.x;
-            g_hudRadarOffY += at.y - lmn.y;
+            // move by the shown delta mapped back to layout px. Not SpecDrag's "at - lmn": the
+            // drawn shapes start inside the 300 px panel (the disc at 23 px), so that adds the
+            // inset again every frame and the radar runs off to the bottom right.
+            const ImVec2 size(lmx.x - lmn.x, lmx.y - lmn.y);
+            const ImVec2 from = Dpi_PanelLayoutPos(mn, size);
+            const ImVec2 to   = Dpi_PanelLayoutPos(ImVec2(mn.x + d.x, mn.y + d.y), size);
+            g_hudRadarOffX += to.x - from.x;
+            g_hudRadarOffY += to.y - from.y;
         }
         if (hovered || s_drag)
         {

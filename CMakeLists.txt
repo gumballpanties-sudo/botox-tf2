@@ -575,3 +575,9 @@ add_executable(skins_test tests/skins_test.cpp)
 # round trip, probe vs loadout, header fields, hostile input clamped / dropped.
 # Build + run: cmake --build build --config Release --target skinshare_test && build\Release\skinshare_test.exe
 add_executable(skinshare_test tests/skinshare_test.cpp)
+
+# Gate test for the csgo weapon selection (src/hacks/aim/weaponsel.cpp): the generated def table
+# (src/hacks/hud/weaponsel_table.h, tools/gen_weaponsel.py) and every botox-assets weaponsel/*.svg
+# through the DLL's nanosvg: parses, rasterises, fills its box.
+# Build + run: cmake --build build --config Release --target weaponsel_test && build\Release\weaponsel_test.exe
+add_executable(weaponsel_test tests/weaponsel_test.cpp)

@@ -9,7 +9,9 @@
 // engine's own network update order, so TF2's own Spawn picks the model, team and style.
 // Nobody else sees any of it. See hats.cpp for the lifecycle.
 
-constexpr int kHatSlots = 8;   // lbox's cap, and CTFPlayer's own wearable limit
+// Menu = "add hat" list, packed from slot 0. ponytail: hard cap = entity index budget under
+// the weather entity (hats.cpp kFirstIndex); raise both together.
+constexpr int kHatSlots = 64;
 // def 0 = empty, unusual/paint -1 = none.
 // eqMask/eqPos: where TF2's loadout screen equipped the backpack copy (hats_inv.cpp hook). Bit 0 set
 // = "loadout-managed": the hat is worn only on classes with their bit (1 scout .. 9 engineer) set,

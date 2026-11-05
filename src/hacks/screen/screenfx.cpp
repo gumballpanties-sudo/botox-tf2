@@ -50,7 +50,109 @@ static bool s_reszOk       = false;
 static bool s_nvapiChecked = false;
 static bool s_nvapiOk      = false;
 static void* s_nvRegTex    = nullptr;             // registering the same resource twice is an error
+static IDirect3DSurface9* s_nvEngDepth = nullptr; // engine z registered with nvapi, AddRef'd while held
+static int  s_nvEngReg     = -1;                  // its register status, for the resolve log
 static bool s_capsLogged   = false;
+
+// ---- what the resolve costs the cpu ---------------------------------------------------------
+// render thread only, summed and logged every 2s: a resolve that stalls on the gpu shows here
+static LARGE_INTEGER s_qpcFreq{};
+static double s_costResolveUs = 0.0, s_costResolveMax = 0.0;
+static int    s_costResolveN  = 0;
+static double s_costProbeUs   = 0.0;
+static int    s_costProbeN    = 0;
+
+static double FxNowUs()
+{
+    if (!s_qpcFreq.QuadPart) QueryPerformanceFrequency(&s_qpcFreq);
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return (double)t.QuadPart * 1e6 / (double)s_qpcFreq.QuadPart;
+}
+
+// ---- what each pass costs, gpu and cpu ------------------------------------------------------
+// One timestamp before the chain and one after each pass, read back 4 frames later with no
+// flush (a pass that did not run = two adjacent stamps = 0). No disjoint query of our own:
+// frameblend.cpp holds one open around its run and nesting them is not allowed.
+enum { k_passDv, k_passRefl, k_passAo, k_passDof, k_passFb, k_passWarp, k_passN };
+struct FxGpuFrame { IDirect3DQuery9* freq = nullptr; IDirect3DQuery9* ts[k_passN + 1]{}; bool pending = false; };
+static FxGpuFrame s_gpu[4];
+static int    s_gpuIdx  = 0;
+static bool   s_gpuDead = false;
+static double s_passGpuMs[k_passN]{};
+static int    s_passGpuN = 0;
+static double s_passCpuUs[k_passN]{};
+static int    s_passCpuN = 0;
+
+static void FxGpuRelease()
+{
+    for (FxGpuFrame& f : s_gpu) {
+        if (f.freq) { f.freq->Release(); f.freq = nullptr; }
+        for (IDirect3DQuery9*& q : f.ts) if (q) { q->Release(); q = nullptr; }
+        f.pending = false;
+    }
+}
+
+// collects the slot it reuses (4 frames old), then opens it again. Null = no timestamps.
+static FxGpuFrame* FxGpuBegin(IDirect3DDevice9* dev)
+{
+    if (s_gpuDead) return nullptr;
+    FxGpuFrame& f = s_gpu[s_gpuIdx];
+    s_gpuIdx = (s_gpuIdx + 1) & 3;
+
+    if (!f.freq) {
+        bool ok = SUCCEEDED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMPFREQ, &f.freq));
+        for (IDirect3DQuery9*& q : f.ts) ok = ok && SUCCEEDED(dev->CreateQuery(D3DQUERYTYPE_TIMESTAMP, &q));
+        if (!ok) { FxGpuRelease(); s_gpuDead = true; DebugLog("^FX: no timestamp queries -- pass gpu cost not logged"); return nullptr; }
+    }
+
+    if (f.pending) {
+        f.pending = false;
+        UINT64 hz = 0, t[k_passN + 1]{};
+        bool ok = f.freq->GetData(&hz, sizeof(hz), 0) == S_OK && hz > 0;
+        for (int i = 0; ok && i <= k_passN; ++i) ok = f.ts[i]->GetData(&t[i], sizeof(t[i]), 0) == S_OK;
+        if (ok) {
+            for (int i = 0; i < k_passN; ++i)
+                s_passGpuMs[i] += (t[i + 1] >= t[i]) ? (double)(t[i + 1] - t[i]) * 1000.0 / (double)hz : 0.0;
+            ++s_passGpuN;
+        }
+    }
+
+    f.ts[0]->Issue(D3DISSUE_END);
+    return &f;
+}
+
+static void FxGpuEnd(FxGpuFrame* f)
+{
+    if (!f) return;
+    f->freq->Issue(D3DISSUE_END);
+    f->pending = true;
+}
+
+static void FxCostLog()
+{
+    static ULONGLONG s_last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_last < 2000) return;
+    s_last = now;
+    if (s_costResolveN || s_costProbeN)
+        DebugLog("^FX: depth cpu -- resolve %.1fus avg %.1fus max (%d), probe %.1fus avg (%d)",
+                 s_costResolveN ? s_costResolveUs / s_costResolveN : 0.0, s_costResolveMax, s_costResolveN,
+                 s_costProbeN ? s_costProbeUs / s_costProbeN : 0.0, s_costProbeN);
+    if (s_passCpuN || s_passGpuN) {
+        const double g = s_passGpuN ? 1.0 / s_passGpuN : 0.0, c = s_passCpuN ? 1.0 / s_passCpuN : 0.0;
+        DebugLog("^FX: pass gpu ms -- dv %.3f refl %.3f ao %.3f dof %.3f fb %.3f warp %.3f (%d) | cpu us -- "
+                 "dv %.0f refl %.0f ao %.0f dof %.0f fb %.0f warp %.0f (%d)",
+                 s_passGpuMs[0] * g, s_passGpuMs[1] * g, s_passGpuMs[2] * g, s_passGpuMs[3] * g,
+                 s_passGpuMs[4] * g, s_passGpuMs[5] * g, s_passGpuN,
+                 s_passCpuUs[0] * c, s_passCpuUs[1] * c, s_passCpuUs[2] * c, s_passCpuUs[3] * c,
+                 s_passCpuUs[4] * c, s_passCpuUs[5] * c, s_passCpuN);
+    }
+    s_costResolveUs = s_costResolveMax = s_costProbeUs = 0.0;
+    s_costResolveN = s_costProbeN = 0;
+    for (int i = 0; i < k_passN; ++i) s_passGpuMs[i] = s_passCpuUs[i] = 0.0;
+    s_passGpuN = s_passCpuN = 0;
+}
 
 // ---- route 3, "universal depth" (botox depth_source.cpp route_live, "z swap") -------------
 // No driver copy at all: our INTZ IS the game's z buffer. SetDepthStencilSurface (slot 39) maps
@@ -317,16 +419,26 @@ static void FxResolveNvapi(IDirect3DDevice9* dev, IDirect3DSurface9* depthSurf)
         DebugLog("screenfx: nvapi register texture %d", st);
     }
 
-    // THE ENGINE'S DEPTH SURFACE IS NOT OURS, so its registration lives and dies inside this
-    // one call, while the caller still holds a reference to it. A map load makes the material
-    // system restore the device without ever calling IDirect3DDevice9::Reset, so that surface
-    // is freed and remade with nothing to tell us. Keeping the registration across it left the
-    // driver holding a freed surface and then unregistered that freed pointer next frame --
-    // the load-in crash with dof/ao on, landing in materialsystem/shaderapidx9 with no frame
-    // of ours in the stack.
-    const int reg = s_nvRegister((IDirect3DResource9*)depthSurf);
+    // THE ENGINE'S DEPTH SURFACE IS NOT OURS. A map load makes the material system restore the
+    // device without ever calling IDirect3DDevice9::Reset, so that surface is freed and remade
+    // with nothing to tell us. A bare kept registration left the driver holding a freed surface
+    // and then unregistered that freed pointer -- the load-in crash with dof/ao on. Registering
+    // inside every call fixed that but paid register + unregister up to twice a frame (the gun
+    // pass resolves too), driver calls on the render thread every frame = input delay.
+    // So the registration is kept WITH A REFERENCE: the surface cannot be freed (or its address
+    // reused) while we hold it, and a new pointer bound here is the remade one -- the old one is
+    // unregistered while still alive, then released. ScreenFx_Destroy drops it before Reset.
+    if (depthSurf != s_nvEngDepth) {
+        if (s_nvEngDepth) {
+            if (s_nvUnregister) s_nvUnregister((IDirect3DResource9*)s_nvEngDepth);
+            s_nvEngDepth->Release();
+        }
+        depthSurf->AddRef();
+        s_nvEngDepth = depthSurf;
+        s_nvEngReg   = s_nvRegister((IDirect3DResource9*)depthSurf);
+    }
+    const int reg = s_nvEngReg;
     const int st = s_nvStretchEx(dev, depthSurf, nullptr, s_ownDepth, nullptr, D3DTEXF_POINT);
-    if (s_nvUnregister) s_nvUnregister((IDirect3DResource9*)depthSurf);
 
     static int s_lastStatus = -1;
     if (st != s_lastStatus) { s_lastStatus = st; DebugLog("screenfx: nvapi resolve %d (register %d)", st, reg); }
@@ -385,6 +497,14 @@ void ScreenFx_Destroy()
     // texture is ever registered past the end of a resolve (see FxResolveNvapi).
     if (s_nvUnregister && s_nvRegTex) s_nvUnregister((IDirect3DResource9*)s_nvRegTex);
     s_nvRegTex = nullptr;
+    // the engine z we hold for nvapi: a live ref to a DEFAULT-pool surface fails the Reset
+    if (s_nvEngDepth) {
+        if (s_nvUnregister) s_nvUnregister((IDirect3DResource9*)s_nvEngDepth);
+        s_nvEngDepth->Release();
+        s_nvEngDepth = nullptr;
+    }
+    s_nvEngReg = -1;
+    FxGpuRelease();   // timestamp queries, remade on the next costed frame
 
     Ssao_Destroy();
     Dof_Destroy();
@@ -1010,6 +1130,23 @@ static bool FxEnsureProbe(IDirect3DDevice9* dev)
     return s_probePs && s_probeTex && s_probeSurf && s_probeSys;
 }
 
+// The copy of the bound z into our INTZ, both draw points. z swap: nothing to copy.
+static void FxResolve(IDirect3DDevice9* dev, IDirect3DSurface9* depthSurf)
+{
+    if (s_route == FX_ROUTE_LIVE) return;
+    const double t0 = FxNowUs();
+    FxSavedState st{};
+    FxSave(dev, st);
+    if (s_route == FX_ROUTE_RESZ) FxResolveResz(dev);
+    else                          FxResolveNvapi(dev, depthSurf);
+    FxRestore(dev, st);
+    const double us = FxNowUs() - t0;
+    s_costResolveUs += us;
+    if (us > s_costResolveMax) s_costResolveMax = us;
+    ++s_costResolveN;
+    FxCostLog();
+}
+
 struct FxProbeStats { float lo, hi, centre, sum; int zeros, ones, n; };
 
 // Render the probe grid and read it back. False = no probe target or the readback failed.
@@ -1069,10 +1206,13 @@ static bool FxProbeRead(IDirect3DDevice9* dev, FxProbeStats& r)
 
     // The readback. A full pipeline stall, which is exactly why this runs once every few
     // seconds and only while the probe is ticked.
+    const double t0 = FxNowUs();
     if (FAILED(dev->GetRenderTargetData(s_probeSurf, s_probeSys))) return false;
 
     D3DLOCKED_RECT lr{};
     if (FAILED(s_probeSys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) return false;
+    s_costProbeUs += FxNowUs() - t0;
+    ++s_costProbeN;
 
     float lo = 1e9f, hi = -1e9f, centre = 0.f, sum = 0.f;
     int   zeros = 0, ones = 0, n = 0;
@@ -1288,15 +1428,7 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
     if (FxEnsure(dev, desc) && ScreenFx_DepthTexture())   // z swap: nothing until it is live
     {
         s_resolvedFrm = s_frame;
-
-        // z swap: nothing to resolve, the INTZ is the z buffer itself
-        if (s_route != FX_ROUTE_LIVE) {
-            FxSavedState st{};
-            FxSave(dev, st);
-            if (s_route == FX_ROUTE_RESZ) FxResolveResz(dev);
-            else                          FxResolveNvapi(dev, depthSurf);
-            FxRestore(dev, st);
-        }
+        FxResolve(dev, depthSurf);
 
         if (s_probePending) FxProbe(dev, depthSurf, scene, fromPostSlot);
 
@@ -1307,23 +1439,40 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
         if (first && wantPass && rt && FxHealthStep(dev, fromPostSlot))
         {
             if (ScreenFx_View(view)) {
+                // cost marks: a stamp + clock read after each pass, see FxGpuBegin
+                FxGpuFrame* gf = FxGpuBegin(dev);
+                double tc = FxNowUs();
+                const auto mark = [&](int pass) {
+                    if (gf) gf->ts[pass + 1]->Issue(D3DISSUE_END);
+                    const double now = FxNowUs();
+                    s_passCpuUs[pass] += now - tc;
+                    tc = now;
+                };
                 // botox's own DoPostScreenSpaceEffects order: depth view, reflections, ao, dof,
                 // motion blur. Reflections ahead of ao/dof so they never shade a mirror image
                 // that itself still needs occlusion and a focus blur.
                 if (wantDv)   ScreenFxPasses_DepthView(dev, rt, desc, ScreenFx_DepthTexture(), view);
+                mark(k_passDv);
                 if (wantRefl) Reflections_Draw(dev, rt, desc, ScreenFx_DepthTexture(), view);
+                mark(k_passRefl);
                 // OCCLUSION FIRST. It belongs on sharp geometry: the other way round the
                 // blur would be finished before the creases were drawn, and every shadow
                 // would come out pin sharp on top of an out of focus wall.
                 if (wantAo)  Ssao_Draw(dev, rt, desc, ScreenFx_DepthTexture(), view);
+                mark(k_passAo);
                 // Then the lens, the way a camera has them: the lens decides what is sharp.
                 if (wantDof) Dof_Draw(dev, rt, desc, ScreenFx_DepthTexture(), view);
+                mark(k_passDof);
                 // AND THE SHUTTER LAST, which is the order a camera has them in: the lens
                 // decides what is sharp, the shutter decides how far it smeared while open.
                 // The gun is not in this frame yet -- ScreenFx_ViewmodelFrame owns that half.
                 if (wantFb)  FrameBlend_Draw(dev, rt, desc, ScreenFx_DepthTexture(), view, false);
+                mark(k_passFb);
                 // distort last: ao/dof/blur above were computed on the undistorted depth
                 if (wantWarp) ScreenFxPasses_Warp(dev, rt, desc, ScreenFx_DepthTexture(), view);
+                mark(k_passWarp);
+                FxGpuEnd(gf);
+                ++s_passCpuN;
             } else {
                 static bool logged = false;
                 if (!logged) {
@@ -1385,13 +1534,7 @@ void ScreenFx_ViewmodelFrame(IDirect3DDevice9* dev)
         // ALWAYS RESOLVED HERE, and this is the point of the whole pass: the copy the first
         // pass worked off was taken before DrawViewModels, so the gun is not in it. This one
         // is taken after, and it is the only depth that knows where the gun is.
-        if (s_route != FX_ROUTE_LIVE) {
-            FxSavedState st{};
-            FxSave(dev, st);
-            if (s_route == FX_ROUTE_RESZ) FxResolveResz(dev);
-            else                          FxResolveNvapi(dev, depthSurf);
-            FxRestore(dev, st);
-        }
+        FxResolve(dev, depthSurf);
 
         FxViewSetup view{};
         if (ScreenFx_View(view)) {

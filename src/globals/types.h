@@ -10,6 +10,7 @@ static constexpr const char* CONFIG_PATH = "C:\\botox-tf2\\default.cfg";
 enum WatermarkPos : int {
     WM_TOP_LEFT = 0, WM_TOP_CENTER, WM_TOP_RIGHT,
     WM_BOTTOM_LEFT,  WM_BOTTOM_CENTER, WM_BOTTOM_RIGHT,
+    WM_CENTER_LEFT,  WM_CENTER_RIGHT,   // media player only
 };
 
 // -- Entity list stub ------------------------------------------------------------

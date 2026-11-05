@@ -585,7 +585,7 @@ bool Chams_BacktrackActive()
 
 bool Chams_AnyActive()
 {
-	if (g_glowEnable) return true;
+	if (g_espEnable && g_glowEnable) return true;
 	if (g_chamsEnable && (s_visible.Get().used || s_occluded.Get().used || s_backtrack.Get().used || s_sound.Get().used)) return true;
 	if (g_chamsTeam && (s_teamVisible.Get().used || s_teamOccluded.Get().used)) return true;
 	if (g_chamsEnable && (s_uber.Get().used || s_cloak.Get().used)) return true;
@@ -1130,10 +1130,11 @@ void Glow_LevelInit()
 // the 3D scene is done, viewmodel and HUD are not drawn yet.
 void Glow_Render()
 {
-	// botox player_stencil enabled() / inner_enabled(): need the players esp on. Player glow does not.
+	// botox player_stencil enabled() / inner_enabled(): need the players esp on. Player glow too.
+	const bool bGlow = g_espEnable && g_glowEnable;
 	const bool bLive = g_espEnable && !PlayerStencil_Failed();
 	const bool bOutline = bLive && g_esxStencil, bInner = bLive && g_esxInnerGlow;
-	if (!g_glowEnable && !bOutline && !bInner)
+	if (!bGlow && !bOutline && !bInner)
 		return;
 	if (!s_glowReady)
 	{
@@ -1204,7 +1205,7 @@ void Glow_Render()
 	const float flBlur = bOutlineStyle ? 0.f : std::clamp(g_glowSize, 1.f, 10.f) / 3.f;
 
 	const bool bMask = bOutline || bInner;
-	GlowPasses_SEH(rc, w, h, iStencil, flBlur, g_glowEnable, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr);
+	GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr);
 	if (bMask)
 		StencilSubmit(bOutline, bInner);
 

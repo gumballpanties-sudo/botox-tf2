@@ -12,3 +12,4 @@
 #include "vars_game.h"
 #include "vars_btchams.h"
 #include "vars_points.h"
+#include "vars_weaponsel.h"

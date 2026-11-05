@@ -26,6 +26,12 @@ constexpr int         kFontIndDefFlags = 0;
 constexpr const char* kFontEspDefName = "Verdana";
 constexpr int         kFontEspDefSize = 22;
 constexpr int         kFontEspDefFlags = 1 << FF_BOLD;
+// csgo killfeed (aim/killfeed_csgo.cpp): vgui GDI family like esp. Stratum2 Bold is embedded and
+// registered process-private, so it is not in the family list -- reset brings it back.
+// Size = css px at 1080p (CS:GO's 18px), scaled with screen height.
+constexpr const char* kFontKfDefName = "Stratum2 Bold";
+constexpr int         kFontKfDefSize = 18;
+constexpr int         kFontKfDefFlags = 1 << FF_BOLD;
 
 extern char g_fontIndName[64];
 extern int  g_fontIndSize;    // 0 = default face (botox: size 0 falls back to the stock font)
@@ -33,6 +39,9 @@ extern int  g_fontIndFlags;
 extern char g_fontEspName[64];
 extern int  g_fontEspSize;
 extern int  g_fontEspFlags;
+extern char g_fontKfName[64];
+extern int  g_fontKfSize;     // 0 = default size
+extern int  g_fontKfFlags;
 
 const std::vector<std::string>& Fonts_FileNames();   // botox m_font_file_names (file stems)
 const std::vector<std::string>& Fonts_Families();    // GDI families (esp page)
@@ -41,6 +50,8 @@ std::string Fonts_FamilyPath(const char* family);    // esp page: GDI family -> 
 void Fonts_RequestReload();                          // botox "reload fonts" button
 void Fonts_ResetIndicator();
 void Fonts_ResetEsp();
+void Fonts_ResetKillfeed();
+uint32_t Fonts_KfSig();
 uint32_t Fonts_IndSig();     // changes whenever the indicator settings (or a reload) change
 uint32_t Fonts_EspSig();
 bool Fonts_EspDue();         // vgui side: true once when the esp face must be recreated

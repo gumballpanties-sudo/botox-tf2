@@ -99,6 +99,67 @@ namespace wc
         std::stable_sort(out, out + k_yaws, [&](const int a, const int b) { return dev[a] < dev[b]; });
     }
 
+    // ---- steer to seam (botox m_wall_climb_seam_steer + m_wall_climb_steer_scale "delta strafe scale", lab P76) ----
+    // where along the wall the hull comes back onto the face decides which seam catches it, and one air tick of along wish
+    // moves the along speed by up to ~37 (AirAccelerate). Targets are DELTAS on the along speed you fly ("delta strafe
+    // scale"): 11-05 log, 118 jobs, along speed -320..384 -- botox's absolute +-30 targets were a 300 u/s brake or out of
+    // reach. Every reachable one is scored (botox took the first that beat your path)
+    constexpr float k_steer_deltas[]    = { -6.f, 6.f, -12.f, 12.f, -20.f, 20.f, -30.f, 30.f }; /* along wall u/s */
+    constexpr int   k_steer_n           = (int)(sizeof(k_steer_deltas) / sizeof(k_steer_deltas[0]));
+    constexpr float k_air_cap           = 30.f;  /* GetAirSpeedCap: no air wish raises a speed past this along its own dir */
+    constexpr int   k_steer_delay       = 5;     /* job slices (first air tick on), the steer goes out from this tick */
+    constexpr int   k_steer_tick_sims   = 150;   /* job sims per slice, on top of the wall clock */
+    constexpr int   k_steer_max         = 6;     /* steer ticks to reach the target */
+    constexpr int   k_steer_roll_ticks  = 64;    /* 2 x 289 / 800 = 48 ticks back to the jump z, + margin */
+    constexpr float k_steer_fall        = 64.f;  /* a roll this far under the last ground is over */
+    constexpr float k_steer_done        = 0.5f;  /* along speed this close to the target = steered */
+    constexpr float k_steer_wish        = 250.f;
+    /* the same log: 414 of 489 catches came FALLING, most under the +10 botox scored -- every catch on the face counts now */
+    constexpr float k_steer_gain        = 8.f;   /* your path already catches: steer only for one this much higher */
+    constexpr float k_steer_drift       = 1.f;   /* real START at the steer tick vs the job's: further = your keys changed */
+    constexpr int   k_steer_slot        = k_snap_base + k_max_vars;   /* START, +1 = the roll (past the sweep's slots) */
+    constexpr float k_steer_scale_min   = 0.25f, k_steer_scale_max = 2.f;
+
+    // the wish that moves along speed `need` in ONE AirAccelerate tick along sign(need) * t:
+    // accelspeed = accel*w*ipt*fr = |need|, and addspeed = min(w, 30) - sg*cur >= |need| needs w >= sg*target
+    inline float SteerWish(const float need, const float target, const float accel_ipt_fr)
+    {
+        const float sg = need < 0.f ? -1.f : 1.f;
+        const float a  = accel_ipt_fr > 1e-4f ? accel_ipt_fr : 1e-4f;
+        return (std::min)((std::max)(std::fabs(need) / a, sg * target), k_steer_wish);
+    }
+
+    // reachable in the air: a wish along +t can raise the along speed only up to k_air_cap (addspeed = cap - cur), along -t
+    // only down to -k_air_cap; slowing toward / through 0 is always open
+    inline bool SteerReachable(const float cur, const float target)
+    {
+        return target <= (std::max)(cur, k_air_cap) && target >= (std::min)(cur, -k_air_cap);
+    }
+
+    // cur + delta x scale, unreachable ones dropped, smallest change first (k_steer_deltas order). Returns the count
+    inline int SteerOrder(const float cur, float scale, float out[k_steer_n])
+    {
+        scale = (std::min)((std::max)(scale, k_steer_scale_min), k_steer_scale_max);
+        int n = 0;
+        for (const float d : k_steer_deltas)
+            if (SteerReachable(cur, cur + d * scale)) out[n++] = cur + d * scale;
+        return n;
+    }
+
+    // a rolled path's worth: a catch on the face scores by its z off the last ground (higher = more climb), 0 = no catch
+    inline float SteerScore(const bool caught, const float z, const float ground_z)
+    {
+        return caught ? (std::max)(1.f, 1000.f + (z - ground_z)) : 0.f;
+    }
+
+    // your path rolled; it misses and a target catches, or it catches and a target catches k_steer_gain higher. Never
+    // trade a catch you have for one a float higher (11-05 log: 1047 -> 1048 went out)
+    inline bool SteerPick(const float base, const float best)
+    {
+        if (base < 0.f || best <= 0.f) return false;
+        return base == 0.f || best >= base + k_steer_gain;
+    }
+
     enum e_hop { hop_none, hop_release, hop_press };
 
     struct Hop

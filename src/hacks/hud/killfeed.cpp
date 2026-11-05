@@ -78,5 +78,6 @@ bool __fastcall h_FireEvent(void* thisptr, void* pEvent, bool bDontBroadcast)
     Hats_OnGameEvent(pEvent);   // spawn / resupply: the hat changer takes its loadout snapshot
     GameEvents_Dispatch(pEvent);
     Names_OnGameEvent(pEvent);   // custom names: on-kill cycle
+    void KillfeedCsgo_OnEvent(void*); KillfeedCsgo_OnEvent(pEvent);   // csgo killfeed (aim/killfeed_csgo.cpp); after Skins: reskin icon
     return h_FireEvent_impl(thisptr, pEvent, bDontBroadcast);
 }

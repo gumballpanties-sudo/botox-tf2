@@ -18,8 +18,10 @@
 //   prevent slow (g_wcPreventSlow: no win that halves xy > 200)        visualize (WC_GetDrawData -> render.cpp RenderWallClimbOverlay)
 //   TF2 rise threshold 250 (CategorizePosition), not CS:GO's 140      TB's non-catch creep no longer starves wc on a shared key:
 //   the sweep starts from the keys TB was handed (s_wcPreTb*), TB's cmd stays unless wc wins
+//   steer to seam (g_wcSeamSteer, "delta strafe scale" g_wcSteerScale): the csgo steer job, scoring every along target
 // Dropped: parks / holds / exit pin / spot scan / jump fix -- the csgo pin model, TF2 grounds instead. Snapshot slots
-// k_snap_base.. are back, but only inside one call (the lookahead's resume), never across ticks.
+// k_snap_base.. are back inside one call (the lookahead's resume); only the steer job's 3 slots (k_steer_slot..) live
+// across ticks, from the first air tick to the steer tick.
 #include <mutex>
 #include "wallclimb_pure.h"
 
@@ -29,9 +31,23 @@ static float   s_wcScanStart = 0.f;
 static float   s_wcGroundZ   = -1e9f;   /* z of the last ground tick: viz "+h", LandOk's rise */
 /* the committed depth-d win: replayed while the re-search misses, so tick 1 of a plan is never sent alone */
 static struct { Vec3 wish; float fwd = 0.f, yo = 0.f; int buttons = 0; int left = 0; } s_wcPlan;
+static int s_wcGroundCmd = 0;   /* command_number of the last ground START (steer job: first air tick = +1) */
+/* steer to seam job (botox m_steer): START of the first air tick in slot k_steer_slot, every along target rolled over the
+   first k_steer_delay ticks, the best one steered from then on */
+static struct WcSteer {
+    bool  valid = false, done = false, rolling = false, decided = false, steer = false, haveAt = false;
+    int   startCmd = 0, cand = -1, count = 0, tick = 0, left = 0, steerLeft = 0, sims = 0;
+    float order[wc::k_steer_n]{};
+    float base = -1.f, best = -1.f, target = 0.f, cur = 0.f;   /* scores: -1 = not rolled */
+    float accel = 0.f;            /* airaccel * ipt (x the live friction where it is used) */
+    float intoYaw = 0.f, faceZ = 0.f;
+    Vec3  t{}, at{};              /* along-wall unit; base roll's START at tick k_steer_delay */
+    GameTrace_t face{};
+    Vec3  view{}; float fwd = 0.f, side = 0.f; int buttons = 0;   /* your keys at the job's START */
+} s_wcSteer;
 
 /* per-second counters, debug log */
-static int s_wcN[18]{}; /* ticks scan disp near sweep win hop strip wall rej d1 d2 d3 d4 plan zmiss dup cut */
+static int s_wcN[23]{}; /* ticks scan disp near sweep win hop strip wall rej d1 d2 d3 d4 plan zmiss dup cut | steer: job pick tick drift done */
 static int s_wcDep[wc::k_depth]{};   /* wins per depth */
 static Vec3 s_wcBrushN{};  /* last brush face the disp gate skipped (log bn=) */
 static int s_wcSims = 0; static long long s_wcUs = 0ll, s_wcUsWorst = 0ll;
@@ -57,9 +73,10 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     if (const unsigned long long now = GetTickCount64(); g_debugLogEnable && now >= s_wcLogNext) {
         s_wcLogNext = now + 1000ull;
         if (s_wcN[0])
-            DebugLog("WC: ticks=%d scan=%d wall=%d disp=%d near=%d sweep=%d win=%d hop=%d strip=%d rej=%d dep=%d/%d/%d/%d/%d/%d plan=%d zmiss=%d dup=%d cut=%d sims=%d us=%lld worst=%lld bn=%.2f,%.2f,%.2f",
+            DebugLog("WC: ticks=%d scan=%d wall=%d disp=%d near=%d sweep=%d win=%d hop=%d strip=%d rej=%d dep=%d/%d/%d/%d/%d/%d plan=%d zmiss=%d dup=%d cut=%d steer=%d/%d/%d/%d/%d sims=%d us=%lld worst=%lld bn=%.2f,%.2f,%.2f",
                      s_wcN[0], s_wcN[1], s_wcN[8], s_wcN[2], s_wcN[3], s_wcN[4], s_wcN[5], s_wcN[6], s_wcN[7], s_wcN[9],
-                     s_wcDep[0], s_wcDep[1], s_wcDep[2], s_wcDep[3], s_wcDep[4], s_wcDep[5], s_wcN[14], s_wcN[15], s_wcN[16], s_wcN[17], s_wcSims, s_wcUs, s_wcUsWorst,
+                     s_wcDep[0], s_wcDep[1], s_wcDep[2], s_wcDep[3], s_wcDep[4], s_wcDep[5], s_wcN[14], s_wcN[15], s_wcN[16], s_wcN[17],
+                     s_wcN[18], s_wcN[22], s_wcN[19], s_wcN[20], s_wcN[21], s_wcSims, s_wcUs, s_wcUsWorst,
                      s_wcBrushN.x, s_wcBrushN.y, s_wcBrushN.z);
         for (int& c : s_wcN) c = 0;
         for (int& c : s_wcDep) c = 0;
@@ -77,13 +94,18 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
         s_wcHop.Reset();
         s_wcPlan.left = 0;
         s_wcScanStart = 0.f;
+        s_wcSteer.valid = false;
         return;
     }
 
     const int iTickNow = g_globalVars->tickcount;
     if (s_wcWallTick > iTickNow) s_wcWallTick = -100000;   // map change rewound the clock
     const bool bGroundPost = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
-    if (bGroundPre) s_wcPlan.left = 0;
+    if (bGroundPre) {
+        s_wcPlan.left   = 0;
+        s_wcSteer.valid = false;
+        s_wcGroundCmd   = pCmd->command_number;
+    }
 
     // armed-hop clock, before every yield: a hop armed in the air must survive the ticks TB/AS own. Fires only on the
     // ground the win simulated (a lost plan lands on the floor)
@@ -126,9 +148,15 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     // airborne at the cmd's start, grounded at its end = the player's own move already lands them
     if (bGroundPost) return;
 
-    // provable skip: CategorizePosition nulls the ground entity when vz > 250 at the check (half a gravity tick in)
+    // provable skip: CategorizePosition nulls the ground entity when vz > 250 at the check (half a gravity tick in). Rising
+    // ticks still run the steer job: it plans the whole jump from the first one
     const Vec3 velocity = EntV3(pLocal, g_offVelocity);
-    if (velocity.z + TargetPredictZVel() > k_rise_vz) return;
+    const bool rising   = velocity.z + TargetPredictZVel() > k_rise_vz;
+    const int  cmdNum   = pCmd->command_number;
+    if (!g_wcSeamSteer) s_wcSteer.valid = false;
+    const bool steer_first = g_wcSeamSteer && rising && cmdNum - s_wcGroundCmd == 1;
+    const bool steer_slice = s_wcSteer.valid && !s_wcSteer.done && cmdNum < s_wcSteer.startCmd + k_steer_delay;
+    if (rising && !steer_first && !steer_slice) return;
 
     // the keys the sweep starts from: TB's creep / probe (no catch) is a band setup on a shared key -- it fired every air wall
     // tick and wc never got the cmd. Sweep from what TB was handed; TB's cmd goes out unless a variant wins
@@ -147,26 +175,197 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
 
     GameTrace_t primary{};
     float found_angle = 0.f;
-    ++s_wcN[1];
     // GATE 1: displacement or nothing. The scan hands back the FIRST face in angle order, so a brush face there (the
     // trim under a disp cliff, the far side of a corner) used to end the tick with a disp face sitting in the next
     // direction: 11-04 log read disp=0 on every second. Step past brush faces, one full turn at most
     // (wallclimb_pure.h NextScan). s_wcWallTick is not stamped on a brush, so the unlatch stays out of it too
-    bool any_wall = false, have_disp = false;
-    for (float a = s_wcScanStart; ScanLeft(s_wcScanStart, a); a = NextScan(found_angle)) {
-        if (!MV_DetectWallLines(pLocal, start_pos, mins, maxs, a, primary, found_angle, k_scan_nz, k_scan_reach))
-            break;
-        any_wall = true;
-        if (primary.dispFlags & DISPSURF_SURFACE) { have_disp = true; break; }
-        s_wcBrushN = primary.plane.normal;
+    const auto scan_disp = [&]() {
+        ++s_wcN[1];
+        bool any_wall = false, have_disp = false;
+        for (float a = s_wcScanStart; ScanLeft(s_wcScanStart, a); a = NextScan(found_angle)) {
+            if (!MV_DetectWallLines(pLocal, start_pos, mins, maxs, a, primary, found_angle, k_scan_nz, k_scan_reach))
+                break;
+            any_wall = true;
+            if (primary.dispFlags & DISPSURF_SURFACE) { have_disp = true; break; }
+            s_wcBrushN = primary.plane.normal;
+        }
+        if (any_wall) ++s_wcN[8];
+        if (!have_disp) {
+            s_wcScanStart = 0.f;   // next scan fresh, do not pin on a brush
+            return false;
+        }
+        ++s_wcN[2];
+        s_wcScanStart = WrapScan(found_angle);
+        return true;
+    };
+
+    AsClock budget;
+    bool clocked = false;   /* started on the first sim ask: the scan stays off the sweep's clock, as it always was */
+    int sims = 0;
+    bool cut = false;
+    const int  nBase   = PredCommandsPredicted();
+    const auto restore = [&]() { RestoreToFrame(nBase - 1); };
+    const auto can_sim = [&]() {
+        if (!clocked) { budget.Start(k_time_share, TickInterval()); clocked = true; }
+        if (SimsLeft() > 0 && !(sims > 0 && budget.Expired())) return true;
+        cut = true;
+        return false;
+    };
+    const auto sim     = [&](UserCmd_t c) { restore(); Pred_Simulate(pLocal, &c); ++sims; };
+    const auto grounded = [&]() { return (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0; };
+    struct Done { const decltype(restore)& r; ~Done() { r(); } } done_restore{ restore };
+    // per-second stats on every way out (the sweep's early returns used to skip them)
+    const auto account = [&]() {
+        if (cut) ++s_wcN[17];
+        s_wcSims += sims;
+        if (!clocked) return;
+        const long long us = budget.UsedUs();
+        s_wcUs += us;
+        s_wcUsWorst = (std::max)(s_wcUsWorst, us);
+    };
+    struct Account { const decltype(account)& a; ~Account() { a(); } } account_stats{ account };
+
+    // ---- STEER TO SEAM (botox m_wall_climb_seam_steer, lab P76) ----
+    // which seam the hull comes back down on is set early in the jump: one air tick of along wish moves the along speed
+    // anywhere in +-30, k_steer_delay ticks of it ~15u along the wall by the fall. The job replays the jump from the first
+    // air START with your keys, from tick k_steer_delay a steer onto each along target, and on every falling tick beside
+    // the face the sweep's straight-in catches (k_forward). EVERY target is scored, highest catch wins (botox stopped at
+    // the first that beat your path); the steer goes out only for a strictly higher catch than your own path's.
+    // ponytail: the roll probes 2 of the sweep's 33 variants and LandOk's z test only, a catch the full sweep would find
+    // elsewhere is scored 0; widen the probe set if the log shows steer picks that never land
+    WcSteer& J = s_wcSteer;
+    const auto along     = [&](const Vec3& v) { return v.x * J.t.x + v.y * J.t.y; };
+    const auto job_keys  = [&]() {
+        UserCmd_t c   = *pCmd;   // this cmd's number / tick; the keys are the job START's
+        c.viewangles  = J.view;
+        c.forwardmove = J.fwd;
+        c.sidemove    = J.side;
+        c.buttons     = J.buttons;
+        return c;
+    };
+    const auto aim_wish = [&](UserCmd_t c, const float yaw, const float fwd) {
+        c.forwardmove = fwd;
+        c.sidemove    = 0.f;
+        Vec3 wish     = c.viewangles;
+        wish.y        = yaw;
+        CorrectMovement(&c, wish, c.viewangles);   // silent: the view is not touched
+        return c;
+    };
+    // friction off the state the entity holds (the roll's, or this cmd's): CategorizePosition sets 0.25 rising beside a
+    // steep face, 1 otherwise, and AirAccelerate scales by it
+    const auto steer_wish = [&](const UserCmd_t& c, const Vec3& v, const float target) {
+        const float need = target - along(v), sg = need < 0.f ? -1.f : 1.f;
+        return aim_wish(c, RAD2DEGF(atan2f(J.t.y * sg, J.t.x * sg)), SteerWish(need, target, J.accel * AsSurfaceFriction(pLocal)));
+    };
+    const auto face_support = [&](const Vec3& o) {
+        GameTrace_t f = J.face;
+        f.endpos.z += o.z - J.faceZ;
+        return MV_SupportDistance(pLocal, f, &o);
+    };
+    // the entity just grounded: a catch = on THAT face (gate 3 without the disp traces: flush, or a crest above the last ground)
+    const auto roll_caught = [&](const Vec3& o) { return LandOk(face_support(o), true, o.z, s_wcGroundZ, false); };
+    const auto steer_job = [&]() {
+        const auto finish = [&](const float score) {
+            J.rolling = false;
+            if (J.cand < 0) J.base = score;
+            else if (score > J.best) { J.best = score; J.target = J.order[J.cand]; }   // ties keep the nearer target
+            if (++J.cand >= J.count) J.done = true;
+        };
+        int used = 0;
+        bool fresh = false;   /* first step of a roll: START (your path) or the fork (a target) */
+        while (!J.done && used < k_steer_tick_sims && can_sim()) {
+            if (!J.rolling) {
+                // every target flies your keys up to tick k_steer_delay: it starts from your path's state there (the fork)
+                if (J.cand >= 0 && !J.haveAt) { J.done = true; break; }   // your path ended first: nothing to steer
+                J.rolling = fresh = true;
+                J.tick    = J.cand >= 0 ? k_steer_delay : 0;
+                J.left    = J.cand >= 0 ? k_steer_max : 0;
+            }
+            const int slot = fresh ? (J.cand >= 0 ? k_steer_slot + 2 : k_steer_slot) : k_steer_slot + 1;
+            fresh = false;
+            if (!Pred_SnapLoad(pLocal, slot)) { J.done = true; break; }   // edge skip's Pred_SnapReset dropped the pool
+            const Vec3 o0 = EntV3(pLocal, g_offOrigin), v0 = EntV3(pLocal, g_offVelocity);
+            if (J.cand < 0 && J.tick == k_steer_delay) {
+                // the fork: the targets are deltas on the along speed you fly HERE (your strafe changed it since tick 0)
+                J.at     = o0;
+                J.haveAt = Pred_SnapSave(pLocal, k_steer_slot + 2);
+                J.cur    = along(v0);
+                J.count  = J.haveAt ? SteerOrder(J.cur, g_wcSteerScale, J.order) : 0;
+            }
+            const float target = J.cand >= 0 ? J.order[J.cand] : 0.f;
+            UserCmd_t c = job_keys();
+            if (J.left > 0 && J.tick >= k_steer_delay && fabsf(along(v0) - target) > k_steer_done) {
+                --J.left;
+                c = steer_wish(c, v0, target);
+            } else {
+                if (J.tick >= k_steer_delay) J.left = 0;
+                if (v0.z <= k_rise_vz && face_support(o0) <= k_engage_support) {
+                    bool caught = false;
+                    for (const float f : k_forward) {
+                        UserCmd_t p = aim_wish(job_keys(), J.intoYaw, f);
+                        Pred_Simulate(pLocal, &p); ++sims; ++used;
+                        const Vec3 po = EntV3(pLocal, g_offOrigin);
+                        const bool hit = grounded() && roll_caught(po);
+                        if (!Pred_SnapLoad(pLocal, slot)) { J.done = true; break; }
+                        if (hit) { finish(SteerScore(true, po.z, s_wcGroundZ)); caught = true; break; }
+                    }
+                    if (caught || J.done) continue;
+                }
+            }
+            Pred_Simulate(pLocal, &c); ++sims; ++used;
+            const Vec3 o = EntV3(pLocal, g_offOrigin);
+            // over: grounded (a catch, or a landing anywhere else = 0), off the face (the sweep's judge calls it dead
+            // too, and it stops a roll flying 60 ticks of probes for nothing), under the last ground, out of ticks
+            if (grounded()) finish(SteerScore(roll_caught(o), o.z, s_wcGroundZ));
+            else if (face_support(o) > k_keep_support || o.z < s_wcGroundZ - k_steer_fall
+                     || ++J.tick >= k_steer_roll_ticks || !Pred_SnapSave(pLocal, k_steer_slot + 1))
+                finish(0.f);
+        }
+        J.sims += used;
+    };
+
+    // the job starts on the first air tick, by a disp face, START saved (botox steer_init)
+    if (steer_first && !tb_creep && scan_disp() && MV_SupportDistance(pLocal, primary, &start_pos) <= k_engage_support
+        && !TB_SteeringAwayFromWall(&base, primary.plane.normal, base.forwardmove, base.sidemove)) {
+        Pred_SnapReserve(k_steer_slot + 3);   // START, roll, fork
+        restore();
+        if (Pred_SnapSave(pLocal, k_steer_slot)) {
+            J          = {};
+            J.valid    = true;
+            J.startCmd = cmdNum;
+            J.face     = primary;
+            J.faceZ    = start_pos.z;
+            J.t        = Vec3(primary.plane.normal.y, -primary.plane.normal.x, 0.f);
+            const float tl = J.t.Length2D();
+            J.t        = tl > 1e-4f ? J.t * (1.f / tl) : Vec3(1.f, 0.f, 0.f);
+            J.intoYaw  = RAD2DEGF(atan2f(-primary.plane.normal.y, -primary.plane.normal.x));
+            J.view     = base.viewangles;
+            J.fwd      = base.forwardmove;
+            J.side     = base.sidemove;
+            J.buttons  = base.buttons & ~IN_JUMP;   // the unlatch strips a held jump beside the face: no air press in the roll
+            J.accel    = CvarFloat("sv_airaccelerate", 10.f) * TickInterval();   // x the friction of the state steered
+            ++s_wcN[18];
+        }
     }
-    if (any_wall) ++s_wcN[8];
-    if (!have_disp) {
-        s_wcScanStart = 0.f;   // next scan fresh, do not pin on a brush
-        return;
+    if (J.valid && !J.done && cmdNum < J.startCmd + k_steer_delay) steer_job();
+
+    // decide once, on the steer tick: only if the real START is where the job's own path put it (your keys held)
+    if (J.valid && !J.decided && cmdNum >= J.startCmd + k_steer_delay) {
+        J.decided = true;
+        const float drift = J.haveAt ? (s_prePredOrigin - J.at).Length() : 1e9f;
+        J.steer     = SteerPick(J.base, J.best) && cmdNum == J.startCmd + k_steer_delay && drift <= k_steer_drift;
+        J.steerLeft = k_steer_max;
+        s_wcN[19] += J.steer;
+        s_wcN[21] += SteerPick(J.base, J.best) && !J.steer;
+        s_wcN[22] += J.done;
+        DebugLog("WC STEER: pick=%d base=%.0f best=%.0f delta=%+.1f along=%.2f cand=%d/%d done=%d sims=%d drift=%.3f",
+                 J.steer, J.base, J.best, J.best > 0.f ? J.target - J.cur : 0.f, J.cur, J.cand, J.count, J.done, J.sims,
+                 J.haveAt ? drift : -1.f);
     }
-    ++s_wcN[2];
-    s_wcScanStart = WrapScan(found_angle);
+
+    if (rising) return;
+
+    if (!scan_disp()) return;
     // GATE 2: near it, live, before any sim
     const float live_support = MV_SupportDistance(pLocal, primary, &start_pos);
     if (live_support > k_engage_support) return;
@@ -174,8 +373,26 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     s_wcWallTick      = iTickNow;
     s_wallClimbActive = true;   // an air wall tick: pixel surf yields
 
-    // seamless leave: steering off the wall = the player keeps the cmd
-    if (TB_SteeringAwayFromWall(&base, primary.plane.normal, base.forwardmove, base.sidemove)) { s_wcPlan.left = 0; return; }
+    // seamless leave: steering off the wall = the player keeps the cmd (and drops the steer, botox you_leave)
+    if (TB_SteeringAwayFromWall(&base, primary.plane.normal, base.forwardmove, base.sidemove)) {
+        s_wcPlan.left = 0;
+        J.valid = false;
+        return;
+    }
+
+    // the steer goes out (botox steer_air): wc's write, the sweep below still overrides it with a catch. Never over TB's creep
+    bool steered = false;
+    if (J.valid && J.steer && J.steerLeft > 0 && !tb_creep) {
+        if (fabsf(along(s_prePredVel) - J.target) <= k_steer_done) J.steer = false;
+        else {
+            --J.steerLeft;
+            const UserCmd_t sc = steer_wish(*pCmd, s_prePredVel, J.target);
+            pCmd->forwardmove = sc.forwardmove;
+            pCmd->sidemove    = sc.sidemove;
+            s_wallClimbHit    = steered = true;
+            ++s_wcN[20];
+        }
+    }
 
     const Vec3 approach_normal = primary.plane.normal * -1.f;
     Vec3 angle_wall = VectorAngles(approach_normal);
@@ -189,21 +406,6 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     const bool  plan_live = s_wcPlan.left > 0;
     int yaw_order[k_yaws];
     OrderYaws(angle_wall.y, plan_live ? s_wcPlan.wish.y : own_yaw, sign, yaw_order);
-
-    AsClock budget;
-    budget.Start(k_time_share, TickInterval());
-    int sims = 0;
-    bool cut = false;
-    const int  nBase   = PredCommandsPredicted();
-    const auto restore = [&]() { RestoreToFrame(nBase - 1); };
-    const auto can_sim = [&]() {
-        if (SimsLeft() > 0 && !(sims > 0 && budget.Expired())) return true;
-        cut = true;
-        return false;
-    };
-    const auto sim     = [&](UserCmd_t c) { restore(); Pred_Simulate(pLocal, &c); ++sims; };
-    const auto grounded = [&]() { return (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0; };
-    struct Done { const decltype(restore)& r; ~Done() { r(); } } done_restore{ restore };
 
     const float start_xy = velocity.Length2D();
     UserCmd_t best{};
@@ -379,7 +581,7 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
         v.valid   = true;
         v.ms      = GetTickCount64();
         v.ground  = false;
-        v.branch  = found ? "land" : "scan";
+        v.branch  = found ? "land" : steered ? "steer" : "scan";
         v.n       = primary.plane.normal;
         v.sims    = sims;
         v.half    = maxs.x;
@@ -402,10 +604,4 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
             }
         }
     }
-
-    const long long us = budget.UsedUs();
-    if (cut) ++s_wcN[17];
-    s_wcSims += sims;
-    s_wcUs += us;
-    s_wcUsWorst = (std::max)(s_wcUsWorst, us);
 }

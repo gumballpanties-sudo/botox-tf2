@@ -2659,6 +2659,8 @@ void Movement_RunGuarded(UserCmd_t* pCmd)
     // BEFORE Movement_Install runs (it has to be -- it claims the slot dih would otherwise take),
     // so for the first few commands the movement port's interfaces/sigs are not resolved yet.
     if (g_eject || !pCmd || !g_predReady) return;
+    // aim owns CreateMove -> h_CreateMove never installed, its Avatar_Pump dead. Pump here instead.
+    Avatar_Pump();
     Movement_Run(pCmd);
 }
 

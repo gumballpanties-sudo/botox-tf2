@@ -131,6 +131,10 @@ static double     s_scCsClock = 0.0;
 static double     s_scCsLast  = -1.0;          // clock of the last frame step
 static std::atomic<long long> s_scCsDrewQpc{ 0 };
 static std::atomic<bool>      s_scCsDrawing{ false };   // drew on the last HUD pass
+// Ours is in charge this HUD pass (alive, in game, art loaded) whether zoomed or not. HudScope's
+// visibility comes from CHud::Think earlier in the frame, our draw reads the cond at paint time:
+// on the unzoom frame they disagree and TF's scope flashed. Same vgui thread as h_ScCsPaint.
+static bool                   s_scCsOwn = false;
 
 static double ScCs_Now()
 {
@@ -212,6 +216,7 @@ static void ScCs_Draw(const ScCsFrame& f, int W, int H)
 // csgo's weapon does) and draws when zoomed. true = drawn.
 static bool ScCs_FrameSafe(uintptr_t vpanel)
 {
+    s_scCsOwn = false;
     if (!g_scCsgo || g_eject || !s_scCsSurface || !g_imguiInit) return false;   // DisplaySize needs imgui
     ScCsInput in;
     if (!IsInGame() || !IsLocalPlayerAlive() || !ScCs_ReadLocal(in))           // dead / spectating -> TF's
@@ -220,6 +225,7 @@ static bool ScCs_FrameSafe(uintptr_t vpanel)
         s_scCsLast = -1.0;
         return false;
     }
+    s_scCsOwn = !s_scCsTexTried || s_scCsTex[0] > 0;   // art failed -> TF's stays as fallback
 
     const double now = ScCs_Now();
     float dt = s_scCsLast < 0.0 ? 0.f : (float)(now - s_scCsLast);
@@ -295,7 +301,7 @@ static void ScCs_FrameGuarded(uintptr_t vpanel)
     __try {
         if (!ScCs_FrameSafe(vpanel)) s_scCsDrawing.store(false, std::memory_order_relaxed);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) { s_scCsDrawing.store(false, std::memory_order_relaxed); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { s_scCsOwn = false; s_scCsDrawing.store(false, std::memory_order_relaxed); }
 }
 
 // eject drains g_miscHookDepth before freeing trampolines -- count every detour
@@ -367,12 +373,12 @@ static void __fastcall h_ScCsPaintTraverse(void* panels, uintptr_t vpanel, bool 
 #endif
 
 // ---- TF's own scope + charge meter ------------------------------------------------------------
-// CHudScope::Paint: skipped while ours draws (a HUD that keeps HudScope visible would put TF's
-// scope ON TOP of ours -- it is a HUD child). CHudScopeCharge::Paint: skipped when asked.
+// CHudScope::Paint: skipped while ours owns the scope (a HUD that keeps HudScope visible would put
+// TF's scope ON TOP of ours -- it is a HUD child), zoomed or not, see s_scCsOwn. CHudScopeCharge::Paint: skipped when asked.
 static void __fastcall h_ScCsPaint(void* panel)
 {
     ScCsDepth _d;
-    if (ScopeCsgo_Active()) return;
+    if ((g_scCsgo && !g_eject && s_scCsOwn) || ScopeCsgo_Active()) return;
     o_ScCsPaint(panel);
 }
 

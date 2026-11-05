@@ -71,6 +71,7 @@ static const CfgEntry kEntries[] = {
     { "mpSimple",         CfgEntry::BOOL,   &g_mpSimple, 0 },
     { "mpTime",           CfgEntry::BOOL,   &g_mpTime, 0 },
     { "mpPos",            CfgEntry::INT,    &g_mpPos, 0 },
+    { "mpLayout",         CfgEntry::INT,    &g_mpLayout, 0 },
 
     { "hmEnable",         CfgEntry::BOOL,   &g_hmEnable, 0 },
     { "hmColor",          CfgEntry::FLOAT4, g_hmColor, 0 },
@@ -371,6 +372,7 @@ static const CfgEntry kEntries[] = {
     { "sheenNormalAlpha", CfgEntry::FLOAT,  &g_sheenNormalAlpha, 0 },
     { "sheenNormalEnv",   CfgEntry::FLOAT,  &g_sheenNormalEnv, 0 },
     { "selfKillfeedOnly", CfgEntry::BOOL,   &g_selfKillfeedOnly, 0 },
+    { "killfeedCsgo",     CfgEntry::BOOL,   &g_killfeedCsgo, 0 },
     { "revealScoreboard", CfgEntry::BOOL,   &g_revealScoreboard, 0 },
     { "steamHistory",     CfgEntry::BOOL,   &g_steamHistory, 0 },
     { "removeRagdolls",   CfgEntry::BOOL,   &g_removeRagdolls, 0 },
@@ -406,6 +408,9 @@ static const CfgEntry kEntries[] = {
     { "fontEspName",      CfgEntry::STR,    g_fontEspName, sizeof(g_fontEspName) },
     { "fontEspSize",      CfgEntry::INT,    &g_fontEspSize, 0 },
     { "fontEspFlags",     CfgEntry::INT,    &g_fontEspFlags, 0 },
+    { "fontKfName",       CfgEntry::STR,    g_fontKfName, sizeof(g_fontKfName) },
+    { "fontKfSize",       CfgEntry::INT,    &g_fontKfSize, 0 },
+    { "fontKfFlags",      CfgEntry::INT,    &g_fontKfFlags, 0 },
 
 
     { "bhop",             CfgEntry::BOOL,   &g_bhop, 0 },
@@ -506,6 +511,8 @@ static const CfgEntry kEntries[] = {
     { "wallClimbMode",    CfgEntry::INT,    &g_wallClimbMode, 0 },
     { "wallClimbPreventSlow", CfgEntry::BOOL, &g_wcPreventSlow, 0 },
     { "wallClimbDuck",    CfgEntry::BOOL,   &g_wcDuck, 0 },
+    { "wallClimbSeamSteer", CfgEntry::BOOL, &g_wcSeamSteer, 0 },
+    { "wallClimbSteerScale", CfgEntry::FLOAT, &g_wcSteerScale, 0 },
     { "wallClimbViz",     CfgEntry::BOOL,   &g_wcViz, 0 },
     { "wallClimbVizColor", CfgEntry::FLOAT4, g_wcVizColor, 0 },
     { "airStuck",         CfgEntry::BOOL,   &g_airStuck, 0 },
@@ -997,6 +1004,7 @@ static const CfgEntry kEntries[] = {
 #include "cfg/vars_game.inc"
 #include "cfg/vars_btchams.inc"
 #include "cfg/vars_points.inc"
+#include "cfg/vars_weaponsel.inc"
 };
 
 // botox g_config.folder(visuals): visuals files live one folder down

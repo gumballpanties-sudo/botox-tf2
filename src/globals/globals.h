@@ -125,7 +125,8 @@ extern bool g_mpBackground;    // m_media_player_background
 extern bool g_mpProgressBar;   // m_media_player_progress_bar
 extern bool g_mpSimple;        // m_media_player_simple -- one line "title - artist"
 extern bool g_mpTime;          // m_media_player_time -- "precise time" 1:23 / 4:56 row
-extern int  g_mpPos;           // WatermarkPos; under the watermark box when it shares the column
+extern int  g_mpPos;           // WatermarkPos (+ center left / right); under the watermark box when it shares the column
+extern int  g_mpLayout;        // 0 default, 1 lumi (spectator list lumi new spacing, wm style theme)
 
 // -- misc HUD (hit marker/sound, death particles, points, spectator list,
 //    watermark style skins, discord rpc, debug menu, console color) -----------------
@@ -478,6 +479,7 @@ extern float g_sheenNormalEnv;
 
 // -- Killfeed --------------------------------------------------------------------------------
 extern bool g_selfKillfeedOnly;
+extern bool g_killfeedCsgo;
 
 // -- Scoreboard ------------------------------------------------------------------------------
 extern bool g_revealScoreboard;   // enemy class icons + enemy health in the match hud panels
@@ -689,6 +691,8 @@ extern float g_tbPredictReach;     // sideways reach of the predicted-path scan 
 extern bool g_wallClimb;   extern int g_wallClimbKey;   extern int g_wallClimbMode;
 extern bool g_wcPreventSlow;   // botox m_wall_climb_prevent_slow: no catch that halves xy > 200
 extern bool g_wcDuck;          // botox m_wall_climb_duck: crouch catches (other stance tried)
+extern bool g_wcSeamSteer;     // botox m_wall_climb_seam_steer: steer the jump's along speed onto the seam that catches highest
+extern float g_wcSteerScale;   // botox m_wall_climb_steer_scale ("delta strafe scale"): along targets x this, 0.25..2
 extern bool g_wcViz;           // botox m_wall_climb_visualize
 extern float g_wcVizColor[4];
 extern bool g_airStuck;    extern int g_airStuckKey;    extern int g_airStuckMode;

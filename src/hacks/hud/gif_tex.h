@@ -29,6 +29,10 @@ bool GifTex_Size(GifTex* gif, float& w, float& h);
 // thread to C:\botox-tf2\images\<fnv1a>. nullptr until the file exists and decodes.
 GifTex* GifTex_GetFile(const char* setting);
 
+// the same download, any file type: true + its local path once it is on disk (http(s) url) or
+// straight away (a local path). Primitive signature: aim TUs declare it themselves (weaponsel.cpp)
+bool GifTex_LocalFile(const char* url, char* out, size_t outSize);
+
 // botox menu_tab_settings.cpp image_path_input( ..., upload = false ): text box + "browse"
 // button (file dialog on its own thread, result lands in buf a frame later).
 void GifTex_PathInput(const char* label, const char* hint, char* buf, size_t bufSize);

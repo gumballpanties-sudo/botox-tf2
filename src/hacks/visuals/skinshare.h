@@ -21,6 +21,7 @@ struct SharePeer {
     bool        ready     = false;   // echoed our nonce
     bool        remoteShare = false, remoteRecv = false;
     bool        hasLoadout = false;
+    uint32_t    loHash    = 0;       // FNV of the loadout bytes: skins.cpp rebuilds this peer's weapons when it moves
     PeerLoadout lo;
 };
 
@@ -28,7 +29,6 @@ void SkinShare_Tick();                       // game thread, in-game or not
 void SkinShare_Shutdown();                   // eject (thread.cpp): stops + joins the worker
 const SharePeer* SkinShare_Peer(int i);      // i < kShareMaxPeers; null = empty slot. Fixed slots: a
                                              // peer keeps its index while it lives (hats.cpp keys on it)
-uint32_t SkinShare_LoadoutGen();             // bumps when any peer loadout appears / changes / leaves
 const char* SkinShare_Status();              // menu line(s)
 
 void SkinShare_SaveCfg(FILE* f);

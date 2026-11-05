@@ -1419,18 +1419,21 @@ void RenderMediaPlayer()
     const float artistPx = sizeOverride > 0.f ? sizeOverride : artistFont->FontSize;
 
     // botox position 0..5 = tr/tl/tc/bc/bl/br -> align (0 left, 1 centre, 2 right) + from_bottom.
-    // Ours is the WatermarkPos enum, same six corners.
-    const bool fromBottom = g_mpPos >= WM_BOTTOM_LEFT;
-    const int align = (g_mpPos == WM_TOP_LEFT || g_mpPos == WM_BOTTOM_LEFT) ? 0
+    // Ours is the WatermarkPos enum, same six corners, plus center left / right (vertical middle,
+    // lyrics below)
+    const bool vCenter = g_mpPos == WM_CENTER_LEFT || g_mpPos == WM_CENTER_RIGHT;
+    const bool fromBottom = !vCenter && g_mpPos >= WM_BOTTOM_LEFT;
+    const int align = (g_mpPos == WM_TOP_LEFT || g_mpPos == WM_BOTTOM_LEFT || g_mpPos == WM_CENTER_LEFT) ? 0
                     : (g_mpPos == WM_TOP_CENTER || g_mpPos == WM_BOTTOM_CENTER) ? 1 : 2;
     const float screenW = io.DisplaySize.x, screenH = io.DisplaySize.y, midX = screenW * 0.5f;
     const ImVec4 wm = g_wmBox;
     const bool wmColumn = wm.z > wm.x && wm.y < screenH * 0.5f &&
                           (align == 2 ? wm.z > midX : align == 0 ? wm.x < midX : wm.x < midX && wm.z > midX);
-    const bool underWm = !fromBottom && wmColumn;
+    const bool underWm = !fromBottom && !vCenter && wmColumn;
     const float anchorX = align == 1 ? midX : align == 2 ? (underWm ? wm.z : screenW - 8.f) : (underWm ? wm.x : 8.f);
-    const float anchorY = fromBottom ? screenH - 8.f : underWm ? wm.w + 4.f : 8.f;
+    const float anchorY = fromBottom ? screenH - 8.f : vCenter ? screenH * 0.5f : underWm ? wm.w + 4.f : 8.f;
     const auto leftOf = [&](float w) { return align == 0 ? anchorX : align == 1 ? anchorX - w * 0.5f : anchorX - w; };
+    const auto topOf  = [&](float h) { return fromBottom ? anchorY - h : vCenter ? floorf(anchorY - h * 0.5f) : anchorY; };
 
     const MediaLook look  = Watermark_MediaLook(style);
     const bool background = g_mpBackground;
@@ -1555,13 +1558,71 @@ void RenderMediaPlayer()
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     DpiPanelScope block(dl);   // botox begin_stretch_block: the player is one hud panel
 
+    // botox waveform: 64 bands as bars (bar width + 1 px gap) or a catmull-rom curve ("smooth"),
+    // standing on the progress bar line, behind the art + text; accent (or custom) at alpha 185
+    const auto drawVisualizer = [&](float left, float right, float floorY, bool onBar) {
+        float bands[n_audio_bands::k_bands]{};
+        {
+            std::lock_guard<std::mutex> lock(s_bandsMtx);
+            std::copy(std::begin(s_bands), std::end(s_bands), bands);
+        }
+        const ImU32 rgb   = g_mpVisCustomColor ? (ImU32)ImColor(g_mpVisColor[0], g_mpVisColor[1], g_mpVisColor[2], g_mpVisColor[3]) : accent;
+        const ImU32 color = (rgb & ~IM_COL32_A_MASK) | (185u << IM_COL32_A_SHIFT);
+
+        const float visualH = std::clamp(g_mpVisHeight, 4.f, 64.f);
+        const bool smooth   = g_mpVisSmooth;
+        const float gap     = 1.f;
+        const float barW    = (float)std::clamp(g_mpVisBarWidth, 1, 12);
+        const int bars      = smooth ? (int)n_audio_bands::k_bands : (std::max)(1, (int)((right - left + gap) / (barW + gap)));
+        const float slot    = (right - left) / (float)bars;
+
+        if (smooth) {
+            const auto curveTop = [&](float x) {
+                const float u = (x - left) / slot - 0.5f;
+                const int i   = (int)floorf(u);
+                const float t = u - (float)i;
+                const auto at = [&](int k) { return bands[std::clamp(k, 0, bars - 1)]; };
+                const float p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
+                const float level = 0.5f * (2.f * p1 + (p2 - p0) * t + (2.f * p0 - 5.f * p1 + 4.f * p2 - p3) * t * t + (3.f * (p1 - p2) + p3 - p0) * t * t * t);
+                const float h = std::clamp(level, 0.f, 1.f) * visualH;
+                return floorY - (onBar ? h : (std::max)(1.f, h));
+            };
+            const auto oldFlags = dl->Flags;
+            dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+            for (float x = left; x < right; x += 1.f) {
+                const float x2 = (std::min)(x + 1.f, right);
+                dl->AddQuadFilled(ImVec2(x, curveTop(x)), ImVec2(x2, curveTop(x2)), ImVec2(x2, floorY), ImVec2(x, floorY), color);
+            }
+            dl->Flags = oldFlags;
+            for (float x = left; x < right; x += 1.f) dl->PathLineTo(ImVec2(x, curveTop(x)));
+            dl->PathLineTo(ImVec2(right, curveTop(right)));
+            dl->PathStroke(color, ImDrawFlags_None, 1.f);
+            return;
+        }
+
+        for (int bar = 0; bar < bars; bar++) {
+            const float level = n_audio_bands::bar_level(bands, (std::size_t)bar, (std::size_t)bars);
+            const float barH  = level * visualH;
+            if (onBar && barH < 1.f) continue;
+            const float top = floorY - (std::max)(1.f, barH);
+            const float x   = floorf(left + slot * (float)bar);
+            const float x2  = bar == bars - 1 ? right : floorf(left + slot * (float)(bar + 1)) - gap;
+            dl->AddRectFilled(ImVec2(x, top), ImVec2(x2, floorY), color);
+        }
+    };
+
+    const auto drawProgress = [&](float left, float right, float y, float h) {
+        dl->AddRectFilled(ImVec2(left, y), ImVec2(right, y + h), IM_COL32(60, 60, 60, 255), 1.f);
+        dl->AddRectFilled(ImVec2(left, y), ImVec2(left + (right - left) * mp::ProgressOf(track), y + h), accent, 1.f);
+    };
+
     if (g_mpSimple) {
         std::string line = artist.empty() ? title : title + " - " + artist;
         if (!timeNow.empty()) line += "  " + timeNow;
         const ImVec2 lineSize = artistFont->CalcTextSizeA(artistPx, FLT_MAX, 0.f, line.c_str());
         const float totalW = lineSize.x + (buttons ? cellGap * 2.f + buttonsW : 0.f);
 
-        const float lineY = fromBottom ? anchorY - lineSize.y : anchorY;
+        const float lineY = topOf(lineSize.y);
         const float lineX = floorf(leftOf(totalW));
         put(dl, bareFx, artistFont, artistPx, ImVec2(lineX, lineY), look.title, line);
         ImRect bounds(ImVec2(lineX, lineY), ImVec2(lineX + totalW, lineY + lineSize.y));
@@ -1577,7 +1638,6 @@ void RenderMediaPlayer()
     const float minWidth = background ? 140.f : 0.f;
     const bool progressBar = g_mpProgressBar;
     const bool visualizer  = g_mpVisualizer;
-    const float visualH    = std::clamp(g_mpVisHeight, 4.f, 64.f);
     const bool art = g_mpCoverArt && s_tex;
     const float artGap = (std::max)(padding, 6.f);
     const float artOffsetX = art ? artSize + artGap : 0.f;
@@ -1591,67 +1651,57 @@ void RenderMediaPlayer()
     const float controlH  = controlRow ? (std::max)(artistSize.y, cell) : 0.f;
     const float controlW  = buttonsW + timeW + (buttons && timeW > 0.f ? 8.f : 0.f);
 
+    // lumi layout: spectator_list DrawLumiNew spacing -- 28 px header ("now playing" left, time +
+    // buttons right), rule at +28 inset 10, body from +34, 10 px sides, 200 min width. frame,
+    // colours, fonts + text fx stay the watermark style's
+    if (g_mpLayout == 1) {
+        constexpr float side = 10.f, headH = 28.f, bodyTop = 34.f, bottom = 8.f, lumiBarH = 2.f;
+        static constexpr const char* label = "now playing";
+        const ImVec2 labelSize = titleFont->CalcTextSizeA(titlePx, FLT_MAX, 0.f, label);
+        const float lumiArtW = art ? artSize + 8.f : 0.f;
+        const float barBlock = progressBar || visualizer ? 6.f + lumiBarH : 0.f;
+        const float lumiW = (std::max)({ 200.f, labelSize.x + (controlW > 0.f ? 12.f + controlW : 0.f) + side * 2.f, lumiArtW + textColW + side * 2.f });
+        const float lumiH = bodyTop + contentH + barBlock + bottom;
+        const float x = floorf(leftOf(lumiW)), y = topOf(lumiH);
+        const float right = x + lumiW - side;
+        ImRect bounds(ImVec2(x, y), ImVec2(x + lumiW, y + lumiH));
+
+        if (background) {
+            Watermark_MediaFrame(dl, bounds.Min, bounds.Max, frameStyle);
+            dl->AddLine(ImVec2(x + side, y + headH), ImVec2(right, y + headH), IM_COL32(255, 255, 255, 20), 1.f);
+        }
+
+        const float bodyY = y + bodyTop, lineY = bodyY + contentH + 6.f;
+        if (visualizer) drawVisualizer(x + side, right, lineY, progressBar);
+        if (progressBar) drawProgress(x + side, right, lineY, lumiBarH);
+
+        put(dl, fx, titleFont, titlePx, ImVec2(x + side, floorf(y + (headH - labelSize.y) * 0.5f)), look.title, label);
+        if (timeW > 0.f)
+            put(dl, fx, artistFont, artistPx, ImVec2(floorf(right - buttonsW - (buttons ? 8.f : 0.f) - timeW), floorf(y + (headH - artistSize.y) * 0.5f)),
+                look.artist, timeNow);
+
+        const float artY = bodyY + (contentH - artSize) * 0.5f;
+        if (art)
+            dl->AddImageRounded((ImTextureID)s_tex, ImVec2(x + side, artY), ImVec2(x + side + artSize, artY + artSize), ImVec2(0.f, 0.f), ImVec2(1.f, 1.f),
+                                IM_COL32_WHITE, 3.f);
+        const float textX = x + side + lumiArtW, textY = floorf(bodyY + (contentH - textColH) * 0.5f);
+        put(dl, fx, titleFont, titlePx, ImVec2(textX, textY), look.title, title);
+        put(dl, fx, artistFont, artistPx, ImVec2(textX, textY + titleSize.y + rowGap), look.artist, artist);
+
+        drawLyrics(dl, fromBottom ? y - rowGap : y + lumiH + rowGap, lumiW, background, fx, bounds);
+        if (buttons) drawButtons(dl, right - buttonsW, floorf(y + headH * 0.5f), fx, bounds);
+        return;
+    }
+
     const float width  = (std::max)({ textColW + artOffsetX + padding * 2.f, controlW + padding * 2.f, minWidth });
     const float height = padding + contentH + (progressBar || visualizer ? rowGap + barHeight : 0.f) + (controlRow ? rowGap + controlH : 0.f) + padding;
 
     const float posX = floorf(leftOf(width));
-    const float posY = fromBottom ? anchorY - height : anchorY;
+    const float posY = topOf(height);
 
     if (background) Watermark_MediaFrame(dl, ImVec2(posX, posY), ImVec2(posX + width, posY + height), frameStyle);
 
-    // botox waveform: 64 bands as bars (bar width + 1 px gap) or a catmull-rom curve ("smooth"),
-    // standing on the progress bar line, behind the art + text; accent (or custom) at alpha 185
-    if (visualizer) {
-        float bands[n_audio_bands::k_bands]{};
-        {
-            std::lock_guard<std::mutex> lock(s_bandsMtx);
-            std::copy(std::begin(s_bands), std::end(s_bands), bands);
-        }
-        const ImU32 rgb   = g_mpVisCustomColor ? (ImU32)ImColor(g_mpVisColor[0], g_mpVisColor[1], g_mpVisColor[2], g_mpVisColor[3]) : accent;
-        const ImU32 color = (rgb & ~IM_COL32_A_MASK) | (185u << IM_COL32_A_SHIFT);
-
-        const bool smooth  = g_mpVisSmooth;
-        const float left   = posX + padding;
-        const float right  = posX + width - padding;
-        const float floorY = posY + padding + contentH + rowGap;
-        const float gap    = 1.f;
-        const float barW   = (float)std::clamp(g_mpVisBarWidth, 1, 12);
-        const int bars     = smooth ? (int)n_audio_bands::k_bands : (std::max)(1, (int)((right - left + gap) / (barW + gap)));
-        const float slot   = (right - left) / (float)bars;
-
-        if (smooth) {
-            const auto curveTop = [&](float x) {
-                const float u = (x - left) / slot - 0.5f;
-                const int i   = (int)floorf(u);
-                const float t = u - (float)i;
-                const auto at = [&](int k) { return bands[std::clamp(k, 0, bars - 1)]; };
-                const float p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
-                const float level = 0.5f * (2.f * p1 + (p2 - p0) * t + (2.f * p0 - 5.f * p1 + 4.f * p2 - p3) * t * t + (3.f * (p1 - p2) + p3 - p0) * t * t * t);
-                const float h = std::clamp(level, 0.f, 1.f) * visualH;
-                return floorY - (progressBar ? h : (std::max)(1.f, h));
-            };
-            const auto oldFlags = dl->Flags;
-            dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
-            for (float x = left; x < right; x += 1.f) {
-                const float x2 = (std::min)(x + 1.f, right);
-                dl->AddQuadFilled(ImVec2(x, curveTop(x)), ImVec2(x2, curveTop(x2)), ImVec2(x2, floorY), ImVec2(x, floorY), color);
-            }
-            dl->Flags = oldFlags;
-            for (float x = left; x < right; x += 1.f) dl->PathLineTo(ImVec2(x, curveTop(x)));
-            dl->PathLineTo(ImVec2(right, curveTop(right)));
-            dl->PathStroke(color, ImDrawFlags_None, 1.f);
-        }
-
-        for (int bar = 0; bar < bars && !smooth; bar++) {
-            const float level = n_audio_bands::bar_level(bands, (std::size_t)bar, (std::size_t)bars);
-            const float barH  = level * visualH;
-            if (progressBar && barH < 1.f) continue;
-            const float top = floorY - (std::max)(1.f, barH);
-            const float x   = floorf(left + slot * (float)bar);
-            const float x2  = bar == bars - 1 ? right : floorf(left + slot * (float)(bar + 1)) - gap;
-            dl->AddRectFilled(ImVec2(x, top), ImVec2(x2, floorY), color);
-        }
-    }
+    if (visualizer) drawVisualizer(posX + padding, posX + width - padding, posY + padding + contentH + rowGap, progressBar);
 
     const bool leftSide = align == 0;
     const float artX = leftSide ? posX + padding : posX + width - padding - artSize;
@@ -1670,13 +1720,7 @@ void RenderMediaPlayer()
     put(dl, fx, titleFont, titlePx, titlePos, look.title, title);
     put(dl, fx, artistFont, artistPx, artistPos, look.artist, artist);
 
-    if (progressBar) {
-        const float barX = posX + padding;
-        const float barY = posY + padding + contentH + rowGap;
-        const float barWidth = posX + width - padding - barX;
-        dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barWidth, barY + barHeight), IM_COL32(60, 60, 60, 255), 1.f);
-        dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barWidth * mp::ProgressOf(track), barY + barHeight), accent, 1.f);
-    }
+    if (progressBar) drawProgress(posX + padding, posX + width - padding, posY + padding + contentH + rowGap, barHeight);
 
     ImRect bounds(ImVec2(posX, posY), ImVec2(posX + width, posY + height));
     drawLyrics(dl, fromBottom ? posY - rowGap : posY + height + rowGap, width, background, fx, bounds);

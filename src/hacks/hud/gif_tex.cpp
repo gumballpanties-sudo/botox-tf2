@@ -187,6 +187,14 @@ static std::string UrlPath(const std::string& setting)
     return {};
 }
 
+bool GifTex_LocalFile(const char* url, char* out, size_t outSize)
+{
+    const std::string path = url ? UrlPath(url) : std::string();
+    if (path.empty() || path.size() >= outSize) return false;
+    memcpy(out, path.c_str(), path.size() + 1);
+    return true;
+}
+
 GifTex* GifTex_GetFile(const char* setting)
 {
     if (!setting || !*setting) return nullptr;

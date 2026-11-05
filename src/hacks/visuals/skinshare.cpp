@@ -85,6 +85,15 @@ static bool ResolveApi()
     s_api.close   = Export<SNM_Close_t>(h, "SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser");
     s_api.release = Export<SNM_Release_t>(h, "SteamAPI_SteamNetworkingMessage_t_Release");
     s_api.self = (get && s_api.send && s_api.recv && s_api.accept && s_api.close && s_api.release) ? get() : nullptr;
+    // Every new P2P session spams "Relay candidates enabled by P2P_Transport_ICE_Enable, but
+    // P2P_TURN_ServerList is empty". Drop the TURN relay bit (no TURN servers anyway): ICE_Enable (104)
+    // = Private(2) | Public(4). SDR relay is separate, untouched.
+    using SNU_Get_t = void* (*)();
+    using SNU_SetInt_t = bool (*)(void*, int, int);
+    auto getU = Export<SNU_Get_t>(h, "SteamAPI_SteamNetworkingUtils_SteamAPI_v004");
+    auto setI = Export<SNU_SetInt_t>(h, "SteamAPI_ISteamNetworkingUtils_SetGlobalConfigValueInt32");
+    void* utils = getU ? getU() : nullptr;
+    DebugLog("skinshare: ICE relay off %d", utils && setI ? (int)setI(utils, 104, 2 | 4) : -1);
     DebugLog("skinshare: ISteamNetworkingMessages %p (exports %d%d%d%d%d%d)", s_api.self, !!get, !!s_api.send,
              !!s_api.recv, !!s_api.accept, !!s_api.close, !!s_api.release);
     return s_api.self != nullptr;
@@ -222,13 +231,11 @@ struct PlayerInfoSdk_t {
 static uint64_t Steam64(uint32_t acct) { return acct ? (0x0110000100000000ULL | acct) : 0; }
 
 static SharePeer s_peers[kShareMaxPeers];
-static uint32_t  s_peerHash[kShareMaxPeers];
-static uint32_t  s_gen = 1, s_seenOut = 0;
+static uint32_t  s_seenOut = 0;
 static char      s_status[512] = "off";
 static MailOut*  s_outCopy = nullptr;   // game-side copy of the mailbox (128 KB, heap)
 
 const SharePeer* SkinShare_Peer(int i) { return (i >= 0 && i < kShareMaxPeers && s_peers[i].sid) ? &s_peers[i] : nullptr; }
-uint32_t SkinShare_LoadoutGen() { return s_gen; }
 const char* SkinShare_Status() { return s_status; }
 
 static uint32_t NewNonce()
@@ -278,19 +285,16 @@ static void TakeOutputs()
     for (int i = 0; i < kShareMaxPeers; ++i) {
         const MailPeer& o = s_outCopy->p[i];
         SharePeer& p = s_peers[i];
-        if (p.sid != o.sid) {   // slot changed hands (or emptied): nothing of the old peer stays
-            if (p.hasLoadout) ++s_gen;
-            p = SharePeer{}; s_peerHash[i] = 0;
-        }
+        if (p.sid != o.sid) p = SharePeer{};   // slot changed hands (or emptied): nothing of the old peer stays
         p.sid = o.sid; p.playerIdx = o.idx; p.ready = o.ready; p.remoteShare = o.rShare; p.remoteRecv = o.rRecv;
         if (o.sid && o.hasLo) {
-            if (!p.hasLoadout || o.loHash != s_peerHash[i]) {
+            if (!p.hasLoadout || o.loHash != p.loHash) {
                 Share_DecodeBody(o.lo, o.loLen, p.lo);
-                s_peerHash[i] = o.loHash; p.hasLoadout = true; ++s_gen;
+                p.loHash = o.loHash; p.hasLoadout = true;
                 DebugLog("skinshare: loadout from peer %d: %d skins, %d hats", i, p.lo.nSkins, p.lo.nHats);
             }
         } else if (p.hasLoadout) {
-            p.hasLoadout = false; p.lo.skins.clear(); p.lo.nSkins = p.lo.nHats = 0; s_peerHash[i] = 0; ++s_gen;
+            p.hasLoadout = false; p.lo.skins.clear(); p.lo.nSkins = p.lo.nHats = 0; p.loHash = 0;
         }
     }
 }

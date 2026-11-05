@@ -1173,10 +1173,26 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 			void WmAim_Tick(CTFPlayer*); WmAim_Tick(pLocal);   // dna watermark "spotted" (wm_aim.cpp)
 			void RadarAim_Tick(CTFPlayer*); RadarAim_Tick(pLocal);   // csgo radar: overview bake + player snapshot (radar_aim.cpp)
 		}
+		if (I::EngineVGui->IsGameUIVisible())   // pause menu up: csgo hud stays under it
+		{
+			void KillfeedCsgo_Paint(); KillfeedCsgo_Paint();
+			void WeaponSel_Paint(); WeaponSel_Paint();
+		}
 		H::Draw.End();
 	}
 
 	CALL_ORIGINAL(rcx, iMode);
+
+	// csgo killfeed (killfeed_csgo.cpp, no local needed: demos) + weapon selection (weaponsel.cpp)
+	// after the game's panels: above the csgo scope (drawn from the viewport's PaintTraverse) and
+	// the rest of TF2's HUD
+	if (!G::Unload && iMode & PAINT_INGAMEPANELS && !SDK::CleanScreenshot() && !I::EngineVGui->IsGameUIVisible())
+	{
+		H::Draw.Start();
+		void KillfeedCsgo_Paint(); KillfeedCsgo_Paint();
+		void WeaponSel_Paint(); WeaponSel_Paint();
+		H::Draw.End();
+	}
 }
 
 // ================ RecvProxy_SimulationTime.cpp ================

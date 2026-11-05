@@ -13,6 +13,9 @@ int  g_fontIndFlags    = kFontIndDefFlags;
 char g_fontEspName[64] = "Verdana";
 int  g_fontEspSize     = kFontEspDefSize;
 int  g_fontEspFlags    = kFontEspDefFlags;
+char g_fontKfName[64]  = "Stratum2 Bold";
+int  g_fontKfSize      = kFontKfDefSize;
+int  g_fontKfFlags     = kFontKfDefFlags;
 
 static std::atomic<int> s_reload{ 0 };
 
@@ -177,6 +180,14 @@ void Fonts_ResetEsp()
     g_fontEspFlags = kFontEspDefFlags;
 }
 
+void Fonts_ResetKillfeed()
+{
+    strcpy_s(g_fontKfName, kFontKfDefName);
+    g_fontKfSize = kFontKfDefSize;
+    g_fontKfFlags = kFontKfDefFlags;
+}
+
+uint32_t Fonts_KfSig() { return FontSig(g_fontKfName, g_fontKfSize, g_fontKfFlags, s_reload.load()); }
 uint32_t Fonts_IndSig() { return FontSig(g_fontIndName, g_fontIndSize, g_fontIndFlags, s_reload.load()); }
 uint32_t Fonts_EspSig() { return FontSig(g_fontEspName, g_fontEspSize, g_fontEspFlags, s_reload.load()); }
 

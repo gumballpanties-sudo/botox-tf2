@@ -84,6 +84,7 @@ bool  g_mpProgressBar  = true;
 bool  g_mpSimple       = false;
 bool  g_mpTime         = false;
 int   g_mpPos          = WM_TOP_RIGHT;   // same corner as the watermark = stacked under it
+int   g_mpLayout       = 0;
 
 // -- misc HUD ---------------------------------------------------------------
 bool  g_hmEnable        = false;
@@ -403,6 +404,7 @@ float g_sheenNormalEnv   = 3.f;     // envmap strength (stock pass = 10, blown o
 
 // -- Killfeed ------------------------------------------------------------------------------------
 bool g_selfKillfeedOnly = false;
+bool g_killfeedCsgo     = false;   // csgo killfeed with tf2 icons (aim/killfeed_csgo.cpp)
 
 // -- Scoreboard (Aletherium "reveal scoreboard") --------------------------------------------------
 bool g_revealScoreboard = false;
@@ -637,6 +639,7 @@ int   g_tbPredictTicks = 40;   // how many ticks of flight the scan rolls (40 = 
 float g_tbPredictReach = 24.f; // how far to the side of the flight a face still counts
 bool g_wallClimb = false;   int g_wallClimbKey = 0;   int g_wallClimbMode = 1;
 bool g_wcPreventSlow = true;  bool g_wcDuck = true;   // botox wall climb defaults
+bool g_wcSeamSteer = false;  float g_wcSteerScale = 1.f;   // botox m_wall_climb_seam_steer / steer_scale
 bool g_wcViz = false;  float g_wcVizColor[4] = { 1.f, 190 / 255.f, 90 / 255.f, 1.f };
 bool g_airStuck = false;    int g_airStuckKey = 0;    int g_airStuckMode = 1;
 

@@ -1,0 +1,5 @@
+    { "wselEnable",         CfgEntry::BOOL,   &g_wselEnable, 0 },
+    { "wselNeverFade",      CfgEntry::BOOL,   &g_wselNeverFade, 0 },
+    { "wselScale",          CfgEntry::FLOAT,  &g_wselScale, 0 },
+    { "wselOffX",           CfgEntry::FLOAT,  &g_wselOffX, 0 },
+    { "wselOffY",           CfgEntry::FLOAT,  &g_wselOffY, 0 },

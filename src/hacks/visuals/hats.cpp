@@ -30,10 +30,7 @@
 // in m_iItemIDLow/High -- checked before every touch. Only ours is ever Released.
 
 bool    g_hatsEnable = false;
-HatSlot g_hatSlots[kHatSlots] = {
-    { 0, 0, -1, -1 }, { 0, 0, -1, -1 }, { 0, 0, -1, -1 }, { 0, 0, -1, -1 },
-    { 0, 0, -1, -1 }, { 0, 0, -1, -1 }, { 0, 0, -1, -1 }, { 0, 0, -1, -1 },
-};
+HatSlot g_hatSlots[kHatSlots] = {};   // def 0 = empty; the menu's add sets unusual/paint -1
 
 int             Hats_Count()      { return k_hatCount; }
 const HatDef*   Hats_At(int i)    { return (i >= 0 && i < k_hatCount) ? &k_hats[i] : nullptr; }
@@ -52,11 +49,11 @@ const HatDef* Hats_Find(int def)
     return nullptr;
 }
 
-// Entity indices 2000..2039: ours at 2000..2007, then 4 per shared peer (skinshare.cpp, 8 peers).
-// The weather entity owns 2047 (visuals.cpp); servers fill from the bottom, and a TF2 map that
-// reaches 2000 networked entities is already at the edict limit.
+// Entity indices 1950..2045: ours at 1950..2013 (kHatSlots), then 4 per shared peer (skinshare.cpp,
+// 8 peers). The weather entity owns 2047 (visuals.cpp); servers fill from the bottom, and a TF2 map
+// that reaches 1950 networked entities is already at the edict limit (StillOurs covers it anyway).
 // ponytail: 4 hats per peer, 8 peers -- the index budget under 2047; raise kShareMaxPeers with it.
-static constexpr int kFirstIndex   = 2000;
+static constexpr int kFirstIndex   = 1950;
 static constexpr int kPeerHatsEach = 4;
 static constexpr int kTotalSlots   = kHatSlots + kShareMaxPeers * kPeerHatsEach;
 static_assert(kFirstIndex + kTotalSlots < 2047, "hat slots run into the weather entity");

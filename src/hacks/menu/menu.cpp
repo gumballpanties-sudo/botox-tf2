@@ -1154,6 +1154,15 @@ static void Page_VisualsScreen()
 
         ImGui::Checkbox("hide scope charge meter", &g_scChargeHide);
         ImGui::Checkbox("static amby crosshair", &g_staticAmbyCrosshair);
+        ImGui::Checkbox("csgo killfeed", &g_killfeedCsgo);
+        ImGui::Checkbox("csgo weapon hud", &g_wselEnable);
+        if (g_wselEnable)
+            ImGui::OptionPopup("csgo weapon hud settings", []() {
+                ImGui::Checkbox("never fade##wsel", &g_wselNeverFade);   // cl_showloadout 1
+                ImGui::SliderFloat("scale##wsel", &g_wselScale, 0.5f, 2.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SliderFloat("x offset##wsel", &g_wselOffX, -1000.f, 200.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SliderFloat("y offset##wsel", &g_wselOffY, -800.f, 200.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+            }, ImVec2(220.f, -1.f));
     }
     menu_group_end();
     menu_columns_end();
@@ -1438,6 +1447,9 @@ static void Page_MovementMain()
                 ImGui::Keybind("wall climb key", &g_wallClimbKey, &g_wallClimbMode);
                 ImGui::Checkbox("prevent slow", &g_wcPreventSlow);
                 ImGui::Checkbox("crouch catches", &g_wcDuck);
+                ImGui::Checkbox("steer to seam", &g_wcSeamSteer);
+                if (g_wcSeamSteer)
+                    SliderF("delta strafe scale", &g_wcSteerScale, 0.25f, 2.f, "%.2fx");
                 ImGui::Checkbox("visualize##wcviz", &g_wcViz);
                 ImGui::ColorEdit4("visualize color##wcvizcolor", g_wcVizColor,
                     ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_NoOptions |
@@ -2450,13 +2462,16 @@ static void Page_MiscMain()
         if (g_mpEnable)
             ImGui::OptionPopup("media player settings", []() {
                 // botox position order (tr / tl / tc / bc / bl / br) over this dll's WatermarkPos
-                static constexpr int kToWm[6] = { 2, 0, 1, 4, 3, 5 }, kFromWm[6] = { 1, 2, 0, 4, 3, 5 };
-                int position = kFromWm[std::clamp(g_mpPos, 0, 5)];
-                if (ImGui::Combo("position##media player position", &position, "top right\0top left\0top center\0bottom center\0bottom left\0bottom right\0"))
-                    g_mpPos = kToWm[std::clamp(position, 0, 5)];
+                static constexpr int kToWm[8] = { 2, 0, 1, 4, 3, 5, 6, 7 }, kFromWm[8] = { 1, 2, 0, 4, 3, 5, 6, 7 };
+                int position = kFromWm[std::clamp(g_mpPos, 0, 7)];
+                if (ImGui::Combo("position##media player position", &position,
+                                 "top right\0top left\0top center\0bottom center\0bottom left\0bottom right\0center left\0center right\0"))
+                    g_mpPos = kToWm[std::clamp(position, 0, 7)];
 
                 ImGui::Checkbox("simple", &g_mpSimple);
                 if (!g_mpSimple) {
+                    g_mpLayout = std::clamp(g_mpLayout, 0, 1);
+                    ImGui::Combo("layout##media player layout", &g_mpLayout, "default\0lumi\0");
                     ImGui::Checkbox("cover art", &g_mpCoverArt);
                     ImGui::Checkbox("background", &g_mpBackground);
                     ImGui::Checkbox("progress bar", &g_mpProgressBar);
@@ -3342,7 +3357,8 @@ static void Page_Hats()
         if (ImGui::IsItemHovered())
             MenuTooltip("client-side cosmetics on your own player. only you see them,\n"
                         "and only in third person / demos, like your real hats.\n"
-                        "pick a slot, then click an item in the list to put it there.\n"
+                        "add hat, then click an item in the list. pick a hat in your list\n"
+                        "and click another item to swap it.\n"
                         "tf2 rules: a change shows at your next spawn or resupply, and with\n"
                         "'show in backpack' the hat is worn only where you equipped it.");
         ImGui::Checkbox("show in backpack##hatsbp", &g_hatsBackpack);
@@ -3353,14 +3369,28 @@ static void Page_Hats()
                         "equipped it on, the real hat in that slot is unequipped, equip\n"
                         "regions conflict as usual. off = no backpack copy, worn on every\n"
                         "class that can wear it.");
-        if (ImGui::BeginListBox("##hatslots", ImVec2(-1.f, 8 * ImGui::GetTextLineHeightWithSpacing() + 4.f)))
+        // Only used slots are listed (plus the one "add hat" just opened). A slot keeps its index
+        // for life -- the backpack item id is built from it -- so nothing is packed on remove.
+        int used = 0, firstFree = -1;
+        for (int i = 0; i < kHatSlots; ++i) {
+            if (g_hatSlots[i].def > 0) ++used;
+            else if (firstFree < 0) firstFree = i;
+        }
+        if (firstFree < 0) ImGui::BeginDisabled();
+        if (ImGui::Button("add hat##hatadd", ImVec2(-1.f, 15.f))) s_sel = firstFree;
+        if (firstFree < 0) { ImGui::EndDisabled(); ImGui::TextDisabled("(%d hats, full)", kHatSlots); }
+        const int rows = (std::min)((std::max)(used + 1, 4), 12);
+        if (ImGui::BeginListBox("##hatslots", ImVec2(-1.f, rows * ImGui::GetTextLineHeightWithSpacing() + 4.f)))
         {
+            int n = 0;
             for (int i = 0; i < kHatSlots; ++i) {
                 const HatDef* d = Hats_Find(g_hatSlots[i].def);
+                if (!d && s_sel != i) continue;
                 char lbl[160];
-                snprintf(lbl, sizeof(lbl), "%d  %s##hs%d", i + 1, d ? d->name : "(empty)", i);
+                snprintf(lbl, sizeof(lbl), "%d  %s##hs%d", ++n, d ? d->name : "(new -- pick an item)", i);
                 if (ImGui::Selectable(lbl, s_sel == i)) s_sel = i;
             }
+            if (!n) ImGui::TextDisabled("no hats -- press add hat");
             ImGui::EndListBox();
         }
 
@@ -3414,7 +3444,7 @@ static void Page_Hats()
             if (!d->paintable) { ImGui::EndDisabled(); ImGui::TextDisabled("(not paintable)"); }
             if (ImGui::Button("remove##hatrm", ImVec2(-1.f, 15.f))) s = { 0, 0, -1, -1 };
         } else {
-            ImGui::TextDisabled("empty slot -- pick an item on the right");
+            ImGui::TextDisabled("pick an item on the right");
         }
     }
     menu_group_end();
@@ -3434,8 +3464,10 @@ static void Page_Hats()
                 for (int r = clip.DisplayStart; r < clip.DisplayEnd; ++r) {
                     const HatDef* d = Hats_At(s_list[r]);
                     char lbl[160]; snprintf(lbl, sizeof(lbl), "%s (%d)##hl%d", d->name, d->def, r);
-                    if (ImGui::Selectable(lbl, g_hatSlots[s_sel].def == d->def))
-                        g_hatSlots[s_sel] = { d->def, 0, g_hatSlots[s_sel].unusual, g_hatSlots[s_sel].paint };
+                    if (ImGui::Selectable(lbl, g_hatSlots[s_sel].def == d->def)) {
+                        HatSlot& t = g_hatSlots[s_sel];
+                        t = t.def > 0 ? HatSlot{ d->def, 0, t.unusual, t.paint } : HatSlot{ d->def, 0, -1, -1 };
+                    }
                 }
             ImGui::EndListBox();
         }
@@ -3457,7 +3489,7 @@ static void Tab_InventoryRoot()
 // indicators / esp map to TF2 (fonts.h); its chud hud / default hud pages rewrite CS:GO's
 // panorama fonts.conf and have no TF2 equivalent. Applies live: render.cpp rebuilds the atlas
 // (indicators) and aim/helpers.cpp recreates the vgui face (esp) once the pick settles.
-static const char* kFontsSub[3] = { "indicators", "esp", "net graph" };   // botox case 4 = net graph (hud)
+static const char* kFontsSub[4] = { "indicators", "esp", "net graph", "killfeed" };   // botox case 4 = net graph (hud)
 static int s_fontsSub = 0;
 static const char* const kFontFlagNames[FF_COUNT] = {
     "no hinting", "no autohint", "force autohint", "light hinting", "monohinting", "bold", "oblique", "monochrome" };
@@ -3501,6 +3533,12 @@ static void Tab_Fonts()
         static ImGuiTextFilter s_espFilter;
         FontPage("esp font", g_fontEspName, sizeof(g_fontEspName), &g_fontEspSize, &g_fontEspFlags,
                  Fonts_ResetEsp, Fonts_Families(), s_espFilter);
+    }
+    else if (s_fontsSub == 3)   // csgo killfeed vgui face (aim/killfeed_csgo.cpp rebuilds on change)
+    {
+        static ImGuiTextFilter s_kfFilter;
+        FontPage("killfeed font", g_fontKfName, sizeof(g_fontKfName), &g_fontKfSize, &g_fontKfFlags,
+                 Fonts_ResetKillfeed, Fonts_Families(), s_kfFilter);
     }
     else if (s_fontsSub == 2)   // custom net graph face (hud_extra.cpp rebuilds the atlas)
     {
@@ -3746,7 +3784,7 @@ static const SidebarTab kSidebar[TAB_COUNT] = {
     { kTabNames[TAB_MOVEMENT],  kMoveSub,    5 },
     { kTabNames[TAB_MISC],      kMiscSub,    3 },
     { kTabNames[TAB_INVENTORY], kInvSub,     2 },
-    { kTabNames[TAB_FONTS],     kFontsSub,   3 },
+    { kTabNames[TAB_FONTS],     kFontsSub,   4 },
     { kTabNames[TAB_SETTINGS],  nullptr,     0 },
 };
 

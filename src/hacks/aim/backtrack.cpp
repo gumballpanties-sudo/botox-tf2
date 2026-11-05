@@ -154,7 +154,18 @@ void CBacktrack::Store()
 
 	// botox lagcomp.cpp:191: built while backtrack or its chams read them
 	const bool bChams = Chams_BacktrackActive();
-	if ((!Enabled() && !bChams) || m_iMaxAllocations <= 0 || !I::EngineClient->IsInGame())
+	if (!Enabled() && !bChams)
+	{	// nobody reads them: free the rings (~0.6 MB a player), no stale poses left for a later toggle
+		for (int i = 0; i < 65; i++)
+		{
+			delete[] m_aRecords[i];
+			m_aRecords[i] = nullptr;
+			m_aLocation[i] = 0;
+		}
+		m_pTarget = nullptr;
+		return;
+	}
+	if (m_iMaxAllocations <= 0 || !I::EngineClient->IsInGame())
 		return;
 	// ghosts render these bones = every bone (botox 0x7FF00); aim alone only reads hitbox bones
 	const int iMask = bChams ? BONE_USED_BY_ANYTHING : BONE_USED_BY_HITBOX;

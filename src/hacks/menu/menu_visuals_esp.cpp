@@ -170,7 +170,7 @@ void Menu_Visuals_Esp()
                 ImGui::SliderFloat("duration##player hitboxes", &g_espHitboxesDuration, 0.1f, 10.f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
         }, ImVec2(220.f, -1));
 
-    // player glow: aim/chams.cpp Glow_Render (Amalgam halo). Works without the players esp.
+    // player glow: aim/chams.cpp Glow_Render (Amalgam halo). Off with the players esp.
     ImGui::Checkbox("player glow", &g_glowEnable);
     if (g_glowEnable)
         ImGui::OptionPopup("player glow settings", [&]() {

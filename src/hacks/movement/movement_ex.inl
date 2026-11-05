@@ -431,4 +431,3 @@ static void SmoothDemoView(void* pLocal, UserCmd_t* pCmd)
     s_lastSentAngles = pCmd->viewangles;
     s_have = true;
 }
-

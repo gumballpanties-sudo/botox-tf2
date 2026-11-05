@@ -879,13 +879,20 @@ static void Ragdoll_Hook(bool on)
 }
 
 // ==== remove hud elements ================================================================
+extern bool g_killfeedCsgo;   // dllmain.cpp, csgo killfeed (aim/killfeed_csgo.cpp) replaces this panel
+
 bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel)
 {
-    if (!g_wdNoHud || g_eject || !panels) return false;
+    if ((!g_wdNoHud && !g_killfeedCsgo && !g_wselEnable) || g_eject || !panels) return false;
     using GetName_t = const char* (*)(void*, uintptr_t);   // IPanel::GetName, slot 36 (render.h)
     const char* nm = nullptr;
     __try { nm = ((GetName_t)(*(void***)panels)[36])(panels, vpanel); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    // paint only: HudDeathNotice keeps handling events, its domination / revenge sounds stay
+    if (g_killfeedCsgo && nm && strcmp(nm, "HudDeathNotice") == 0) return true;
+    // csgo weapon selection (aim/weaponsel.cpp) replaces this one; paint only, switching still works
+    if (g_wselEnable && nm && strcmp(nm, "HudWeaponSelection") == 0) return true;
+    if (!g_wdNoHud) return false;
     const int i = wfx3::HudElemFor(nm);
     return i >= 0 && i < k_wdHudCount && g_wdNoHudElems[i];
 }
