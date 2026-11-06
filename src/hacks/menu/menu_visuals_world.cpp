@@ -100,6 +100,13 @@ void Menu_Visuals_World()
     WdModulationRow("prop modulation", &g_propTintEnable, g_propTintColor, &g_wdPropModBright);
     WdModulationRow("skybox modulation", &g_wdSkyMod, g_wdSkyModColor, &g_wdSkyModBright);
 
+    // Aletherium COPRenderSprites hooks: sprite particle rgb (+ alpha when < 255)
+    ImGui::Checkbox("particle modulation", &g_wdParticleMod);
+    if (g_wdParticleMod) {
+        ImGui::SameLine();
+        ImGui::ColorRow("##particle modulation color picker", g_wdParticleModColor, kWdPickerAlpha);
+    }
+
     // botox commits a custom path only when the box is left (IsItemDeactivatedAfterEdit), so a
     // half-typed name never reaches the material walk
     constexpr auto presetLabel = [](void*, int i, const char** out) { *out = wfx3::k_texPresets[i].label; return true; };

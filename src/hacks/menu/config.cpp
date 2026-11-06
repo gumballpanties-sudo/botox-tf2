@@ -11,6 +11,7 @@
 #include "../movement/recorder.h"      // movement extras
 #include "fonts.h"         // fonts tab
 #include "visual_keys.h"   // settings tab "visuals config"
+#include "../lua/lua_bridge.h"   // lua config.*
 #include <cfloat>      // FLT_MAX -- the "this end was never bounded" sentinel below
 #include <algorithm>   // std::sort -- ListConfigs
 
@@ -1155,8 +1156,65 @@ bool DeleteConfigNamed(const char* name, bool visuals)
     return ok;
 }
 
+// lua config.* (hacks/lua/lua_bridge.h). Defaults = every entry's bytes before the first load.
+static size_t CfgEntryBytes(const CfgEntry& e)
+{
+    switch (e.type)
+    {
+    case CfgEntry::BOOL:   return sizeof(bool);
+    case CfgEntry::INT:    return sizeof(int);
+    case CfgEntry::FLOAT:  return sizeof(float);
+    case CfgEntry::FLOAT4: return sizeof(float) * 4;
+    case CfgEntry::STR:    return e.size;
+    case CfgEntry::CURVE:  return sizeof(CcCurve);
+    }
+    return 0;
+}
+
+static std::vector<std::vector<unsigned char>> s_cfgDefaults;
+
+static void CfgSnapshotDefaults()
+{
+    if (!s_cfgDefaults.empty()) return;
+    for (const auto& e : kEntries)
+    {
+        const unsigned char* p = (const unsigned char*)e.ptr;
+        s_cfgDefaults.emplace_back(p, p + CfgEntryBytes(e));
+    }
+}
+
+int LuaB_CfgCount() { return (int)(sizeof(kEntries) / sizeof(kEntries[0])); }
+
+bool LuaB_CfgAt(int index, LuaCfgVar& out)
+{
+    if (index < 0 || index >= LuaB_CfgCount()) return false;
+    const CfgEntry& e = kEntries[index];
+    out = { e.key, (int)e.type, e.ptr, e.size };
+    return true;
+}
+
+bool LuaB_CfgFind(const char* key, LuaCfgVar& out)
+{
+    for (int i = 0; i < LuaB_CfgCount(); ++i)
+        if (strcmp(kEntries[i].key, key) == 0) return LuaB_CfgAt(i, out);
+    return false;
+}
+
+bool LuaB_CfgReset(const char* key)
+{
+    for (int i = 0; i < LuaB_CfgCount(); ++i)
+    {
+        if (strcmp(kEntries[i].key, key) != 0) continue;
+        if (i >= (int)s_cfgDefaults.size()) return false;
+        memcpy(kEntries[i].ptr, s_cfgDefaults[i].data(), s_cfgDefaults[i].size());
+        return true;
+    }
+    return false;
+}
+
 void LoadConfig(const char* path, bool visuals)
 {
+    CfgSnapshotDefaults();
     FILE* f = fopen(path, "r");
     if (!f) return;
 

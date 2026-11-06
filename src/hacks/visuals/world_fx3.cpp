@@ -302,6 +302,41 @@ static void __fastcall h_FireBullet(void* rcx, void* wpn, const void* info, bool
     if (!g_eject && rcx && info) OnBullet(rcx, info);
 }
 
+// ==== particle modulation (Aletherium COPRenderSprites_Render.cpp) ==========================
+// COPRenderSprites::RenderSpriteCard / RenderTwoSequenceSpriteCard, once per sprite particle.
+// SpriteRenderInfo_t (particles lib, not in sdk-2013): 6 {size_t stride, fltx4* ptr} pairs before
+// m_nRGBStride (+0x30) / m_pRGB (+0x38). RGB is SoA: channel c of particle h lives at
+// m_pRGB[(h/4)*stride + c].lane[h&3]. ParticleRenderData_t::m_nAlpha = byte +0xC (particles.h:938).
+using SpriteCard_t = void(__fastcall*)(void*, void*, void*, void*, int, void*, void*);
+static SpriteCard_t o_SpriteCard = nullptr, o_SpriteCard2 = nullptr;
+
+static inline void ParticleMod_Apply(void* info, int h, void* sortList)
+{
+    const size_t stride = *reinterpret_cast<size_t*>((uint8_t*)info + 0x30);
+    float* rgb = *reinterpret_cast<float**>((uint8_t*)info + 0x38);
+    if (!rgb) return;
+    float* lane = rgb + ((h / 4) * stride) * 4 + (h & 3);
+    lane[0] = g_wdParticleModColor[0];   // r  (each channel is one fltx4 = 4 floats further)
+    lane[4] = g_wdParticleModColor[1];   // g
+    lane[8] = g_wdParticleModColor[2];   // b
+    const int a = (int)(g_wdParticleModColor[3] * 255.f + .5f);
+    if (a != 255 && sortList) *((uint8_t*)sortList + 0xC) = (uint8_t)a;
+}
+
+static void __fastcall h_SpriteCard(void* rcx, void* mb, void* ctx, void* info, int h, void* sort, void* cam)
+{
+    MiscHookGuard _g;
+    if (g_wdParticleMod && !g_eject && info) ParticleMod_Apply(info, h, sort);
+    o_SpriteCard(rcx, mb, ctx, info, h, sort, cam);
+}
+
+static void __fastcall h_SpriteCard2(void* rcx, void* mb, void* ctx, void* info, int h, void* sort, void* cam)
+{
+    MiscHookGuard _g;
+    if (g_wdParticleMod && !g_eject && info) ParticleMod_Apply(info, h, sort);
+    o_SpriteCard2(rcx, mb, ctx, info, h, sort, cam);
+}
+
 void WorldFx3_OnPlayerHurt(int victimIdx)
 {
     if (!g_wdHitMarker || victimIdx <= 0) return;
@@ -940,6 +975,11 @@ void WorldFx3_Install()
     InstallPatternHook(client, "worldfx3: CTFPlayer::FireBullet",
                        "48 89 74 24 ? 55 57 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? F3 41 0F 10 58",
                        (void*)h_FireBullet, (void**)&o_FireBullet);
+    InstallPatternHook(client, "worldfx3: COPRenderSprites::RenderSpriteCard",
+                       "48 8B C4 48 89 58 ? 57 41 54", (void*)h_SpriteCard, (void**)&o_SpriteCard);
+    InstallPatternHook(client, "worldfx3: COPRenderSprites::RenderTwoSequenceSpriteCard",
+                       "48 8B C4 48 89 58 ? 48 89 68 ? 56 57 41 54 41 56 41 57 48 81 EC ? ? ? ? F3 0F 10 1D",
+                       (void*)h_SpriteCard2, (void**)&o_SpriteCard2);
 }
 
 void WorldFx3_Tick()

@@ -3,6 +3,7 @@
 #include "skins.h"
 #include "skins_pure.h"
 #include "hats.h"
+#include "../lua/lua.h"   // lua tick / frame_stage / eject shutdown (h_FrameStageNotify)
 #include "skinshare.h"   // peers' loadouts: applied to THEIR weapons below, same passes as ours
 #include "../../hooks/crashlog.h"   // CrashSpan: stutter probe per FSN module
 #include "visuals.h"
@@ -1811,6 +1812,15 @@ static void __fastcall h_FrameStageNotify(int stage)
     // and one call too late for the sound: the Saxxy drew right and still opened a knife.
     // Prediction is NOT inside OnRenderStart -- it has already run by this point -- so nothing
     // rewrites m_nSequence between here and the draw.
+    // lua: eject closes every state here (game thread, eject waits on this hook); else stage 0 = the
+    // once-a-frame tick (requests, buttons, saves), then frame_stage before the game runs the stage
+    if (g_eject) g_lua.shutdown();
+    else
+    {
+        CrashSpan _s("fsn/lua");
+        if (stage == 0) g_lua.on_tick();
+        g_lua.on_frame_stage(stage);
+    }
     if (stage == 5 && !g_eject && g_enableSkins) { SweepViewmodelSequence(); RestampStreak("before think"); }
     // Hats are built here, before the original: its OnRenderStart runs ProcessOnDataChangedEvents,
     // which is what delivers the OnDataChanged(CREATED) a new hat's PreDataUpdate queued.

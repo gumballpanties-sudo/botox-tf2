@@ -22,6 +22,8 @@ inline float g_wdPropModBright  = 100.f;                           // m_prop_mod
 inline bool  g_wdSkyMod = false;                                   // m_skybox_modulation
 inline float g_wdSkyModColor[4] = { 1.f, 1.f, 1.f, 1.f };
 inline float g_wdSkyModBright = 100.f;
+inline bool  g_wdParticleMod = false;                              // Aletherium Colors::ParticleModulation
+inline float g_wdParticleModColor[4] = { 1.f, 1.f, 1.f, 1.f };     // alpha < 1 also overrides particle alpha
 
 inline bool  g_wdWorldTex = false;                                 // m_world_texture
 inline int   g_wdWorldTexPreset[7] = {};                           // per category, world_fx3_math.h k_texPresets index

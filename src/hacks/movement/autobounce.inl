@@ -14,6 +14,9 @@
 //   no ladders / fireman: yield = the TF2 owners (TB/HS/HB/AS/WC/PS)
 //   budget = AsClock (botox c_sim_budget port), 0.25 tick share like botox
 //   engine tick = RestoreToFrame + Pred_Simulate on the edited cmd (botox engine_tick)
+//   rocket-speed xy (botox is CS ~300): stop speed caps at sv_maxvelocity not 450, reach is the
+//   steer off the coast line (ab::ReachDist) not distance from origin, lookahead runs on to the coast
+//   contact, an exit along your own heading passes the side gate (ab::HeadingKept), keep plans first
 #include "autobounce_pure.h"
 
 namespace abk
@@ -933,7 +936,8 @@ static void AutoBounceRun(void* pLocal, UserCmd_t* cmd, bool yield)
     };
     const auto accept = [&](AbPlan_t& c) {
         // the face must pay from vz alone: a glide onto flat floor is air strafe, not a bounce
-        if (!c.valid || c.floor < gainMin || c.normal.z > abk::kMinFaceNz || (c.target - origin).Length2D() > reach) return false;
+        if (!c.valid || c.floor < gainMin || c.normal.z > abk::kMinFaceNz
+            || ab::ReachDist(c.target.x - origin.x, c.target.y - origin.y, velocity.x, velocity.y, c.ttc) > reach) return false;
 
         AbResult_t r = AbFly(start, world, c, dropIn, &budget);
         if (!r.valid) return c.floor >= need;
@@ -983,7 +987,7 @@ static void AutoBounceRun(void* pLocal, UserCmd_t* cmd, bool yield)
         c.first     = r.first;
         c.slides    = r.slides;
         c.side      = r.hit ? AbSideDeg(r.out, r.trace.plane.normal) : -1.f;
-        const bool straight = c.side <= abk::kSideMax;
+        const bool straight = c.side <= abk::kSideMax || (r.hit && ab::HeadingKept(r.out.x, r.out.y, velocity.x, velocity.y, abk::kSideMax));
         c.room = r.hit ? AbExitRoom(r.trace, r.out, world.mins, world.maxs) : 1.f;
         const bool clear = c.room >= 1.f;
         if (c.pred >= need && straight && clear && !r.snapped && (c.keep || onFace(r, c))) return true;
@@ -1022,14 +1026,26 @@ static void AutoBounceRun(void* pLocal, UserCmd_t* cmd, bool yield)
         heldRefused = stop.flown && !stop.valid;
     }
 
+    // armed keep stays keep, armed stop stays stop (no flip between the two mid-air).
+    // before the lookahead: a fast lookahead runs long, keep must not starve on its budget
+    AbPlan_t keep;
+    if (keepOn && (!armed || data.keep) && AbPlanKeep(origin, velocity, need, depth, world, budget, keep))
+        accept(keep);
+
     if (!armed) {
         const float dt   = AbDt();
         const float grav = AbGrav();
         const int maxTicks = (int)(abk::kLookaheadTime / dt + 0.5f);
         const int step     = std::max((int)(abk::kLookaheadStep / dt + 0.5f), 1);
+        // fast: the coast lands past reach. scan on to that contact (reach bounds the steer, not the coast)
+        float coastT = 0.f;
+        AbContact_t coast;
+        if (speed2d * abk::kLookaheadTime > reach
+            && AbSweepFall(origin, Vec3(velocity.x, velocity.y, 0.f), velocity.z, depth, world.mins, world.maxs, budget, coast))
+            coastT = coast.time;
         for (int t = step; t <= maxTicks && !budget.Expired(); t += step) {
             const float time = (float)t * dt;
-            if (speed2d * time > reach) break;
+            if (speed2d * time > reach && time > coastT + abk::kLookaheadStep) break;
             const Vec3 p(origin.x + velocity.x * time, origin.y + velocity.y * time, origin.z + velocity.z * time - 0.5f * grav * time * time);
             AbPlan_t cand;
             if (AbScanBelow(p, radius, rays, depth, hit, &patch, &budget)
@@ -1044,11 +1060,6 @@ static void AutoBounceRun(void* pLocal, UserCmd_t* cmd, bool yield)
                 take(wide);
         }
     }
-
-    // armed keep stays keep, armed stop stays stop (no flip between the two mid-air)
-    AbPlan_t keep;
-    if (keepOn && (!armed || data.keep) && AbPlanKeep(origin, velocity, need, depth, world, budget, keep))
-        accept(keep);
 
     const AbPlan_t* plan = keep.valid && (!stop.valid || score(keep) >= score(stop)) ? &keep : stop.valid ? &stop : nullptr;
 

@@ -18,6 +18,8 @@ namespace ab
     constexpr float kWalkableNz  = 0.7f;
     constexpr float kBhopFactor  = 1.2f;    // BUNNYJUMP_MAX_SPEED_FACTOR
     constexpr float kNonJumpVz   = 250.f;   // TF2 CategorizePosition
+    constexpr float kMaxVelocity = 3500.f;  // sv_maxvelocity
+    constexpr float kHeadingMin  = 100.f;   // below this xy your heading is noise, the fall line rules
     constexpr float kPi          = 3.14159265358979323846f;
 
     struct World
@@ -43,21 +45,20 @@ namespace ab
         return nz >= kWalkableNz ? std::min(result, maxSpeed * kBhopFactor) : result;
     }
 
-    // botox ab_stop_speed: fastest closing speed that can still brake to 0 inside `dist`
+    // botox ab_stop_speed: fastest closing speed that can still brake to 0 inside `dist`.
+    // cap = sv_maxvelocity, not botox's 450 (CS speed): a 450 cap brakes every rocket-speed glide down to 450.
+    // travel = closed form of botox's tick loop: v0 dt + dt sum_{k=1..m} (v0 - k b), m = floor(v0 / b)
     inline float StopSpeed(float dist, const World& w)
     {
         const float brakeTick = 0.9f * AccelSpeed(w);
+        if (brakeTick <= 0.0001f) return 0.f;   // sv_airaccelerate 0: no brake, no steer
         const auto travel = [&](float v0) {
-            float v = v0, d = v0 * w.dt;
-            for (int k = 0; k < 256 && v > 0.f; ++k) {
-                v = std::max(v - brakeTick, 0.f);
-                d += v * w.dt;
-            }
-            return d;
+            const float m = std::floor(v0 / brakeTick);
+            return w.dt * (v0 + m * v0 - brakeTick * m * (m + 1.f) * 0.5f);
         };
-        float lo = 0.f, hi = 450.f;
+        float lo = 0.f, hi = kMaxVelocity;
         if (travel(hi) <= dist) return hi;
-        for (int i = 0; i < 12; ++i) {
+        for (int i = 0; i < 16; ++i) {
             const float mid = (lo + hi) * 0.5f;
             (travel(mid) <= dist ? lo : hi) = mid;
         }
@@ -119,6 +120,23 @@ namespace ab
         const float spd  = std::sqrt(ox * ox + oy * oy);
         if (flat < 0.01f || spd < 1.f) return 0.f;
         return std::acos(std::clamp((ox * nx + oy * ny) / (flat * spd), -1.f, 1.f)) * 180.f / kPi;
+    }
+
+    // fast entry: an exit within maxDeg of your own heading keeps your line, it is not a throw.
+    // botox's fall-line-only gate is CS speed, where the exit is mostly the face's push
+    inline bool HeadingKept(float ox, float oy, float vx, float vy, float maxDeg)
+    {
+        return vx * vx + vy * vy >= kHeadingMin * kHeadingMin && SideDeg(ox, oy, vx, vy) <= maxDeg;
+    }
+
+    // reach = steer budget, not distance: how far target (dx, dy from origin) sits off the coast segment
+    // origin -> origin + v ttc. a fast fall lands far ahead with no input at all
+    inline float ReachDist(float dx, float dy, float vx, float vy, float ttc)
+    {
+        const float ex = vx * ttc, ey = vy * ttc, ee = ex * ex + ey * ey;
+        const float t  = ee > 0.0001f ? std::clamp((dx * ex + dy * ey) / ee, 0.f, 1.f) : 0.f;
+        const float rx = dx - ex * t, ry = dy - ey * t;
+        return std::sqrt(rx * rx + ry * ry);
     }
 
     // botox ab_glides: drop in glides in on time unless the approach runs uphill

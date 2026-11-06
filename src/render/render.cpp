@@ -35,6 +35,8 @@
 #include "../hacks/visuals/lsd_chams.h"       // SheenNormal_Tick
 #include "../hacks/menu/debugmenu.h"
 #include "../hacks/menu/fonts.h"          // fonts tab: indicator face picked at runtime
+#include "../hacks/lua/lua.h"             // lua paint callback (h_PaintTraverse)
+#include "../hacks/lua/lua_draw.h"        // lua render.* replay (RenderLuaQueue)
 #include "../dependencies/imgui/freetype/imgui_freetype.h"
 #include "../dependencies/imgui/imgui_internal.h"
 // botox dependencies/fonts/spectator_fonts.h: donor ttf bytes, FontDataOwnedByAtlas = false
@@ -1449,6 +1451,46 @@ static std::string ValidEspFont()
 
 // Clear() frees every ImFont, so EVERY font pointer we keep is reassigned here and
 // nothing may hold one across the call.
+// lua fonts.* ids (lua_draw.h LuaFontId) -> faces. Render thread only, like every ImFont* read.
+static ImFont* LuaFontFor(int id)
+{
+    ImFont* f = nullptr;
+    switch (id)
+    {
+    case LUAF_VERDANA:          f = g_menuReg; break;
+    case LUAF_VERDANA_BOLD:     f = g_menuBold; break;
+    case LUAF_ICONS:            f = g_fontIcon13; break;
+    case LUAF_INDICATOR:
+    case LUAF_CUSTOM_INDICATOR: f = g_fontMi; break;
+    case LUAF_TAHOMA:           f = g_fontTahoma12; break;
+    case LUAF_TAHOMA_BOLD:      f = g_fontTahomaBd12; break;
+    case LUAF_CUSTOM_ESP:       f = s_fontEsp; break;
+    case LUAF_CUSTOM_NET_GRAPH: f = HudFonts_NetGraphFont(); break;
+    }
+    return f ? f : (g_menuReg ? g_menuReg : ImGui::GetIO().Fonts->Fonts.empty() ? nullptr : ImGui::GetIO().Fonts->Fonts[0]);
+}
+
+// after io.Fonts->Build(): the game thread measures render.text_size off these (it may not touch the atlas)
+static void LuaPublishFontMetrics()
+{
+    static const int kIds[k_luaFontSlots] = { LUAF_VERDANA, LUAF_VERDANA_BOLD, LUAF_ICONS, LUAF_INDICATOR, LUAF_TAHOMA, LUAF_TAHOMA_BOLD,
+                                              LUAF_CUSTOM_INDICATOR, LUAF_CUSTOM_ESP, LUAF_CUSTOM_NET_GRAPH };
+    LuaFontMetrics out[k_luaFontSlots];
+    for (int slot = 0; slot < k_luaFontSlots; ++slot)
+    {
+        ImFont* f = LuaFontFor(kIds[slot]);
+        if (!f) continue;
+        LuaFontMetrics& m = out[slot];
+        m.ok = true;
+        m.size = f->FontSize;
+        m.fallback = f->FallbackAdvanceX;
+        for (int c = 0; c < 256; ++c)
+            m.adv[c] = c < f->IndexAdvanceX.Size ? f->IndexAdvanceX[c] : f->FallbackAdvanceX;
+    }
+    LuaDrawLockGuard lock;
+    for (int slot = 0; slot < k_luaFontSlots; ++slot) g_luaFontMetrics[slot] = out[slot];
+}
+
 static void BuildFontAtlas()
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -1654,6 +1696,7 @@ static void BuildFontAtlas()
     HudFonts_Build();   // net graph face
 
     io.Fonts->Build();
+    LuaPublishFontMetrics();
 }
 
 // botox draw_cached_data: replay the esp the game thread recorded (aim/esp.cpp, esp_queue.h) into
@@ -1831,6 +1874,99 @@ static void RenderCrosshairList()
     vp->DrawLists[0] = bg;
 }
 
+// lua render.* (hacks/lua/lua_api.cpp records in the paint callback, lua_draw.h). Background list,
+// over esp + world fx, under the menu. s_rtLuaSeq = the frame this build is for (multicore), 0 = newest.
+static uint32_t s_rtLuaSeq = 0;
+
+static void RenderLuaQueue()
+{
+    static LuaDrawFrame f;
+    LuaDraw::CopyFrame(s_rtLuaSeq, f);
+    if (f.cmds.empty() || GetTickCount64() - f.stampMs > 250)
+        return;
+
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImGuiIO& io = ImGui::GetIO();
+    const float sx = f.srcW > 0.f ? io.DisplaySize.x / f.srcW : 1.f, sy = f.srcH > 0.f ? io.DisplaySize.y / f.srcH : 1.f;
+    const int firstVtx = dl->VtxBuffer.Size;
+    ImVec2 buf[32];
+
+    for (const LuaDrawCmd& c : f.cmds)
+    {
+        switch (c.type)
+        {
+        case LUAD_TEXT:
+        {
+            ImFont* font = LuaFontFor(c.font);
+            if (!font || c.pn <= 0 || c.p0 < 0 || c.p0 + c.pn > (int)f.text.size()) break;
+            const char* b = f.text.data() + c.p0;
+            const char* e = b + c.pn;
+            // botox n_render::impl_t::text: shadow wins over outline, outline = two diagonal copies
+            const float size = c.size > 0.f ? c.size : font->FontSize;
+            const ImVec2 at(c.x0, c.y0);
+            if (c.flags & 1)
+                dl->AddText(font, size, ImVec2(at.x + 1.f, at.y + 1.f), c.col2, b, e);
+            else if (c.flags & 2)
+            {
+                dl->AddText(font, size, ImVec2(at.x + 1.f, at.y - 1.f), c.col2, b, e);
+                dl->AddText(font, size, ImVec2(at.x - 1.f, at.y + 1.f), c.col2, b, e);
+            }
+            dl->AddText(font, size, at, c.col, b, e);
+            break;
+        }
+        case LUAD_LINE:
+            dl->AddLine(ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), c.col, c.thick);
+            break;
+        case LUAD_RECT:
+        {   // botox impl_t::rect
+            if (c.flags & 1)
+                dl->AddRectFilled(ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), c.col, c.round);
+            else
+            {
+                const float inset = (c.thick - 1.f) * 0.5f;
+                dl->AddRect(ImVec2(c.x0 + inset, c.y0 + inset), ImVec2(c.x1 - inset, c.y1 - inset), c.col, std::max(c.round - inset, 0.f), 0, c.thick);
+            }
+            break;
+        }
+        case LUAD_GRAD:
+        {
+            if (c.round <= 0.f)
+            {
+                dl->AddRectFilledMultiColor(ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), c.col, c.col, c.col2, c.col2);
+                break;
+            }
+            const int first = dl->VtxBuffer.Size;
+            dl->AddRectFilled(ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), IM_COL32_WHITE, c.round);
+            RecolourVertsY(dl, first, c.col, c.col2, c.y0, c.y1);
+            break;
+        }
+        case LUAD_CIRCLE:
+            dl->AddCircle(ImVec2(c.x0, c.y0), c.x1, c.col, c.pn, c.thick);
+            break;
+        case LUAD_CIRCLE_FILLED:
+            dl->AddCircleFilled(ImVec2(c.x0, c.y0), c.x1, c.col, c.pn);
+            break;
+        case LUAD_POLY:
+        {
+            const int n = std::min(c.pn, 32);
+            if (n < 3 || c.p0 < 0 || (c.p0 + n) * 2 > (int)f.pts.size()) break;
+            for (int i = 0; i < n; ++i) buf[i] = ImVec2(f.pts[(c.p0 + i) * 2], f.pts[(c.p0 + i) * 2 + 1]);
+            if (c.col) dl->AddConvexPolyFilled(buf, n, c.col);
+            if (c.flags & 1) dl->AddPolyline(buf, n, c.col2, ImDrawFlags_Closed, c.thick);
+            break;
+        }
+        }
+    }
+
+    // engine screen px -> imgui display px (windowed + dpi scaling), same as RenderEspQueue
+    if (sx != 1.f || sy != 1.f)
+        for (int i = firstVtx; i < dl->VtxBuffer.Size; ++i)
+        {
+            dl->VtxBuffer[i].pos.x *= sx;
+            dl->VtxBuffer[i].pos.y *= sy;
+        }
+}
+
 static void BuildImGuiFrame()
 {
     if (s_frameBuilt) return;
@@ -1894,6 +2030,7 @@ static void BuildImGuiFrame()
     RenderKillEffects();
     AspectStretch_Run(RenderPoints, AsPanel);
     RenderMiscOverlays();        // healthshot effect, low fps warning, displayed logs
+    RenderLuaQueue();            // lua render.* (botox: paint_traverse lua last, under the menu)
     RenderDebugMenu();
     RenderPsPointWindow();
     RenderMenu();   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
@@ -1950,7 +2087,7 @@ static const char* VGui_PanelName(void* panels, VPANEL_t vpanel)
 // single-threaded vgui pass would: same position, same frame, same matrix.
 // Ring of 8: the main thread runs at most a frame or two ahead of the replay, so a slot is
 // never rewritten before its call ran. Faked CFunctor, never freed (screenfx.cpp:496).
-struct OvFunctor { void** vfptr; float m[4][4]; bool ok; uint32_t espSeq; };
+struct OvFunctor { void** vfptr; float m[4][4]; bool ok; uint32_t espSeq; uint32_t luaSeq; };
 static int   __fastcall OvFn_AddRef (void*)             { return 1; }
 static int   __fastcall OvFn_Release(void*)             { return 1; }
 static void* __fastcall OvFn_Dtor   (void* p, unsigned) { return p; }
@@ -1979,9 +2116,11 @@ static void __fastcall OvFn_Call(void* self)
     const OvFunctor* f = static_cast<const OvFunctor*>(self);
     if (f->ok) { memcpy(s_rtMatrix, f->m, sizeof(s_rtMatrix)); s_rtMatrixOk = true; }
     s_rtEspSeq = f->espSeq;
+    s_rtLuaSeq = f->luaSeq;
     BuildImGuiFrame();
     s_rtMatrixOk = false;
     s_rtEspSeq = 0;
+    s_rtLuaSeq = 0;
     if (s_gameCount > 0) RenderSubset(s_gameLists, s_gameCount);   // scene is open: vgui's own
     s_vguiDrew = true;
 }
@@ -1994,6 +2133,7 @@ static bool OvQueue()
     const float(*m)[4] = PsEngineW2S();
     f.ok = m != nullptr;
     f.espSeq = g_espQSeq.load(std::memory_order_acquire);   // this frame's esp, committed earlier in this paint
+    f.luaSeq = g_luaDrawSeq.load(std::memory_order_acquire);   // lua paint, committed just before (h_PaintTraverse)
     if (m) memcpy(f.m, m, sizeof(f.m));
     return ScreenFx_QueueFunctor(&f);
 }
@@ -2033,6 +2173,11 @@ void h_PaintTraverse(void* panels, VPANEL_t vpanel, bool forceRepaint, bool allo
     // otherwise stand down and let the EndScene fallback (always on the render thread) do it.
     const DWORD tid = GetCurrentThreadId();
     RC_RefreshLive();   // game thread, the frame about to be drawn: entity markers onto their entity
+    {
+        ++g_hookDepth;   // eject drains on it: never free the module under a running script
+        struct Dec { ~Dec() { --g_hookDepth; } } _dec;
+        g_lua.on_paint();   // game thread: lua paint callbacks record render.*, committed for this frame
+    }
     if (s_presentTid && tid != s_presentTid)
     {
         OvQueue();          // the render thread draws it at this point (OvFn_Call)

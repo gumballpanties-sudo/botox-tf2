@@ -33,6 +33,7 @@
 #include "../visuals/world_fx3_math.h"   // remove hud elements list (k_hudElems)
 #include "menu_misc.h"
 #include "menu_aimbot.h"
+#include "menu_lua.h"        // settings > lua
 
 static void MenuClientCmd(const char* cmd);   // below the fonts tab; the hud group's radar button uses it
 
@@ -3694,8 +3695,13 @@ static void MenuStyleApply(const MenuStyleRow& s)
 
 // botox tab_settings: col1 "config" + "system", col2 "visuals config" + "menu". Left out, no
 // TF2 counterpart: "botox network" (no TF2 server).
+static const char* kSettingsSub[2] = { "main", "lua" };
+static int s_settingsSub = 0;
+
 static void Tab_Settings()
 {
+    if (s_settingsSub == 1) { Page_Lua(); return; }
+
     // botox menu_internal.h color_picker_no_alpha_flags
     constexpr ImGuiColorEditFlags kPickerNoAlpha = ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB |
         ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop |
@@ -3785,7 +3791,7 @@ static const SidebarTab kSidebar[TAB_COUNT] = {
     { kTabNames[TAB_MISC],      kMiscSub,    3 },
     { kTabNames[TAB_INVENTORY], kInvSub,     2 },
     { kTabNames[TAB_FONTS],     kFontsSub,   4 },
-    { kTabNames[TAB_SETTINGS],  nullptr,     0 },
+    { kTabNames[TAB_SETTINGS],  kSettingsSub, 2 },
 };
 
 // botox_menu_spec.md section 1, build_date_text() literal (menu.cpp lines 22-45): the
@@ -4092,6 +4098,7 @@ void RenderMenu()
                       : (i == (int)TAB_MISC)     ? s_miscSub
                       : (i == (int)TAB_FONTS)    ? s_fontsSub
                       : (i == (int)TAB_INVENTORY) ? s_invSub
+                      : (i == (int)TAB_SETTINGS) ? s_settingsSub
                       : s_noPage;
             if (SidebarTab_Draw(kSidebar[i], i, s_tab == i, page, sidebarX, tabY, io.DeltaTime))
                 s_tab = i;

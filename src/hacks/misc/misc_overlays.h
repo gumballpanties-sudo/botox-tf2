@@ -13,6 +13,7 @@
 void Healthshot_Trigger(int trigger);                    // any thread
 void RenderMiscOverlays();                               // imgui frame build
 void MiscLogs_OnGameEvent(void* pEvent, const char* name, int localIdx);   // FireEvent thread
+void MiscLogs_Push(const char* prefix, const char* text);                    // any thread (lua client.log)
 
 void ConsoleTint_Install();                              // PollThread, after vgui is up
 bool ConsoleTint_Begin(void* panels, uintptr_t vpanel);  // PaintTraverse, before the original

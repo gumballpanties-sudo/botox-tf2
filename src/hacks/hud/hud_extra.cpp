@@ -82,6 +82,11 @@ namespace
     struct Row { std::vector<Piece> left; Piece right{ "", "", nullptr }; };
 }
 
+ImFont* HudFonts_NetGraphFont()
+{
+    return s_fontNg ? s_fontNg : g_fontLegendwareLucida10;
+}
+
 static void DrawNetGraph(const HudSnap& s, ImDrawList* dl, const ImVec2& ds)
 {
     if (!g_hudNg || s.netGraph < 1) return;   // botox: shown with net_graph 1

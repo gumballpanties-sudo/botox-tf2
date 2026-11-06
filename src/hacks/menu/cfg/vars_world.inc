@@ -13,6 +13,8 @@
     { "wdSkyMod",                CfgEntry::BOOL,   &g_wdSkyMod, 0 },
     { "wdSkyModColor",           CfgEntry::FLOAT4, g_wdSkyModColor, 0 },
     { "wdSkyModBright",          CfgEntry::FLOAT,  &g_wdSkyModBright, 0 },
+    { "wdParticleMod",           CfgEntry::BOOL,   &g_wdParticleMod, 0 },
+    { "wdParticleModColor",      CfgEntry::FLOAT4, g_wdParticleModColor, 0 },
     { "wdWorldTex",              CfgEntry::BOOL,   &g_wdWorldTex, 0 },
     { "wdWorldTexPreset0",       CfgEntry::INT,    &g_wdWorldTexPreset[0], 0 },
     { "wdWorldTexPreset1",       CfgEntry::INT,    &g_wdWorldTexPreset[1], 0 },

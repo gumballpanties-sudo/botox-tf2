@@ -76,6 +76,11 @@ add_library(botox SHARED
     src/hacks/menu/menu_movement_extra.cpp
     src/hacks/menu/menu_visuals_esp.cpp
     src/hacks/menu/menu_aimbot.cpp
+    src/hacks/menu/menu_lua.cpp
+    src/hacks/lua/lua.cpp
+    src/hacks/lua/lua_dih.cpp
+    src/hacks/lua/lua_api.cpp
+    src/dependencies/lua/lua_unity.cpp
     src/hacks/screen/screenfx_passes.cpp
     src/hacks/visuals/world_fx.cpp
     src/hacks/visuals/world_fx2.cpp
@@ -143,6 +148,15 @@ target_compile_definitions(botox PRIVATE
 
 # The aimbot is the hot path (projectile sim, movement sim, bone setup). botox's global
 # /O1 /Os is a size choice for the visual features; build the aim tree for speed.
+# lua bindings sit on the aim SDK (I:: interfaces, entity layout): same forced prefix as the aim tree.
+set_source_files_properties(src/hacks/lua/lua_api.cpp PROPERTIES
+    COMPILE_OPTIONS "/FI${AIM_DIR}/prefix.h;/bigobj"
+)
+# vendored lua 5.4.7 (onelua.c compiled as c++): warnings are upstream's
+set_source_files_properties(src/dependencies/lua/lua_unity.cpp PROPERTIES
+    COMPILE_OPTIONS "/W0"
+)
+
 set_source_files_properties(${AIM_SRC} PROPERTIES
     COMPILE_OPTIONS "/FI${AIM_DIR}/prefix.h;/bigobj;$<$<CONFIG:Release>:/O2>"
 )

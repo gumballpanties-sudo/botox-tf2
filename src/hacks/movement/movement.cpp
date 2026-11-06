@@ -2,6 +2,7 @@
 #include "../../globals/pinned_thread.h"   // routecalc.inl solver worker
 #include "movement.h"
 #include "../hud/avatar_cache.h"   // Avatar_Pump piggybacks this game-thread tick
+#include "../lua/lua.h"            // lua create_move / pre_prediction (no-aim CreateMove path)
 #include "prediction.h"   // engine prediction core (Pred_*, restore, sim pool, snapshots)
 #include "recorder.h"      // movement recorder (record/play owns the cmd before features run)
 #include "eb_stance.h"    // edge bug stance filter (pure, gate-tested)
@@ -2609,7 +2610,11 @@ static void __fastcall h_CreateMove_impl(void* rcx, int seq, float frametime, bo
     if (pCmd)
     {
         Movement_Run(pCmd);
+        // botox create_move_proxy: lua pre_prediction (alive only) then create_move, last before the send.
+        // This path has no send-packet pointer: cmd.send_packet reads true, writes are dropped.
+        if (IsLocalPlayerAlive()) g_lua.on_create_move(pCmd, nullptr, true);
         Movement_AirStuckLastWriter(pCmd);   // nothing runs after us on this path
+        g_lua.on_create_move(pCmd, nullptr, false);
     }
 }
 

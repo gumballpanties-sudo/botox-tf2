@@ -15,6 +15,7 @@
 #include "backtrack.h"
 #include "scope_fov.h"
 #include "hud_aim.h"   // botox hud group data, collected in IEngineVGui_Paint
+#include "../lua/lua.h"   // lua create_move / pre_prediction
 
 // Remove interp targets: remote players + the viewmodel. Amalgam hits every non-local entity;
 // projectiles / props / the local player model stay smooth here.
@@ -737,6 +738,9 @@ MAKE_HOOK(CHLClient_CreateMove, U::Memory.GetVirtual(I::Client, 21), void,
 	F::Backtrack.BeginCommand(pCmd, pLocal);   // botox create_move_proxy: server tick before anything shoots
 	ScopeFOV::Run(pLocal);
 		Movement_RunGuarded(reinterpret_cast<UserCmd_t*>(pCmd)); // dih movement pipeline, in Misc.RunPre's slot
+	// botox create_move_proxy: lua pre_prediction = after movement pre, before prediction + aimbot, alive only
+	if (!G::Unload && pLocal->IsAlive())
+		g_lua.on_create_move(pCmd, pSendPacket, true);
 	// NOTE: EnginePrediction.Start is called inside F::Ticks.Start (and paired with the single
 	F::Ticks.Start(pLocal, pCmd);
 
@@ -750,6 +754,10 @@ MAKE_HOOK(CHLClient_CreateMove, U::Memory.GetVirtual(I::Client, 21), void,
 
 	// botox create_move_proxy.cpp:481/505: air stuck re-proves the cmd AFTER the aimbot touched it
 	Movement_AirStuckLastWriter(reinterpret_cast<UserCmd_t*>(pCmd));
+
+	// botox: lua create_move after every feature, before the cmd is sent
+	if (!G::Unload)
+		g_lua.on_create_move(pCmd, pSendPacket, false);
 
 	AntiCheatCompatibility(pCmd, pSendPacket);
 	LocalAnimations(pLocal, pCmd, *pSendPacket);

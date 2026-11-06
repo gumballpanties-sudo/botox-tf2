@@ -1,4 +1,5 @@
 #include "../../globals/globals.h"
+#include "../lua/lua.h"   // lua level_init / level_shutdown
 #include "flipworld.h"
 #include "../screen/screenfx.h"   // ScreenFx_FindClientMode
 #include "visuals.h"    // Chams_LevelInit/LevelUnload -- piggybacked on this file's LevelInit hook
@@ -531,6 +532,8 @@ static void __fastcall h_FlipLevelInit(void* rcx)
     if (!g_eject) Glow_LevelInit();
     // old map's steamids are stale -- drop the avatar cache next Avatar_Tick.
     if (!g_eject) Avatar_OnMapChange();
+    // lua level_init (botox LevelInitPostEntity: after the original)
+    if (!g_eject && OnGameThread()) g_lua.on_level_init();
 }
 
 // Map change and disconnect. FRAME_RENDER_START does not tick through a map load, so without this
@@ -538,6 +541,7 @@ static void __fastcall h_FlipLevelInit(void* rcx)
 static void __fastcall h_FlipLevelShutdown(void* rcx)
 {
     MiscHookGuard _g;
+    if (!g_eject && OnGameThread()) g_lua.on_level_shutdown();
     if (!g_eject && OnGameThread()) {
         s_flipReady = false;
         FlipRunTick(true);

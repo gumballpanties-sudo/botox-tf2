@@ -3,6 +3,7 @@
 #include "../visuals/hats.h"       // Hats_OnGameEvent: spawn / resupply snapshot
 #include "../misc/game_events.h"   // hit marker/sound, death particles, score popup -- piggyback, no new hook
 #include "../misc/names.h"          // custom names: on-kill cycle trigger
+#include "../lua/lua.h"             // lua game events
 
 // Server events (player_death etc.) reach CHudBaseDeathNotice through slot 8, which in TF2 x64
 // engine.dll is FireEventClientSide (CGameEventManager vtable: 6 CreateEvent, 7 FireEvent,
@@ -79,5 +80,6 @@ bool __fastcall h_FireEvent(void* thisptr, void* pEvent, bool bDontBroadcast)
     GameEvents_Dispatch(pEvent);
     Names_OnGameEvent(pEvent);   // custom names: on-kill cycle
     void KillfeedCsgo_OnEvent(void*); KillfeedCsgo_OnEvent(pEvent);   // csgo killfeed (aim/killfeed_csgo.cpp); after Skins: reskin icon
+    if (pEvent && !g_eject) g_lua.on_event(pEvent);   // lua game_event + named event callbacks
     return h_FireEvent_impl(thisptr, pEvent, bDontBroadcast);
 }

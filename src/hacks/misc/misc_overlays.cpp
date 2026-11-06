@@ -121,6 +121,11 @@ namespace
     }
 }
 
+void MiscLogs_Push(const char* prefix, const char* text)
+{
+    Log(prefix, text, text);
+}
+
 void MiscLogs_OnGameEvent(void* pEvent, const char* name, int localIdx)
 {
     // healthshot trigger 0 (botox fire_event_intern player_death: you killed someone else)

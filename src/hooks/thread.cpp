@@ -23,6 +23,7 @@
 #include "../hacks/visuals/flipworld.h"
 #include "../hacks/hud/mediaplayer.h"
 #include "../hacks/misc/misc_overlays.h"   // ConsoleTint_Install
+#include "../hacks/lua/lua.h"             // eject: wait for the FSN lua shutdown
 #include "../hacks/misc/discord_ex.h"   // discord rich presence, its own IPC thread
 #include "../hacks/misc/game_extras.h"  // bot names GetPlayerInfo hook + eject restore
 #include "../hacks/misc/names.h"        // custom names: C_PlayerResource::GetPlayerName hook
@@ -501,6 +502,9 @@ static void MainThread()
     for (int i = 0; i < 100 && Hats_AnyLive(); ++i) Sleep(10);
     // Weather entity: same, Rain_Tick (FrameStageNotify) Releases it on the game thread.
     for (int i = 0; i < 100 && Precip_IsLive(); ++i) Sleep(10);
+    // Lua: FrameStageNotify closes every script state the frame after g_eject (unload callbacks run
+    // on the game thread). No frame = states left open, nothing of theirs runs again.
+    for (int i = 0; i < 100 && !g_lua.m_shutdown.load(); ++i) Sleep(10);
 
     // World is back under the cover: "ejected", the game fades back in (<= 1.5s). Present
     // still draws the splash until here, so nothing below may touch d3d before it returns.
