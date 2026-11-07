@@ -620,23 +620,15 @@ bool g_autoAlign = false;   // plain on/off, no bind
 // aim frac, engage dist, xy keep, window keeper) went with the machinery they drove; autocrouch
 // is SIM-DECIDED now (a duck pass runs only when the standing hull missed everywhere)
 bool g_textureBug = false;  int g_textureBugKey = 0;  int g_textureBugMode = 1;
-int g_tbStyle = 0;             // 0 cumidere (TF2 dll port) / 1 botox (the big search)
+int g_tbStyle = 1;             // 0 cumidere (TF2 dll port) / 1 botox (csgo texturebug.cpp 1:1, texturebug.inl tbx)
 bool g_tbcAlign = true;        // cumidere style: run cumidere misc_auto_align (ride steer) before the tb
 bool g_tbcAutoCrouch = false;  // cumidere style: duck grid pass when standing misses, latched through the ride
-float g_tbReach = 2.f;         // how far out of the hull the wall scan looks
+float g_tbReach = 8.f;         // botox style: 8-dir wall scan reach off the hull (botox m_texture_bug_reach, 0-48)
+int   g_tbTypes = 3;           // botox style: bit0 ducking / bit1 standing allowed (m_texture_bug_types)
+bool  g_tbAutoDuck = true;     // botox style: tb may crouch you (m_texture_bug_auto_duck)
+bool  g_tbWallstrafe = false;  // botox style: keep along-wall speed while pinned (m_texture_bug_wallstrafe)
 float g_tbScanStep = 1.f;      // z resolution of the scan's line grid
-float g_tbRampNz = 0.05f;      // coldtires ramp_nz_band() default -- 2.9 deg off vertical = a surf
-float g_tbHugRange = 0.2f;     // 83rd: support gap the creep starts hugging from (x2 on a ride)
-bool  g_tbSolveForward = true; // 83rd pass 3: invert AirAccelerate for the exact pinning forward
 bool  g_tbNoOffgridStick = false; // refuse the HOLD paths on a yaw-rotated wall (pins still ride)
-bool  g_tbParkAtEnd = true;   // park out the end of a surf instead of the 2-tick bridge
-int   g_tbParkTicks = 0;      // park ticks in a row, 0 = no cap (hold until the wall is gone)
-float g_tbParkSpeed = 30.f;   // was k_tbParkXyMax, a fixed 30. Raise to park a faster surf
-bool  g_tbParkBrake = true;   // brake into the measured end of the face instead of a wallbug
-float g_tbParkLead = 24.f;    // units of margin added to the measured stopping distance
-bool  g_tbPredict = true;      // roll the flight forward, close the gap BEFORE the ledge
-int   g_tbPredictTicks = 40;   // how many ticks of flight the scan rolls (40 = 0.6s)
-float g_tbPredictReach = 24.f; // how far to the side of the flight a face still counts
 bool g_wallClimb = false;   int g_wallClimbKey = 0;   int g_wallClimbMode = 1;
 bool g_wcPreventSlow = true;  bool g_wcDuck = true;   // botox wall climb defaults
 bool g_wcSeamSteer = false;  float g_wcSteerScale = 1.f;   // botox m_wall_climb_seam_steer / steer_scale

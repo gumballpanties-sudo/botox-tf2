@@ -161,7 +161,7 @@ static void AS_SyncArm(const bool on)
 
 static void AS_Sync(void* pLocal, UserCmd_t* cmd, const bool armed)
 {
-    AS_SyncArm(armed || s_wcSyncWant);   // botox sync_arm owners: as + wc ( wall climb's flush parks are sub-ulp too )
+    AS_SyncArm(armed || s_wcSyncWant || s_tbSyncWant);   // botox sync_arm owners: as + wc + tb ( flush parks are sub-ulp too )
 
     struct rec_t {
         int cmd = -1, tick_base = 0;

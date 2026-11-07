@@ -1406,7 +1406,8 @@ static void Page_MovementMain()
 
         ImGui::Checkbox("texture bug", &g_textureBug);
         if (g_textureBug)
-            // also drives head surf + head bounce, which have no toggle of their own
+            // cumidere style also drives head surf + head bounce (no toggle of their own);
+            // botox style = botox texture_bug + head_bounce + auto align
             ImGui::OptionPopup("texture bug settings", [&]() {
                 ImGui::Label("texture bug keybind");
                 ImGui::Keybind("texture bug key", &g_textureBugKey, &g_textureBugMode);
@@ -1418,27 +1419,12 @@ static void Page_MovementMain()
                     ImGui::Checkbox("no park on off-grid walls##tbc", &g_tbNoOffgridStick);
                     return;
                 }
-                SliderF("reach", &g_tbReach, 1.f, 48.f, "%.0f");
-                SliderF("hug range", &g_tbHugRange, 0.05f, 4.f, "%.2f");
-                ImGui::Checkbox("predict ledges", &g_tbPredict);
-                if (g_tbPredict)
-                {
-                    SliderI("predict ticks", &g_tbPredictTicks, 8, 128);
-                    SliderF("predict reach", &g_tbPredictReach, 1.f, 96.f, "%.0f");
-                }
-                SliderF("scan step", &g_tbScanStep, 1.f, 8.f, "%.0f");
-                SliderF("ramp nz (hands off)", &g_tbRampNz, 0.02f, 0.25f, "%.2f");
-                ImGui::Checkbox("exact solve pass", &g_tbSolveForward);
-                ImGui::Checkbox("no off-grid stick", &g_tbNoOffgridStick);
-                ImGui::Checkbox("park at end of surf##tb", &g_tbParkAtEnd);
-                if (g_tbParkAtEnd)
-                {
-                    SliderI("park ticks (0 = forever)", &g_tbParkTicks, 0, 256);
-                    SliderF("park speed cap", &g_tbParkSpeed, 5.f, 250.f, "%.0f");
-                }
-                ImGui::Checkbox("brake into the park", &g_tbParkBrake);
-                if (g_tbParkBrake)
-                    SliderF("brake lead", &g_tbParkLead, 0.f, 128.f, "%.0f");
+                // botox menu_tab_movement.cpp:720-725
+                SliderF("reach##tbreach", &g_tbReach, 0.f, 48.f, "%.1f u");
+                static const char* const kTbTypes[] = { "ducking", "standing" };
+                ImGui::MultiCombo("types allowed##tbtypes", &g_tbTypes, kTbTypes, 2);
+                ImGui::Checkbox("auto crouch##tbautoduck", &g_tbAutoDuck);
+                ImGui::Checkbox("wallstrafe##tbws", &g_tbWallstrafe);
             }, ImVec2(260.f, -1));
 
         ImGui::Checkbox("wall climb", &g_wallClimb);

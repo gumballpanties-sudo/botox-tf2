@@ -674,20 +674,12 @@ extern bool g_textureBug;  extern int g_textureBugKey;  extern int g_textureBugM
 extern int g_tbStyle;              // 0 cumidere (texturebug.inl TextureBugCumidere) / 1 botox
 extern bool g_tbcAlign;            // cumidere style: cumidere auto align first (texturebug.inl TBC_Align)
 extern bool g_tbcAutoCrouch;       // cumidere style: duck pass on a standing miss (texturebug.inl TextureBugCumidere)
-extern float g_tbReach;            // wall scan reach on top of the 1-tick lookahead (def 2 = base, 1-48)
+extern float g_tbReach;            // botox style: wall scan reach (def 8, 0-48)
+extern int   g_tbTypes;            // botox style: bit0 ducking / bit1 standing (def 3)
+extern bool  g_tbAutoDuck;         // botox style: auto crouch (def on)
+extern bool  g_tbWallstrafe;       // botox style: wallstrafe (def off)
 extern float g_tbScanStep;         // wall scan z step (def 1 = base, 1-8) -- perf lever, >1 misses thin seams
-extern float g_tbRampNz;           // |plane.normal.z| past this = a RAMP: TB hands the cmd back (def 0.05)
-extern float g_tbHugRange;         // support gap the creep hold starts hugging from (def 0.2, x2 on a ride)
-extern bool  g_tbSolveForward;     // exact-solve pass: invert AirAccelerate for the pinning forward
 extern bool  g_tbNoOffgridStick;   // no creep/press/drive/park on a yaw-rotated wall (clean pins still ride)
-extern bool  g_tbParkAtEnd;        // when a surf runs out of clean pins, hold the park instead of dropping
-extern int   g_tbParkTicks;        // max park ticks in a row (0 = hold it forever)
-extern float g_tbParkSpeed;        // top xy speed the park may engage at (was the fixed 30)
-extern bool  g_tbParkBrake;        // brake to a stop at the measured end of the face (no wallbug needed)
-extern float g_tbParkLead;         // extra units of margin on the brake's stopping distance
-extern bool  g_tbPredict;          // predictive intercept: catch ledges the live scan sees too late
-extern int   g_tbPredictTicks;     // ticks of flight the prediction rolls (def 40, 8-128)
-extern float g_tbPredictReach;     // sideways reach of the predicted-path scan (def 24, 1-96)
 extern bool g_wallClimb;   extern int g_wallClimbKey;   extern int g_wallClimbMode;
 extern bool g_wcPreventSlow;   // botox m_wall_climb_prevent_slow: no catch that halves xy > 200
 extern bool g_wcDuck;          // botox m_wall_climb_duck: crouch catches (other stance tried)

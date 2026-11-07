@@ -332,6 +332,11 @@ add_executable(dpi_test tests/dpi_test.cpp)
 # Build + run: cmake --build build --config Release --target airlean_test && build\Release\airlean_test.exe
 add_executable(airlean_test tests/airlean_test.cpp)
 
+# Gate test for the botox-style texture bug's wallstrafe math (src/hacks/movement/texturebug_wallstrafe.h):
+# best along-wall gain vs brute force, aligned wish lands the asked normal delta, owned move replay.
+# Build + run: cmake --build build --config Release --target tbws_test && build\Release\tbws_test.exe
+add_executable(tbws_test tests/tbws_test.cpp)
+
 # Gate test for the low fps viewmodel (src/hacks/visuals/viewmodel_fps.h): camera-space hold
 # round-trips exactly, a held pose rides the moved camera, the step cadence matches the rate.
 # Build + run: cmake --build build --config Release --target vmfps_test && build\Release\vmfps_test.exe

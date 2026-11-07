@@ -1690,6 +1690,7 @@ static bool s_wallClimbHit = false;    // botox g_wall_climb.caught(): wc's catc
 static bool s_wallClimbActive = false; // botox g_wall_climb.active(): wc ran an air wall tick this cmd (pixel surf yields)
 static bool s_wcLanded = false;        // botox g_wall_climb.m_hit: a land went out (indicator + detection)
 static bool s_wcSyncWant = false;      // wc key held: AS_Sync keeps cl_pred_optimize armed for it too
+static bool s_tbSyncWant = false;      // botox-style tb armed: same (botox sync_arm owner k_sync_tb)
 // cmd right before TextureBug. botox runs wc BEFORE tb and tb keeps only a real catch on a wc tick
 // (texturebug.cpp:159); here tb runs first, so wc starts its air wall ticks from this instead
 static float s_wcPreTbFwd = 0.f, s_wcPreTbSide = 0.f;
@@ -2102,7 +2103,6 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     RefreshTargetPredictZVel();  // once per cmd -- IsTargetVz in sweep loops reads cache
     Pred_ResetCmd();            // shared sim pool + restore counters reset per cmd
     s_tracesThisCmd = 0;        // perf counters, printed as tr= / res= / resk= / fast=
-    s_tbFastProbes = 0;         // analytic probe budget -- its own pool, never spends sims
     // a fresh cmd starts on the LIVE end-of-cmd state, not the restore base, so the first
     // restore of the tick always runs
     g_predDirty = true;
@@ -2241,10 +2241,15 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             AutoAlign(pLocal, pCmd);
             s_wcPreTbFwd = pCmd->forwardmove; s_wcPreTbSide = pCmd->sidemove; s_wcPreTbButtons = pCmd->buttons;
             TextureBug(pLocal, pCmd);
-            HeadSurf(pLocal, pCmd);
-            // after HS on purpose (coldtires texturebug.cpp:212): a ceiling RIDE always beats a
-            // one-tick clip, and HeadBounce returns outright when TB or HS owns the tick
-            HeadBounce(pLocal, pCmd);
+            // cumidere style only: the botox style runs its own head_bounce inside TextureBug
+            // and has no head surf (botox csgo texturebug.cpp has none)
+            if (g_tbStyle == 0)
+            {
+                HeadSurf(pLocal, pCmd);
+                // after HS on purpose (coldtires texturebug.cpp:212): a ceiling RIDE always beats a
+                // one-tick clip, and HeadBounce returns outright when TB or HS owns the tick
+                HeadBounce(pLocal, pCmd);
+            }
             // AS moved ABOVE WallClimb. coldtires states the order outright -- "priority high ->
             // low: texture_bug, air_stuck, wall_climb, edge_bug" -- and ours had AS dead last,
             // yielding to WC and arriving at a drained sim pool. HS stays above it: HS is TB's
@@ -2313,6 +2318,9 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         EdgeBugPost(pLocal, pCmd);
         EdgeSkipPost(pLocal, pCmd);   // same timing: after Pred_End, re-establishes its own window
     }
+    // botox create_move_proxy:578 -- the owned wallstrafe move goes back on last (texturebug.inl)
+    if (!bMoveBlocked)
+        TB_PreserveMove(pLocal, pCmd);
 
     // ---- publish the indicator snapshot (movement thread -> render thread) ----
     // Last thing in the pipeline so every feature's hit flag is final. Bind state is read

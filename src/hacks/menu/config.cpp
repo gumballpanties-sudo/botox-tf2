@@ -493,20 +493,12 @@ static const CfgEntry kEntries[] = {
     { "tbStyle",          CfgEntry::INT,    &g_tbStyle, 0 },
     { "tbcAlign",         CfgEntry::BOOL,   &g_tbcAlign, 0 },
     { "tbcAutoCrouch",    CfgEntry::BOOL,   &g_tbcAutoCrouch, 0 },
-    { "tbReach",          CfgEntry::FLOAT,  &g_tbReach, 0 },
+    { "tbbReach",         CfgEntry::FLOAT,  &g_tbReach, 0 },   // new key: botox default 8, not the old engine's saved 2
+    { "tbTypes",          CfgEntry::INT,    &g_tbTypes, 0 },
+    { "tbAutoDuck",       CfgEntry::BOOL,   &g_tbAutoDuck, 0 },
+    { "tbWallstrafe",     CfgEntry::BOOL,   &g_tbWallstrafe, 0 },
     { "tbScanStep",       CfgEntry::FLOAT,  &g_tbScanStep, 0 },
-    { "tbRampNz",         CfgEntry::FLOAT,  &g_tbRampNz, 0 },
-    { "tbHugRange",       CfgEntry::FLOAT,  &g_tbHugRange, 0 },
-    { "tbSolveForward",   CfgEntry::BOOL,   &g_tbSolveForward, 0 },
     { "tbNoOffgridStick", CfgEntry::BOOL,   &g_tbNoOffgridStick, 0 },
-    { "tbParkAtEnd",      CfgEntry::BOOL,   &g_tbParkAtEnd, 0 },
-    { "tbParkTicks",      CfgEntry::INT,    &g_tbParkTicks, 0 },
-    { "tbParkSpeed",      CfgEntry::FLOAT,  &g_tbParkSpeed, 0 },
-    { "tbParkBrake",      CfgEntry::BOOL,   &g_tbParkBrake, 0 },
-    { "tbParkLead",       CfgEntry::FLOAT,  &g_tbParkLead, 0 },
-    { "tbPredict",        CfgEntry::BOOL,   &g_tbPredict, 0 },
-    { "tbPredictTicks",   CfgEntry::INT,    &g_tbPredictTicks, 0 },
-    { "tbPredictReach",   CfgEntry::FLOAT,  &g_tbPredictReach, 0 },
     { "wallClimb",        CfgEntry::BOOL,   &g_wallClimb, 0 },
     { "wallClimbKey",     CfgEntry::INT,    &g_wallClimbKey, 0 },
     { "wallClimbMode",    CfgEntry::INT,    &g_wallClimbMode, 0 },
@@ -1300,24 +1292,9 @@ void LoadConfig(const char* path, bool visuals)
 
     struct FloatClamp { float* p; float lo, hi; const char* name; const char* whyLo; const char* whyHi; };
     static const FloatClamp kFloatClamps[] = {
-        // tbHugRange replaced tbEngageDist as the one TB knob whose zero disables the
-        // hold -- the creep is what keeps a ride alive between pins.
-        { &g_tbHugRange,   0.05f, kNoHi,  "tbHugRange",   "the creep hold stops working", nullptr },
-        { &g_tbReach,      1.f,   kNoHi,  "tbReach",      nullptr, nullptr },
+        { &g_tbReach,      0.f,   48.f,   "tbbReach",     nullptr, nullptr },   // botox clamps 0-48 in the feature too
         { &g_rcPathThick,  1.f,   8.f,    "rcPathThick",  nullptr, nullptr },
         { &g_tbScanStep,   1.f,   kNoHi,  "tbScanStep",   nullptr, nullptr },
-        // the live scan's own max_normal_z is 0.35, so a saved 0.35 makes the hands-off
-        // gate reject NOTHING and TB glues itself to every ramp and displacement it can see.
-        // 0.25 is the loosest value that still refuses something the scan accepts.
-        { &g_tbRampNz,     kNoLo, 0.25f,  "tbRampNz",     nullptr, "the ramp gate becomes a no-op" },
-        // a park cap under the wallbug's own xy<1 gate disables the park outright.
-        { &g_tbParkSpeed,  5.f,   250.f,  "tbParkSpeed",  nullptr, nullptr },
-        // 0 lead is legal (brake at the exact solved distance); the ceiling stops a
-        // garbage cfg braking the moment a wall is seen. Both ends still park.
-        { &g_tbParkLead,   0.f,   128.f,  "tbParkLead",   nullptr, nullptr },
-        // reach 1 = the hull's own width, i.e. the live scan again. The point of the
-        // predicted scan is a face the flight passes BESIDE, so 1 is the useful minimum.
-        { &g_tbPredictReach, 1.f, 96.f,   "tbPredictReach", nullptr, nullptr },
         // botox air_stuck: the scan reach is clamped 0-32 in the feature too; the clock is a
         // share of one tick, 90 is where botox's own c_sim_budget clamps
         { &g_asExtraReach, 0.f,   32.f,   "asExtraReach", nullptr, nullptr },
@@ -1388,14 +1365,8 @@ void LoadConfig(const char* path, bool visuals)
 
     struct IntClamp { int* p; int lo, hi; const char* name; const char* whyLo; const char* whyHi; };
     static const IntClamp kIntClamps[] = {
-        // 0 means "hold the park forever" on purpose, so only a negative is nonsense.
-        // 256 stops a garbage cfg gluing the player to a wall for four seconds.
-        { &g_tbParkTicks,        0,  256, "tbParkTicks",        nullptr, nullptr },
         // combo index: off / keys / always
         { &g_psWallStrafe,       0,  2,   "psWallStrafe",       nullptr, nullptr },
-        // 8 ticks of flight (0.12s) is short but still predicts; the ceiling is the
-        // traced-path array.
-        { &g_tbPredictTicks,     8,  128, "tbPredictTicks",     nullptr, nullptr },
         // the EB search array is 132 entries (2.0s at TF2's 66 tick, where the old
         // 128 was 2.0s at CSGO's 64). Above it the search clamps silently and the menu lies.
         // 0 any / 1 ducked / 2 standing. Anything else is a filter that matches no run
