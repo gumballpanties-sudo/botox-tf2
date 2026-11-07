@@ -3,6 +3,7 @@
 #include "../hacks/visuals/visuals.h"
 #include "../hacks/hud/watermark.h"
 #include "../hacks/misc/boot_screen.h"
+#include "../hacks/misc/minesweeper.h"
 #include "../dependencies/fonts/icon_font.h"   // botox icon_font_compressed_data (cog glyph)
 #include "../hacks/hud/mediaplayer.h"
 #include "../hacks/hud/avatar_cache.h"   // steam avatar textures
@@ -1283,6 +1284,7 @@ static void SplitDrawData()
     ImGuiContext& g = *ImGui::GetCurrentContext();
     ImGuiWindow* menuRoot = ImGui::FindWindowByName("botox");
     ImGuiWindow* psRoot   = ImGui::FindWindowByName("ps point");
+    ImGuiWindow* msRoot   = ImGui::FindWindowByName(Minesweeper_WindowName());   // own window, fades with the menu
 
     for (int i = 0; i < dd->CmdListsCount; ++i)
     {
@@ -1302,7 +1304,7 @@ static void SplitDrawData()
             ImGuiWindow* w = g.Windows[wi];
             if (w->DrawList != dl) continue;
             for (ImGuiWindow* p = w; p; p = p->ParentWindowInBeginStack)
-                if (p == menuRoot || p == psRoot) { menu = true; fade = (p == menuRoot); break; }
+                if (p == menuRoot || p == psRoot || p == msRoot) { menu = true; fade = (p != psRoot); break; }
             break;
         }
 
@@ -1601,6 +1603,15 @@ static void BuildFontAtlas()
     orElse(g_fontMenuTahoma9, g_fontReg);
     g_fontMenuTahomaBd9 = sys("tahomabd.ttf", 9.f, flagged(ImGuiFreeTypeBuilderFlags_Monochrome | ImGuiFreeTypeBuilderFlags_MonoHinting | ImGuiFreeTypeBuilderFlags_Bitmap), cyr);
     orElse(g_fontMenuTahomaBd9, g_fontBold);
+
+    // fpsoverlay minesweeper cell numbers: tahoma bold 19, digits 1-8 only
+    {
+        static const ImWchar msRanges[] = { '1', '8', 0 };
+        ImFontConfig c = { };
+        c.PixelSnapH = true;
+        g_fontMs19 = sys("tahomabd.ttf", 19.f, c, msRanges);
+        orElse(g_fontMs19, g_fontBold);
+    }
 
     g_fontLobotomy13     = donor(sf_pro_display_semibold, sizeof(sf_pro_display_semibold), 13.f, ImGuiFreeTypeBuilderFlags_Bitmap);
     g_fontLobotomyBold13 = donor(sf_pro_display_bold, sizeof(sf_pro_display_bold), 13.f, ImGuiFreeTypeBuilderFlags_Bitmap);

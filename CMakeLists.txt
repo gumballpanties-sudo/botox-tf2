@@ -50,6 +50,7 @@ add_library(botox SHARED
     src/hacks/hud/points.cpp
     src/hacks/hud/spectator_list.cpp
     src/hacks/misc/discord_ex.cpp
+    src/hacks/misc/minesweeper.cpp
     src/hacks/misc/game_extras.cpp
     src/hacks/misc/names.cpp
     src/hacks/menu/debugmenu.cpp
@@ -192,6 +193,11 @@ set_target_properties(botox PROPERTIES
 )
 
 set(CMAKE_GENERATOR_PLATFORM x64 CACHE STRING "" FORCE)
+
+# Gate test for minesweeper rules (src/hacks/misc/minesweeper.h, same file as botox csgo): presets + custom
+# board mine counts, safe first click, flood fill, chord, win/lose, clamps.
+# Build + run: cmake --build build --config Release --target minesweeper_test && build\Release\minesweeper_test.exe
+add_executable(minesweeper_test tests/minesweeper_test.cpp)
 
 # Gate test for flip world's engine-free math + cl_flipviewmodels hold (header-only, no game).
 # Build + run: cmake --build build --config Release --target flipworld_test && build\Release\flipworld_test.exe

@@ -1069,12 +1069,12 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	// tick_count is moved back by that many ticks. Stats and the miss line stay on
 	// the default tick so they read the same as bs17's.
 	const float flTRewind0 = m_flTRewind;
-	// Knife backtrack only with its own toggle on; global backtrack alone never turns it on, it
-	// only caps it by its time limit when both are on.
-	int nBack = Vars::Aimbot::Melee::BackstabBacktrack.Value
+	// Knife backtrack needs global backtrack AND its own toggle: global off = legit, no rewind
+	// anywhere. Global caps it by its time limit unless "ignore melee".
+	int nBack = F::Backtrack.Enabled() && Vars::Aimbot::Melee::BackstabBacktrack.Value
 		? BsMath::RewindBackTicks(m_flTDue, flTRewind0, BacktrackCorrect(), TICK_INTERVAL)
 		: 0;
-	if (nBack && F::Backtrack.Enabled() && !Vars::Aimbot::Backtrack::IgnoreMelee.Value)
+	if (nBack && !Vars::Aimbot::Backtrack::IgnoreMelee.Value)
 		nBack = std::min(nBack, TIME_TO_TICKS(F::Backtrack.TimeLimit()));
 
 	// bs19: every tick is judged and the BEST shot is taken, not the first. bs18's first-fire picked
@@ -1327,7 +1327,8 @@ void CAimbotMelee::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd
 			{
 				// Only on the tick the swing actually fires -- see aim_hitscan.cpp's Run() for
 				// the same write and why (player_lagcompensation.cpp:402).
-				if (tTarget.m_bBacktrack && tTarget.m_pRecord)
+				// backtrack off = tick_count never touched (swing-pred records included)
+				if (F::Backtrack.Enabled() && tTarget.m_bBacktrack && tTarget.m_pRecord)
 					pCmd->tick_count = TIME_TO_TICKS(tTarget.m_pRecord->m_flSimTime + BacktrackLerp());
 				pCmd->buttons |= IN_ATTACK;
 			}

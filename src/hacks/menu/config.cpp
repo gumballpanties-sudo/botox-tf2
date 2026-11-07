@@ -111,6 +111,13 @@ static const CfgEntry kEntries[] = {
     { "discordDetails",   CfgEntry::STR,    g_discordDetails, sizeof(g_discordDetails) },
     { "discordImageKey",  CfgEntry::STR,    g_discordImageKey, sizeof(g_discordImageKey) },
 
+    { "msOpen",           CfgEntry::BOOL,   &g_msOpen, 0 },
+    { "msNight",          CfgEntry::BOOL,   &g_msNight, 0 },
+    { "msDiff",           CfgEntry::INT,    &g_msDiff, 0 },
+    { "msWidth",          CfgEntry::INT,    &g_msWidth, 0 },
+    { "msHeight",         CfgEntry::INT,    &g_msHeight, 0 },
+    { "msMines",          CfgEntry::INT,    &g_msMines, 0 },
+
     { "debugMenuEnable",  CfgEntry::BOOL,   &g_debugMenuEnable, 0 },
     { "consoleColor",     CfgEntry::FLOAT4, g_consoleColor, 0 },
 

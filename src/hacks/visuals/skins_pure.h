@@ -91,6 +91,119 @@ inline int SkinPure_SheenIdx(const SkinCfg& c)
     return c.ksCustomColor ? 1 : 0;
 }
 
+// Quality of the backpack copy (econ_item_constants.h: 5 unusual, 6 unique, 11 strange, 15
+// decorated weapon). TF2's own rules: every australium is strange, a stat clock makes a strange,
+// unusual outranks both (the name then reads "Strange Unusual", econ_item_description.cpp:809),
+// a painted weapon with none of those is a Decorated Weapon.
+inline int SkinPure_InvQuality(const SkinCfg& c)
+{
+    if (c.unusual >= 0)                          return 5;
+    if (c.statClock || c.australium)             return 11;
+    if (c.paintKitId > 0 || c.weaponSkinDef > 0) return 15;
+    return 6;
+}
+
+// Quality a REAL item shows once our config is laid over it: it keeps its own (a strange stays
+// strange, a genuine stays genuine) unless ours outranks a plain one. Unusual over a strange
+// with kills reads "Strange Unusual".
+inline int SkinPure_MergeQuality(int real, int ours)
+{
+    if (ours == 5) return 5;
+    if (ours == 11 && (real == 6 || real == 15)) return 11;
+    if (ours == 15 && real == 6) return 15;
+    return real;
+}
+
+// ---- patching a real item's attribute rows -------------------------------------------------
+// CEconItemCustomData::m_vecAttributes rows: 16 bytes, def u16 @0, value @8 (float or int bits
+// for every def we write; pointer-valued rows are the item's own and are never touched).
+struct AttrRows { uint8_t* rows; int* count; int cap; };
+inline int      Rows_Find(const AttrRows& a, uint16_t def)
+{
+    for (int i = 0; i < *a.count; ++i) if (*reinterpret_cast<uint16_t*>(a.rows + i * 16) == def) return i;
+    return -1;
+}
+inline uint32_t Rows_Get(const AttrRows& a, int i)             { return *reinterpret_cast<uint32_t*>(a.rows + i * 16 + 8); }
+inline void     Rows_Set(const AttrRows& a, int i, uint32_t v) { *reinterpret_cast<uint32_t*>(a.rows + i * 16 + 8) = v; }
+
+// One row we own or overrode. had = the item had this def before us (saved = its value);
+// wrote = what we last put there. A value that is no longer `wrote` was written by the GC
+// (CEconItem::operator= overwrites per def), and the GC's value wins from then on.
+struct PatchRow   { uint16_t def; bool had; uint32_t saved, wrote; };
+struct PatchState { PatchRow r[32]; int n = 0; };
+
+// Undo one row. Returns true if the rows changed.
+inline bool SkinPure_PatchUndoRow(const AttrRows& a, const PatchRow& t)
+{
+    const int i = Rows_Find(a, t.def);
+    if (i < 0 || Rows_Get(a, i) != t.wrote) return false;   // gone, or the GC's now: leave it
+    if (t.had) { Rows_Set(a, i, t.saved); return t.saved != t.wrote; }
+    memmove(a.rows + i * 16, a.rows + (i + 1) * 16, (size_t)(*a.count - i - 1) * 16);
+    --*a.count;
+    return true;
+}
+
+// Rows the item still lacks out of `want` (what Apply would append).
+inline int SkinPure_PatchNeed(const AttrRows& a, const uint16_t* defs, int nWant)
+{
+    int need = 0;
+    for (int k = 0; k < nWant; ++k) if (Rows_Find(a, defs[k]) < 0) ++need;
+    return need;
+}
+
+// Lay `want` over the item's rows: overwrite or append, undo rows we no longer want. The caller
+// guarantees room (cap >= count + SkinPure_PatchNeed). Returns rows changed.
+inline int SkinPure_PatchApply(const AttrRows& a, PatchState& st, const uint16_t* defs, const uint32_t* vals, int nWant)
+{
+    int changed = 0;
+    for (int j = 0; j < st.n; ) {   // dropped from the config: give the row back
+        bool keep = false;
+        for (int k = 0; k < nWant && !keep; ++k) keep = (defs[k] == st.r[j].def);
+        if (keep) { ++j; continue; }
+        changed += SkinPure_PatchUndoRow(a, st.r[j]) ? 1 : 0;
+        st.r[j] = st.r[--st.n];
+    }
+    for (int k = 0; k < nWant; ++k) {
+        PatchRow* t = nullptr;
+        for (int j = 0; j < st.n; ++j) if (st.r[j].def == defs[k]) t = &st.r[j];
+        int i = Rows_Find(a, defs[k]);
+        if (!t) {
+            if (st.n >= 32) continue;
+            t = &st.r[st.n++];
+            *t = { defs[k], i >= 0, i >= 0 ? Rows_Get(a, i) : 0u, 0u };
+        } else if (i >= 0 && Rows_Get(a, i) != t->wrote) {
+            t->had = true; t->saved = Rows_Get(a, i);         // the GC wrote it since
+        }
+        if (i < 0) {
+            if (*a.count >= a.cap) continue;
+            i = (*a.count)++;
+            memset(a.rows + i * 16, 0, 16);
+            *reinterpret_cast<uint16_t*>(a.rows + i * 16) = defs[k];
+            t->had = false;   // row gone (data rebuilt): it is ours again
+            ++changed;
+        } else if (Rows_Get(a, i) != vals[k]) ++changed;
+        Rows_Set(a, i, vals[k]);
+        t->wrote = vals[k];
+    }
+    return changed;
+}
+
+// Undo every row. Returns rows changed.
+inline int SkinPure_PatchRestore(const AttrRows& a, PatchState& st)
+{
+    int changed = 0;
+    for (int j = 0; j < st.n; ++j) changed += SkinPure_PatchUndoRow(a, st.r[j]) ? 1 : 0;
+    st.n = 0;
+    return changed;
+}
+
+// Every field equal, live ones included (the backpack copy's name and description show them all).
+inline bool SkinPure_Same(const SkinCfg& a, const SkinCfg& b)
+{
+    char x[1024], y[1024];
+    return SkinPure_Format(x, sizeof(x), 1, a) && SkinPure_Format(y, sizeof(y), 1, b) && strcmp(x, y) == 0;
+}
+
 inline unsigned SkinPure_Classify(const SkinCfg& was, const SkinCfg& now)
 {
     if (was.enabled != now.enabled) return SC_Rebuild;

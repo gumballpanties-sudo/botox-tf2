@@ -210,6 +210,7 @@ static bool IsAimVar(const std::string& sName)
 		"Vars::CritHack::",
 		"Vars::Misc::Game::CleanPOVDemos",
 		"Vars::Misc::Game::AntiCheatCompatibility",
+		"Vars::Visuals::Removals::Scope",
 	};
 	for (auto sPrefix : kPrefixes)
 	{

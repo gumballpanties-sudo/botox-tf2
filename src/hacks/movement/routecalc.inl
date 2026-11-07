@@ -540,6 +540,49 @@ static void RcSolveCancel(const char* why)
 // bPixel: the pixel calculator -- route = the one pixel marker, start = where you are.
 // nHops: pixel calculator only, ground markers at your own floor in front of it (see above)
 // nBld: pixel calculator only, k_pcBld index of the building top the start is lifted onto
+// TEXTUREBUG MARKER INPUTS (botox pixel_finder.cpp pf_tb_make). The finder's seam ring sits at
+// the first z on the upper face, bisected to 1/32 -- B itself on the hammer grid, so a ring that
+// close to a whole unit IS that unit (the ride phase is h mod 0.18, a 1/32 error is a sixth of it).
+// Then the two numbers the ulp band (rs::TbLo) reads off the wall:
+//   tbUlp  one float step of the hull origin on the wall's axis (flush on the face, 24u out)
+//   tbTall T - B of the brush over the seam: a line 0.5u inside the face leaves it at T
+// A wall the probe cannot find keeps botox's fallback: the bigger of |x| / |y|, which never gives
+// a smaller ulp than the real one, and tall 0 (unread).
+static void RcTbProbe(void* pLocal, const Vec3& at, float scale, rs::Point& p)
+{
+    const float whole = std::round(p.z);
+    if (std::fabs(p.z - whole) <= rs::kDistEps + 1e-4f) p.z = whole;
+
+    auto ulpOf = [](float c) { int ex = 0; std::frexp(std::fabs(c), &ex); return c != 0.f ? std::ldexp(1.f, ex - 24) : 0.f; };
+    p.tbUlp = ulpOf(std::max(std::fabs(at.x), std::fabs(at.y)));
+    p.tbTall = 0.f;
+
+    TraceFilterWorldProps fil; fil.Setup(pLocal);
+    static const float k_dirs[4][2] = { { 1.f, 0.f }, { -1.f, 0.f }, { 0.f, 1.f }, { 0.f, -1.f } };
+    for (const auto& d : k_dirs)
+    {
+        // a 8u line across the ring, half a unit over B, hits the upper brush's face from outside
+        const float z = p.z + 0.5f;
+        GameTrace_t tr{};
+        TraceLine(Vec3(at.x + d[0] * 4.f, at.y + d[1] * 4.f, z), Vec3(at.x - d[0] * 4.f, at.y - d[1] * 4.f, z),
+                  MASK_PLAYERSOLID, &fil, &tr);
+        if (tr.startsolid || tr.fraction >= 1.f || tr.plane.normal.x * d[0] + tr.plane.normal.y * d[1] < 0.9999f)
+            continue;
+        const float face = d[0] != 0.f ? tr.endpos.x : tr.endpos.y;
+        p.tbUlp = ulpOf(face + (d[0] + d[1]) * 24.f * scale);
+        const float qx = tr.endpos.x - d[0] * 0.5f, qy = tr.endpos.y - d[1] * 0.5f;
+        const float lo = p.z + 0.05f, hi = p.z + 256.f;
+        GameTrace_t up{};
+        TraceLine(Vec3(qx, qy, lo), Vec3(qx, qy, hi), MASK_PLAYERSOLID, &fil, &up);
+        if (up.startsolid)
+        {
+            const bool left = !up.allsolid && up.fractionleftsolid > 0.f && up.fractionleftsolid < 1.f;
+            p.tbTall = (left ? lo + up.fractionleftsolid * (hi - lo) : hi) - rs::kDistEps - p.z;
+        }
+        return;
+    }
+}
+
 static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int nHops = 0, int nBld = 0)
 {
     s_rcMs = 0.0; s_rcDuckLeft = 0;
@@ -746,6 +789,7 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         p.allowDuck = pts[i].duck;
         p.player = pts[i].player;
         p.building = pts[i].building;
+        if (p.type == rs::PT_TEXTUREBUG) RcTbProbe(pLocal, pts[i].pos, params.scale, p);
         route.push_back(p);
         s_rcMarkerNo.push_back(markerNo[i]);
         s_rcMarkerType.push_back(pts[i].type);
@@ -787,6 +831,11 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         DebugLog("RC: marker %d  %-11s z %.4f  moves 0x%X  stand %d duck %d%s", s_rcMarkerNo[i],
                  rs::PointTypeName(route[i].type), route[i].z, route[i].moves, (int)route[i].allowStand,
                  (int)route[i].allowDuck, route[i].player ? "  (player head)" : route[i].building ? "  (building)" : "");
+    for (size_t i = 0; i < route.size(); i++)
+        if (route[i].type == rs::PT_TEXTUREBUG)
+            DebugLog("RC: marker %d  tb B %.4f  ulp %.3g  brush %.3f tall%s  band floor at D=82: %.4f", s_rcMarkerNo[i],
+                     route[i].z, route[i].tbUlp, route[i].tbTall, route[i].tbTall > 0.f ? "" : " (unread)",
+                     rs::TbLo(route[i].z, route[i].tbTall, route[i].tbUlp, route[i].z - 82.f * params.scale));
     if (s_rcCheck.ran)
         DebugLog("RC: engine check -- %s", s_rcCheck.line.c_str());
     else
@@ -930,16 +979,14 @@ static void RcSolveFinish(RcJob& job)
                 snprintf(b, sizeof(b), "nothing gets %s it: best was %.1fu short",
                          (type == rs::PT_HEADBANG || type == rs::PT_TEXTUREBUG) ? "the head to" : "above",
                          -r.highest[dp]);
-            // A TEXTUREBUG HAS NO MISS DISTANCE TO PRINT, so "none arrive the way this marker
-            // needs" said nothing at all about the one thing that decides it. The catch is an
-            // AIRBORNE tick (rising or falling -- rs::Arrive PT_TEXTUREBUG asks for neither) with
-            // the seam STRICTLY between the feet and the head and no stance change on that tick.
-            // So the hull got past the seam without a tick ever straddling it, or it ducked or
-            // unducked on the tick that would have
+            // a texturebug is the HEAD crossing B falling (rs::Arrive PT_TEXTUREBUG). closest =
+            // how far under the ulp band the best crossing's drop was (rs::TbLo)
+            else if (type == rs::PT_TEXTUREBUG && r.closest[dp] < 1e8f)
+                snprintf(b, sizeof(b), "the head crosses it falling, but %.3fu per tick too slow to pin - "
+                                       "come down onto it from higher", r.closest[dp]);
             else if (type == rs::PT_TEXTUREBUG)
-                snprintf(b, sizeof(b), "the head gets %.1fu over it, but no airborne tick had the seam "
-                                       "between your feet and your head (a duck or unduck on that "
-                                       "tick cancels it too) - come past it slower",
+                snprintf(b, sizeof(b), "the head gets %.1fu over it, but never crosses it falling (a duck or "
+                                       "unduck on that tick cancels it, so does a refused stance)",
                          r.highest[dp]);
             // a lip grounds only a hull that started rs::kPjCreepTicks ticks over it: the top of
             // an arc that only grazes it is not enough to creep in

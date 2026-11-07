@@ -36,6 +36,17 @@ void Skins_SaveCfg(FILE* f);   // "skin_<def>_<field>=..." lines
 bool Skins_LoadCfg(const char* key, const char* val);  // true = key consumed
 // The tab body lives in menu.cpp with every other tab -- it needs that file's widgets.
 
+// Backpack + loadout copy of every enabled weapon (hats_inv.cpp, next to the hats' own copies).
+// The copy is built from the same attribute list the weapon in hand gets, so its name, quality
+// and description match what you hold: "Strange Professional Killstreak Australium Rocket Launcher".
+extern bool g_skinsBackpack;
+struct SkinAttr { uint16_t def; float value; };   // value = float, or int bits for int attrs
+constexpr int kSkinAttrCap = 32;
+int  Skins_BuildAttrs(const SkinCfg& c, SkinAttr* out, int cap, bool inv);
+int  Skins_ConfigKey(int def);                    // any def -> config key, 0 = none
+int  Skins_InvDef(int key, const SkinCfg& c);     // def the backpack copy is
+void SkinsInv_Tick(bool want);                    // FSN stage 5; false = take every copy out
+
 // Shared with the hat changer (hats.cpp) -- see the bottom of skins.cpp.
 int         Skins_ModelIndex(const char* path);          // precached or client-side dynamic, 0 = none
 bool        Skins_SetAttribute(void* pAttrList, unsigned int index, float value);

@@ -224,6 +224,7 @@ struct FbTimer
 static FbTimer s_timer[2][4];       // [world, gun][ring]
 static int     s_timerIdx[2] = {};
 static double  s_timerMs[2]  = {};
+static double  s_timerMax[2] = {};   // worst run in the window: a flick is the spike, the average hides it
 static int     s_timerN[2]   = {};
 static bool    s_timerDead   = false;   // the card has no timestamp queries
 
@@ -266,7 +267,9 @@ static FbTimer* FbTimerBegin(IDirect3DDevice9* dev, int run)
             t.end->GetData(&b, sizeof(b), 0) == S_OK &&
             t.freq->GetData(&f, sizeof(f), 0) == S_OK &&
             !disjoint && f > 0 && b > a) {
-            s_timerMs[run] += (double)(b - a) * 1000.0 / (double)f;
+            const double ms = (double)(b - a) * 1000.0 / (double)f;
+            s_timerMs[run] += ms;
+            if (ms > s_timerMax[run]) s_timerMax[run] = ms;
             ++s_timerN[run];
         }
         t.pending = false;
@@ -278,11 +281,13 @@ static FbTimer* FbTimerBegin(IDirect3DDevice9* dev, int run)
         if (nowMs - s_last > 2000) {
             s_last = nowMs;
             if (s_timerN[0] || s_timerN[1])
-                DebugLog("^FX: frame blending gpu -- world %.3fms gun %.3fms a frame (%d / %d runs; "
-                         "the gun's depth resolve is screenfx's and not in it)",
-                         s_timerN[0] ? s_timerMs[0] / s_timerN[0] : 0.0,
-                         s_timerN[1] ? s_timerMs[1] / s_timerN[1] : 0.0, s_timerN[0], s_timerN[1]);
+                DebugLog("^FX: frame blending gpu -- world %.3fms (max %.3f) gun %.3fms (max %.3f) a frame "
+                         "(%d / %d runs; the gun's depth resolve is screenfx's and not in it)",
+                         s_timerN[0] ? s_timerMs[0] / s_timerN[0] : 0.0, s_timerMax[0],
+                         s_timerN[1] ? s_timerMs[1] / s_timerN[1] : 0.0, s_timerMax[1],
+                         s_timerN[0], s_timerN[1]);
             s_timerMs[0] = s_timerMs[1] = 0.0;
+            s_timerMax[0] = s_timerMax[1] = 0.0;
             s_timerN[0]  = s_timerN[1]  = 0;
         }
     }

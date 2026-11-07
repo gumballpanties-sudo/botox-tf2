@@ -18,6 +18,7 @@
 #include "../../dependencies/data/skindata.h"
 #include "../../dependencies/imgui/imgui_internal.h"
 #include "menu_chrome.h"  // the panels, the group box flow and every metric they use
+#include "../misc/minesweeper.h"
 
 #include <cmath>   // isfinite -- SliderF refuses a NaN/inf value as a range bound
 #include <cctype>  // tolower -- the searchable warpaint/particle combos
@@ -2710,6 +2711,22 @@ static void Page_MiscMain()
                                 sizeof(g_discordImageKey), true);
             }, ImVec2(220.f, -1.f));
 
+        ImGui::Checkbox("minesweeper", &g_msOpen);
+        if (g_msOpen)
+            ImGui::OptionPopup("minesweeper settings", []() {
+                ImGui::Checkbox("night theme##minesweeper", &g_msNight);
+                if (g_msDiff < 0 || g_msDiff > MsGame::kCustom) g_msDiff = 1;
+                ImGui::Combo("board size##minesweeper", &g_msDiff, "beginner 9x9\0intermediate 16x16\0expert 30x16\0custom\0");
+                if (g_msDiff == MsGame::kCustom)
+                {
+                    ImGui::SliderInt("width##minesweeper", &g_msWidth, MsGame::kMinSide, MsGame::kMaxW);
+                    ImGui::SliderInt("height##minesweeper", &g_msHeight, MsGame::kMinSide, MsGame::kMaxH);
+                    ImGui::SliderInt("mines##minesweeper", &g_msMines, 1,
+                                     MsGame::MaxMines(ImClamp(g_msWidth, MsGame::kMinSide, MsGame::kMaxW),
+                                                      ImClamp(g_msHeight, MsGame::kMinSide, MsGame::kMaxH)));
+                }
+            }, ImVec2(220.f, -1.f));
+
         ImGui::Checkbox("debugger menu", &g_debugMenuEnable);
 
         // ---- TF2-only rows
@@ -3002,6 +3019,15 @@ static void Tab_Skins()
         MenuTooltip("client-side only. rewrites the item definition and the runtime\n"
                     "attributes of the weapons in your own loadout, which is what your\n"
                     "own renderer reads. nobody else sees any of it.");
+    ImGui::Checkbox("show in backpack##skbp", &g_skinsBackpack);
+    if (ImGui::IsItemHovered())
+        MenuTooltip("every enabled weapon also shows up in tf2's backpack and loadout\n"
+                    "screen with its real name: strange (stat clock / australium),\n"
+                    "killstreak tier, australium, festivized, unusual, war paint.\n"
+                    "only the weapon currently equipped in each slot changes: an owned\n"
+                    "item there gets the settings (keeps its name tag, kills, quality),\n"
+                    "a stock weapon there gets a copy in its place. unequipped items\n"
+                    "are left alone. client-side only, the gc never sees it.");
 
     if (ImGui::BeginCombo("weapon##skwpn", k_wpnList[s_wpnSel].name))
     {
@@ -4133,4 +4159,8 @@ void RenderMenu()
     ImGui::Unindent(mf::kTabW + st.ItemSpacing.x);
 
     ImGui::End();
+
+    // own window, still in the style scope: menu colours + font, fades with the menu (render.cpp SplitDrawData)
+    const MsSettings ms = { &g_msOpen, &g_msNight, &g_msDiff, &g_msWidth, &g_msHeight, &g_msMines };
+    Minesweeper_Draw(ms, BoldFont(), g_fontMs19, s_animProgress >= 0.999f, ImVec2(wp.x + wz.x + 10.f, wp.y));
 }

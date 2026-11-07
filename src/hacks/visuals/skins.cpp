@@ -16,6 +16,7 @@
 
 // ==== state =====================================================================================
 bool g_enableSkins     = false;
+bool g_skinsBackpack   = true;    // backpack + loadout copy of each enabled weapon (hats_inv.cpp)
 bool g_skinNeedsUpdate = false;
 std::unordered_map<int, SkinCfg> g_skinCfgs;
 // True once Skins_Install has pre-created every key and the FSN hook can read the map from the
@@ -1140,92 +1141,112 @@ static const int k_ksEffectIds[] = { 0, 2002, 2003, 2004, 2005, 2006, 2007, 2008
 // that no CPaintKitDefinition answers for (the real ones stop around 400), so nothing paints.
 static constexpr int k_noPaintKit = 30000;
 
+// The attribute set one config stands for. The weapon in hand (Skin_ApplyCfg) and its backpack
+// copy (hats_inv.cpp) both take it from here, so the item the loadout screen names and the
+// weapon you hold can never disagree. A def written twice keeps its slot, last value wins.
+// inv = for the backpack CEconItem: that copy keeps its own def, so the stat clock's carrier
+// trick is skipped, and an australium is strange the way every real one is.
+int Skins_BuildAttrs(const SkinCfg& c, SkinAttr* out, int cap, bool inv)
+{
+    int n = 0;
+    auto put = [&](uint16_t def, float v) {
+        for (int i = 0; i < n; ++i) if (out[i].def == def) { out[i].value = v; return; }
+        if (n < cap) out[n++] = { def, v };
+    };
+
+    // -- warpaint ------------------------------------------------------------------------
+    // 725 wear, 731 allow_inspect (the paintkit only renders on an inspectable item),
+    // 2022 loot_rarity, 866/867 the two halves of the 64-bit pattern seed.
+    if (c.weaponSkinDef > 0 || c.paintKitId > 0) {
+        if (c.weaponSkinDef <= 0)
+            put(834, AsFloatBits(c.paintKitId));
+        put(725,  c.wear);
+        put(731,  1.0f);
+        put(2022, 6.0f);
+        put(866, AsFloatBits((int)(uint32_t)(c.pattern & 0xFFFFFFFFull)));
+        put(867, AsFloatBits((int)(uint32_t)(c.pattern >> 32)));
+    }
+
+    // -- killstreak ----------------------------------------------------------------------
+    if (c.ksTier > 0) {
+        put(2025, (float)c.ksTier);
+        // KsSheenIndexFor, not c.ksSheen: a custom color has to live in a sheen row, so
+        // "custom color with no sheen picked" still writes one.
+        const int sheenIdx = KsSheenIndexFor(c);
+        if (sheenIdx > 0)
+            put(2014, (float)sheenIdx);
+        if (c.ksTier == 3 && c.ksEffect > 0) {
+            const int ne = (int)(sizeof(k_ksEffectIds) / sizeof(k_ksEffectIds[0]));
+            const int effectId = (c.ksEffect < ne) ? k_ksEffectIds[c.ksEffect] : 0;
+            if (effectId > 0) put(2013, (float)effectId);
+        }
+    }
+
+    // -- unusual particle ----------------------------------------------------------------
+    // 134 is the animated attach point, 370 the static one; TF2's own unusual weapons
+    // carry both. -1 means the user picked nothing (0 is the real "Invalid Particle" id).
+    if (c.unusual >= 0) {
+        put(134, (float)c.unusual);
+        put(370, (float)c.unusual);
+    }
+
+    // -- australium ----------------------------------------------------------------------
+    if (c.australium) {
+        put(2027, 1.0f);   // is_australium_item
+        put(542,  1.0f);   // item_style_override -> the gold style
+        put(2022, 6.0f);
+    }
+
+    if (c.festivized) put(2053, 1.0f);
+
+    // -- stat clock ----------------------------------------------------------------------
+    // Two gates decide whether the clock entity is ever built (CTFWeaponBase::AddStatTrakModel,
+    // tf_weaponbase.cpp:6730): a kill-eater score attribute (214 below) and GetStattrak(),
+    // which needs a paint kit id AND the weapon_uses_stattrak_module string. The string is a
+    // static attr on the paintkit_base prefab, so the weapon has to be wearing a 15xxx
+    // warpaint def -- ResolveWeaponTarget puts it in one when no skin was picked. Here the
+    // paint that def would otherwise apply is cancelled: 834 is set to an id no paintkit
+    // definition answers for, so the composite never builds and the weapon looks stock.
+    // Backpack copy: 214 is also what puts the strange rank in the name
+    // (CStrangeRankLocalizationGenerator, econ_item_description.cpp:494).
+    if (c.statClock || (inv && c.australium)) {
+        put(214, AsFloatBits(c.statKills));  // kill_eater
+        put(292, 0.0f);                      // score type: kills
+        if (!inv && c.statClock && c.weaponSkinDef <= 0 && c.paintKitId <= 0) {
+            put(834, AsFloatBits(k_noPaintKit));
+            put(725, 0.2f);   // wear; GetPaintKitWear must answer
+        }
+    }
+
+    if (c.spellFlags & kCfgSpell_Exorcism) put(1009, 1.0f);
+    if (c.spellFlags & kCfgSpell_Pumpkin)  put(1007, 1.0f);
+    if (c.spellFlags & kCfgSpell_Fire)     put(1008, 1.0f);
+
+    // -- reskin's own item properties ----------------------------------------------------
+    // Taken from items_game.txt, not hand-listed: attr 150 set_turn_to_gold is what a
+    // Saxxy / Golden Wrench / Gold Frying Pan carries, and attr 542 item_style_override
+    // is how a multi-style reskin (Black Rose black variant) selects its skin pair.
+    // Australium already owns 542, so it wins when both are set.
+    if (c.reskinDef > 0 && !c.australium) {
+        if (const ReskinInfo* ri = Skin_FindReskinInfo(c.reskinDef)) {
+            if (ri->turnToGold)   put(150, 1.0f);  // set_turn_to_gold
+            if (ri->specialTaunt) put(551, 1.0f);  // special_taunt
+            if (ri->styleCount > 1 && c.reskinStyle > 0
+                && c.reskinStyle < ri->styleCount)
+                put(542, (float)c.reskinStyle);
+        }
+    }
+    return n;
+}
+
 __declspec(noinline) static void Skin_ApplyCfg(void* pWeapon, const SkinCfg& c)
 {
     CAttributeList* pList = reinterpret_cast<CAttributeList*>(
         reinterpret_cast<uintptr_t>(pWeapon) + s_offAttrList);
-
+    SkinAttr a[kSkinAttrCap];
+    const int n = Skins_BuildAttrs(c, a, kSkinAttrCap, false);
     __try {
-        // -- warpaint ------------------------------------------------------------------------
-        // 725 wear, 731 allow_inspect (the paintkit only renders on an inspectable item),
-        // 2022 loot_rarity, 866/867 the two halves of the 64-bit pattern seed.
-        if (c.weaponSkinDef > 0 || c.paintKitId > 0) {
-            if (c.weaponSkinDef <= 0)
-                EngineSetAttribute(pList, 834, AsFloatBits(c.paintKitId));
-            EngineSetAttribute(pList, 725,  c.wear);
-            EngineSetAttribute(pList, 731,  1.0f);
-            EngineSetAttribute(pList, 2022, 6.0f);
-            EngineSetAttribute(pList, 866, AsFloatBits((int)(uint32_t)(c.pattern & 0xFFFFFFFFull)));
-            EngineSetAttribute(pList, 867, AsFloatBits((int)(uint32_t)(c.pattern >> 32)));
-        }
-
-        // -- killstreak ----------------------------------------------------------------------
-        if (c.ksTier > 0) {
-            EngineSetAttribute(pList, 2025, (float)c.ksTier);
-            // KsSheenIndexFor, not c.ksSheen: a custom color has to live in a sheen row, so
-            // "custom color with no sheen picked" still writes one.
-            const int sheenIdx = KsSheenIndexFor(c);
-            if (sheenIdx > 0)
-                EngineSetAttribute(pList, 2014, (float)sheenIdx);
-            if (c.ksTier == 3 && c.ksEffect > 0) {
-                const int n = (int)(sizeof(k_ksEffectIds) / sizeof(k_ksEffectIds[0]));
-                const int effectId = (c.ksEffect < n) ? k_ksEffectIds[c.ksEffect] : 0;
-                if (effectId > 0) EngineSetAttribute(pList, 2013, (float)effectId);
-            }
-        }
-
-        // -- unusual particle ----------------------------------------------------------------
-        // 134 is the animated attach point, 370 the static one; TF2's own unusual weapons
-        // carry both. -1 means the user picked nothing (0 is the real "Invalid Particle" id).
-        if (c.unusual >= 0) {
-            EngineSetAttribute(pList, 134, (float)c.unusual);
-            EngineSetAttribute(pList, 370, (float)c.unusual);
-        }
-
-        // -- australium ----------------------------------------------------------------------
-        if (c.australium) {
-            EngineSetAttribute(pList, 2027, 1.0f);   // is_australium_item
-            EngineSetAttribute(pList, 542,  1.0f);   // item_style_override -> the gold style
-            EngineSetAttribute(pList, 2022, 6.0f);
-        }
-
-        if (c.festivized) EngineSetAttribute(pList, 2053, 1.0f);
-
-        // -- stat clock ----------------------------------------------------------------------
-        // Two gates decide whether the clock entity is ever built (CTFWeaponBase::AddStatTrakModel,
-        // tf_weaponbase.cpp:6730): a kill-eater score attribute (214 below) and GetStattrak(),
-        // which needs a paint kit id AND the weapon_uses_stattrak_module string. The string is a
-        // static attr on the paintkit_base prefab, so the weapon has to be wearing a 15xxx
-        // warpaint def -- ResolveWeaponTarget puts it in one when no skin was picked. Here the
-        // paint that def would otherwise apply is cancelled: 834 is set to an id no paintkit
-        // definition answers for, so the composite never builds and the weapon looks stock.
-        if (c.statClock) {
-            EngineSetAttribute(pList, 214, AsFloatBits(c.statKills));  // kill_eater
-            EngineSetAttribute(pList, 292, 0.0f);                      // score type: kills
-            if (c.weaponSkinDef <= 0 && c.paintKitId <= 0) {
-                EngineSetAttribute(pList, 834, AsFloatBits(k_noPaintKit));
-                EngineSetAttribute(pList, 725, 0.2f);   // wear; GetPaintKitWear must answer
-            }
-        }
-
-        if (c.spellFlags & kCfgSpell_Exorcism) EngineSetAttribute(pList, 1009, 1.0f);
-        if (c.spellFlags & kCfgSpell_Pumpkin)  EngineSetAttribute(pList, 1007, 1.0f);
-        if (c.spellFlags & kCfgSpell_Fire)     EngineSetAttribute(pList, 1008, 1.0f);
-
-        // -- reskin's own item properties ----------------------------------------------------
-        // Taken from items_game.txt, not hand-listed: attr 150 set_turn_to_gold is what a
-        // Saxxy / Golden Wrench / Gold Frying Pan carries, and attr 542 item_style_override
-        // is how a multi-style reskin (Black Rose black variant) selects its skin pair.
-        // Australium already owns 542, so it wins when both are set.
-        if (c.reskinDef > 0 && !c.australium) {
-            if (const ReskinInfo* ri = Skin_FindReskinInfo(c.reskinDef)) {
-                if (ri->turnToGold)   EngineSetAttribute(pList, 150, 1.0f);  // set_turn_to_gold
-                if (ri->specialTaunt) EngineSetAttribute(pList, 551, 1.0f);  // special_taunt
-                if (ri->styleCount > 1 && c.reskinStyle > 0
-                    && c.reskinStyle < ri->styleCount)
-                    EngineSetAttribute(pList, 542, (float)c.reskinStyle);
-            }
-        }
+        for (int i = 0; i < n; ++i) EngineSetAttribute(pList, a[i].def, a[i].value);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
@@ -1319,18 +1340,37 @@ static int BuildReverseMap(const SkinMap& m, RevEntry* out, int cap, bool* anyKs
 
 static void RebuildReverseMap() { s_revCount = BuildReverseMap(g_skinCfgs, s_rev, 64, &s_anyKillstreak); }
 
+// Any def index -> the config key that weapon reads. 0 = none (Bat is 0 but redirects to 190).
+int Skins_ConfigKey(int def)
+{
+    int key = def;
+    Skin_RedirectIndex(key);
+    if (key <= 0) return 0;
+    // A 15xxx def is a weapon-specific warpaint item; map it back to the weapon it belongs to.
+    if (key == def && def >= 15000 && def < 16000) {
+        const int redir = Skin_FindWeaponRedir(def);
+        if (redir > 0) key = redir;
+    }
+    return key;
+}
+
+// The def the backpack copy is: the one the weapon in hand turns into, except the stat clock's
+// 15xxx carrier (an implementation detail of the clock, not what the item is).
+int Skins_InvDef(int key, const SkinCfg& c)
+{
+    if (c.festive)
+        if (const int f = Skin_GetFestiveIdx(key)) return f;
+    if (c.reskinDef > 0)     return c.reskinDef;
+    if (c.weaponSkinDef > 0) return c.weaponSkinDef;
+    return key;
+}
+
 static WeaponTarget ResolveWeaponTargetIn(const SkinMap& m, const RevEntry* rev, int nRev, int origDefIdx)
 {
     WeaponTarget wt{ 0, 0, nullptr };
 
-    int configKey = origDefIdx;
-    Skin_RedirectIndex(configKey);
+    int configKey = Skins_ConfigKey(origDefIdx);
     if (configKey <= 0) return wt;
-    // A 15xxx def is a weapon-specific warpaint item; map it back to the weapon it belongs to.
-    if (configKey == origDefIdx && origDefIdx >= 15000 && origDefIdx < 16000) {
-        const int redir = Skin_FindWeaponRedir(origDefIdx);
-        if (redir > 0) configKey = redir;
-    }
 
     auto it = m.find(configKey);
     if (it == m.end() || !it->second.enabled) {
@@ -1825,6 +1865,7 @@ static void __fastcall h_FrameStageNotify(int stage)
     // Hats are built here, before the original: its OnRenderStart runs ProcessOnDataChangedEvents,
     // which is what delivers the OnDataChanged(CREATED) a new hat's PreDataUpdate queued.
     { CrashSpan _s("fsn/hats"); Hats_FrameStage(stage); }
+    if (stage == 5) { CrashSpan _s("fsn/skinsinv"); SkinsInv_Tick(!g_eject && g_enableSkins && g_skinsBackpack); }
     // Weather entity, same reason and same spot as the hats (visuals.cpp Rain_Tick).
     if (stage == 5) { CrashSpan _s("fsn/rain"); Rain_Tick(); }
 
@@ -2728,6 +2769,7 @@ void Skins_Install()
 void Skins_SaveCfg(FILE* f)
 {
     fprintf(f, "enableSkins=%d\n", g_enableSkins ? 1 : 0);
+    fprintf(f, "skinsBackpack=%d\n", g_skinsBackpack ? 1 : 0);
     char buf[1024];   // one weapon's block is ~500 bytes; same text the wire carries (skinshare_pure.h)
     for (const auto& [id, c] : g_skinCfgs)
         if (SkinPure_Format(buf, sizeof(buf), id, c)) fputs(buf, f);
@@ -2736,6 +2778,7 @@ void Skins_SaveCfg(FILE* f)
 bool Skins_LoadCfg(const char* key, const char* val)
 {
     if (strcmp(key, "enableSkins") == 0) { g_enableSkins = (atoi(val) != 0); return true; }
+    if (strcmp(key, "skinsBackpack") == 0) { g_skinsBackpack = (atoi(val) != 0); return true; }
     if (strncmp(key, "skin_", 5) != 0) return false;
 
     const char* p = key + 5;

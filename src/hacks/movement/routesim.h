@@ -498,7 +498,7 @@ inline bool JumpbugWillHit(State s, const World& w, const Params& p, bool jumpHe
 //    pixelsurf  caught on a falling tick in the window        "pixelsurf (ducked)"
 //    edgebug    fall onto the ledge, slide off                 "edgebug (stand)"
 //    headbang   head hits the ceiling on the way up            "headbang (stand)"
-//    texturebug the hull's SIDE spans a wall seam and the clip freezes z  "texturebug (ducked)"
+//    texturebug the head crosses a wall brush's bottom falling: pin, ride if in band  "texturebug (ducked)"
 //  Search = layered DAG. A node is an exact engine state at a marker; two routes that arrive in
 //  the same state share every continuation, so they merge and nothing is lost: counts add up
 //  along edges (every combination is counted) and each node keeps its K cheapest paths.
@@ -556,12 +556,29 @@ inline float AimTanTo(const V& vEye, const V& vFwd, const V& p)
 struct Point
 {
     int   type = PT_GROUND;
-    float z = 0.f;                 // floorEff (ground, edgebug), seam z (surf, texturebug), ceilEff (headbang)
+    float z = 0.f;                 // floorEff (ground, edgebug), seam z (surf), brush bottom (texturebug), ceilEff (headbang)
     unsigned moves = kMovesMarker; // ground: presses after landing on it + whether it may be jumpbugged
     bool  allowStand = true, allowDuck = true;   // arrival stance (surf, edgebug, headbang)
     bool  player = false;          // a player's head
     bool  building = false;        // a sentry / dispenser / teleporter top
+    // texturebug only (botox route_point_t tb_coord / tb_tall): z = brush bottom B.
+    // tbUlp = one float step of the hull origin on the wall's axis, tbTall = T - B of the brush
+    // over the seam (0 = unread). Together they set the ride band floor, TbLo
+    float tbUlp = 0.f, tbTall = 0.f;
 };
+
+// ---- TEXTUREBUG BAND (botox route_engine.cpp, lab edge_probe C) ----
+// The head crossing B falling pins at h = head over B at the tick's start, but only when
+// h >= lo = 1.3 ulp * D / DIST_EPSILON (D = brush top - feet, never under 0.02): the move into
+// the wall is k ulps, never v*dt. Every later fall is k * g*dt^2, so the ride phase
+// phi = h mod g*dt^2 is locked from the pin: held iff phi in [lo, g*dt^2). Out of band = the
+// first pin only, then it falls.
+constexpr float kTbUlpMargin = 1.3f;
+constexpr float kTbLoFloor   = 0.02f;
+inline float TbLo(float seam, float tall, float ulp, float feet)
+{
+    return std::max(kTbUlpMargin * ulp * (seam + tall - feet) / kDistEps, kTbLoFloor);
+}
 
 struct Start
 {
@@ -817,7 +834,6 @@ private:
         bool aboveT = false;    // feet have been over the target's floor top
         bool psDuck = false;    // PixelSurf latched through its duck pass (s_psShouldDuck)...
         int  psPinI = 0;        // ...for the pin on this cmd index
-        int  tbSeen = 0;        // texturebug: straddling ticks this leg has already offered
         int  creep = 0;         // pixeljump: ticks the feet started over the lip (- DIST_EPSILON)
         bool lipIn = false;     // ...enough of them: the hull has crept in over it, it is a floor
     };
@@ -883,7 +899,12 @@ private:
     void RecArrive(const State& arrived)
     {
         if (m_recHit || !m_recTo) return;
-        if (MakeKey(arrived) == MakeKey(*m_recTo)) { m_recHit = true; m_recLen = m_rec->size(); }
+        if (MakeKey(arrived) != MakeKey(*m_recTo)) return;
+        m_recHit = true;
+        // the line ends where the arrival HOLDS the hull: a texturebug pin is not the free-fall
+        // end of its tick (the clip kept the feet up), every other arrival is that same z
+        if (!m_rec->empty()) m_rec->back() = arrived.z;
+        m_recLen = m_rec->size();
     }
 
     void AddEdge(const Leg& L, const State& arrived, const std::string& dep, const std::string& arr,
@@ -1373,8 +1394,8 @@ private:
                 if (T.type == PT_HEADBANG) return;
                 // a standing hull still has PixelSurf's +20 duck pass
                 if (T.type == PT_SURF && s.z < T.z - 1.f - (s.fDuck ? 0.f : DuckShift(p))) return;
-                // a texturebug is caught anywhere on the hull's side, so the band only closes
-                // once the STANDING head (the tallest it could become) is under the seam
+                // a texturebug is the head crossing B, so the band only closes once the
+                // STANDING head (the tallest it could become) is under the seam
                 if (T.type == PT_TEXTUREBUG && s.z + StandH(p) < T.z - 1.f) return;
                 if (tFloor && s.z < T.z - 0.001f) return;
             }
@@ -1456,41 +1477,39 @@ private:
         }
         case PT_TEXTUREBUG:
         {
-            // THE WALL SEAM (the antoha bug). Two coplanar faces the solver clips separately: a
-            // swept hull whose SIDE spans the line touches both at once, TryPlayerMove's two-plane
-            // branch projects velocity onto the horizontal crease and zeroes vz, FinishGravity puts
-            // back one half step. The move never moved the origin, so z is exactly where the tick
-            // started -- texturebug.inl's pin test is that same "vz == TargetPredictZVel()" and its
-            // log rows read pz == oz. Vertically this is a pixelsurf catch with a hull-tall window
-            // instead of a 0.04u one; the horizontal push that lands it is the player's, like the
-            // rest of the horizontal half, and so is WHERE in the band it is caught -- so every
-            // straddling tick is an arrival and the arc flies on past it instead of stopping.
-            // The window and the give-up below are dih's OWN TB predictor, not a guess:
-            // texturebug.inl:638 picks its seam tick with `seam_z >= z + mins.z && seam_z <= z +
-            // maxs.z` and gives up on `z + maxs.z < seam_z` ("fallen clean under the ledge").
-            // The 1/32 margins are this file's: a seam exactly level with the feet or the head is
-            // one face touching, not two, so it cannot be the clip that pins anything.
+            // BOX-BRUSH PIN (texturebug.inl TextureBugImpl, botox route_engine.cpp 1:1). T.z is
+            // the bottom B of the wall brush over the seam. IntersectRayWithBoxBrush picks its +z
+            // face only on the tick the HEAD crosses B falling while the move crosses the wall
+            // plane, so a seam is met once per arc, never "every tick the hull spans it": a
+            // rising head or a hull already under B touches one face and nothing pins.
             if (s.ground) return false;
-            // a stance change moves the origin (FinishDuck/UnDuck +-20 in air): z would not be pre.z
+            // a stance change moves the origin (FinishDuck/UnDuck +-20 in air): not a swept hull
             if (ti.duckedNow || ti.unducked) return false;
-            const float h = HullH(pre, p);
-            if (pre.z + kDistEps >= T.z || pre.z + h - kDistEps <= T.z) return false;
-            const int nth = f.tbSeen++;   // counted even when the stance bars it: the tick still straddled
-            if (!stanceOk) return false;
+            const float hull = HullH(pre, p);
+            const float h = pre.z + hull - T.z;                 // head over B at the tick's start
+            if (h <= 0.f || s.z + hull > T.z) return false;     // this move did not take it through B
+            if (!stanceOk) return true;                          // one crossing per arc
+            const float lo = TbLo(T.z, T.tbTall, T.tbUlp, pre.z);
+            if (h < lo)
+            {
+                // fell too slow: the move into the wall is under the ulp band. The miss readout
+                // says how much more drop per tick it wanted
+                if (lo - h < m_res.closest[L.layer]) { m_res.closest[L.layer] = lo - h; m_res.closestDz[L.layer] = 0.f; }
+                return true;
+            }
+            const float period = p.gravity * p.dt * p.dt;
+            const float phi = std::fmod(h, period);
+            const bool ride = phi >= lo && phi < period - 1e-4f;
             State a = s;
-            a.z  = pre.z;                 // clipped: the move never moved it
-            a.vz = HalfGrav(p);
+            a.z = ride ? T.z + phi - hull : pre.z;              // ride: head held phi over B
+            a.vz = HalfGrav(p);                                  // the pin's -g*dt/2
             a.ground = false;
-            a.onSeam = true;              // rides exactly like a pixelsurf from here
-            // Which tick of the band you push in on is a press the player makes, so it is named
-            // and each catch height is its own combination -- they are NOT the same route, the
-            // hull is held at a different height and everything after it differs.
-            // +nth on the cost so the list reads: the earliest catch of every press first, then
-            // the later ones. Without it a marker deep in the band fills the whole panel with one
-            // press at fifteen heights and buries the other presses under it.
-            AddEdge(L, a, dep, "texturebug" + Stance(s.ducked)
-                    + (nth ? " +" + std::to_string(nth) + " ticks" : std::string()), cost + nth, kInf);
-            return false;
+            a.onSeam = ride;                                     // out of band: one pin, then it falls
+            // botox tiers: an unread brush top is a guess at lo, a pin with no ride is one tick
+            const int tier = !ride ? 2 : T.tbTall > 0.f ? 0 : 1;
+            AddEdge(L, a, dep, "texturebug" + Stance(pre.ducked) + (ride ? std::string() : std::string(" pin only")),
+                    cost + tier, ride ? std::min(phi - lo, period - phi) : 0.f);
+            return true;
         }
         default: return true;
         }

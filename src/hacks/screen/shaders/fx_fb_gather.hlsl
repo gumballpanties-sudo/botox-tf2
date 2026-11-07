@@ -99,8 +99,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     // direction with the pixel's own, so where those two disagree each walk only gets every
     // OTHER sample and its taps stand twice as far apart -- which is a thing coming back as
     // separate copies with their own edges. So the count doubles exactly where they disagree.
+    //
+    // ONE TAP PER TWO PIXELS, not botox's one per pixel: filtered colour + the per-frame jitter
+    // hide a 2px step (the cpu-side streak cap already assumes it), and this loop is the whole
+    // cost of a flick -- every pixel on screen walks it at once, the card falls behind, the
+    // driver queues frames, and that queue is the input delay. Half the taps, half the spike.
     float agree  = (cen_len < 1.0) ? 1.0 : abs(dot(info.zw, tile_dir));
-    float per_px = lerp(2.0, 1.0, saturate((agree - 0.85) * 6.6667));
+    float per_px = lerp(1.0, 0.5, saturate((agree - 0.85) * 6.6667));
 
     float half_n = clamp(ceil(tile_len * per_px), 3.0, max(3.0, c2.x));
 

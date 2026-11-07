@@ -55,6 +55,7 @@ ImFont* g_fontHowewewareMinecraft14 = nullptr, *g_fontGamesenseSfBold15 = nullpt
 ImFont* g_fontHeroinArialBd16 = nullptr, *g_fontHeroinProggy13 = nullptr, *g_fontHeroinTahoma16 = nullptr;
 ImFont* g_fontHeroinTahomaBd14 = nullptr, *g_fontHeroinTahoma14 = nullptr;
 ImFont* g_fontMenuTahoma9 = nullptr, *g_fontMenuTahomaBd9 = nullptr;
+ImFont* g_fontMs19 = nullptr;
 
 int   g_menuStyle      = 0;
 float g_accentColor[4] = { 160.f / 255.f, 170.f / 255.f, 220.f / 255.f, 1.f };   // matches render.cpp's old fixed kAccent
@@ -123,6 +124,14 @@ char  g_discordAppId[32]     = "";
 char  g_discordState[128]    = "In-game";
 char  g_discordDetails[128]  = "Team Fortress 2";
 char  g_discordImageKey[128] = "";
+
+// fpsoverlay minesweeper (hacks/misc/minesweeper.cpp): diff 0..2 presets, 3 = custom
+bool  g_msOpen   = false;
+bool  g_msNight  = true;
+int   g_msDiff   = 1;
+int   g_msWidth  = 20;
+int   g_msHeight = 20;
+int   g_msMines  = 60;
 
 bool  g_debugMenuEnable = false;
 float g_consoleColor[4] = { 0.f, 1.f, 1.f, 1.f };   // matches the hardcoded cyan it replaces

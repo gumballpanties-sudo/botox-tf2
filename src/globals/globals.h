@@ -98,6 +98,7 @@ extern ImFont* g_fontHeroinTahoma14;     // tahoma 14  Monochrome|MonoHinting (h
 // -- Menu style (settings > menu "style" dropdown) donor fonts not already covered above
 extern ImFont* g_fontMenuTahoma9;        // tahoma 9   Monochrome|MonoHinting|Bitmap, cyrillic (lobotomy v1 regular)
 extern ImFont* g_fontMenuTahomaBd9;      // tahoma bd 9  Monochrome|MonoHinting|Bitmap, cyrillic (lobotomy v1 bold)
+extern ImFont* g_fontMs19;               // tahoma bd 19, digits 1-8 only: minesweeper cell numbers
 
 // -- Menu settings tab (stage 4: appearance + safety) ------------------------------
 extern int   g_menuStyle;      // settings > menu "style": index into menu.cpp's k_menuStyles
@@ -170,6 +171,9 @@ extern char  g_discordAppId[32];
 extern char  g_discordState[128];
 extern char  g_discordDetails[128];
 extern char  g_discordImageKey[128];
+
+extern bool  g_msOpen, g_msNight;                    // minesweeper panel + night skin
+extern int   g_msDiff, g_msWidth, g_msHeight, g_msMines;
 
 extern bool  g_debugMenuEnable;
 extern float g_consoleColor[4];   // ConsoleColorPrint tint (rgb; a unused, FLOAT4 config slot)
