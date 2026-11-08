@@ -735,7 +735,7 @@ public:
         Node n;
         n.s = st.s;
         n.best.push_back({ 0, kInf, -1, -1, 0, 0, -1, 1.f });
-        n.count = 1.0;
+        n.count = 1.0; n.texts = 1.0;
         m_layers[0].push_back(n);
         m_layer = 0; m_next = 0;
         m_done = false;
@@ -800,7 +800,9 @@ private:
         if (last >= 0 && last != bind) switches++;
         last = bind; presses++;
     }
-    struct Node { State s; std::vector<Best> best; double count = 0.0; };
+    // count = paths (every one materialised = the exact list), texts = paths that print differently:
+    // the forks of one box crossing print the same buttons, so only the first per arrival counts
+    struct Node { State s; std::vector<Best> best; double count = 0.0, texts = 0.0; };
     // sc/jb/ride are the PLAN that flew this edge, kept so the winning route can be flown again
     // tick by tick for the drawn arc (TraceBest). Three bytes, not a second search.
     // duckApex too: a forced-duck landing replayed without its duck flies the standing arc, misses
@@ -808,7 +810,7 @@ private:
     // cross / prob: the box-edge crossing tick that flew it (-1 = the old aboveT floor) and the
     // share of crossings that land like it (FlyCross). The replay needs cross to fly the same ticks
     struct Edge { int from; int dep; int arr; int cost; float margin; int8_t sc; int8_t ride; bool jb; bool duckApex;
-                  int16_t cross; float prob; };
+                  int16_t cross; float prob; int to; };
     struct Key
     {
         uint32_t z, vz, bits, duckTime; int since, aduck;
@@ -869,6 +871,7 @@ private:
     int   m_curCross = -1;       // ...and the crossing it is on (FlyCross), with its share
     float m_curProb = 1.f;
     bool  m_noEdge = false;      // FlyCross's free flight / one-tick probes: fly, add nothing
+    std::vector<int>* m_crossArr = nullptr;   // FlyCross: arrival labels its forks already counted
     int   m_replayCross = -1;    // TraceBest: the crossing the replayed edge was flown on
     // ---- replay recorder (TraceBest): the arc of ONE known-good edge, not a search ----
     std::vector<float>* m_rec = nullptr;   // z after every tick of the leg being replayed
@@ -963,11 +966,18 @@ private:
         std::vector<Edge>& edges = m_edges[into];
         if (edges.size() >= m_o.maxEdges) { m_res.capped = true; return; }
         edges.push_back({ L.from, di, ai, cost, margin, (int8_t)m_curSc, (int8_t)m_ride, m_curJb, m_curDuckApex,
-                          (int16_t)m_curCross, m_curProb });
+                          (int16_t)m_curCross, m_curProb, v });
         const int ei = (int)edges.size() - 1;
         const Node& u = m_layers[L.layer][L.from];
         Node& n = layer[v];
         n.count += u.count;
+        bool newText = true;
+        if (m_crossArr)
+        {
+            newText = std::find(m_crossArr->begin(), m_crossArr->end(), ai) == m_crossArr->end();
+            if (newText) m_crossArr->push_back(ai);
+        }
+        if (newText) n.texts += u.texts;
         // the binds this edge asks for: the press it departs on (a seam ride departs on none) and
         // the jumpbug, which replaces the landing and is a bind of its own
         const int depBind = L.srcGround ? ScriptBit(m_curSc) : -1;
@@ -1336,23 +1346,33 @@ private:
             }
         }
         const int n = (int)snap.size();
+        struct Fork { int k, ticks; };
+        std::vector<Fork> forks;
         int run = 0;
         for (int k = 0; k < n; k++)
         {
-            Fs g = snap[k]; g.crossAt = g.i;
-            if (k + 1 < n && snap[k + 1].i == g.i + 1)
+            if (k + 1 < n && snap[k + 1].i == snap[k].i + 1)
             {
-                Fs q = g;
-                m_noEdge = true;
+                Fs q = snap[k]; q.crossAt = q.i;
                 if (!FlyTick(L, pl, q, p, dep, cost) && SameFs(q, snap[k + 1])) { run++; continue; }
             }
-            m_noEdge = noEdge;
-            m_curCross = g.i; m_curProb = (float)(run + 1) / (float)n;
+            forks.push_back({ k, run + 1 });
             run = 0;
+        }
+        // latest crossing first: its landing (the falling clip, as a rule) is the one that counts
+        // the buttons toward Result::total -- the other forks print the same text again
+        std::vector<int> counted;
+        m_crossArr = &counted;
+        m_noEdge = noEdge;
+        for (auto it = forks.rbegin(); it != forks.rend(); ++it)
+        {
+            Fs g = snap[it->k]; g.crossAt = g.i;
+            m_curCross = g.i; m_curProb = (float)it->ticks / (float)n;
             for (; g.i < m_o.maxLegTicks; g.i++)
                 if (FlyTick(L, pl, g, p, dep, cost)) break;
         }
         m_noEdge = noEdge;
+        m_crossArr = nullptr;
         m_curCross = -1; m_curProb = 1.f;
     }
 
@@ -1618,32 +1638,35 @@ private:
 
         struct Pick { int cost; float margin; int node; int rank; int presses; int switches; float prob; };
         std::vector<Pick> all;
-        double total = 0.0;
+        double total = 0.0, texts = 0.0;
         for (int v = 0; v < (int)m_layers[N].size(); v++)
         {
             const Node& n = m_layers[N][v];
             total += n.count;
+            texts += n.texts;
             for (int r = 0; r < (int)n.best.size(); r++)
                 all.push_back({ n.best[r].cost, n.best[r].margin, v, r, n.best[r].presses, n.best[r].switches, n.best[r].prob });
         }
         // likeliest, then easiest first: fewest binds pressed, then fewest switches between binds (Best)
         std::stable_sort(all.begin(), all.end(), [](const Pick& a, const Pick& b)
             { return Easier(a.prob, a.presses, a.switches, a.cost, a.margin, b.prob, b.presses, b.switches, b.cost, b.margin); });
-        m_res.total = total;
+        m_res.total = texts;
         // one line per press sequence: paths that differ only in ride lengths merge (RideText).
         // With every path materialised the count is exact too
         const bool whole = (double)all.size() >= total;
-        // odds: paths with the SAME text (ride steps and all) are the same buttons landing on
+        // odds: paths with the SAME labels (ride steps and all) are the same buttons landing on
         // different crossings, so their shares add up; texts that differ only in ride lengths are
         // the player's choice of ride, so the line is as good as its best one
-        struct Group { Combo best; std::vector<std::string> variants; std::unordered_map<std::string, float> odds;
-                       int node, rank; };
+        using Seq = std::vector<uint64_t>;      // (dep, arr) label pair per marker, marker 1 first
+        struct Group { Combo best; std::vector<std::string> variants; std::vector<Seq> seqs; int node, rank; };
         std::vector<Group> groups;
         std::unordered_map<std::string, size_t> at;
+        auto pair = [](int dep, int arr) { return ((uint64_t)(uint32_t)dep << 32) | (uint32_t)arr; };
         for (const Pick& pk : all)
         {
             if (!whole && (int)groups.size() >= m_o.topK) break;
             std::vector<std::string> parts;
+            Seq seq(N);
             int layer = N, node = pk.node, rank = pk.rank;
             while (layer > 0)
             {
@@ -1651,6 +1674,7 @@ private:
                 const Edge& e = m_edges[layer][b.edge];
                 if (e.arr >= 0) parts.push_back(m_labels[e.arr]);
                 if (e.dep >= 0) parts.push_back(m_labels[e.dep]);
+                seq[layer - 1] = pair(e.dep, e.arr);
                 node = e.from; rank = b.rank; layer--;
             }
             std::string text;
@@ -1661,25 +1685,50 @@ private:
             }
             const std::string key = StripRide(text);
             auto it = at.find(key);
-            size_t gi;
             if (it == at.end())
             {
-                gi = groups.size();
-                at.emplace(key, gi);
+                at.emplace(key, groups.size());
                 groups.push_back({ { text, pk.cost, pk.margin, pk.presses, pk.switches }, {}, {}, pk.node, pk.rank });
+                it = at.find(key);
             }
-            else
-                gi = it->second;
-            Group& G = groups[gi];
-            auto o = G.odds.find(text);
-            if (o == G.odds.end()) { G.variants.push_back(text); G.odds.emplace(text, pk.prob); }
-            else o->second += pk.prob;
+            Group& G = groups[it->second];
+            if (std::find(G.variants.begin(), G.variants.end(), text) == G.variants.end())
+            {
+                G.variants.push_back(text);
+                G.seqs.push_back(std::move(seq));
+            }
         }
+        // a line's odds come off the EDGES, not off the K paths each node keeps: the crossing share
+        // flows marker by marker along every edge carrying this line's labels. Exact whatever topK
+        // cut (a 100% line whose rarer crossings fell out of a node's K read 75% and was dropped)
+        std::vector<std::unordered_map<uint64_t, std::vector<int>>> byLabel(N + 1);
+        for (int l = 1; l <= N; l++)
+            for (int ei = 0; ei < (int)m_edges[l].size(); ei++)
+                byLabel[l][pair(m_edges[l][ei].dep, m_edges[l][ei].arr)].push_back(ei);
+        auto oddsOf = [&](const Seq& q)
+        {
+            std::vector<double> mass(1, 1.0), next;
+            for (int l = 1; l <= N; l++)
+            {
+                next.assign(m_layers[l].size(), 0.0);
+                auto f = byLabel[l].find(q[l - 1]);
+                if (f != byLabel[l].end())
+                    for (int ei : f->second)
+                    {
+                        const Edge& e = m_edges[l][ei];
+                        if (e.from < (int)mass.size()) next[e.to] += mass[e.from] * (double)e.prob;
+                    }
+                mass.swap(next);
+            }
+            double sum = 0.0;
+            for (double m : mass) sum += m;
+            return sum;
+        };
         for (Group& G : groups)
         {
-            float odds = 0.f;
-            for (const auto& o : G.odds) odds = std::max(odds, o.second);
-            G.best.odds = std::min(odds, 1.f);
+            double odds = 0.0;
+            for (const Seq& q : G.seqs) odds = std::max(odds, oddsOf(q));
+            G.best.odds = (float)std::min(odds, 1.0);
         }
         // safe lines first, then the rest by their odds (botox row_key: tier, -odds, ...); inside one
         // odds level the easiest-first order the groups were made in stays
@@ -1699,7 +1748,9 @@ private:
             c.text = RideText(groups[g].variants, c.text);
             m_res.combos.push_back(c);
         }
-        if (whole) m_res.total = (double)groups.size();
+        // texts undercounts a line that lives only off an uncounted fork (a hover-only route): never
+        // fewer than the lines in hand, or a found route would read as "no combination"
+        m_res.total = whole ? (double)groups.size() : std::max(texts, (double)groups.size());
         // the first printed combo's likeliest path: keep where it ends so its arc can be re-flown
         if (!groups.empty() && !m_res.combos.empty()) { m_bestNode = groups[0].node; m_bestRank = groups[0].rank; }
     }

@@ -21,7 +21,7 @@
 // ============================================================================
 
 static constexpr int k_ebMaxTicks = 256;   // botox k_predicted_cmd_max (2 s at 128)
-static constexpr int k_ebPlanMax  = 4;
+static constexpr int k_ebPlanMax  = 8;
 static constexpr float k_ebStandable = 0.7f;   // CategorizePosition's walkable cut (route calc reads it)
 
 struct EbCmd_t { Vec3 view; float fwd; float side; int buttons; Vec3 origin; };

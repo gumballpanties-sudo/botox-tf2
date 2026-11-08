@@ -111,7 +111,7 @@ static void AS_SyncArm(const bool on)
 
 static void AS_Sync(void* pLocal, UserCmd_t* cmd, const bool armed)
 {
-    AS_SyncArm(armed || s_wcSyncWant || s_tbSyncWant);   // botox sync_arm owners: as + tb + wc ( all sub-ulp: pins are exact floats )
+    AS_SyncArm(armed || s_wcSyncWant || s_tbSyncWant || s_phSyncWant);   // botox sync_arm owners: as + tb + wc (+ ph) ( all sub-ulp: pins are exact floats )
 
     struct rec_t {
         int cmd = -1, tick_base = 0;
@@ -205,9 +205,9 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         if (s_as.latched) DebugLog("AS: unstuck why=%s held=%d z=%.3f", why, s_as.len, s_prePredOrigin.z);
         s_as.latched = false; s_as.len = 0; s_as.hold = false;
     };
-    if (!on || (s_prePredFlags & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK)
+    if (!on || (s_prePredFlags & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK || s_pixelHopHit)
     {
-        end(!on ? "key" : "ground");
+        end(!on ? "key" : s_pixelHopHit ? "ph" : "ground");
         return;
     }
 

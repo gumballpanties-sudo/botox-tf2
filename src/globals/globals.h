@@ -660,7 +660,7 @@ extern bool  g_edgeBugToEdge;        // autostrafe to edge = the search's autost
 extern bool  g_edgeBugPlayers;       // allow bugs off enemy players
 extern float g_edgeBugStrafeAngleMax; // max path bend off course (def 180 = off)
 extern bool  g_edgeBugMouseSteer;    // re-plan + pick between paths by where the mouse turns
-extern int   g_edgeBugPaths;         // plans kept per search when steering (1-4)
+extern int   g_edgeBugPaths;         // plans kept per search when steering (1-8)
 extern int   g_edgeBugLockType;      // 0 smooth / 1 full
 extern float g_edgeBugLockStrength;  // 0-100 %
 extern int   g_edgeBugStance;        // 0 any (jump-eating ducked find = fallback) / 1 ducked / 2 stand

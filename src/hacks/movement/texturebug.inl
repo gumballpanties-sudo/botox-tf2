@@ -2298,17 +2298,10 @@ static void TB_PreserveMove(void* pLocal, UserCmd_t* pCmd)
 // with tung's widened vertical gate (no cumidere tung). Publishes the movement.cpp yield flags
 // every other feature reads.
 // ============================================================================
-static void TextureBug(void* pLocal, UserCmd_t* pCmd)
+// the botox tbx tick + the movement.cpp yield flags. Also pixel hop's landing fallback (pixelhop.inl calls it
+// forced on, no TB key: webz runs its TB when nothing lands)
+static void TextureBugBotox(void* pLocal, UserCmd_t* pCmd, const bool bTbOn, const bool bTungOn)
 {
-    const bool bTbOn   = On(g_textureBug, g_textureBugKey, g_textureBugMode);
-    const bool bTungOn = !bTbOn && On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);
-    if (bTbOn && g_tbStyle == 0)
-    {
-        tbx::Off();
-        TextureBugCumidere(pLocal, pCmd);
-        return;
-    }
-
     s_textureBugHit = false;
     s_tbOwnsCmd     = false;
     tbx::OnCreateMove(pLocal, pCmd, bTbOn, bTungOn);
@@ -2322,6 +2315,19 @@ static void TextureBug(void* pLocal, UserCmd_t* pCmd)
     s_tbRideLen = t.hit ? (std::max)(t.run, 1) : 0;
     s_tbPhase   = t.hit ? (s_tbRideLen >= 2 ? TBP_RIDE : TBP_PIN) : t.owns_cmd ? TBP_HUG
                 : (bTbOn || bTungOn) ? TBP_SCAN : TBP_OFF;
+}
+
+static void TextureBug(void* pLocal, UserCmd_t* pCmd)
+{
+    const bool bTbOn   = On(g_textureBug, g_textureBugKey, g_textureBugMode);
+    const bool bTungOn = !bTbOn && On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);
+    if (bTbOn && g_tbStyle == 0)
+    {
+        tbx::Off();
+        TextureBugCumidere(pLocal, pCmd);
+        return;
+    }
+    TextureBugBotox(pLocal, pCmd, bTbOn, bTungOn);
 }
 
 // ============================================================================

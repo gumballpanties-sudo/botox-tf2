@@ -1391,7 +1391,7 @@ void LoadConfig(const char* path, bool visuals)
           "not a stance, so every attempt would be refused",
           "not a stance, so every attempt would be refused" },
         { &g_edgeBugDetectMode,  0,  2,   "edgeBugDetectMode",  nullptr, nullptr },
-        { &g_edgeBugPaths,       1,  4,   "edgeBugPaths",       nullptr, nullptr },
+        { &g_edgeBugPaths,       1,  8,   "edgeBugPaths",       nullptr, nullptr },
         { &g_edgeBugLockType,    0,  1,   "edgeBugLockType",    nullptr, nullptr },
         { &g_edgeBugStyle,       0,  3,   "edgeBugStyle",       nullptr, nullptr },
         { &g_edgeBugHwTicks,     0,  32,  "edgeBugHwTicks",     nullptr, nullptr },

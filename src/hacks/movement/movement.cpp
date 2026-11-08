@@ -1704,6 +1704,8 @@ static float s_wcPreTbFwd = 0.f, s_wcPreTbSide = 0.f;
 static int   s_wcPreTbButtons = 0;
 static bool s_airStuckHit = false;
 static bool s_pixelHopHit = false;   // pixeljump's pixel hop wrote this cmd (land / hop): the air movers after it yield
+static bool s_pixelHopOn  = false;   // PH key active this cmd: pixel surf stands down (webz 18000c0b0 skips wall stuck)
+static bool s_phSyncWant  = false;   // ph key held: a pin landing is exact-float, START must be the server END too
 // s_shouldPixelSurf / s_psRidingNow / s_psAssistHopActive moved ABOVE AutoJumpbug --
 // jumpbug is a PRE-prediction feature and has to read the ride state too
 // indicator snapshot, written once per cmd at the end of Movement_RunImpl
@@ -2034,12 +2036,19 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     // the face this tick: short hull sweep straight into the latched normal. A bent seam is
     // followed (normal re-read when it stays within ~25 deg); nothing within 2u = ride over
     float flGap = 0.f;
+    float flPlaneD = -1.f;   // hull to the face PLANE (not its 0.03125 trace shell): sv_wallbug 0 ride lives while < 0.03125
     {
         GameTrace_t tr{};
         TraceHull(org, org - s_aaStickN * 2.f, mins, maxs, MASK_PLAYERSOLID, &fil, &tr);
         if (tr.fraction >= 1.f || tr.startsolid)
             { AutoAlignStickDrop("wall"); return false; }
         flGap = tr.fraction * 2.f;
+        {
+            const Vec3& N = tr.plane.normal;   // box corner nearest the plane: mins where N > 0, maxs where N < 0
+            const float sup = (N.x > 0.f ? mins.x : maxs.x) * N.x + (N.y > 0.f ? mins.y : maxs.y) * N.y
+                            + (N.z > 0.f ? mins.z : maxs.z) * N.z;
+            flPlaneD = org.x * N.x + org.y * N.y + org.z * N.z + sup - tr.plane.dist;
+        }
         const Vec3 nn(tr.plane.normal.x, tr.plane.normal.y, 0.f);
         if (fabsf(tr.plane.normal.z) < 0.7f && nn.Length2D() > 0.5f)
         {
@@ -2195,11 +2204,12 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     // k = measured gain), p = press search
     if (g_debugLogEnable && (s_aaStickRideTick < 32 || best < k_stickHorizon))
         DebugLog("AA: stick t=%d %c pin=%d best=%d press=%.4f dh=%d doff=%.5f va=%.5f/%.5f k=%.4f tan=%.0f "
-                 "gap=%.4f off=%.4f anc=%.4f vz=%.3f xy=%.1f duck=%d/%d sims=%d",
+                 "gap=%.4f off=%.4f anc=%.4f pd=%.5f life=%.1f vz=%.3f xy=%.1f duck=%d/%d sims=%d",
                  s_aaStickRideTick, bDrift ? driftMode : 'p', pinned_now ? 1 : 0, best, bestPress, heldDrift,
                  flDriftOff, flAway0, flVaNone, flDriftK, flTan, flGap,
                  org.x * s_aaStickN.x + org.y * s_aaStickN.y,
-                 s_aaStickAnchor.x * s_aaStickN.x + s_aaStickAnchor.y * s_aaStickN.y, s_prePredVel.z, s_prePredVel.Length2D(),
+                 s_aaStickAnchor.x * s_aaStickN.x + s_aaStickAnchor.y * s_aaStickN.y,
+                 flPlaneD, (MV_SURF_EPS - flPlaneD) / (MV_SURF_EPS * TickInterval()), s_prePredVel.z, s_prePredVel.Length2D(),
                  (s_prePredFlags & FL_DUCKING) ? 1 : 0, (pCmd->buttons & IN_DUCK) ? 1 : 0, simsUsed);
     s_aaStickRideTick++;
     return true;
@@ -2212,6 +2222,7 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
     static int   s_aaPropRej = 0;   // faces refused for being a prop (diag, per second)
 
     s_aaStickOwns = false;   // per cmd: only the stick's pick below sets it
+    s_aaCreepOn   = false;   // per cmd: only the creep below sets it
     if (!g_autoAlign) // plain on/off, no bind (user pick)
     {
         s_aaWallDetected = false;
@@ -2425,6 +2436,8 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
             int sims = 0;
             MV_DriftHold(pLocal, pCmd, nBasePredicted - 1, n, false, 1, sims, nullptr, true);
             ++s_aaCreep;
+            s_aaCreepOn = true;   // PixelSurf's hunt re-solves this every simulated tick (pixelsurf.inl creep mirror)
+            s_aaCreepN  = n;
         }
     }
 
@@ -2495,8 +2508,8 @@ static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
 // helpers (Pred_Simulate / RestoreToFrame / SimsLeft / s_prePredFlags / s_prePredVel).
 #include "psassist.inl"
 
-// pixeljump's pixel hop (botox css SgPixelHop): needs psassist.inl's s_psAssistHopActive / k_psLaunchVz and
-// airstuck.inl's AsClock, so after both
+// pixeljump's pixel hop (botox css SgPixelHop): needs psassist.inl's s_psAssistHopActive, airstuck.inl's
+// AsUserCmd and texturebug.inl's TextureBugBotox, so after all three
 #include "pixelhop.inl"
 
 // the route calculator, and it is included AFTER psassist.inl on purpose -- it flies
@@ -2751,9 +2764,9 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s_tbOwnsCmd = false;
         s_headSurfHit = false;
         s_headBounceHit = false;
-        s_wallClimbHit = s_wallClimbActive = s_wcLanded = s_wcSyncWant = false;
+        s_wallClimbHit = s_wallClimbActive = s_wcLanded = s_wcSyncWant = s_phSyncWant = false;
         s_airStuckHit = false;
-        s_pixelHopHit = false;
+        s_pixelHopHit = s_pixelHopOn = false;
         s_asHolding = false;
         s_shouldPixelSurf = false;
         s_psShouldSurf = s_psShouldUnduck = false;

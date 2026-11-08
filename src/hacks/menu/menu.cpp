@@ -1292,7 +1292,7 @@ static void Page_MovementMain()
                         SliderF("max path bend##ebstrafemax", &g_edgeBugStrafeAngleMax, 0.f, 180.f, "%.0f deg");
                     ImGui::Checkbox("mouse steer##ebsteer", &g_edgeBugMouseSteer);
                     if (g_edgeBugMouseSteer)
-                        SliderI("paths##ebpaths", &g_edgeBugPaths, 1, 4);
+                        SliderI("paths##ebpaths", &g_edgeBugPaths, 1, 8);
                     // TF2: a ducked bug that lands still ducked eats the next jump
                     ImGui::Combo("stance##ebstance", &g_edgeBugStance,
                                  "prefer standing\0" "ducked only\0" "standing only\0");
