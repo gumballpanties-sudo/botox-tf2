@@ -22,6 +22,10 @@ set(AIM_DIR ${CMAKE_SOURCE_DIR}/src/hacks/aim)
 file(GLOB AIM_SRC CONFIGURE_DEPENDS ${AIM_DIR}/*.cpp)
 # project-local core-only freetype (no png/brotli/bz2/zlib) -- global vcpkg untouched
 set(FREETYPE_STATIC_DIR "${CMAKE_SOURCE_DIR}/vcpkg_local/x64-windows-static")
+# .gitignore drops *.lib, so a fresh clone has the headers but not the lib: say so here, not at link time
+if(NOT EXISTS "${FREETYPE_STATIC_DIR}/lib/freetype.lib")
+    message(FATAL_ERROR "freetype.lib missing from vcpkg_local/x64-windows-static/lib -- see BUILDING.md step 4")
+endif()
 
 add_library(botox SHARED
     src/dllmain.cpp
@@ -192,6 +196,9 @@ set_target_properties(botox PROPERTIES
 )
 
 set(CMAKE_GENERATOR_PLATFORM x64 CACHE STRING "" FORCE)
+
+# tests/ is gitignored: a fresh clone builds the dll only
+if(EXISTS "${CMAKE_SOURCE_DIR}/tests")
 
 # Gate test for minesweeper rules (src/hacks/misc/minesweeper.h, same file as botox csgo): presets + custom
 # board mine counts, safe first click, flood fill, chord, win/lose, clamps.
@@ -628,3 +635,5 @@ add_executable(skinshare_test tests/skinshare_test.cpp)
 # through the DLL's nanosvg: parses, rasterises, fills its box.
 # Build + run: cmake --build build --config Release --target weaponsel_test && build\Release\weaponsel_test.exe
 add_executable(weaponsel_test tests/weaponsel_test.cpp)
+
+endif() # EXISTS tests
