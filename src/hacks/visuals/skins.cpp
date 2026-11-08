@@ -1891,7 +1891,7 @@ static void __fastcall h_FrameStageNotify(int stage)
 
     // Movement recorder camera (botox on_frame_stage FRAME_START): per frame, so the replayed
     // view eases at fps instead of stepping at tick rate.
-    if (stage == 0) Recorder_FrameStart();
+    if (stage == 0) { Recorder_FrameStart(); EdgeBug_FrameStart(); }   // + hotwheels eb view
 
     // No hats reads this back in DrawModelExecute; entities live on this thread.
     if (stage == 5 && IsInGame()) NoHats_BodyTick();

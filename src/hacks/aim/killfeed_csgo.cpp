@@ -279,7 +279,7 @@ namespace
             if (!s_font.m_dwFont)
                 s_font.m_dwFont = I::MatSystemSurface->CreateFont();
             strncpy_s(s_fontName, g_fontKfName[0] ? g_fontKfName : kFontKfDefName, _TRUNCATE);
-            const int flagMask = g_fontKfSize > 0 ? g_fontKfFlags : kFontKfDefFlags;   // size 0 = whole default face
+            const int flagMask = g_fontKfSize > 0 ? FontFlagsNorm(g_fontKfFlags) : kFontKfDefFlags;   // size 0 = whole default face
             if (g_fontKfSize <= 0)
                 strcpy_s(s_fontName, kFontKfDefName);
             const VguiFace face = FontFlagsToVgui(flagMask);

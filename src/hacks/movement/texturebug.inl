@@ -791,6 +791,15 @@ static int  s_wc_act_tick = -1000;   // g_wall_climb.m_act_tick: last cmd wall c
 static int  s_sent_cmd = -1;
 static Vec3 s_sent_org{}, s_sent_vel{};
 
+/* end vz on the pin. botox csgo: 1e-3. Valve Oct 2026 ClipVelocity subtracts DIST_EPSILON, so on
+   sv_wallbug 0 every pin ends at -halfgrav + 0.03125 and 1e-3 saw none (log: act=K only, no R/P).
+   as::k_pinTol like cumidere / PixelSurf; a free fall that lands near -halfgrav by chance ends at
+   exactly vz0 + 2*pin, that one is no pin */
+static bool TbPinned(const float vz_end, const float vz_start, const float pin)
+{
+    return fabsf(vz_end - pin) < as::k_pinTol && fabsf(vz_end - (vz_start + 2.f * pin)) > 1e-3f;
+}
+
 static bool JumpTrickKey()
 {
     return On(g_miniJump, g_miniJumpKey, g_miniJumpMode) || On(g_longJump, g_longJumpKey, g_longJumpMode)
@@ -918,7 +927,7 @@ static void TextureBugImpl(void* pLocal, UserCmd_t* cmd, const bool tb_on, const
         e.ground = (fl & FL_ONGROUND) != 0;
         e.vel    = EntV3(pLocal, g_offVelocity);
         const bool walk   = EntMoveType(pLocal) == MOVETYPE_WALK;
-        const bool pinned = !(fl & FL_ONGROUND) && walk && fabsf(e.vel.z - pin) < 1e-3f && e.vel.Length2D() >= 1.f;
+        const bool pinned = !(fl & FL_ONGROUND) && walk && TbPinned(e.vel.z, vel.z, pin) && e.vel.Length2D() >= 1.f;
         e.ride   = pinned && vel.z + pin < 0.f;
         e.bounce = pinned && rising && (!wallstrafe_enabled || ws::RetainsSpeed(vel.Length2D(), e.vel.Length2D()));
         e.head   = false;   // ponytail: m_last_face_dz not ported, see banner
@@ -1257,7 +1266,7 @@ static void TextureBugImpl(void* pLocal, UserCmd_t* cmd, const bool tb_on, const
             const auto pinned_now = [&](const float vz_start) {
                 const Vec3 v = EntV3(pLocal, g_offVelocity);
                 return !(EntI(pLocal, g_offFlags) & FL_ONGROUND) && EntMoveType(pLocal) == MOVETYPE_WALK
-                    && fabsf(v.z - pin) < 1e-3f && v.Length2D() >= 1.f && vz_start + pin < 0.f;
+                    && TbPinned(v.z, vz_start, pin) && v.Length2D() >= 1.f && vz_start + pin < 0.f;
             };
             const auto rollout = [&](UserCmd_t first, int st) -> int {
                 const int s0 = sims;
@@ -2185,6 +2194,30 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on, const b
     s_tb.input_yaw     = cmd->viewangles.y;
 
     AutoAlignImpl(pLocal, cmd, tb_on);
+    /* NOT botox: cumidere's ride half (TBC_Align) while the START is pinned. One held WASD key
+       steers along the wall up to 450 and a 450 press tilted off the normal gains speed, every
+       move re-proven pinned. Kept only when it pinned; texture_bug's 'R' then keeps it (it tests
+       the incoming cmd first), else the ladder takes over as before. A held key align could not
+       steer (no wall down its axis) stays the player's: 'R' tests their own move */
+    if (tb_on && g_tbcAlign && EntAlive(pLocal) && !(s_prePredFlags & FL_ONGROUND)
+        && EntMoveType(pLocal) == MOVETYPE_WALK) {
+        static int s_ride_diag = -1000;
+        const int base = PredCommandsPredicted();
+        Restore(base - 1);
+        UserCmd_t a = *cmd;
+        const int  r    = TBC_Align(pLocal, &a, base);
+        const bool keys = (cmd->buttons & (IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT)) != 0;
+        const bool keep = (r & TBCA_PINNED) && ((r & (TBCA_STEER | TBCA_GAIN)) || ((r & TBCA_PRESS) && !keys));
+        s_tbAlignDead   = (r & TBCA_PINNED) && !(r & (TBCA_PRESS | TBCA_STEER | TBCA_GAIN));
+        if (keep) {
+            cmd->forwardmove = a.forwardmove;
+            cmd->sidemove    = a.sidemove;
+        }
+        if (g_debugLogEnable && r && DiagOk(s_ride_diag, (r & TBCA_PINNED) != 0))
+            // al bits = TBC_Align: 1 wall, 2 press pinned, 4 start pinned, 8 key steer pinned, 16 speed gain
+            DebugLog("TB RIDE: al=%d keep=%d keys=%d fwd=%.1f side=%.1f vz=%.3f xy=%.1f", r, (int)keep, (int)keys,
+                     a.forwardmove, a.sidemove, EntV3(pLocal, g_offVelocity).z, EntV3(pLocal, g_offVelocity).Length2D());
+    }
     const float align_forward = cmd->forwardmove;
     const float align_side    = cmd->sidemove;
     const int   align_buttons = cmd->buttons;

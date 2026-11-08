@@ -89,6 +89,7 @@ inline void SectionHeader(const char* label)
     ImGui::PopStyleColor();
     ImGui::PopFont();
 
+    if (!ImGui::IsSearchHidden())
     {
         const ImVec2 tmax = ImGui::GetItemRectMax();
         const float midY = (ImGui::GetItemRectMin().y + tmax.y) * 0.5f;
@@ -144,8 +145,12 @@ inline MenuFlowState g_flow;
 // `w` 0 = fill the column (botox: groups always sit inside a column child). `fixedH` > 0 = a
 // box of that height instead of the cached content height (botox cvars_page: one BeginChild
 // sized to the page, show_text = true).
+// search results: a page's own columns + groups collapse into the result group it is drawn in
+inline bool g_menuFlat = false;
+
 inline bool menu_group_begin(const char* name, float w = 0.f, float fixedH = 0.f)
 {
+    if (g_menuFlat) { ImGui::PushID(name); return true; }
     ImGuiWindow* parent = ImGui::GetCurrentWindow();
     const float h = fixedH > 0.f ? fixedH : ImGui::GetStateStorage()->GetFloat(ImGui::GetID(name), 40.f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 20.f);
@@ -180,6 +185,7 @@ inline bool menu_group_begin(const char* name, float w = 0.f, float fixedH = 0.f
 }
 inline void menu_group_end()
 {
+    if (g_menuFlat) { ImGui::PopID(); return; }
     ImGuiWindow* group = ImGui::GetCurrentWindow();
     if (!group->SkipItems)
         group->ParentWindow->StateStorage.SetFloat(group->ChildId,
@@ -192,16 +198,18 @@ inline void menu_group_end()
 // fixed-column shape instead.
 inline void menu_columns_begin()
 {
+    if (g_menuFlat) return;
     const float w = ImFloor((ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f);
     ImGui::BeginChild("##mc_left", ImVec2(w, ImGui::GetContentRegionAvail().y), false, 0);
 }
 inline void menu_columns_next()
 {
+    if (g_menuFlat) return;
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("##mc_right", ImVec2(0.f, ImGui::GetContentRegionAvail().y), false, 0);
 }
-inline void menu_columns_end() { ImGui::EndChild(); }
+inline void menu_columns_end() { if (!g_menuFlat) ImGui::EndChild(); }
 
 // botox_menu_spec.md section 3a: a group box is menu_group_begin/end (headerless
 // bordered child, height cached in native StateStorage) -- no hand-drawn notch, no

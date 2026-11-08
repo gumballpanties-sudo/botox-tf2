@@ -967,7 +967,7 @@ void CFonts::Reload(float flDPI)
 	const uint32_t uSig = Fonts_EspSig();
 	strncpy_s(s_szEsp, g_fontEspName[0] ? g_fontEspName : kFontEspDefName, _TRUNCATE);
 	const int nSize = g_fontEspSize > 0 ? g_fontEspSize : kFontEspDefSize;
-	const VguiFace tFace = FontFlagsToVgui(g_fontEspSize > 0 ? g_fontEspFlags : kFontEspDefFlags);
+	const VguiFace tFace = FontFlagsToVgui(g_fontEspSize > 0 ? FontFlagsNorm(g_fontEspFlags) : kFontEspDefFlags);
 	m_mFonts[FONT_INDICATORS] = { s_szEsp, int(nSize * flDPI), tFace.flags, tFace.weight };
 	Fonts_EspApplied(uSig);
 	DebugLog("fonts: esp face '%s' %d weight %d flags 0x%x", s_szEsp, int(nSize * flDPI), tFace.weight, tFace.flags);

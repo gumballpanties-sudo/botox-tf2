@@ -3,6 +3,7 @@
 #include "hud_math.h"
 #include "../menu/fonts.h"
 #include "../../globals/globals.h"
+#include "../../dependencies/imgui/freetype/imgui_freetype.h"   // ImGuiFreeTypeBuilderFlags_Stroke
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -16,6 +17,8 @@
 
 // ---- fonts ---------------------------------------------------------------------------------
 static ImFont* s_fontNg = nullptr;
+static int s_ngTextLook = 0;   // FontTextLook of the custom face, 0 = g_hudNgTextStyle
+static ImFont* s_fontNgOutline = nullptr;   // stroked twin of the custom face
 static uint32_t s_ngApplied = 0;
 static FontSettle s_ngSettle;
 
@@ -26,7 +29,7 @@ static bool NgTestBuild(const std::string& path, float px, int flags)
 {
     ImFontAtlas test;
     ImFontConfig cfg;
-    cfg.FontBuilderFlags = flags;
+    Fonts_ApplyFlags(cfg, flags, path, px);
     ImFont* f = test.AddFontFromFileTTF(path.c_str(), px, &cfg, test.GetGlyphRangesDefault());
     return f && test.Build() && f->FindGlyphNoFallback('0') && f->FindGlyphNoFallback('A');
 }
@@ -38,16 +41,24 @@ void HudFonts_Build()
 
     // botox render_font_page: size 0 / unloadable = the fallback face (legendware lucida 10)
     s_fontNg = nullptr;
+    s_fontNgOutline = nullptr;
+    s_ngTextLook = 0;
     if (g_hudNgFontSize > 0)
     {
         const float px = (float)std::clamp(g_hudNgFontSize, 6, 100);
-        const int flags = g_hudNgFontFlags & 0xFF;   // FontFlagBit i == builder flag 1 << i
+        const int flags = FontFlagsNorm(g_hudNgFontFlags);
         const std::string path = Fonts_FindPath(g_hudNgFontName);
         if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES && NgTestBuild(path, px, flags))
         {
             ImFontConfig c;
-            c.FontBuilderFlags = flags;
+            Fonts_ApplyFlags(c, flags, path, px);
             s_fontNg = atlas->AddFontFromFileTTF(path.c_str(), px, &c, atlas->GetGlyphRangesDefault());
+            if (s_fontNg)
+            {
+                s_ngTextLook = FontTextLook(flags);
+                c.FontBuilderFlags |= ImGuiFreeTypeBuilderFlags_Stroke;
+                s_fontNgOutline = atlas->AddFontFromFileTTF(path.c_str(), px, &c, atlas->GetGlyphRangesDefault());
+            }
         }
         else
             DebugLog("hud: net graph font '%s' unusable (%s) -- lucida 10", g_hudNgFontName, path.c_str());
@@ -175,15 +186,16 @@ static void DrawNetGraph(const HudSnap& s, ImDrawList* dl, const ImVec2& ds)
         dl->AddRectFilled(ImVec2(x - 4.f, y - 2.f), ImVec2(x + w + 4.f, y + fs * rows.size() + 2.f), Col(g_hudNgBgColor));
 
     const ImU32 outline = Col(g_hudNgOutlineColor);
+    // custom font flags pick the look over the text style
+    const bool useLook = s_ngTextLook && font == s_fontNg;
+    const bool shadowOn  = useLook ? (s_ngTextLook & (1 << FF_DROPSHADOW)) != 0 : g_hudNgTextStyle == 1;
+    const bool outlineOn = useLook ? (s_ngTextLook & (1 << FF_OUTLINE)) != 0 : g_hudNgTextStyle == 2;
     auto put = [&](float px, float py, const Piece& p) {
         const ImVec2 at(std::round(px), std::round(py));
-        if (g_hudNgTextStyle == 1)
+        if (shadowOn)
             dl->AddText(font, fs, ImVec2(at.x + 1.f, at.y + 1.f), outline, p.text.c_str());
-        else if (g_hudNgTextStyle == 2)
-        {
-            dl->AddText(font, fs, ImVec2(at.x + 1.f, at.y - 1.f), outline, p.text.c_str());
-            dl->AddText(font, fs, ImVec2(at.x - 1.f, at.y + 1.f), outline, p.text.c_str());
-        }
+        if (outlineOn)
+            Fonts_AddOutlineText(dl, font, font == s_fontNg ? s_fontNgOutline : nullptr, fs, at.x, at.y, outline, p.text.c_str());
         dl->AddText(font, fs, at, Col(p.color), p.text.c_str());
     };
 

@@ -42,7 +42,7 @@ bool LuaB_BindActive(int key, int style)
 {
     if (style != 1 && style != 2) return true;
     if (key <= 0 || key >= 256 || !LuaB_WindowActive()) return false;
-    return style == 1 ? (GetAsyncKeyState(key) & 0x8000) != 0 : (GetKeyState(key) & 1) != 0;
+    return style == 1 ? !Binds_Blocked() && (GetAsyncKeyState(key) & 0x8000) != 0 : Binds_Toggled(key);
 }
 
 void LuaB_MousePos(int& x, int& y)

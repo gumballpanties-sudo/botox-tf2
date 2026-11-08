@@ -39,6 +39,21 @@ static int  s_psTicks        = 0;       // `ticks`: latch + flip + 16 ( scaled )
 static int  s_psUnpinned     = 0;
 static int  s_psLastBy       = 0;
 static bool s_psParkHold     = false;   // this cmd starts parked: pinned, xy < 1, park on ( PixelSurf sets it )
+static int  s_psCatchTick    = 0;       // tick the latch's hunt predicted the pin on
+static bool s_psRode         = false;   // a pinned tick has been seen since the latch ( the catch came )
+// diag, per second ( PixelSurf prints it ): air ticks past the wall gate, hunts flown, hunts that found a pin.
+// 11-08 log had zero PSU: lines on a whole session = nothing said whether PS even looked
+static int  s_psDiagWall = 0, s_psDiagHunts = 0, s_psDiagFinds = 0;
+// 12:33 log: finds=0 every second and no real pin anywhere, but nothing said WHY. yield = cmds PS gave
+// up to as/tb/wc, air/pin = real air ticks / real ticks on the pin, zup = real ticks whose vz rose vs
+// free fall (the hull hit SOME top plane), hclip = same inside hunts, near = hunts' closest |vz - pin|
+// (vz/xy at it), hland = hunts that ended on ground. zup>0 + pin=0 = touching lips that won't hold
+static int  s_psDiagYield[3] = {}, s_psDiagAir = 0, s_psDiagPin = 0, s_psDiagZup = 0;
+static int  s_psDiagHClip = 0, s_psDiagHLand = 0;
+static float s_psDiagNear = 1e9f, s_psDiagNearVz = 0.f, s_psDiagNearXy = 0.f;
+// 15:29 log: every pin read -6.000 exact, zero drift = no DIST_EPSILON clip on that server. wb = sv_wallbug as the
+// client sees it (-1 = cvar not found), pvz = mean real pinned vz (-5.969 = Valve clip live, -6.000 = old clip)
+static double s_psDiagPinVz = 0.0;
 
 /* botox ps_cmd_start: your own duck key flipped on a live ride = you bailed, PS lets go until the ground */
 static void PsCmdStart(void* pLocal)
@@ -47,7 +62,7 @@ static void PsCmdStart(void* pLocal)
     const bool ground = (s_prePredFlags & FL_ONGROUND) != 0;
     const bool key    = (s_rawButtons & IN_DUCK) != 0;
     const bool ducked = (s_prePredFlags & FL_DUCKING) != 0;
-    const bool riding = !ground && fabsf(s_prePredVel.z - TargetPredictZVel()) < 0.01f;
+    const bool riding = !ground && fabsf(s_prePredVel.z - TargetPredictZVel()) < as::k_pinTol;
     if (ground || EntMoveType(pLocal) != MOVETYPE_WALK)
         s_psBail = false;
     else if (key != prev_key && riding && key != ducked && !s_psBail) {
@@ -135,6 +150,7 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
     const bool as_owns = s_airStuckHit;
     const bool tb_owns = s_textureBugHit || s_tbOwnsCmd;
     if (as_owns || tb_owns || s_wallClimbHit || s_wallClimbActive) {
+        ++s_psDiagYield[as_owns ? 0 : tb_owns ? 1 : 2];
         if (latched)
             DebugLog("PSU: yield by=%s", as_owns ? "as" : tb_owns ? "tb" : "wc");
         s_psShouldSurf = s_psShouldUnduck = false;
@@ -153,6 +169,7 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         return;
     if (!latched && TbBudgetExpired())
         return;
+    ++s_psDiagWall;
 
     const float pin   = TargetPredictZVel();
     /* xy < 1 = wall hang ( stuck ), not a surf. 10-07 21:28 log: all 3 rides spd 0, one hung 53 ticks */
@@ -163,18 +180,27 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         RestoreToFrame(frame);
         const int base = EntI(pLocal, g_offTickBase);
         int found = -1, run = 0;
+        float pvz = EntV3(pLocal, g_offVelocity).z;
         for (int z = 0; z <= n && found < 0; z++) {
             cmd->buttons = z < delay ? live : buttons;
             EntSetI(pLocal, g_offTickBase, base + z);
             Pred_Simulate(pLocal, cmd);
-            if (EntI(pLocal, g_offFlags) & FL_ONGROUND)
+            if (EntI(pLocal, g_offFlags) & FL_ONGROUND) {
+                ++s_psDiagHLand;
                 break;
-            run = pinned(EntV3(pLocal, g_offVelocity)) ? run + 1 : 0;
+            }
+            const Vec3 v = EntV3(pLocal, g_offVelocity);
+            if (v.z > pvz + 2.f * pin + 1.f) ++s_psDiagHClip;   // pin = -halfgrav: free fall adds 2 * pin a tick
+            if (fabsf(v.z - pin) < s_psDiagNear) { s_psDiagNear = fabsf(v.z - pin); s_psDiagNearVz = v.z; s_psDiagNearXy = v.Length2D(); }
+            pvz = v.z;
+            run = pinned(v) ? run + 1 : 0;
             if (run == 2)
                 found = z - 1;
         }
         cmd->buttons = live;
         RestoreToFrame(frame);
+        ++s_psDiagHunts;
+        if (found >= 0) ++s_psDiagFinds;
         return found;
     };
 
@@ -204,6 +230,11 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         constexpr float k_leave_dot = 0.5f;
         if (len > 0.01f && (wish.x * n.x + wish.y * n.y) / len > k_leave_dot)
             return 0;
+        /* auto align's surf stick holds the hull still off the face, or ( sv_wallbug 0 ) presses with an 8-tick
+           proof ( movement.cpp AutoAlignStick ): keep its
+           move, no gain strafe / press -- either one re-clips on the face and the DIST_EPSILON drift is back */
+        if (s_aaStickOwns)
+            return keeps_pin() ? 1 : 0;
         /* strafing into the face = 450 at the best along-wall strafe yaw ( wall eats the into part ), only if it keeps the pin.
            g_psWallStrafe: 1 = botox ( your keys into the face ), 2 = every ride tick, keys or not ( leaving still wins, above ) */
         constexpr float k_gain_dot = 0.25f;
@@ -270,6 +301,8 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         }
         (holds_duck ? s_psShouldUnduck : s_psShouldSurf) = true;
         s_psTicks    = cmd->tick_count + flip + as::TicksScaled(16, ipt);
+        s_psCatchTick = cmd->tick_count + flip;
+        s_psRode     = false;
         s_psUnpinned = 0;
         cmd->buttons = flip_buttons;
         DebugLog("PSU: latch %s in=%d z=%.3f vz=%.2f spd=%.1f", holds_duck ? "stand" : "duck", flip, s_prePredOrigin.z,
@@ -282,7 +315,29 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
     const int held        = hold();
     log_hold(held);
     const Vec3& v0   = s_prePredVel;
-    const bool stuck = !held && fabsf(v0.z - pin) < 0.01f && v0.Length2D() < 1.f;
+    const bool stuck = !held && fabsf(v0.z - pin) < as::k_pinTol && v0.Length2D() < 1.f;
+    if (pinned(v0))
+        s_psRode = true;
+    /* THE 16-TICK HOLD IS FOR A RIDE THAT HAPPENED. botox keeps the latch 16 ticks past the predicted pin
+       whether or not it came, so a guess 8 ticks out that the path / keys then missed forced the crouch
+       ~24 ticks AND lit s_shouldPixelSurf, which jumpbug / edge / auto bounce / bounce assist / wall climb
+       all yield to: pixel surf breaking them with no surf happening. A catch that has not come 2 ticks
+       after its tick re-hunts 4 ticks: still ahead = the catch moved, keep; gone = let go now */
+    const bool missed = !stuck && !s_psRode && cmd->tick_count > s_psCatchTick + as::TicksScaled(2, ipt);
+    if (missed) {
+        const int ahead = hunt(cmd->buttons, as::TicksScaled(4, ipt));
+        if (ahead >= 0) {
+            s_psCatchTick = cmd->tick_count + ahead;
+            return;
+        }
+        DebugLog("PSU: miss %s (no pin %d ticks after the predicted one) z=%.3f", s_psShouldSurf ? "duck" : "stand",
+                 cmd->tick_count - s_psCatchTick, s_prePredOrigin.z);
+        /* own_buttons already carries the latch's crouch ( movement.cpp applies it before every mover ):
+           the duck bit goes back to the player's own key, the rest stays what earlier features wrote */
+        cmd->buttons   = (own_buttons & ~IN_DUCK) | (s_rawButtons & IN_DUCK);
+        s_psShouldSurf = s_psShouldUnduck = false;
+        return;
+    }
     if (stuck)
         cmd->buttons = own_buttons;
     else {
@@ -334,12 +389,12 @@ static int PsPark(void* pLocal, UserCmd_t* cmd, int& end_out)
         return 0;
     if (!EntAlive(pLocal) || EntMoveType(pLocal) != MOVETYPE_WALK || (s_prePredFlags & FL_ONGROUND))
         return 0;
-    if (s_airStuckHit || s_textureBugHit || s_tbOwnsCmd || s_wallClimbHit || s_wallClimbActive)
+    if (s_airStuckHit || s_textureBugHit || s_tbOwnsCmd || s_wallClimbHit || s_wallClimbActive || s_pixelHopHit)
         return 0;
     const float pin = TargetPredictZVel();
     const Vec3  v0  = s_prePredVel;
     const float xy0 = v0.Length2D();
-    if (fabsf(v0.z - pin) >= 0.01f)
+    if (fabsf(v0.z - pin) >= as::k_pinTol)
         return 0;   // not on a pin this cmd
     const int frame = PredCommandsPredicted() - 1;
     RestoreToFrame(frame);
@@ -359,7 +414,7 @@ static int PsPark(void* pLocal, UserCmd_t* cmd, int& end_out)
     const float ipt = TickInterval();
     const float aa  = CvarFloat("sv_airaccelerate", 10.f);
     const auto on_pin = [&]() {
-        return !(EntI(pLocal, g_offFlags) & FL_ONGROUND) && fabsf(EntV3(pLocal, g_offVelocity).z - pin) < 0.01f;
+        return !(EntI(pLocal, g_offFlags) & FL_ONGROUND) && fabsf(EntV3(pLocal, g_offVelocity).z - pin) < as::k_pinTol;
     };
     const auto brake_into = [&](const Vec3& v) {
         MV_WriteWishWorld(cmd, Vec3(-v.x, -v.y, 0.f), as::BrakeWish(v.Length2D(), aa, ipt));
@@ -428,7 +483,7 @@ static void PixelSurf(void* pLocal, UserCmd_t* pCmd)
     if (!g_autoAlign) PsWallDetectFallback(pLocal);
 
     s_psParkHold = g_psParkAtEnd && !(s_prePredFlags & FL_ONGROUND)
-                && fabsf(s_prePredVel.z - TargetPredictZVel()) < 0.01f && s_prePredVel.Length2D() < 1.f;
+                && fabsf(s_prePredVel.z - TargetPredictZVel()) < as::k_pinTol && s_prePredVel.Length2D() < 1.f;
     PixelSurfImpl(pLocal, pCmd);
     {
         static int s_lastAct = 0;
@@ -438,6 +493,40 @@ static void PixelSurf(void* pLocal, UserCmd_t* pCmd)
             DebugLog("PSU: park %s spd=%.1f end=%d z=%.3f", act == 1 ? "brake" : act == 2 ? "hold" : "off",
                      s_prePredVel.Length2D(), end, s_prePredOrigin.z);
         s_lastAct = act;
+    }
+
+    {
+        static bool  s_prevAir = false;
+        static float s_prevVz  = 0.f;
+        const bool air = On(g_pixelSurf, g_pixelSurfKey, g_pixelSurfMode) && EntAlive(pLocal)
+                      && EntMoveType(pLocal) == MOVETYPE_WALK && !(s_prePredFlags & FL_ONGROUND);
+        if (air) {
+            const float pin = TargetPredictZVel();
+            ++s_psDiagAir;
+            if (fabsf(s_prePredVel.z - pin) < as::k_pinTol) { ++s_psDiagPin; s_psDiagPinVz += s_prePredVel.z; }
+            if (s_prevAir && s_prePredVel.z > s_prevVz + 2.f * pin + 1.f) ++s_psDiagZup;
+        }
+        s_prevAir = air;
+        s_prevVz  = s_prePredVel.z;
+    }
+    {
+        static int s_sec = -1;
+        const int sec = g_globalVars ? (int)g_globalVars->curtime : 0;
+        if (sec != s_sec)
+        {
+            s_sec = sec;
+            if (g_debugLogEnable && (s_psDiagWall > 0 || s_psDiagPin > 0 || s_psDiagYield[0] + s_psDiagYield[1] + s_psDiagYield[2] > 0))
+                DebugLog("PSU: sec wall=%d hunts=%d finds=%d yield=%d/%d/%d air=%d pin=%d zup=%d hclip=%d hland=%d near=%.3f vz=%.2f xy=%.0f wb=%.0f pvz=%.4f",
+                         s_psDiagWall, s_psDiagHunts, s_psDiagFinds, s_psDiagYield[0], s_psDiagYield[1], s_psDiagYield[2],
+                         s_psDiagAir, s_psDiagPin, s_psDiagZup, s_psDiagHClip, s_psDiagHLand,
+                         s_psDiagNear < 1e8f ? s_psDiagNear : -1.f, s_psDiagNearVz, s_psDiagNearXy,
+                         CvarFloat("sv_wallbug", -1.f), s_psDiagPin > 0 ? s_psDiagPinVz / s_psDiagPin : 0.0);
+            s_psDiagPinVz = 0.0;
+            s_psDiagWall = s_psDiagHunts = s_psDiagFinds = 0;
+            s_psDiagYield[0] = s_psDiagYield[1] = s_psDiagYield[2] = 0;
+            s_psDiagAir = s_psDiagPin = s_psDiagZup = s_psDiagHClip = s_psDiagHLand = 0;
+            s_psDiagNear = 1e9f; s_psDiagNearVz = s_psDiagNearXy = 0.f;
+        }
     }
 
     s_shouldPixelSurf = s_psShouldSurf || s_psShouldUnduck;

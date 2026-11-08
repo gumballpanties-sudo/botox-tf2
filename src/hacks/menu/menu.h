@@ -12,6 +12,7 @@ struct ImDrawList;
 struct MenuFadedList { ImDrawList* list; float alpha; };
 int  Menu_SplitPopups(ImDrawList** lists, int& count, MenuFadedList* out, int max);
 void Menu_DropPopupGhosts();
+bool Menu_SearchTyping();   // sidebar search box has the keyboard (Binds_Blocked)
 
 // bold label + thin line to the right edge -- the SUB header inside a group box.
 // Shared so the ps point window heads its blocks the same way instead of with

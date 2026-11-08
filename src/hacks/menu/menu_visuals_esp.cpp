@@ -366,9 +366,9 @@ static bool ChamsHasLayers(const char* cfg)
 }
 
 // Called inside menu.cpp's "chams" group (Page_VisualsEsp, col2). botox menu_tab_visuals.cpp
-// "chams" group, verbatim order/labels/ranges. TF2 mapping: gloves = c_ arms, sleeve = classic
-// v_ viewmodels (TF2 has no sleeve model), teammates = the extra visible/occluded pair the old
-// TF2 chams had (botox draws enemies only).
+// "chams" group, verbatim order/labels/ranges. TF2 mapping: botox gloves + sleeve = one "arms"
+// list (TF2 has arm models only: c_ arms and classic v_ viewmodels), teammates = the extra
+// visible/occluded pair the old TF2 chams had (botox draws enemies only).
 void Menu_Visuals_Chams()
 {
     ImGui::Checkbox("enable enemy chams", &g_chamsEnable);
@@ -421,14 +421,13 @@ void Menu_Visuals_Chams()
     ImGui::BeginDisabled(!g_chamsLocalEnable);
 
     ChamsDropdown("weapon material", g_chamsWeaponCfg);
-    ChamsDropdown("gloves material", g_chamsArmsCfg);
-    ChamsDropdown("sleeve material", g_chamsSleeveCfg);
+    ChamsDropdown("arms material", g_chamsArmsCfg);
 
     ImGui::EndDisabled();
 
     bool two_tone_used = false;
     for (const char* cfg : { g_chamsVisibleCfg, g_chamsOccludedCfg, g_chamsSoundCfg, g_chamsTeamVisibleCfg, g_chamsTeamOccludedCfg,
-                             g_chamsUberCfg, g_chamsCloakCfg, g_chamsTeamUberCfg, g_chamsTeamCloakCfg, g_chamsWeaponCfg, g_chamsArmsCfg, g_chamsSleeveCfg }) {
+                             g_chamsUberCfg, g_chamsCloakCfg, g_chamsTeamUberCfg, g_chamsTeamCloakCfg, g_chamsWeaponCfg, g_chamsArmsCfg }) {
         ChamsLayers::List l;
         ChamsLayers::Parse(cfg, l);
         two_tone_used |= ChamsLayers::IndexOf(l, ChamsLayers::TwoTone) >= 0;

@@ -126,7 +126,7 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     // the assist arc flies beside the very wall this sweeps and a win would overwrite its catch duck / steer
     if (s_textureBugHit || s_headSurfHit || s_headBounceHit || s_airStuckHit || s_asHolding || s_ebDetected
         || (On(g_textureBug, g_textureBugKey, g_textureBugMode) && s_tbRideHold > 0)
-        || s_psAssistHopActive || s_shouldPixelSurf || s_psRidingNow || s_psAssistDuckHeld)
+        || s_psAssistHopActive || s_shouldPixelSurf || s_psRidingNow || s_psAssistDuckHeld || s_pixelHopHit)
         return;
 
     // ---- THE LAUNCH ---- wc never jumps on its own: s_rawJumpHeld is the real space bar before AutoJump rewrites the cmd

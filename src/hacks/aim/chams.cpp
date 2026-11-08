@@ -48,7 +48,6 @@ extern char  g_chamsTeamVisibleCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsTeamOccludedCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsWeaponCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsArmsCfg[ChamsLayers::kCfgLen];
-extern char  g_chamsSleeveCfg[ChamsLayers::kCfgLen];
 extern char  g_chamsUberCfg[ChamsLayers::kCfgLen];        // TF2 extra: enemy visible list while ubered / bonked
 extern char  g_chamsCloakCfg[ChamsLayers::kCfgLen];       // TF2 extra: enemy visible list while cloaked
 extern char  g_chamsTeamUberCfg[ChamsLayers::kCfgLen];    // same pair, teammates
@@ -404,7 +403,7 @@ namespace
 	};
 	CfgList s_visible{ g_chamsVisibleCfg }, s_occluded{ g_chamsOccludedCfg }, s_backtrack{ g_chamsBacktrackCfg },
 	        s_sound{ g_chamsSoundCfg }, s_teamVisible{ g_chamsTeamVisibleCfg }, s_teamOccluded{ g_chamsTeamOccludedCfg },
-	        s_weapon{ g_chamsWeaponCfg }, s_arms{ g_chamsArmsCfg }, s_sleeve{ g_chamsSleeveCfg },
+	        s_weapon{ g_chamsWeaponCfg }, s_arms{ g_chamsArmsCfg },
 	        s_uber{ g_chamsUberCfg }, s_cloak{ g_chamsCloakCfg },
 	        s_teamUber{ g_chamsTeamUberCfg }, s_teamCloak{ g_chamsTeamCloakCfg };
 
@@ -590,7 +589,7 @@ bool Chams_AnyActive()
 	if (g_chamsTeam && (s_teamVisible.Get().used || s_teamOccluded.Get().used)) return true;
 	if (g_chamsEnable && (s_uber.Get().used || s_cloak.Get().used)) return true;
 	if (g_chamsTeam && (s_teamUber.Get().used || s_teamCloak.Get().used)) return true;
-	if (g_chamsLocalEnable && (s_weapon.Get().used || s_arms.Get().used || s_sleeve.Get().used)) return true;
+	if (g_chamsLocalEnable && (s_weapon.Get().used || s_arms.Get().used)) return true;
 	return false;
 }
 
@@ -630,13 +629,12 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 		I::RenderView->SetBlend(flOrigBlend);
 	};
 
-	// ---- local: viewmodel weapon / gloves (arms) / sleeve (classic v_ viewmodels) ----
+	// ---- local: viewmodel weapon / arms (c_ arms + classic v_ viewmodels, one list) ----
 	if (vmKind)
 	{
 		if (!g_chamsLocalEnable)
 			return false;
-		const ChamsLayers::List& l = vmKind == 2 ? s_weapon.Get()
-			: (modelName && strstr(modelName, "_arms.mdl")) ? s_arms.Get() : s_sleeve.Get();
+		const ChamsLayers::List& l = vmKind == 2 ? s_weapon.Get() : s_arms.Get();
 		if (!l.used)
 			return false;
 		DrawLayers(l, false, flOrigBlend, ctx);   // keeps the transparent-viewmodel blend

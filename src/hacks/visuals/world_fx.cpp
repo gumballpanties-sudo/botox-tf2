@@ -5,8 +5,9 @@
 #include "../movement/prediction.h"   // g_globalVars -- framecount + absoluteframetime, main thread only
 #include "viewmodel_fps.h"            // g_vmFps.Frame -- the camera the low fps viewmodel re-attaches to
 #include "../network/netregion.h"     // FindMatSystemSurface -- cloak meter hook
-#include "world_fx2.h"                // WorldFx2_Frame -- sun angle, per frame
 #include "world_fx3.h"                // WorldFx3_Frame -- trail, dlights, modulation, per frame
+#include "../../render/render.h"      // W2S_Project -- third person crosshair
+#include <mutex>
 
 // ==== fullbright + disable interp ===================================================
 // Both are plain convar pokes -- gap.md flags them "trivial... no hook needed". Ridden on
@@ -122,8 +123,8 @@ static bool ThirdPersonKey()
     if (g_hwnd && GetForegroundWindow() != g_hwnd) return false;
     const int key = g_sfxThirdPersonKey;
     if (key <= 0 || key > 0xFE) return false;
-    return g_sfxThirdPersonKeyMode == 1 ? (GetAsyncKeyState(key) & 0x8000) != 0
-                                        : (GetKeyState(key) & 1) != 0;
+    return g_sfxThirdPersonKeyMode == 1 ? !Binds_Blocked() && (GetAsyncKeyState(key) & 0x8000) != 0
+                                        : Binds_Toggled(key);
 }
 
 // IEngineTrace::TraceRay slot 4 (movement.h kTrace_TraceRay). World + static props only, the
@@ -145,12 +146,12 @@ struct TpTraceFilter
 };
 
 // __try lives alone here: C2712 refuses it next to objects that need unwinding.
-static bool TpTraceRaw(void* trace, const Ray_mv& ray, void* filter, GameTrace_t* tr)
+static bool TpTraceRaw(void* trace, const Ray_mv& ray, void* filter, GameTrace_t* tr, unsigned mask = 0x200400B /* MASK_SOLID */)
 {
     using TraceRay_t = void(__fastcall*)(void*, const Ray_mv&, unsigned, void*, GameTrace_t*);
     __try {
         void** vt = *(void***)trace;
-        ((TraceRay_t)vt[kTrace_TraceRay])(trace, ray, 0x200400B /* MASK_SOLID */, filter, tr);
+        ((TraceRay_t)vt[kTrace_TraceRay])(trace, ray, mask, filter, tr);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -168,19 +169,70 @@ static float ThirdPersonCollide(const Vec3& eye, const Vec3& cam)
     return tr.fraction < 0.f ? 0.f : (tr.fraction > 1.f ? 1.f : tr.fraction);
 }
 
+// third person crosshair: the game's stays screen centre, which is not where shots go once the
+// camera sits behind / beside the eye. Main thread writes the eye trace hit, render thread draws it.
+struct TpAimFilter
+{
+    void** vfptr;
+    void*  skip;
+    static bool __fastcall sShouldHit(TpAimFilter* self, void* pEnt, int) { return pEnt != self->skip; }
+    static int __fastcall sTraceType(TpAimFilter*) { return 0; }   // TRACE_EVERYTHING
+    explicit TpAimFilter(void* s) : skip(s) { static void* vt[2] = { (void*)&sShouldHit, (void*)&sTraceType }; vfptr = vt; }
+};
+
+static std::mutex s_tpAimMx;
+static Vec3       s_tpAim;
+static ULONGLONG  s_tpAimMs = 0;   // 0 = none; stale after 250 ms (third person off, menu, loading)
+
+static void ThirdPersonAimUpdate(const Vec3& eye, const Vec3& fwd)
+{
+    static void* s_trace = GetInterface("engine.dll", "EngineTraceClient003");
+    if (!s_trace) return;
+    Ray_mv ray;
+    ray.Init(eye, eye + fwd * 8192.f);
+    TpAimFilter filter(GetClientEntity(GetLocalPlayerIndex()));
+    GameTrace_t tr{};
+    if (!TpTraceRaw(s_trace, ray, &filter, &tr, 0x4600400B /* MASK_SHOT */)) return;
+    std::lock_guard<std::mutex> lk(s_tpAimMx);
+    s_tpAim   = tr.endpos;
+    s_tpAimMs = GetTickCount64();
+}
+
+// render thread, background list (render.cpp, next to RenderWorldFx3)
+void RenderThirdPersonCrosshair()
+{
+    if (!g_thirdPersonEnable || !g_sfxThirdPersonCrosshair) return;
+    Vec3 at;
+    {
+        std::lock_guard<std::mutex> lk(s_tpAimMx);
+        if (!s_tpAimMs || GetTickCount64() - s_tpAimMs > 250) return;
+        at = s_tpAim;
+    }
+    ImVec2 s;
+    if (!W2S_Project(at, s)) return;
+    const float* c = g_sfxThirdPersonCrosshairColor;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    dl->AddCircleFilled(s, 3.5f, ImGui::ColorConvertFloat4ToU32(ImVec4(0.f, 0.f, 0.f, c[3])), 12);
+    dl->AddCircleFilled(s, 2.5f, ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3])), 12);
+}
+
 // Main thread, inside OverrideView. Returns true while the camera is ours.
+// No sv_cheats needed: CThirdPersonManager::Update (cam_thirdperson.cpp:82, run by CAM_Think at
+// render start, before OverrideView) calls CAM_ToFirstPerson every frame while sv_cheats is 0.
+// So re-force whenever it kicked us, Amalgam ThirdPerson() style -- this frame draws third person.
 static bool ThirdPersonSet(bool wanted)
 {
     static bool s_forced = false;
     if (!g_input) return false;
     __try {
         void** vt = *(void***)g_input;
-        if (wanted && !s_forced) {
+        const bool isTp = ((int(__fastcall*)(void*))vt[k_inCamIsThirdPerson])(g_input) != 0;
+        if (wanted && (!s_forced || !isTp)) {
             ((void(__fastcall*)(void*))vt[k_inCamToThirdPerson])(g_input);
             if (void* local = GetClientEntity(GetLocalPlayerIndex()))
                 VCall<void>(local, k_plThirdPersonSwitch, true);
+            if (!s_forced) DebugLog("third person: on (CAM_ToThirdPerson)");
             s_forced = true;
-            DebugLog("third person: on (CAM_ToThirdPerson)");
         } else if (!wanted && s_forced) {
             ((void(__fastcall*)(void*))vt[k_inCamToFirstPerson])(g_input);
             if (void* local = GetClientEntity(GetLocalPlayerIndex()))
@@ -208,15 +260,17 @@ static bool WorldFov_Wanted()
 static void __fastcall h_OverrideView(void* rcx, void* pView)
 {
     // the eye, before ClientModeShared::OverrideView lays a third person camera back from it
-    float eye[3] = { 0.f, 0.f, 0.f };
+    float eye[3] = { 0.f, 0.f, 0.f }, eyeAng[3] = { 0.f, 0.f, 0.f };
     if (pView)
-        __try { memcpy(eye, reinterpret_cast<const float*>(reinterpret_cast<uintptr_t>(pView) + k_vsOrigin), sizeof(eye)); }
+        __try {
+            memcpy(eye, reinterpret_cast<const float*>(reinterpret_cast<uintptr_t>(pView) + k_vsOrigin), sizeof(eye));
+            memcpy(eyeAng, reinterpret_cast<const float*>(reinterpret_cast<uintptr_t>(pView) + k_vsAngles), sizeof(eyeAng));
+        }
         __except (EXCEPTION_EXECUTE_HANDLER) {}
 
     o_OverrideView(rcx, pView);
 
     // main thread, once a frame, before any model draw
-    WorldFx2_Frame();   // sun angle + shadow_control
     WorldFx3_Frame();   // movement trail, dlights, world/prop/skybox modulation walk
     const bool fovOn = WorldFov_Wanted();
 
@@ -240,16 +294,31 @@ static void __fastcall h_OverrideView(void* rcx, void* pView)
             const Vec3 angles(a[0], a[1], 0.f);
             if (angles.x > -91.f && angles.x < 91.f)   // sane pitch, or the pattern/offsets are wrong
             {
-                Vec3 fwd;
-                AngleVectors(angles, &fwd);
+                Vec3 fwd, right, up;
+                AngleVectors(angles, &fwd, &right, &up);
                 float dist = g_thirdPersonDistance < 20.f ? 20.f :
                              (g_thirdPersonDistance > 300.f ? 300.f : g_thirdPersonDistance);   // botox slider range
                 const Vec3 from(eye[0], eye[1], eye[2]);
                 if (g_sfxThirdPersonCollision)
                     dist *= ThirdPersonCollide(from, from - fwd * dist);
-                o[0] = from.x - fwd.x * dist;
-                o[1] = from.y - fwd.y * dist;
-                o[2] = from.z - fwd.z * dist;
+                Vec3 cam = from - fwd * dist;
+
+                // shoulder offset on top of the laid back camera ( c_thirdpersonshoulder math )
+                if (g_sfxThirdPersonOffsetSide != 0.f || g_sfxThirdPersonOffsetUp != 0.f)
+                {
+                    const Vec3 shift = right * g_sfxThirdPersonOffsetSide + up * g_sfxThirdPersonOffsetUp;
+                    cam = cam + shift * (g_sfxThirdPersonCollision ? ThirdPersonCollide(cam, cam + shift) : 1.f);
+                }
+                o[0] = cam.x;
+                o[1] = cam.y;
+                o[2] = cam.z;
+
+                if (g_sfxThirdPersonCrosshair)
+                {
+                    Vec3 aimFwd;
+                    AngleVectors(Vec3(eyeAng[0], eyeAng[1], 0.f), &aimFwd);
+                    ThirdPersonAimUpdate(from, aimFwd);
+                }
             }
         }
 

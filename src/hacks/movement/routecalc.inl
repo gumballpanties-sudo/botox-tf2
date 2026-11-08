@@ -821,7 +821,7 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
     s_rcJob = job;
     s_rcBusy = true;
 
-    DebugLog("RC: solve (dihrc32) -- %d marker(s), start %s%s%s z %.3f vz %.1f%s, moves 0x%X start 0x%X, "
+    DebugLog("RC: solve (dihrc33) -- %d marker(s), start %s%s%s z %.3f vz %.1f%s, moves 0x%X start 0x%X, "
              "delay hop %dt, gravity %.0f, tick %.4f, scale %.2f, jump mod %.4f, bhop crop %.4f",
              (int)route.size(), start.air ? "IN AIR" : (bHere ? "where you stand" : "marker 1"),
              s_pcBld > 0 ? " on a " : "", k_pcBld[s_pcBld].name,
@@ -945,10 +945,24 @@ static void RcSolveFinish(RcJob& job)
     }
     if (r.total > 0.0)
     {
+        // only chancy lines exist (rs kOddsMin): they ARE the route, but each says how often its
+        // box landing comes out right -- botox's old "(works N% of tries)"
         for (int i = 0; i < (int)r.combos.size() && i < rows; i++)
-            lines.push_back(r.combos[i].text);
+            lines.push_back(r.onlyChancy ? r.combos[i].text + " (works " + std::to_string((int)(r.combos[i].odds * 100.f + 0.5f))
+                                             + "% of tries)"
+                                         : r.combos[i].text);
         if (!s_rcPixelSolve && r.total > (double)std::min<size_t>(r.combos.size(), (size_t)rows))
             lines.push_back(RC_NOTE "(and +" + RcCount(r.total - (double)std::min<size_t>(r.combos.size(), (size_t)rows)) + " more)");
+        if (r.onlyChancy)
+            Explain("every line needs you to cross a box edge at the right tick (a rising catch) - the falling "
+                    "landing does not make it");
+        else if (r.chancy > 0 && g_rcAdvanced)
+        {
+            char b[160];
+            snprintf(b, sizeof(b), "%d line(s) hidden: they work under %d%% of box-edge crossings", r.chancy,
+                     (int)(rs::kOddsMin * 100.f));
+            Explain(b);
+        }
     }
     // the worker's own ceiling, not a dead marker: Finish() never ran, so there is no deadPoint to
     // name and saying there was one would blame the wrong marker
@@ -1099,12 +1113,12 @@ static void RcSolveFinish(RcJob& job)
     std::string layers;
     for (size_t i = 0; i < r.layerNodes.size(); i++) layers += " " + std::to_string(r.layerNodes[i]);
     DebugLog("RC: layers (states per marker):%s | %s combination(s), %lld sim ticks, %.1f ms off the "
-             "game thread%s%s",
+             "game thread%s%s | %d chancy hidden%s",
              layers.c_str(), RcCount(r.total).c_str(), r.ticks, s_rcMs, r.capped ? " | CAPPED" : "",
-             r.timedOut ? " | TIMED OUT" : "");
+             r.timedOut ? " | TIMED OUT" : "", r.chancy, r.onlyChancy ? " (only chancy: listed)" : "");
     for (size_t i = 0; i < r.combos.size(); i++)
-        DebugLog("RC: combo %2d  binds %d  switches %d  cost %2d  margin %s  %s", (int)i + 1,
-                 r.combos[i].presses, r.combos[i].switches, r.combos[i].cost,
+        DebugLog("RC: combo %2d  odds %3d%%  binds %d  switches %d  cost %2d  margin %s  %s", (int)i + 1,
+                 (int)(r.combos[i].odds * 100.f + 0.5f), r.combos[i].presses, r.combos[i].switches, r.combos[i].cost,
                  r.combos[i].margin > 1e8f ? "  -   " : (std::to_string(r.combos[i].margin).substr(0, 6)).c_str(),
                  r.combos[i].text.c_str());
     for (const std::string& s : lines) DebugLog("RC: %s", RcRowText(s));

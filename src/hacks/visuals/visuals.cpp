@@ -10,7 +10,7 @@
 #include "../esp/esp_fx.h"   // sound-ping ring, written from h_EmitSound below
 #include "chams_api.h"    // 10-31: chams + glow passes (aim/chams.cpp)
 #include "world_fx.h"     // WorldFx_Tick -- fullbright + disable interp pokes
-#include "world_fx2.h"    // WorldFx2_Tick/_OnFindMaterial -- dlight, sun angle, tints
+#include "world_fx2.h"    // WorldFx2_Tick/_OnFindMaterial -- dlight, tints
 #include "mc_world.h"     // MCWorld_OnSkyBoxDrawn -- minecraft sky behind the 2D sky draw
 #include "../misc/game_extras.h"   // ChatTranslator_OnUserMessage -- DispatchUserMessage
 #include <intrin.h>       // _ReturnAddress -- net_graph must still read the real lerp
@@ -66,10 +66,12 @@ void UpdateVisualsCvars()
     // queue bounce at the loading screen and re-queue (sv_pure bypass in thread.cpp is the
     // other half). Fog rides the same force, so fog's cheat push stands down on casual too --
     // it comes back the moment you are on a community server or in the menu.
+    // The bounce is a loading screen thing, so on casual it only stands down until signon is
+    // done (IsInGame) -- once in the match the push is back on, off again on the next load.
     {
         static CachedCVar sv_cheats;
         static bool       s_wasOn = false;
-        bool wantOn = (g_cheatsBypass || g_fogEnable) && !MMFix_OnMatchmadeServer();
+        bool wantOn = (g_cheatsBypass || g_fogEnable) && (!MMFix_OnMatchmadeServer() || IsInGame());
         if (wantOn)          CVar_ForceInt(sv_cheats.Get("sv_cheats"), 1);
         else if (s_wasOn)    CVar_ForceInt(sv_cheats.Get("sv_cheats"), 0);
         s_wasOn = wantOn;
@@ -185,7 +187,7 @@ void UpdateVisualsCvars()
     // of ours enabled at all. One writer only.
 
     WorldFx_Tick();   // fullbright + disable interp pokes, same 100ms tick
-    WorldFx2_Tick();  // dlight + sun angle, same 100ms tick
+    WorldFx2_Tick();  // dlight, same 100ms tick
 }
 
 // ==== Net stats ==================================================================

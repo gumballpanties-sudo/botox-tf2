@@ -88,7 +88,12 @@ inline float CumiSign(float vel_yaw, float wall_yaw)
     return std::remainder(vel_yaw - wall_yaw, 360.0f) < 0.0f ? 1.0f : -1.0f;
 }
 
+// how close vz must sit to -halfgrav to count as a pin. botox (csgo) uses 0.01, but Valve's Oct 2026
+// ClipVelocity (backoff -= DIST_EPSILON) ends a TF2 top-plane pin at -halfgrav + 0.03125 = -5.97:
+// 0.01 made pixel surf blind to every ride on those servers (11-08 log: all pins -5.97, zero PSU:)
+inline constexpr float k_pinTol = 0.05f;
+
 // botox pixel_surf `pinned`: vz on the pin AND still sliding ( xy < 1 = a wall hang, not a surf )
-inline bool SurfPinned(float vz, float vxy, float pin) { return std::fabs(vz - pin) < 0.01f && vxy >= 1.f; }
+inline bool SurfPinned(float vz, float vxy, float pin) { return std::fabs(vz - pin) < k_pinTol && vxy >= 1.f; }
 
 }   // namespace as

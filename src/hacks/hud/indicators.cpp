@@ -3,6 +3,7 @@
 #include "miwarp.h"
 #include "points.h"                 // g_trickFired / g_esFired: the particle burst counts
 #include "../movement/movement.h"   // MvInd_t: the movement thread's per-cmd snapshot
+#include "../menu/fonts.h"          // indicator font flags: dropshadow / outline
 #include "../../hooks/crashlog.h"
 #include <algorithm>
 #include <cmath>
@@ -65,8 +66,9 @@ namespace
     shadow_opts_t shadow_opts_of(const bool on, const float blur, const float* color, const bool outline, const float* outline_color,
                                  const int outline_px, const int shadow_x, const int shadow_y)
     {
-        return { on, blur, col_of(color), outline, col_of(outline_color), std::clamp(outline_px, 1, 5),
-                 (float)shadow_x, (float)shadow_y };
+        // indicator font flags dropshadow / outline add on top of the indicator's own
+        return { on || (g_fontIndFlags & (1 << FF_DROPSHADOW)), blur, col_of(color), outline || (g_fontIndFlags & (1 << FF_OUTLINE)),
+                 col_of(outline_color), std::clamp(outline_px, 1, 5), (float)shadow_x, (float)shadow_y };
     }
 
     indicator_colors_t key_colors_plain(const col_t& shadow_tint, const col_t& outline_tint)
@@ -1246,25 +1248,21 @@ static void keybinds_mitosis(const std::vector<key_pending_t>& pending, ImFont* 
     mitosis_queue(f);
 }
 
-static ImFont* kamibebra_font(const float scale, float& fs, float& s)
-{
-    ImFont* const font = g_fontKamibebra22;
-    s  = std::clamp(scale, kIndScaleMin, kIndScaleMax);
-    fs = font ? font->FontSize * s : 0.f;
-    return font;
-}
-
 static void kamibebra_text(ImFont* font, const float fs, const float x, const float y, const std::string& text, const ImVec4& color)
 {
     push_label(font, fs, ImVec2(std::round(x), std::round(y)), text, u32(color), 0u, { false, 0.f });
 }
 
-static void kamibebra_shadowed(ImFont* font, const float fs, const float s, const float x, const float y, const std::string& text, const ImVec4& color)
+// own 2 layer drop shadow while the shadow option is off; on = the shared shadow / outline options
+static void kamibebra_shadowed(ImFont* font, const float fs, const float s, const float x, const float y, const std::string& text, const ImVec4& color,
+                               const shadow_opts_t& shadow, const float shadow_alpha)
 {
-    const float a = (200.f / 255.f) * color.w;
-    kamibebra_text(font, fs, x + std::round(s), y + std::round(s), text, ImVec4(0.f, 0.f, 0.f, a));
-    kamibebra_text(font, fs, x + std::round(2.f * s), y + std::round(2.f * s), text, ImVec4(0.f, 0.f, 0.f, a * 0.25f));
-    kamibebra_text(font, fs, x, y, text, color);
+    if (!shadow.m_on) {
+        const float a = (200.f / 255.f) * color.w;
+        kamibebra_text(font, fs, x + std::round(s), y + std::round(s), text, ImVec4(0.f, 0.f, 0.f, a));
+        kamibebra_text(font, fs, x + std::round(2.f * s), y + std::round(2.f * s), text, ImVec4(0.f, 0.f, 0.f, a * 0.25f));
+    }
+    push_label(font, fs, ImVec2(std::round(x), std::round(y)), text, u32(color), shadow_u32(shadow.m_color, shadow_alpha), shadow);
 }
 
 struct kamibebra_tag_t {
@@ -1273,7 +1271,8 @@ struct kamibebra_tag_t {
     ImVec2      m_size = {};
     float m_opacity = 0.f, m_target_opacity = 1.f;
     float m_x = 0.f, m_target_x = 0.f, m_spawn_x = 0.f;
-    bool  m_removing = false, m_detect = false;
+    float m_y = 0.f, m_target_y = 0.f;
+    bool  m_removing = false, m_detect = false, m_predicted = false;
     float m_detect_t = 0.f, m_target_detect = 0.f;
     float m_appear_until = 0.f, m_detect_hold_until = 0.f;
 };
@@ -1281,20 +1280,19 @@ struct kamibebra_tag_t {
 static std::vector<kamibebra_tag_t> s_kamibebra_tags;
 static float s_kamibebra_clock = 0.f;
 
-static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const float scale, const float dt, const float base)
+static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, ImFont* font, const float fs, const float scale, const float dt, const float base,
+                               const bool horizontal, const shadow_opts_t& shadow, const bool shadow_detect)
 {
     constexpr float k_opacity = 10.f, k_position = 9.5f, k_detect = 4.5f, k_detect_hold = 0.25f, k_detect_max = 0.75f, k_appear = 0.09f,
                     k_remove_opacity = 2.35f, k_spacing = 4.f;
 
-    float fs = 0.f, s = 1.f;
-    ImFont* const font = kamibebra_font(scale, fs, s);
-    if (!font)
-        return;
+    const float s = std::clamp(scale, kIndScaleMin, kIndScaleMax);
 
     s_kamibebra_clock += dt;
     const float now = s_kamibebra_clock;
     const float W   = screen_w();
     const float gap = (float)g_kiSpacing;
+    const float y0  = screen_h() - base;
 
     const auto find = [&](const int id) -> kamibebra_tag_t* {
         for (auto& t : s_kamibebra_tags)
@@ -1312,6 +1310,18 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const 
     };
 
     const auto recalc = [&]() {
+        if (!horizontal) {
+            float y = y0;
+            for (auto& t : s_kamibebra_tags) {
+                if (t.m_removing)
+                    continue;
+                t.m_target_x = std::round((W - t.m_size.x) * 0.5f);
+                t.m_target_y = y;
+                y += t.m_size.y + gap;
+            }
+            return;
+        }
+
         const float spacing = std::round(k_spacing * s) + gap;
         float total = -spacing;
         for (const auto& t : s_kamibebra_tags)
@@ -1323,6 +1333,7 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const 
             if (t.m_removing)
                 continue;
             t.m_target_x = x;
+            t.m_target_y = y0;
             x += t.m_size.x + spacing;
         }
     };
@@ -1358,10 +1369,12 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const 
                 t.m_appear_until      = now + k_appear;
                 t.m_detect_hold_until = p.m_success ? now + k_detect_hold : 0.f;
                 t.m_target_detect     = p.m_success ? 1.f : 0.f;
+                t.m_predicted         = p.m_predicted;
                 t.m_x = t.m_target_x = t.m_spawn_x = batch_spawn;
                 s_kamibebra_tags.push_back(std::move(t));
                 recalc();
                 s_kamibebra_tags.back().m_x = batch_spawn;
+                s_kamibebra_tags.back().m_y = s_kamibebra_tags.back().m_target_y;
             } else {
                 if (tag->m_removing) {
                     tag->m_removing       = false;
@@ -1371,10 +1384,13 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const 
                     tag->m_spawn_x        = batch_spawn;
                     recalc();
                     tag->m_x = batch_spawn;
+                    tag->m_y = tag->m_target_y;
                 }
                 if (p.m_success)
                     tag->m_detect_hold_until = now + k_detect_hold;
                 tag->m_detect        = p.m_success || tag->m_detect_hold_until > now;
+                if (p.m_success)
+                    tag->m_predicted = p.m_predicted;
                 tag->m_target_detect = tag->m_detect ? 1.f : 0.f;
                 tag->m_text          = p.m_text;
             }
@@ -1397,9 +1413,7 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const 
         if (t.m_opacity > 0.01f || !t.m_removing)
             ++visible;
 
-    const col_t  key = col_of(g_kiColor);
     const ImVec4 acc(g_indKamibebraAccent[0], g_indKamibebraAccent[1], g_indKamibebraAccent[2], 1.f);
-    const float  y   = screen_h() - base;
 
     for (auto it = s_kamibebra_tags.begin(); it != s_kamibebra_tags.end();) {
         kamibebra_tag_t& t = *it;
@@ -1414,19 +1428,24 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const 
         const float opacity_target = (!t.m_removing && now < t.m_appear_until) ? 0.f : t.m_target_opacity;
         t.m_opacity = rido_lerp(t.m_opacity, opacity_target, k_opacity * (t.m_removing ? k_remove_opacity : 1.f), dt);
         t.m_x       = rido_lerp(t.m_x, t.m_target_x, position_smooth, dt);
+        t.m_y       = rido_lerp(t.m_y, t.m_target_y, position_smooth, dt);
         if (std::fabs(t.m_target_x - t.m_x) <= std::round(0.75f * s))
             t.m_x = t.m_target_x;
+        if (std::fabs(t.m_target_y - t.m_y) <= std::round(0.75f * s))
+            t.m_y = t.m_target_y;
         if (std::fabs(t.m_target_opacity - t.m_opacity) <= 0.015f)
             t.m_opacity = t.m_target_opacity;
         t.m_detect_t = rido_lerp(t.m_detect_t, t.m_target_detect, k_detect, dt);
 
-        const float tx = std::round(t.m_x + 0.2f * s), ty = std::round(y);
+        const float tx = std::round(t.m_x + 0.2f * s), ty = std::round(t.m_y);
         if (t.m_opacity > 0.01f) {
             const float d = std::min(t.m_detect_t, k_detect_max);
-            ImVec4 shade(acc.x * d, acc.y * d, acc.z * d, (t.m_detect ? 0.85f : 200.f / 255.f) * t.m_opacity);
-            kamibebra_text(font, fs, tx + std::round(s), ty + std::round(s), t.m_text, shade);
-            shade.w *= d > 0.01f ? 0.45f : 0.25f;
-            kamibebra_text(font, fs, tx + std::round(2.f * s), ty + std::round(2.f * s), t.m_text, shade);
+            if (!shadow.m_on) {
+                ImVec4 shade(acc.x * d, acc.y * d, acc.z * d, (t.m_detect ? 0.85f : 200.f / 255.f) * t.m_opacity);
+                kamibebra_text(font, fs, tx + std::round(s), ty + std::round(s), t.m_text, shade);
+                shade.w *= d > 0.01f ? 0.45f : 0.25f;
+                kamibebra_text(font, fs, tx + std::round(2.f * s), ty + std::round(2.f * s), t.m_text, shade);
+            }
 
             if (d > 0.01f) {
                 const float  a = d * t.m_opacity;
@@ -1439,7 +1458,10 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, const 
             }
         }
 
-        kamibebra_text(font, fs, tx, ty, t.m_text, ImVec4(key.r, key.g, key.b, key.a * t.m_opacity));
+        const indicator_colors_t colors =
+            key_colors_at(std::min(t.m_detect_t, 1.f), shadow_detect, shadow.m_color, t.m_predicted, shadow.m_outline_color);
+        push_label(font, fs, ImVec2(tx, ty), t.m_text, u32(colors.m_text, t.m_opacity), u32(colors.m_shadow, t.m_opacity), shadow,
+                   u32(colors.m_outline, t.m_opacity));
         if (!t.m_removing)
             part_mark(t.m_id, tx, ty, t.m_size);
 
@@ -1572,7 +1594,7 @@ static void keybind_indicators(const MvInd_t& s)
     }
 
     if (style == IND_STYLE_KAMIBEBRA) {
-        keybinds_kamibebra(pending, g_kiScale, dt, base);
+        keybinds_kamibebra(pending, font, fs, g_kiScale, dt, base, horizontal, shadow, shadow_detect);
         return;
     }
 
@@ -1916,11 +1938,14 @@ static void speed_pair(speed_pair_state_t& st, const int style, const char* anim
     if (style != IND_STYLE_KAMIBEBRA)
         st.m_kamibebra = {};
 
+    const auto ink = [](const ImFont* f, const float size) {
+        const ImFontGlyph* const g = f->FindGlyph('0');
+        const float s = size / f->FontSize;
+        return g ? ImVec2(g->Y0 * s, g->Y1 * s) : ImVec2(0.f, size);
+    };
+
     if (style == IND_STYLE_KAMIBEBRA) {
-        float kfs = 0.f, s = 1.f;
-        ImFont* const kfont = kamibebra_font(scale, kfs, s);
-        if (!kfont)
-            return;
+        const float s = std::clamp(scale, kIndScaleMin, kIndScaleMax);
 
         speed_kamibebra_t& k = st.m_kamibebra;
         const float real = real_time();
@@ -1941,23 +1966,27 @@ static void speed_pair(speed_pair_state_t& st, const int style, const char* anim
         if (!show_pre && k.m_has_pre)
             k.m_pre_removing = true;
 
-        const float spacing = 5.f * s;
-        const float main_w  = kfont->CalcTextSizeA(kfs, FLT_MAX, 0.f, main_text.c_str()).x;
-        const float pre_w   = k.m_has_pre ? kfont->CalcTextSizeA(kfs, FLT_MAX, 0.f, k.m_pre.c_str()).x : 0.f;
+        const bool   stacked   = opts.m_pre_layout == PRE_LAYOUT_ABOVE || opts.m_pre_layout == PRE_LAYOUT_BELOW;
+        const float  spacing   = 5.f * s;
+        const ImVec2 main_size = font->CalcTextSizeA(fs, FLT_MAX, 0.f, main_text.c_str());
+        const ImVec2 pre_size  = k.m_has_pre ? pfont->CalcTextSizeA(pfs, FLT_MAX, 0.f, k.m_pre.c_str()) : ImVec2(0.f, 0.f);
 
-        const float target_x = k.m_has_pre && !k.m_pre_removing ? (W - (main_w + std::round(spacing) + pre_w)) * 0.5f : (W - main_w) * 0.5f;
+        const float target_x = k.m_has_pre && !k.m_pre_removing && !stacked ? (W - (main_size.x + std::round(spacing) + pre_size.x)) * 0.5f
+                                                                            : (W - main_size.x) * 0.5f;
         if (!k.m_init) {
             k.m_x    = target_x;
             k.m_init = true;
         }
         k.m_x = rido_lerp(k.m_x, target_x, 8.5f, dt);
 
-        kamibebra_shadowed(kfont, kfs, s, k.m_x + 0.2f * s, y, main_text, color);
+        kamibebra_shadowed(font, fs, s, k.m_x + 0.2f * s, y, main_text, color, shadow, shadow_alpha);
 
         if (k.m_has_pre) {
             k.m_pre_opacity = rido_lerp(k.m_pre_opacity, k.m_pre_removing ? 0.f : 1.f, 16.f * (k.m_pre_removing ? 1.6f : 1.f), dt);
-            if (!k.m_pre_removing)
-                k.m_pre_x = k.m_pre_target_x = k.m_x + main_w + spacing;
+            if (stacked)
+                k.m_pre_x = k.m_pre_target_x = std::round((W - pre_size.x) * 0.5f);
+            else if (!k.m_pre_removing)
+                k.m_pre_x = k.m_pre_target_x = k.m_x + main_size.x + spacing;
             else
                 k.m_pre_x = rido_lerp(k.m_pre_x, k.m_pre_target_x, 12.f, dt);
 
@@ -1967,8 +1996,14 @@ static void speed_pair(speed_pair_state_t& st, const int style, const char* anim
             k.m_pre_color.z = rido_lerp(k.m_pre_color.z, target.z, 14.f * 0.96f, dt);
             k.m_pre_color.w = target.w;
 
+            float pre_y = opts.m_pre_layout == PRE_LAYOUT_ABOVE ? y - pre_size.y : y + main_size.y;
+            if (!stacked) {
+                const ImVec2 mi = ink(font, fs), pi = ink(pfont, pfs);
+                pre_y = std::round(opts.m_pre_align == PRE_ALIGN_TOP ? y + mi.x - pi.x : y + mi.y - pi.y);
+            }
+
             if (k.m_pre_opacity > 0.01f)
-                kamibebra_shadowed(kfont, kfs, s, k.m_pre_x + 0.2f * s, y, k.m_pre, k.m_pre_color);
+                kamibebra_shadowed(pfont, pfs, pscl, k.m_pre_x + 0.2f * s, pre_y, k.m_pre, k.m_pre_color, shadow, shadow_alpha * k.m_pre_opacity);
 
             if (k.m_pre_removing && k.m_pre_opacity < 0.01f)
                 k.m_has_pre = k.m_pre_removing = false;
@@ -1980,12 +2015,6 @@ static void speed_pair(speed_pair_state_t& st, const int style, const char* anim
     const std::string pre_text  = stacked ? pre_value : " " + pre_value;
     const ImVec2      main_size = font->CalcTextSizeA(fs, FLT_MAX, 0.f, main_text.c_str());
     const ImVec2      pre_size  = pfont->CalcTextSizeA(pfs, FLT_MAX, 0.f, pre_text.c_str());
-
-    const auto ink = [](const ImFont* f, const float size) {
-        const ImFontGlyph* const g = f->FindGlyph('0');
-        const float s = size / f->FontSize;
-        return g ? ImVec2(g->Y0 * s, g->Y1 * s) : ImVec2(0.f, size);
-    };
 
     float pre_y = opts.m_pre_layout == PRE_LAYOUT_ABOVE ? y - pre_size.y : y + main_size.y;
     if (!stacked) {

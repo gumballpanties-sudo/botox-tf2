@@ -10,6 +10,10 @@ inline bool  g_sfxDisablePostProcessing = false;
 inline int   g_sfxThirdPersonKey       = 0;
 inline int   g_sfxThirdPersonKeyMode   = 1;
 inline bool  g_sfxThirdPersonCollision = true;
+inline float g_sfxThirdPersonOffsetSide = 0.f;   // camera right, units
+inline float g_sfxThirdPersonOffsetUp   = 0.f;   // camera up, units
+inline bool  g_sfxThirdPersonCrosshair  = false; // dot on the real aim point
+inline float g_sfxThirdPersonCrosshairColor[4] = { 1.f, 1.f, 1.f, 1.f };
 
 // aspect ratio
 inline bool  g_sfxAspectHud          = false;

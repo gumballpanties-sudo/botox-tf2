@@ -40,7 +40,7 @@ void Menu_Movement_Indicators()
             }
 
             ImGui::Checkbox("show pre speed##velocity indicator", &g_viPreSpeed);
-            if (g_viPreSpeed && g_viStyle != IND_STYLE_KAMIBEBRA)
+            if (g_viPreSpeed)
             {
                 ImGui::Combo("pre speed position##velocity indicator", &g_viPreLayout, kPreLayoutNames);
                 ImGui::SliderFloat("pre speed scale##velocity indicator", &g_viPreScale, 0.25f, 2.f, "%.2fx");
@@ -52,9 +52,8 @@ void Menu_Movement_Indicators()
 
             ImGui::Checkbox("custom color##velocity indicator", &g_viCustomColor);
 
-            if (g_viStyle != IND_STYLE_KAMIBEBRA)
-                ImGui::Checkbox("shadow##velocity indicator", &g_viShadow);
-            if (g_viShadow && g_viStyle != IND_STYLE_KAMIBEBRA)
+            ImGui::Checkbox("shadow##velocity indicator", &g_viShadow);
+            if (g_viShadow)
             {
                 ImGui::SliderFloat("shadow blur##velocity indicator", &g_viShadowBlur, 0.f, 20.f, "%.1f");
                 if (g_viStyle != IND_STYLE_KAMIDERE)
@@ -63,9 +62,8 @@ void Menu_Movement_Indicators()
                 ImGui::SliderInt("shadow y##velocity indicator", &g_viShadowY, -10, 10, "%d px");
             }
 
-            if (g_viStyle != IND_STYLE_KAMIBEBRA)
-                ImGui::Checkbox("outline##velocity indicator", &g_viOutline);
-            if (g_viOutline && g_viStyle != IND_STYLE_KAMIBEBRA)
+            ImGui::Checkbox("outline##velocity indicator", &g_viOutline);
+            if (g_viOutline)
             {
                 ImGui::ColorRow("outline color##velocity indicator", g_viOutlineColor);
                 ImGui::SliderInt("outline thickness##velocity indicator", &g_viOutlinePx, 1, 5, "%d px");
@@ -115,8 +113,17 @@ void Menu_Movement_Indicators()
         }, ImVec2(220.f, -1.f));
 
     ImGui::Checkbox("keybind indicators", &g_kiEnable);
+    const bool labelColumn = g_kiCustomLabels;
     if (g_kiEnable)
         ImGui::OptionPopup("keybind indicator settings", [&]() {
+            // popup = AlwaysAutoResize -> default table sizing is FixedFit, force stretch
+            if (labelColumn)
+            {
+                if (!ImGui::BeginTable("##keybind indicator columns", 2, ImGuiTableFlags_SizingStretchSame))
+                    return;
+                ImGui::TableNextColumn();
+            }
+
             ImGui::Combo("style##keybind indicator style", &g_kiStyle, kIndStyleNames);
 
             if (g_kiStyle == IND_STYLE_SMOOTH)
@@ -138,14 +145,12 @@ void Menu_Movement_Indicators()
 
             ImGui::ColorRow("in prediction color##keybind predict color", g_kiColorPredict);
 
-            if (!kamibebra_keys)
-                ImGui::Checkbox("horizontal layout", &g_kiHorizontal);
+            ImGui::Checkbox("horizontal layout", &g_kiHorizontal);
 
             ImGui::SliderInt("spacing##keybind indicators", &g_kiSpacing, -10, 40, "%d px");
 
-            if (!kamibebra_keys)
-                ImGui::Checkbox("shadow##keybind indicators", &g_kiShadow);
-            if (g_kiShadow && !kamibebra_keys)
+            ImGui::Checkbox("shadow##keybind indicators", &g_kiShadow);
+            if (g_kiShadow)
             {
                 ImGui::SliderFloat("shadow blur##keybind indicators", &g_kiShadowBlur, 0.f, 20.f, "%.1f");
 
@@ -157,9 +162,8 @@ void Menu_Movement_Indicators()
                 ImGui::SliderInt("shadow y##keybind indicators", &g_kiShadowY, -10, 10, "%d px");
             }
 
-            if (!kamibebra_keys)
-                ImGui::Checkbox("outline##keybind indicators", &g_kiOutline);
-            if (g_kiOutline && !kamibebra_keys)
+            ImGui::Checkbox("outline##keybind indicators", &g_kiOutline);
+            if (g_kiOutline)
             {
                 ImGui::ColorRow("outline color##keybind indicators", g_kiOutlineColor);
                 ImGui::SliderInt("outline thickness##keybind indicators", &g_kiOutlinePx, 1, 5, "%d px");
@@ -187,8 +191,10 @@ void Menu_Movement_Indicators()
 
             // per-bind label override; empty = stock label (hint). 16 = botox's buffer
             ImGui::Checkbox("custom labels", &g_kiCustomLabels);
-            if (g_kiCustomLabels)
+            if (labelColumn && g_kiCustomLabels)
             {
+                ImGui::TableNextColumn();
+
                 float name_width = 0.f;
                 for (int i = 0; i < LBL_COUNT; i++)
                     name_width = ImMax(name_width, ImGui::CalcTextSize(kKiLabels[i][0]).x);
@@ -206,7 +212,10 @@ void Menu_Movement_Indicators()
                     ImGui::PopID();
                 }
             }
-        }, ImVec2(220.f, -1.f));
+
+            if (labelColumn)
+                ImGui::EndTable();
+        }, ImVec2(labelColumn ? 440.f : 220.f, -1.f));
 
     ImGui::Checkbox("keystroke indicators", &g_kpEnable);
     if (g_kpEnable)
@@ -249,8 +258,8 @@ void Menu_Movement_Indicators()
         }, ImVec2(220.f, -1.f));
 }
 
-// botox menu_tab_movement.cpp case 1, "detections" group body (its edgebug visualize lives in
-// the edge bug popup here)
+// botox menu_tab_movement.cpp case 1, "detections" group body. Skipped: "project onto
+// geometry" (a render-thread trace per pad sample).
 void Menu_Movement_Detections()
 {
     // botox menu_tab_movement "detections": label list order must match DetType
@@ -261,6 +270,20 @@ void Menu_Movement_Detections()
             ImGui::MultiCombo("detections", &g_detectionTypes, kTypes, DET_MAX);
             ImGui::Checkbox("stack edgebugs##detstack", &g_detectionStackEb);
             ImGui::InputText("chat label##detlabel", g_detectionLabel, sizeof(g_detectionLabel));
+        }, ImVec2(220.f, -1));
+
+    ImGui::Checkbox("edgebug visualize", &g_edgeBugViz);
+    if (g_edgeBugViz)
+        ImGui::OptionPopup("edgebug visualize settings", [&]() {
+            ImGui::ColorRow("outline color##ebvizcolor", g_edgeBugVizColor);
+            ImGui::SliderFloat("visualize thickness##ebvizthick", &g_edgeBugVizThick, 0.5f, 10.f, "%.1f");
+            ImGui::Combo("pad shape##ebvizshape", &g_edgeBugVizShape, "square\0circle\0");
+            ImGui::Combo("pad fill##ebvizfill", &g_edgeBugVizFill, "outline\0filled\0filled + outline\0");
+            if (g_edgeBugVizFill != 0) {
+                ImGui::ColorRow("pad color##ebvizpadcolor", g_edgeBugVizPadColor);
+                ImGui::SliderFloat("fill opacity##ebvizfilla", &g_edgeBugVizFillAlpha, 0.05f, 1.f, "%.2f");
+            }
+            ImGui::SliderFloat("pad size##ebvizsize", &g_edgeBugVizSize, 4.f, 64.f, "%.0f");
         }, ImVec2(220.f, -1));
 
     ImGui::Checkbox("pixelsurf lines", &g_psLinesEnable);

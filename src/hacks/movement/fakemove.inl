@@ -831,8 +831,9 @@ static void FakeMove_Tick()
         if (On(g_fmHeadSurf,   g_fmHeadSurfKey,   g_fmHeadSurfMode))   b |= FM_HEADSURF;
     }
     s_fmBits = b;
-    // not gated on g_fmEnabled: it is a server cvar, not a fake bind. wc / as / tb pins need it,
-    // and cfg fmEnabled=0 + fmWallbugFix=1 silently never applied it
-    FM_WallbugCvar(g_fmWallbugFix && !g_eject
+    // gated on g_fmEnabled again (user, 11-08: "i have fake movement disabled why does it still trigger
+    // it" -- they play sv_wallbug 0 on purpose). Fake movement off = the server cvar is never touched;
+    // flipping it off while applied hands the old value back (FM_WallbugCvar(false))
+    FM_WallbugCvar(g_fmEnabled && g_fmWallbugFix && !g_eject
                    && GetTickCount64() - s_fmServerSeenMs < 1000);
 }

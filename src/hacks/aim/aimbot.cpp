@@ -8,6 +8,9 @@
 #include "autoairblast.h"
 #include "autorocketjump.h"
 
+void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd);
+bool Binds_Blocked();   // render.cpp: chat / console / menu text box -- a press there is typing
+
 // activation bind -- the same three modes dih's own movement features
 // use (MovementKeyOK). Mode 0 = always on, 1 = while the key is held, 2 = the key toggles it.
 // Edge-detected here rather than in the menu so a toggle press is counted once per command.
@@ -23,8 +26,9 @@ bool CAimbot::KeyOK()
 		return true;     // a mode with no key bound would be an off switch nobody can turn back on
 
 	// GetAsyncKeyState, not the engine's button bits: this has to work for mouse buttons and for
-	// keys the game does not bind. Same source dih's own BindKey widget captures from.
-	const bool bDown = (GetAsyncKeyState(iKey) & 0x8000) != 0;
+	// keys the game does not bind. Same source dih's own BindKey widget captures from. Typed
+	// keys read up, so neither hold nor the toggle latch below sees them.
+	const bool bDown = !Binds_Blocked() && (GetAsyncKeyState(iKey) & 0x8000) != 0;
 
 	if (iMode == Vars::Aimbot::General::AimKeyModeEnum::OnHotkey)
 		return bDown;
@@ -53,7 +57,7 @@ bool CAimbot::BackstabOn()
 	if (!iKey)
 		return true;
 
-	const bool bDown = (GetAsyncKeyState(iKey) & 0x8000) != 0;
+	const bool bDown = !Binds_Blocked() && (GetAsyncKeyState(iKey) & 0x8000) != 0;
 
 	if (iMode == Vars::Aimbot::Melee::BackstabKeyModeEnum::OnHotkey)
 		return bDown;
@@ -121,6 +125,7 @@ void CAimbot::RunMain(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 		return;
 
 	F::AutoRocketJump.Run(pLocal, pWeapon, pCmd);   // Amalgam RunMain slot; driven by the auto goomba
+	AutoPogo_Run(pLocal, pWeapon, pCmd);            // autopogo.cpp, own bind
 	if (!ShouldRun(pLocal, pWeapon))
 		return;
 

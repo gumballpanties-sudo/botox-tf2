@@ -133,7 +133,6 @@ int   g_msWidth  = 20;
 int   g_msHeight = 20;
 int   g_msMines  = 60;
 
-bool  g_debugMenuEnable = false;
 float g_consoleColor[4] = { 0.f, 1.f, 1.f, 1.f };   // matches the hardcoded cyan it replaces
 
 // -- Viewmodel ---------------------------------------------------------------------
@@ -367,9 +366,6 @@ bool  g_dlightEnable  = false;
 float g_dlightRadius  = 150.f;
 float g_dlightColor[4]= { 1.f, 0.6f, 0.2f, 1.f };
 
-bool  g_sunAngleEnable = false;
-float g_sunAnglePitch  = 60.f;
-float g_sunAngleYaw    = 0.f;
 
 bool  g_worldTintEnable   = false;
 float g_worldTintColor[4] = { 1.f, 1.f, 1.f, 1.f };
@@ -617,20 +613,31 @@ bool  g_edgeBugDnaAdvanced = false;
 int   g_edgeBugDnaRange = 6;
 bool  g_edgeBugDnaCustomAngle = false;
 float g_edgeBugDnaAngleLimit = 3.f;
+int   g_edgeBugHwTicks = 32;            // botox m_edgebug_hw_* defaults
+float g_edgeBugHwLockAmt = 0.3f;
+bool  g_edgeBugHwAdvanced = false;
+float g_edgeBugHwStrafeDeltaMax = 10.f;
 bool  g_edgeBugViz = false;         // draw the latched plan (path + landing pad)
 float g_edgeBugVizSize = 16.f;      // pad half-width; 16 = the player hull's own footprint
+float g_edgeBugVizColor[4] = { 1.f, 1.f, 1.f, 1.f };     // path + pad outline (botox m_edgebug_visualize_color)
+float g_edgeBugVizThick = 1.5f;
+int   g_edgeBugVizShape = 0;        // 0 square, 1 circle
+int   g_edgeBugVizFill = 0;         // 0 outline, 1 filled, 2 filled + outline
+float g_edgeBugVizFillAlpha = 0.35f;
+float g_edgeBugVizPadColor[4] = { 1.f, 1.f, 1.f, 1.f };
 bool g_pixelSurf = false;   int g_pixelSurfKey = 0;   int g_pixelSurfMode = 1;
 int  g_pixelSurfPredictTicks = 8;
 int  g_psWallStrafe = 1;     // 0 off / 1 keys into wall (botox) / 2 always on a ride
 bool g_psParkAtEnd  = false; // brake to a stop where the ride runs out, hang there
 // approach aids (both OFF by default -- see the memory note on the guide/speed fix)
 bool g_autoAlign = false;   // plain on/off, no bind
+bool g_aaSurfStick = true;  // auto align: a pin seen once = press into that face every tick (tb style)
 // -- TB knob set rebuilt off coldtires. The -knobs (autocrouch, seam scan,
 // aim frac, engage dist, xy keep, window keeper) went with the machinery they drove; autocrouch
 // is SIM-DECIDED now (a duck pass runs only when the standing hull missed everywhere)
 bool g_textureBug = false;  int g_textureBugKey = 0;  int g_textureBugMode = 1;
 int g_tbStyle = 1;             // 0 cumidere (TF2 dll port) / 1 botox (csgo texturebug.cpp 1:1, texturebug.inl tbx)
-bool g_tbcAlign = true;        // cumidere style: run cumidere misc_auto_align (ride steer) before the tb
+bool g_tbcAlign = true;        // both tb styles: cumidere misc_auto_align (ride steer + gain) before the tb
 bool g_tbcAutoCrouch = false;  // cumidere style: duck grid pass when standing misses, latched through the ride
 float g_tbReach = 8.f;         // botox style: 8-dir wall scan reach off the hull (botox m_texture_bug_reach, 0-48)
 int   g_tbTypes = 3;           // botox style: bit0 ducking / bit1 standing allowed (m_texture_bug_types)
@@ -655,6 +662,7 @@ bool g_delayHop = false;   int g_delayHopKey = 0;   int g_delayHopMode = 1;
 int  g_delayHopTicks = 6;
 bool g_goomba = false;     int g_goombaKey = 0;     int g_goombaMode = 1;
 int  g_goombaHow = 2;      int g_goombaLead = 0;
+bool g_autoPogo = false;   int g_autoPogoKey = 0;   int g_autoPogoMode = 1;
 bool g_autoCrouch = false; int g_autoCrouchKey = 0; int g_autoCrouchMode = 1;
 int  g_autoCrouchTicks = 6;
 bool g_djStrafe = false;   int g_djStrafeKey = 0;   int g_djStrafeMode = 1;
@@ -719,13 +727,8 @@ bool g_fmHeadSurfLedgeOnly = true;
 bool g_fmHeadSurfBottoms = true;
 float g_asExtraReach = 4.f;  // botox m_air_stuck_extra_reach
 float g_asBudget = 50.f;     // botox m_air_stuck_budget (percent of a tick)
-int g_asStyle = 2;           // 0 cumidere (TF2 dll port) / 1 botox (clarity + lumi) / 2 aletherium
-// Aletherium AirStuckCore knobs (Vars::Misc::Movement::AirStuck*), same defaults + ranges
-float g_asaCatchEps  = 0.5f;  // catch tolerance around the pin vz (0.05-8; Aletherium 4.5 = every jump apex reads pinned for a tick)
-float g_asaReach     = 72.f;  // hull sweep reach, engage walls this far out (16-128)
-float g_asaFlushTol  = 56.f;  // gap > this = drive in, <= = catch sweep (8-96)
-float g_asaDriftGain = 18.f;  // drive-in forwardmove = gap * gain (4-40)
-int   g_asaSimBudget = 64;    // sims per catch sweep (16-128)
+bool g_asMovementFix = true;    // botox m_movement_fix (air_stuck.cpp:168 -- off forces view+move onto cmd)
+bool g_asDriftHang = true;      // sv_wallbug 0: hold a pinned hull still off the face (MV_DriftHold)
 // wave 3 (Aletherium): pixel surf finder + assist
 bool g_psFinder = false;    int g_psFinderKey = 0;    int g_psFinderMode = 1;
 float g_psFinderMargin = 8.f;
@@ -751,6 +754,7 @@ bool g_pixelJump = false;  int g_pixelJumpKey = 0;  int g_pixelJumpMode = 1;
 bool g_pjUnsafe = false;
 bool g_pjCrouch = false;
 bool g_pjReadout = true;
+bool g_pjHop = true;
 bool  g_psGroundHelp = false;
 float g_psGroundHelpAngle = 45.f;
 float g_psLaunchZSlack = 4.f;   // half k_psCatchZ: an arc shifted less than that still
@@ -947,7 +951,6 @@ char  g_chamsTeamVisibleCfg[160] = "";
 char  g_chamsTeamOccludedCfg[160] = "";
 char  g_chamsWeaponCfg[160] = "";
 char  g_chamsArmsCfg[160] = "";
-char  g_chamsSleeveCfg[160] = "";
 char  g_chamsUberCfg[160] = "";        // enemy: replaces the visible list while ubered/bonked
 char  g_chamsCloakCfg[160] = "";       // enemy: replaces the visible list while cloaked
 char  g_chamsTeamUberCfg[160] = "";    // team: same pair for teammates

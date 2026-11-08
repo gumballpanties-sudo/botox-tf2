@@ -1256,6 +1256,8 @@ void MediaPlayer_ReleaseTexture()
     if (!s_px.empty()) s_pxDirty = true;
 }
 
+void Render_DeferRelease(IUnknown* p);   // render.cpp: freed once no built list binds it
+
 void MediaPlayer_Tick(IDirect3DDevice9* dev)
 {
     if (!dev || !g_mpEnable) return;
@@ -1270,7 +1272,8 @@ void MediaPlayer_Tick(IDirect3DDevice9* dev)
         w = s_pxW; h = s_pxH;
     }
 
-    if (s_tex) { s_tex->Release(); s_tex = nullptr; }
+    // Present, BEFORE it draws this frame's lists -- the player panel may still bind the old art
+    Render_DeferRelease(s_tex); s_tex = nullptr;
     if (px.empty() || w <= 0 || h <= 0) return;
 
     // DYNAMIC + DEFAULT, the exact pair imgui_impl_dx9 uses for its own font atlas -- and that
@@ -1373,10 +1376,9 @@ static void MediaBinds()
     const int keys[3] = { g_mpPrevKey, g_mpToggleKey, g_mpNextKey };
     static constexpr int cmds[3] = { 1, 2, 3 };   // botox e_command: previous, toggle, next
 
-    // botox keys_blocked: menu open, or the game is not the focused window; the console being up
-    // too (IVEngineClient::Con_IsVisible, slot 11 -- GetPlayerInfo 8 / GetLocalPlayer 12 bracket it)
-    // asked only when a bind fires: the engine getter stays off the render thread's hot path
-    const auto blocked = []() { return g_showMenu || (g_hwnd && GetForegroundWindow() != g_hwnd) || (g_engine && VCall<bool>(g_engine, 11)); };
+    // botox keys_blocked: menu open, unfocused, chat / console / a text box up (Binds_Blocked).
+    // Asked only when a bind fires: the engine getters stay off the render thread's hot path
+    const auto blocked = []() { return g_showMenu || Binds_Blocked(); };   // + chat / text boxes
 
     for (int i = 0; i < 3; i++) {
         Bind& bind = binds[i];

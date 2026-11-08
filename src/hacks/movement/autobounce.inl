@@ -1152,6 +1152,6 @@ static void AutoBounceRun(void* pLocal, UserCmd_t* cmd, bool yield)
 static void AutoBounce(void* pLocal, UserCmd_t* pCmd)
 {
     const bool yield = s_textureBugHit || s_headSurfHit || s_headBounceHit || s_airStuckHit || s_wallClimbHit
-                    || s_psAssistHopActive || s_shouldPixelSurf || s_psRidingNow;
+                    || s_psAssistHopActive || s_shouldPixelSurf || s_psRidingNow || s_pixelHopHit;
     AutoBounceRun(pLocal, pCmd, yield);
 }

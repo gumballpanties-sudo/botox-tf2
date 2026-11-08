@@ -11,13 +11,15 @@
 #include <string>
 #include <vector>
 
-// botox e_free_type_font_flags, one bit each, same order as the "font flags" multicombo.
-// Bit i == ImGuiFreeTypeBuilderFlags 1 << i, so the mask IS the FontBuilderFlags value.
+// botox e_font_flags, one bit each, same order as the "font flags" multicombo.
+// no antialias + monospace + bold = atlas build (Fonts_ApplyFlags), dropshadow + outline = draw time.
 enum FontFlagBit
 {
-    FF_NOHINTING, FF_NOAUTOHINT, FF_FORCEAUTOHINT, FF_LIGHTHINTING,
-    FF_MONOHINTING, FF_BOLD, FF_OBLIQUE, FF_MONOCHROME, FF_COUNT
+    FF_NOANTIALIAS, FF_DROPSHADOW, FF_OUTLINE, FF_MONOSPACE, FF_BOLD, FF_COUNT
 };
+constexpr int kFontFlagMask = (1 << FF_COUNT) - 1;
+// old configs: freetype bits, bold = 32. every reader goes through this; idempotent on new masks
+inline int FontFlagsNorm(int raw) { return (raw & kFontFlagMask) | ((raw & 32) ? 1 << FF_BOLD : 0); }
 
 // Defaults: indicators = botox m_indicator_font_settings ("Verdanab", 29, no flags), esp Verdana 22 bold.
 constexpr const char* kFontIndDefName = "verdanab";
@@ -56,6 +58,13 @@ uint32_t Fonts_IndSig();     // changes whenever the indicator settings (or a re
 uint32_t Fonts_EspSig();
 bool Fonts_EspDue();         // vgui side: true once when the esp face must be recreated
 void Fonts_EspApplied(uint32_t sig);
+// no antialias / monospace onto an ImGui face config (monospace cell = widest digit of the file at px)
+struct ImFontConfig;
+void Fonts_ApplyFlags(ImFontConfig& cfg, int mask, const std::string& path, float px);
+// outline: twin = same face built with ImGuiFreeTypeBuilderFlags_Stroke (same atlas), drawn on base's layout.
+// no twin = 1px ring, all 8 sides
+struct ImDrawList; struct ImFont;
+void Fonts_AddOutlineText(ImDrawList* dl, const ImFont* base, const ImFont* twin, float size, float x, float y, unsigned col, const char* text);
 
 // ---- pure, tested by tests/fonts_test.cpp ------------------------------------------------
 
@@ -81,17 +90,20 @@ struct FontSettle
     }
 };
 
-// botox freetype flags -> vgui SetFontGlyphSet. GDI has no hinting knobs: bold = weight,
-// oblique = italic, monochrome = no antialias; the hinting bits do nothing on this face.
+// font flags -> vgui SetFontGlyphSet: bold = weight, the rest = FONTFLAG_*. vgui has no monospace.
 struct VguiFace { int weight; int flags; };
 inline VguiFace FontFlagsToVgui(int mask)
 {
-    constexpr int kItalic = 0x001, kAntialias = 0x010;   // FONTFLAG_ITALIC / FONTFLAG_ANTIALIAS (aim/defs.h)
+    constexpr int kAntialias = 0x010, kDropShadow = 0x080, kOutline = 0x200;   // FONTFLAG_* (aim/defs.h)
     VguiFace f;
     f.weight = (mask & (1 << FF_BOLD)) ? 700 : 400;
-    f.flags  = ((mask & (1 << FF_OBLIQUE)) ? kItalic : 0) | ((mask & (1 << FF_MONOCHROME)) ? 0 : kAntialias);
+    f.flags  = ((mask & (1 << FF_NOANTIALIAS)) ? 0 : kAntialias) | ((mask & (1 << FF_DROPSHADOW)) ? kDropShadow : 0) |
+               ((mask & (1 << FF_OUTLINE)) ? kOutline : 0);
     return f;
 }
+
+// ImGui faces: dropshadow / outline bits of a face, 0 = the draw site's own look
+inline int FontTextLook(int mask) { return mask & ((1 << FF_DROPSHADOW) | (1 << FF_OUTLINE)); }
 
 // Indicator raster px: base size (0 -> default) times the indicator scale, clamped.
 inline float FontIndPx(int size, float scale)

@@ -1,9 +1,14 @@
 #include "fonts.h"
 #include "../../globals/globals.h"   // DebugLog
+#include "../../dependencies/imgui/freetype/imgui_freetype.h"
+#include "../../dependencies/imgui/imgui_internal.h"   // ImTextCharFromUtf8
+#include <ft2build.h>
+#include FT_FREETYPE_H
 #include <windows.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 
@@ -200,3 +205,76 @@ bool Fonts_EspDue()
 }
 
 void Fonts_EspApplied(uint32_t sig) { s_espApplied = sig; }
+
+// widest digit advance in em: the monospace cell, numbers stay tabular. 0 = unreadable file
+static float WidestDigitEm(const std::string& path)
+{
+    FT_Library lib = nullptr;
+    if (FT_Init_FreeType(&lib)) return 0.f;
+    float em = 0.f;
+    FT_Face face = nullptr;
+    if (!FT_New_Face(lib, path.c_str(), 0, &face))
+    {
+        if (face->units_per_EM)
+            for (char c = '0'; c <= '9'; ++c)
+                if (!FT_Load_Char(face, c, FT_LOAD_NO_SCALE))
+                    em = std::max(em, (float)face->glyph->advance.x / face->units_per_EM);
+        FT_Done_Face(face);
+    }
+    FT_Done_FreeType(lib);
+    return em;
+}
+
+// twin glyphs on the base font's advances (ImFont::RenderText layout): a glyph the twin lacks only loses its outline
+void Fonts_AddOutlineText(ImDrawList* dl, const ImFont* base, const ImFont* twin, float size, float x, float y, unsigned col, const char* text)
+{
+    if (!twin || twin->ContainerAtlas != base->ContainerAtlas)
+    {
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                if (dx || dy)
+                    dl->AddText(base, size, ImVec2(x + dx, y + dy), col, text);
+        return;
+    }
+    const float scale = size / base->FontSize;
+    const float x0 = IM_FLOOR(x);
+    x = x0; y = IM_FLOOR(y);
+    dl->PushTextureID(twin->ContainerAtlas->TexID);   // PrimRectUV draws with whatever is current
+    for (const char *s = text, *end = text + strlen(text); s < end;)
+    {
+        unsigned c = (unsigned char)*s;
+        if (c < 0x80) s += 1;
+        else
+        {
+            s += ImTextCharFromUtf8(&c, s, end);
+            if (!c) break;
+        }
+        if (c == '\n') { x = x0; y += size; continue; }
+        if (c == '\r') continue;
+        if (const ImFontGlyph* g = twin->FindGlyphNoFallback((ImWchar)c); g && g->Visible)
+        {
+            dl->PrimReserve(6, 4);
+            dl->PrimRectUV(ImVec2(x + g->X0 * scale, y + g->Y0 * scale), ImVec2(x + g->X1 * scale, y + g->Y1 * scale),
+                           ImVec2(g->U0, g->V0), ImVec2(g->U1, g->V1), col);
+        }
+        x += base->GetCharAdvance((ImWchar)c) * scale;
+    }
+    dl->PopTextureID();
+}
+
+void Fonts_ApplyFlags(ImFontConfig& cfg, int mask, const std::string& path, float px)
+{
+    if (mask & (1 << FF_NOANTIALIAS))
+        cfg.FontBuilderFlags |= ImGuiFreeTypeBuilderFlags_Monochrome | ImGuiFreeTypeBuilderFlags_MonoHinting;
+    const bool bold = (mask & (1 << FF_BOLD)) != 0;
+    if (bold)
+        cfg.FontBuilderFlags |= ImGuiFreeTypeBuilderFlags_Bold;
+    // imgui centres each glyph in the fixed cell; PixelSnapH floors that shift to whole px (half px = blurry
+    // glyphs). synthetic bold widens each glyph by ~px / 24
+    if (mask & (1 << FF_MONOSPACE))
+        if (const float em = WidestDigitEm(path); em > 0.f)
+        {
+            cfg.GlyphMinAdvanceX = cfg.GlyphMaxAdvanceX = std::round(em * px + (bold ? px / 24.f : 0.f));
+            cfg.PixelSnapH = true;
+        }
+}

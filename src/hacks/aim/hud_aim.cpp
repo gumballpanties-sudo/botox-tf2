@@ -10,6 +10,7 @@
 #include <cstring>
 
 void DebugLog(const char* fmt, ...);   // dllmain.cpp
+bool Binds_Blocked();                  // render.cpp: aim key typed in chat = not held
 
 // ============================================================================================
 // HUD extras, game thread half. botox reads these straight off g_ctx/g_interfaces inside its
@@ -64,7 +65,7 @@ namespace
 		{
 			const int iKey = Vars::Aimbot::General::AimKey.Value;
 			const int iMode = Vars::Aimbot::General::AimKeyMode.Value;
-			if (iKey && iMode == Vars::Aimbot::General::AimKeyModeEnum::OnHotkey && !(GetAsyncKeyState(iKey) & 0x8000))
+			if (iKey && iMode == Vars::Aimbot::General::AimKeyModeEnum::OnHotkey && (Binds_Blocked() || !(GetAsyncKeyState(iKey) & 0x8000)))
 				return 0.f;
 			if (iKey && iMode == Vars::Aimbot::General::AimKeyModeEnum::Toggle && !F::Aimbot.m_bToggled)
 				return 0.f;

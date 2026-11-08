@@ -1,4 +1,5 @@
 #include "render.h"
+#include "deferred_release.h"    // texture graveyard (swapped mid-frame, freed after a rebuilt one)
 #include "../hooks/crashlog.h"   // CrashSpan: stutter probe
 #include "../hacks/visuals/visuals.h"
 #include "../hacks/hud/watermark.h"
@@ -14,6 +15,7 @@
 #include "../hacks/hud/hud_extra.h"   // fov circle, net graph, their fonts
 #include "../hacks/hud/radar.h"       // csgo radar
 #include "../hacks/menu/menu.h"
+#include "../hacks/aim/aim.h"             // Aim_VguiInputUp: bind gate
 #include "../hacks/movement/movement.h"
 #include "../hacks/network/netregion.h"
 #include "../hacks/network/equipregion.h"
@@ -34,7 +36,6 @@
 #include "../hacks/esp/esp_queue.h"  // botox m_draw_data: esp recorded on the game thread, replayed in RenderEspQueue
 #include "../hacks/visuals/player_stencil.h"  // PlayerStencil_ReleaseTargets in h_Reset
 #include "../hacks/visuals/lsd_chams.h"       // SheenNormal_Tick
-#include "../hacks/menu/debugmenu.h"
 #include "../hacks/menu/fonts.h"          // fonts tab: indicator face picked at runtime
 #include "../hacks/lua/lua.h"             // lua paint callback (h_PaintTraverse)
 #include "../hacks/lua/lua_draw.h"        // lua render.* replay (RenderLuaQueue)
@@ -173,6 +174,8 @@ static __declspec(noinline) const float(*PsEngineW2S())[4]
 // only set for the length of that build.
 static float s_rtMatrix[4][4];
 static ImFont* s_fontEsp = nullptr;          // BuildFontAtlas, esp replay
+static int s_espTextLook = 0;                // FontTextLook of the custom esp face, 0 = queued shadow flag
+static ImFont* s_fontEspOutline = nullptr;   // stroked twin of the custom esp face (outline flag)
 static std::vector<ImVec2> s_espPolyScratch;  // RenderEspQueue polyline points, render thread only
 static bool  s_rtMatrixOk = false;
 static uint32_t s_rtEspSeq = 0;   // esp_queue.h frame of the build in progress, 0 = newest (see EspQ::CopyFrame)
@@ -587,8 +590,8 @@ static void RenderPsOverlay()
 }
 
 // ==== edge bug plan overlay ======================================================================
-// Two shapes and no knobs beyond size: the flight path of the latched plan, and a flat square on
-// the tick the bug lands. The line is drawn from where the replay has got to, so it is eaten tick
+// Two shapes, botox edgebug visualize knobs (movement > indicators > detections): the flight path
+// of the latched plan, and a flat square / circle pad on the tick the bug lands. The line is drawn from where the replay has got to, so it is eaten tick
 // by tick and what is left IS the countdown. No sims and no traces -- it only draws the path the
 // search already paid for (movement.cpp EbVizLatch).
 static void RenderEdgeBugOverlay()
@@ -619,29 +622,47 @@ static void RenderEdgeBugOverlay()
         return true;
     };
 
+    const float* c = g_edgeBugVizColor;
+    const ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3]));
+    const float thick = g_edgeBugVizThick;
+
     ImVec2 prev; bool bHavePrev = false;
     for (const Vec3& p : d.path)
     {
         ImVec2 s;
         if (!W2S(p, s)) { bHavePrev = false; continue; }
-        if (bHavePrev) dl->AddLine(prev, s, IM_COL32(235, 235, 235, 200), 1.f);
+        if (bHavePrev) dl->AddLine(prev, s, col, thick);
         prev = s; bHavePrev = true;
     }
 
     // the pad: the bug tick's own footprint, built in WORLD space so it keeps its perspective
-    // and reads as a mark lying on the map instead of a sticker floating over it
+    // and reads as a mark lying on the map instead of a sticker floating over it.
+    // botox draw_plan: square = 4 corners, circle = 32-gon; one convex poly for the fill.
+    constexpr int kCircle = 32;
+    const bool circle = g_edgeBugVizShape == 1;
+    const int n = circle ? kCircle : 4;
     const float r = g_edgeBugVizSize;
     const Vec3& p = d.at;
-    const Vec3 corner[4] = { { p.x - r, p.y - r, p.z }, { p.x - r, p.y + r, p.z },
-                             { p.x + r, p.y + r, p.z }, { p.x + r, p.y - r, p.z } };
-    ImVec2 s[4];
-    bool bAll = true;
-    for (int i = 0; i < 4; i++) bAll = W2S(corner[i], s[i]) && bAll;
-    if (bAll)
+    ImVec2 s[kCircle];
+    for (int i = 0; i < n; i++)
     {
-        dl->AddQuadFilled(s[0], s[1], s[2], s[3], IM_COL32(0, 0, 0, 90));
-        dl->AddQuad(s[0], s[1], s[2], s[3], IM_COL32(235, 235, 235, 255), 1.f);
+        Vec3 w;
+        if (circle)
+        {
+            const float a = 6.28318530718f * (float)i / (float)n;
+            w = { p.x + cosf(a) * r, p.y + sinf(a) * r, p.z };
+        }
+        else
+            w = { p.x + (i < 2 ? -r : r), p.y + (i == 1 || i == 2 ? r : -r), p.z };
+        if (!W2S(w, s[i])) return;   // botox: whole pad on screen or none of it
     }
+    if (g_edgeBugVizFill != 0)
+    {
+        const float* f = g_edgeBugVizPadColor;
+        dl->AddConvexPolyFilled(s, n, ImGui::ColorConvertFloat4ToU32(ImVec4(f[0], f[1], f[2], f[3] * g_edgeBugVizFillAlpha)));
+    }
+    if (g_edgeBugVizFill != 1)
+        dl->AddPolyline(s, n, col, ImDrawFlags_Closed, thick);
 }
 
 // ==== auto bounce overlay (botox auto_bounce_render) =============================================
@@ -1403,28 +1424,28 @@ ImFont* IndicatorFont(float scale, float& fs)
 static uint32_t s_indApplied = 0;   // Fonts_IndSig() of what the atlas holds
 static FontSettle s_indSettle;
 // One unloadable face fails the whole atlas, so a picked one is built alone first.
-static bool TestBuildFont(const std::string& path, float px, int builderFlags)
+static bool TestBuildFont(const std::string& path, float px, int flags)
 {
     ImFontAtlas test;
     ImFontConfig cfg;
-    cfg.FontBuilderFlags = builderFlags;
+    Fonts_ApplyFlags(cfg, flags, path, px);
     ImFont* f = test.AddFontFromFileTTF(path.c_str(), px, &cfg, test.GetGlyphRangesDefault());
     return f && test.Build() && f->FindGlyphNoFallback('0') && f->FindGlyphNoFallback('A');
 }
 static float EspFontPx() { return (float)std::clamp(g_fontEspSize, 6, 100); }
 
-static std::string ValidIndicatorFont(float px, int builderFlags)
+static std::string ValidIndicatorFont(float px, int flags)
 {
     if (g_fontIndSize <= 0) return "";   // botox: size 0 = stock font
     // the default pick IS the stock face: no font-folder scan, no test build at startup
-    if (_stricmp(g_fontIndName, kFontIndDefName) == 0 && g_fontIndFlags == kFontIndDefFlags) return "";
+    if (_stricmp(g_fontIndName, kFontIndDefName) == 0 && flags == kFontIndDefFlags) return "";
     const std::string path = Fonts_FindPath(g_fontIndName);
     if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
         DebugLog("fonts: indicator font '%s' not found (%s) -- stock verdanab", g_fontIndName, path.c_str());
         return "";
     }
-    if (TestBuildFont(path, px, builderFlags)) return path;
+    if (TestBuildFont(path, px, flags)) return path;
     DebugLog("fonts: indicator font '%s' failed to build -- stock verdanab", path.c_str());
     return "";
 }
@@ -1438,14 +1459,14 @@ static FontSettle s_espSettle;
 static std::string ValidEspFont()
 {
     if (g_fontEspSize <= 0) return "";
-    if (_stricmp(g_fontEspName, kFontEspDefName) == 0 && g_fontEspSize == kFontEspDefSize && g_fontEspFlags == kFontEspDefFlags) return "";
+    if (_stricmp(g_fontEspName, kFontEspDefName) == 0 && g_fontEspSize == kFontEspDefSize && FontFlagsNorm(g_fontEspFlags) == kFontEspDefFlags) return "";
     const std::string path = Fonts_FamilyPath(g_fontEspName);
     if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
         DebugLog("fonts: esp font '%s' not found (%s) -- stock verdana bd 11", g_fontEspName, path.c_str());
         return "";
     }
-    if (!TestBuildFont(path, EspFontPx(), g_fontEspFlags & 0xFF))
+    if (!TestBuildFont(path, EspFontPx(), FontFlagsNorm(g_fontEspFlags)))
     {
         DebugLog("fonts: esp font '%s' failed to build -- stock verdana bd 11", path.c_str());
         return "";
@@ -1537,22 +1558,25 @@ static void BuildFontAtlas()
     s_miFontPx = MiFontPx();
     s_indApplied = Fonts_IndSig();
     {
-        const std::string custom = ValidIndicatorFont(s_miFontPx, g_fontIndFlags & 0xFF);
+        const int indFlags = FontFlagsNorm(g_fontIndFlags);
+        const std::string custom = ValidIndicatorFont(s_miFontPx, indFlags);
         // botox font_name_indicator_29: verdana bold, freetype default flags
-        ImFontConfig indCfg;
-        indCfg.FontBuilderFlags = custom.empty() ? 0 : (g_fontIndFlags & 0xFF);   // FontFlagBit i == builder flag 1 << i
         const std::string path = custom.empty() ? std::string("C:\\Windows\\Fonts\\verdanab.ttf") : custom;
-        g_fontMi = io.Fonts->AddFontFromFileTTF(path.c_str(), s_miFontPx, &indCfg, io.Fonts->GetGlyphRangesDefault());
+        const auto addInd = [&](float px) {
+            ImFontConfig indCfg;
+            if (!custom.empty()) Fonts_ApplyFlags(indCfg, indFlags, path, px);
+            return io.Fonts->AddFontFromFileTTF(path.c_str(), px, &indCfg, io.Fonts->GetGlyphRangesDefault());
+        };
+        g_fontMi = addInd(s_miFontPx);
         if (!custom.empty())
-            DebugLog("fonts: indicator font %s %.0fpx flags 0x%x", custom.c_str(), s_miFontPx, g_fontIndFlags & 0xFF);
+            DebugLog("fonts: indicator font %s %.0fpx flags 0x%x", custom.c_str(), s_miFontPx, indFlags);
 
         s_indBuilt = WantedIndScales();
         s_indScaleSettle.seen = IndScaleSig(s_indBuilt);
         for (int i = 0; i < 3; ++i) s_indFonts[i] = nullptr;
         if (g_fontMi)
             for (int i = 0; i < s_indBuilt.count; ++i)
-                s_indFonts[i] = io.Fonts->AddFontFromFileTTF(path.c_str(), std::clamp(s_miFontPx * s_indBuilt.scales[i], 1.f, 128.f),
-                                                             &indCfg, io.Fonts->GetGlyphRangesDefault());
+                s_indFonts[i] = addInd(std::clamp(s_miFontPx * s_indBuilt.scales[i], 1.f, 128.f));
     }
     if (!g_fontMi) g_fontMi = g_fontBold;
 
@@ -1691,12 +1715,21 @@ static void BuildFontAtlas()
     // the "esp font" page defaults to. Cyrillic for player names.
     s_espImApplied = Fonts_EspSig();
     s_fontEsp = nullptr;
+    s_fontEspOutline = nullptr;
+    s_espTextLook = 0;
     if (const std::string custom = ValidEspFont(); !custom.empty())
     {
+        const int flags = FontFlagsNorm(g_fontEspFlags);
         ImFontConfig c = { };
-        c.FontBuilderFlags = g_fontEspFlags & 0xFF;   // FontFlagBit i == builder flag 1 << i
+        Fonts_ApplyFlags(c, flags, custom, EspFontPx());
         s_fontEsp = io.Fonts->AddFontFromFileTTF(custom.c_str(), EspFontPx(), &c, cyr);
-        DebugLog("fonts: esp font %s %.0fpx flags 0x%x", custom.c_str(), EspFontPx(), g_fontEspFlags & 0xFF);
+        if (s_fontEsp)
+        {
+            s_espTextLook = FontTextLook(flags);   // stock fallback face keeps the plain shadow
+            c.FontBuilderFlags |= ImGuiFreeTypeBuilderFlags_Stroke;
+            s_fontEspOutline = io.Fonts->AddFontFromFileTTF(custom.c_str(), EspFontPx(), &c, cyr);
+        }
+        DebugLog("fonts: esp font %s %.0fpx flags 0x%x", custom.c_str(), EspFontPx(), flags);
     }
     if (!s_fontEsp) s_fontEsp = sys("verdanab.ttf", 11.f, mono, cyr);
     orElse(s_fontEsp, g_menuBold);
@@ -1835,8 +1868,13 @@ static void RenderEspQueue()
             const ImVec2 sz = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.f, s);
             const ImVec2 at(floorf(c.x0 - sz.x * c.ax), floorf(c.y0 - sz.y * c.ay));
             lastTextLeft = at.x;
-            if (c.flags & ESPF_SHADOW)
+            // custom esp font flags pick the look over the queued one (csgo text( ))
+            const bool shadow  = s_espTextLook ? (s_espTextLook & (1 << FF_DROPSHADOW)) != 0 : (c.flags & ESPF_SHADOW) != 0;
+            const bool outline = (s_espTextLook & (1 << FF_OUTLINE)) != 0;
+            if (shadow)
                 dl->AddText(font, font->FontSize, ImVec2(at.x + 1.f, at.y + 1.f), c.col2, s);
+            if (outline)
+                Fonts_AddOutlineText(dl, font, font == s_fontEsp ? s_fontEspOutline : nullptr, font->FontSize, at.x, at.y, c.col2, s);
             dl->AddText(font, font->FontSize, at, c.col, s);
             break;
         }
@@ -1860,6 +1898,7 @@ static void RenderEspQueue()
 // Everything is built in ONE frame even though the two halves render at different times --
 // splitting the BUILD is what broke input the last time.
 void RenderWorldFx3();   // world (visuals/world_fx3.cpp): bullet impact boxes + world hit markers
+void RenderThirdPersonCrosshair();   // visuals/world_fx.cpp: aim point dot while in third person
 
 // The crosshair draws through ImGui::GetBackgroundDrawList() like every overlay, so for its call
 // the viewport's background slot points at s_chList instead: every crosshair style (and the
@@ -2022,6 +2061,7 @@ static void BuildImGuiFrame()
 
     RenderEspQueue();     // botox: esp under every other overlay (background list, first in)
     RenderWorldFx3();     // background list too, under the HUD overlays
+    RenderThirdPersonCrosshair();
     s_chOverBlur = RenderMenuBlur();   // menu bg blur: blurs game + esp + world fx above, every HUD panel below stays sharp
     RenderBootScreen();   // foreground draw list draws last regardless of call order: always on top
     RenderPsOverlay();
@@ -2044,7 +2084,6 @@ static void BuildImGuiFrame()
     AspectStretch_Run(RenderPoints, AsPanel);
     RenderMiscOverlays();        // healthshot effect, low fps warning, displayed logs
     RenderLuaQueue();            // lua render.* (botox: paint_traverse lua last, under the menu)
-    RenderDebugMenu();
     RenderPsPointWindow();
     RenderMenu();   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
 
@@ -2074,6 +2113,16 @@ static DWORD     s_presentTid    = 0;
 // until the first Present. screenfx asks: a hook that finds itself on this thread may issue
 // raw d3d in step with the engine, one that does not has to stand down.
 DWORD Render_PresentTid() { return s_presentTid; }
+
+// Graveyard (deferred_release.h). A Present tick that Release()d a texture this frame's lists
+// still bind = SetTexture on freed memory -> AV inside DrawIndexedPrimitive (crash.log
+// d3d9+0x32215 under ImGui_ImplDX9_RenderDrawData: cover art on a track change, avatars on a
+// map change). Render thread only.
+static DeferredReleaseQ<IUnknown> s_deferred;
+
+void Render_DeferRelease(IUnknown* p) { s_deferred.Push(p); }
+void Render_FlushDeferred()           { s_deferred.Flush(); }
+static void Render_AgeDeferred(bool built) { s_deferred.Age(built); }
 
 void* VGui_GetPanelInterface()
 {
@@ -2303,6 +2352,7 @@ static void Render_RebindDevice(IDirect3DDevice9* dev)
     ScreenFxPasses_Destroy();
     MediaPlayer_ReleaseTexture();   // DEFAULT pool, and it belongs to the device being dropped
     Indicators_ReleaseTextures();      // mitosis morph texture, same story
+    Render_FlushDeferred();            // old device's swapped-out textures (lists cleared below)
     ImGui_ImplDX9_Shutdown();
     ImGui_ImplDX9_Init(dev);
     s_imguiDev = dev;
@@ -2513,6 +2563,7 @@ chain:
     // End of frame. If vgui went a long stretch without painting the latched panel it was
     // destroyed (level change remakes the tree), so re-resolve it by name next frame.
     if (s_focusPanel && !s_vguiDrew && ++s_focusMissed > 120) VGui_ResetPanelCache();
+    Render_AgeDeferred(s_frameBuilt);   // this frame's lists drawn; a built one replaced the old
     s_frameBuilt = false;
     s_vguiDrew   = false;
     s_ovDefer    = s_ovRan;   // the replayed vgui pass owns the next frame only while it keeps running
@@ -2542,6 +2593,7 @@ HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     SpectatorList_ReleaseTextures();   // spectator list: eyes style row textures, DEFAULT-pool
     Radar_ReleaseTextures();           // csgo radar overview, DEFAULT-pool; the baked pixels rebuild it
     BlurRect_Destroy();               // blur scratch targets + shader
+    Render_FlushDeferred();           // swapped-out DEFAULT-pool textures: a live one fails the Reset
     if (g_imguiInit) ImGui_ImplDX9_InvalidateDeviceObjects();
     // The split arrays point at draw lists from the frame being dropped -- a Present that
     // renders them after a Reset would submit freed geometry.
@@ -2561,6 +2613,45 @@ BOOL WINAPI h_SetCursorPos(int x, int y) {
     MiscHookGuard _g;
     if (g_showMenu || s_psPointWin >= 0 || Recorder_EditorOpen()) return TRUE; // eat the recenter = view freezes
     return o_SetCursorPos(x, y);
+}
+
+// ==== bind gate ===================================================================
+// botox input::keys_blocked. Console asked through the engine too (Con_IsVisible, slot 11):
+// it answers before the aim half's interfaces resolve.
+bool Binds_Blocked()
+{
+    if (g_hwnd && GetForegroundWindow() != g_hwnd) return true;
+    if (g_imguiInit && ImGui::GetIO().WantTextInput) return true;   // any imgui text box
+    if (Menu_SearchTyping()) return true;
+    if (g_engine && VCall<bool>(g_engine, 11)) return true;
+    return Aim_VguiInputUp();                                       // chat, pause menu, class menu
+}
+
+// Toggle binds read the key's toggle bit (flips on every press). A press typed while blocked
+// flips it too, so WndProc -- main thread, key state as of the message being handled -- notes
+// every flip and a blocked one is xored back out. Press that OPENS chat still counts: blocked
+// is asked before the game sees the message.
+static BYTE s_tglSeen[256] = {}, s_tglMask[256] = {};
+static bool s_tglInit = false;
+
+bool Binds_Toggled(int vk)
+{
+    if (vk <= 0 || vk > 255) return false;
+    return ((GetKeyState(vk) & 1) ^ s_tglMask[vk]) != 0;
+}
+
+static void Binds_NoteToggles()
+{
+    BYTE ks[256];
+    if (!GetKeyboardState(ks)) return;
+    const bool blocked = s_tglInit && Binds_Blocked();   // first scan: bits are baseline, not presses
+    for (int vk = 1; vk < 256; ++vk) {
+        const BYTE bit = ks[vk] & 1;
+        if (bit == s_tglSeen[vk]) continue;
+        if (blocked) s_tglMask[vk] ^= 1;
+        s_tglSeen[vk] = bit;
+    }
+    s_tglInit = true;
 }
 
 // ==== WndProc hook ================================================================
@@ -2591,6 +2682,8 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     // Eject: ImGui is torn down under this, and a later subclasser may keep us chained.
     if (g_eject) return CallWindowProcW(g_origWndProc, hWnd, msg, wParam, lParam);
+    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || (msg >= WM_LBUTTONDOWN && msg <= WM_XBUTTONDBLCLK))
+        Binds_NoteToggles();
     if (msg == WM_KEYDOWN) {
         if ((int)wParam == g_menuKey) {
             g_showMenu = !g_showMenu;
@@ -2606,7 +2699,9 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     // opening press can't instantly close. Eaten = never reaches the game's chat bind.
     if (!g_showMenu && msg == WM_KEYDOWN && !(lParam & (1u << 30)))
     {
-        if (s_psPointWin < 0 && wParam == VK_RETURN && s_psPointHover >= 0)
+        // chat's own ENTER (send) must reach chat, not open a point / route editor
+        const bool typing = s_psPointWin < 0 && !Recorder_EditorOpen() && Binds_Blocked();
+        if (s_psPointWin < 0 && !typing && wParam == VK_RETURN && s_psPointHover >= 0)
         {
             s_psPointWin = s_psPointHover;
             s_psPointWinGen = PS_PointsGen();
@@ -2614,9 +2709,9 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         // botox movement > points "delete points": key on the hovered point deletes it, window
-        // closed. botox keys_blocked: console up = the key is being typed (IVEngineClient slot 11)
+        // closed. botox keys_blocked: chat / console up = the key is being typed
         if (s_psPointWin < 0 && g_pointsDelete && g_pointsDeleteKey > 0 && (int)wParam == g_pointsDeleteKey
-            && s_psPointHover >= 0 && !(g_engine && VCall<bool>(g_engine, 11)))
+            && s_psPointHover >= 0 && !typing)
         {
             PS_PointDelete(s_psPointHover);
             s_psPointHover = -1;
@@ -2628,7 +2723,7 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (wParam == VK_BACK) { PS_PointDelete(s_psPointWin); s_psPointWin = -1; return 0; }
         }
         // recorder: ENTER on a route start opens its clip editor, ESC/ENTER close it (botox)
-        if (s_psPointWin < 0 && Recorder_EditorKey((unsigned)wParam)) return 0;
+        if (s_psPointWin < 0 && !typing && Recorder_EditorKey((unsigned)wParam)) return 0;
     }
 
     // Menu up, or the point window open: imgui gets the input and the game is starved.

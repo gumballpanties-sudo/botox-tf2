@@ -42,6 +42,13 @@ void Menu_Movement_Main()
             ImGui::SliderInt("lead ticks##goomba", &g_goombaLead, 0, 64);
         }, ImVec2(220.f, -1));
 
+    ImGui::Checkbox("auto pogo", &g_autoPogo);
+    if (g_autoPogo)
+        ImGui::OptionPopup("auto pogo settings", [&]() {
+            ImGui::Label("auto pogo keybind");
+            ImGui::Keybind("auto pogo key", &g_autoPogoKey, &g_autoPogoMode);
+        }, ImVec2(220.f, -1));
+
     ImGui::Checkbox("auto crouch", &g_autoCrouch);
     if (g_autoCrouch)
         ImGui::OptionPopup("auto crouch settings", [&]() {

@@ -1,4 +1,4 @@
-// pjseam.h -- heroin pixeljump seam height test, no engine deps (tests/pjseam_test.cpp)
+// pjseam.h -- heroin pixeljump seam height test + pixel hop search table, no engine deps (tests/pjseam_test.cpp)
 //
 // heroin FUN_18007dcc0(z, pz) 1:1 (decomp: both sign branches reduce to the same rule):
 //   same integer part (trunc toward zero), and the hull's hundredths bucket is the point's
@@ -28,4 +28,23 @@ inline bool FloorCatch(float z, float launchZ)
     const float d = z - launchZ;
     return d > -k_floorBand && d < k_floorBand;
 }
+
+// pixel hop (pixelhop.inl = botox css sergo.inl SgPixelHop = sergowebz z.dll FUN_18002a420): the 384-step rolling
+// land search, 12 yaw offsets off the face x 8 wish sizes x side x duck flip. Tables z.dll 0x18009d470 / 0x18009d4a0
+constexpr float k_phYaw[]  = { 0.5f, 3.f, 8.f, 15.f, 22.f, 30.f, 40.f, 50.f, 60.f, 70.f, 80.f, 89.9f };
+constexpr float k_phMove[] = { 0.001f, 0.05f, 0.25f, 1.f, 5.f, 15.f, 60.f, 450.f };
+constexpr int   k_phSteps  = 384;
+struct PhStep { float yawOff; float move; bool flipSide; bool flipDuck; };
+inline PhStep PhAt(int i)
+{
+    i = ((i % k_phSteps) + k_phSteps) % k_phSteps;
+    PhStep s;
+    s.yawOff   = k_phYaw[i % 12];
+    s.move     = k_phMove[(i / 12) & 7];
+    s.flipSide = ((i / 96) & 1) != 0;
+    s.flipDuck = ((i / 192) & 1) != 0;
+    return s;
+}
+// the rolling search only runs while hung on a pin (vz on -halfgrav)
+inline bool PhPinned(float vz, float halfGrav) { return (vz + halfGrav) <= 0.05f && (vz + halfGrav) >= -0.05f; }
 }

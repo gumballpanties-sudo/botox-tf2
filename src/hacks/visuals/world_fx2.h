@@ -3,7 +3,7 @@
 #include <cstring>
 
 // the features World fx pass 1 listed BLOCKED (new hook, or infra it did not
-// own) and this file's brief covers -- remove visual recoil, dlight, sun angle, custom
+// own) and this file's brief covers -- remove visual recoil, dlight, custom
 // weather particle colour, world/prop texture (colour) replace. Reflections, remove hud
 // elements, custom blood colour, minecraft hud and web on surface stay blocked here too --
 // see the world fx 2 port notes for why each one is blocked.
@@ -23,14 +23,8 @@ void __fastcall h_CalcView(void* rcx, void* eyeOrigin, void* eyeAngles, float& z
 void WorldFx2_InstallHooks();
 
 // 100ms tick (visuals.cpp's UpdateVisualsCvars, same cadence world_fx.cpp's WorldFx_Tick
-// rides) -- dlight (IVEfx::CL_AllocDlight, slot 4, "VEngineEffects001") and sun angle
-// (env_sun's DT_Sun::m_vDirection netvar, resolved by name like every other netvar in this
-// DLL, not a hardcoded offset).
+// rides) -- forwards to WorldFx3_Tick.
 void WorldFx2_Tick();
-
-// Main thread, once a frame (world_fx.cpp h_OverrideView): sun angle -- env_sun direction +
-// shadow_control direction/distance (OnDataChanged has to run where the shadow manager lives).
-void WorldFx2_Frame();
 
 // Pure, engine-free: classifies FindMaterial's own pTextureGroup string (engine-assigned,
 // public/texture_group_names.h -- not a name-pattern guess). 0 = neither, 1 = world

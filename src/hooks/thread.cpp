@@ -598,6 +598,7 @@ static void MainThread()
         ColorCorr_Destroy();
         Bloom_Destroy();
         ScreenFx_Destroy();
+        Render_FlushDeferred();   // textures still waiting out a frame (render.cpp graveyard)
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();

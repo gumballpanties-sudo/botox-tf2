@@ -5,22 +5,10 @@
 #include "../visuals/world_fx3_math.h"   // world/prop texture presets + categories
 
 // Called inside menu.cpp's "screen" group (Page_VisualsScreen, col1): botox
-// menu_tab_visuals.cpp 1132-1178 (third person, aspect ratio). Colour correction follows in
-// menu.cpp, then Menu_Visuals_ScreenFx (sharpen .. show depth).
+// menu_tab_visuals.cpp (aspect ratio; third person moved to misc > game). Colour correction
+// follows in menu.cpp, then Menu_Visuals_ScreenFx (sharpen .. show depth).
 void Menu_Visuals_Camera()
 {
-    ImGui::Checkbox("third person", &g_thirdPersonEnable);
-    if (g_thirdPersonEnable)
-        ImGui::OptionPopup("third person settings", [&]() {
-            ImGui::Label("third person keybind");
-            ImGui::Keybind("third person key", &g_sfxThirdPersonKey, &g_sfxThirdPersonKeyMode);
-
-            ImGui::SliderFloat("distance##third person", &g_thirdPersonDistance, 20.f, 300.f, "%.0f u",
-                               ImGuiSliderFlags_AlwaysClamp);
-
-            ImGui::Checkbox("wall collision##third person", &g_sfxThirdPersonCollision);
-        }, ImVec2(220.f, -1.f));
-
     ImGui::Checkbox("aspect ratio", &g_aspectRatioEnable);
     if (g_aspectRatioEnable)
         // slider edits a pending value, apply commits it (botox: r_aspectratio re-lays the view)

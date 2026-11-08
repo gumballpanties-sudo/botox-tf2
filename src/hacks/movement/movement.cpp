@@ -305,6 +305,7 @@ static bool EngineGetViewAngles(Vec3& ang)
 // let feature A run on "pressed" while feature B saw "released" -- a half-applied tick.
 // Resolve both once per cmd and hand every ask the same answer.
 static bool s_bindAppActive = true;
+static bool s_bindTyping = false;
 struct BindMemo_t { int key; int mode; bool val; };
 static BindMemo_t s_bindMemo[16] = {};
 static int  s_bindMemoN = 0;
@@ -312,13 +313,14 @@ static int  s_bindMemoN = 0;
 static void MovementBinds_NewCmd()
 {
     s_bindAppActive = !g_hwnd || GetForegroundWindow() == g_hwnd; // is_active_app gate
+    s_bindTyping = Binds_Blocked();   // chat / console / menu text box: held keys are letters
     s_bindMemoN = 0;
 }
 
 static bool BindKeyDown(int key, int mode)
 {
-    return (mode == 1) ? (GetAsyncKeyState(key) & 0x8000) != 0   // on hotkey
-                       : (GetKeyState(key) & 1) != 0;            // toggle (key toggle bit)
+    return (mode == 1) ? !s_bindTyping && (GetAsyncKeyState(key) & 0x8000) != 0   // on hotkey
+                       : Binds_Toggled(key);                                     // toggle, typed presses taken out
 }
 
 bool MovementKeyOK(int key, int mode)
@@ -981,6 +983,9 @@ static bool s_psAssistHopPj = false;     // ...and pixeljump planned it (indicat
 // botox `wall_detected`: AutoAlign's flat-wall find, or pixel surf's own 16-ray probe when
 // AutoAlign is off (pixelsurf.inl PsWallDetectFallback). Pixel surf's hunt gate reads it
 static bool s_aaWallDetected = false;
+// AutoAlignStick wrote this cmd's move (drift hold; on sv_wallbug 0 any proven press too). PixelSurf's hold keeps it as is: its 450 gain
+// strafe / wall press re-clips the hull on the face, and every clip adds the DIST_EPSILON drift
+static bool s_aaStickOwns = false;
 // the assist's own catch crouch, held until the feet land. Declared here (not in
 // psassist.inl, which is #included far below) so WallClimb can yield to it -- see PS_AssistTick
 static bool s_psAssistDuckHeld = false;
@@ -1678,6 +1683,8 @@ static void FastMovement(void* pLocal, UserCmd_t* pCmd)
 // ============================================================================
 
 static bool s_textureBugHit = false; // TB catch owns pCmd this tick (HeadSurf/WallClimb/AirStuck yield)
+static bool s_tbAlignDead = false;   // TBC_Align this cmd: START pinned, no press 0..100 / steer / gain pins the next
+                                     // tick = the ride ends here (surf stick skips its latch: 15:29 log, 0 of 122 held)
 static bool s_tbOwnsCmd = false;     // TB steered pCmd this tick WITHOUT a hit (creep/drive/probe = band
                                      // setup) -- AirStuck must not stomp it with its coarse sweep move
 // TB ride coyote ticks left (texturebug.inl s_ride_grace), as of the END of the last TB call.
@@ -1696,6 +1703,7 @@ static bool s_tbSyncWant = false;      // botox-style tb armed: same (botox sync
 static float s_wcPreTbFwd = 0.f, s_wcPreTbSide = 0.f;
 static int   s_wcPreTbButtons = 0;
 static bool s_airStuckHit = false;
+static bool s_pixelHopHit = false;   // pixeljump's pixel hop wrote this cmd (land / hop): the air movers after it yield
 // s_shouldPixelSurf / s_psRidingNow / s_psAssistHopActive moved ABOVE AutoJumpbug --
 // jumpbug is a PRE-prediction feature and has to read the ride state too
 // indicator snapshot, written once per cmd at the end of Movement_RunImpl
@@ -1799,15 +1807,415 @@ static bool MV_IsHullFlatWall(const Vec3& n)
     return fabsf(n.x) >= k_mvAxisAlignDot || fabsf(n.y) >= k_mvAxisAlignDot;
 }
 
+// ---- DRIFT HOLD: keep a pin on sv_wallbug 0 by NOT touching the face -------------------------
+// Valve Oct 2026 ClipVelocity: backoff = min(backoff,0) - DIST_EPSILON, so every clip leaves the hull
+// moving 0.03125 u/s OFF the plane it hit. 11-08 log, every pixel surf that fell: pin vz -5.969 (the
+// top-plane clip, same epsilon, self-sustaining), and the origin across the wall creeping off it
+// 0.00047u a tick = 0.03125 * dt until ~0.005u later the lip is gone. A press cannot fix it: the hull
+// is inside the trace's epsilon shell, so pressing in only re-clips (fraction 0) and puts the
+// +0.03125 back -- press 10 and press 450 drifted at the same slope. The one ride that held 235
+// ticks had zero across-face velocity. Same story for an air stuck: a flat face can never nail the
+// hull any more, only a lip / seam pin can hold it, and only while the hull stops drifting.
+// So: solve the wish that leaves the across-face velocity at k_awayTarget (a hair AWAY, never toward:
+// toward = a clip = the drift again), and with stopAlong also the along-face velocity at 0 (a hang).
+// SDK AirAccelerate: dv = airaccel * wish * frametime * friction along wishdir (gamemovement.cpp:1734),
+// the 30 cap never bites (addspeed = 30 - v.wishdir, and wishdir points against v). The gain is
+// MEASURED (a bare tick + a half step), so duck crop / friction / clip offsets are the engine's.
+// Proof = closed loop over `horizon` ticks: every simulated tick re-solves from its own velocity.
+// cmd: its fwd/side are scratch (left on the first tick's solve); buttons / view are flown as given
+// anchor (optional): steer the ORIGIN back onto a spot that pinned for real instead of holding a
+// hair away. SDK brush clip skips a brush whose side plane the hull is in front of and not closing
+// on (d1 > 0 && d2 >= d1), so a pure "away" target can cost the seam brush's top plane = the pin.
+// Per tick: across target = (anchor - origin).n / dt, capped at one clip's DIST_EPSILON. The caller
+// flies both and keeps the longer hold: the sim decides, not this comment
+// creep (optional, wins over anchor): close HALF the gap to the face's trace shell every tick.
+// Same SDK rule, other half: a lip brush sticking out under the face is only entered while the
+// hull closes on it (d2 < d1), and the face above must not be reached first (its clip = the
+// +DIST_EPSILON push = hull moving away = lip skipped). Half the gap never reaches the shell and
+// always closes. Gap under 2 ulps of origin = no room to close: take the one clip (gap + 1 ulp)
+// and let its push hand the room back
+struct MvDrift
+{
+    int   held = 0;              // ticks the closed loop kept the pin
+    float fwd = 0.f, side = 0.f; // the first tick's move, exact bits
+    Vec3  wish{};                // ...as a world wish (dir * magnitude)
+    float k = 0.f;               // measured gain, u/s per unit wish
+    float vaNone = 0.f;          // across-face velocity a bare tick ends with
+    float doff = 0.f;            // origin moved along n over the loop (+ = off the face)
+};
+static MvDrift MV_DriftHold(void* pLocal, UserCmd_t* cmd, int frame, const Vec3& n, bool stopAlong,
+                            int horizon, int& simsUsed, const Vec3* anchor = nullptr, bool creep = false)
+{
+    MvDrift r;
+    constexpr float k_awayTarget = 0.0002f;   // u/s left drifting off: 0.000003u a tick
+    const float pin = TargetPredictZVel();
+    const auto on_pin = [&]() {
+        return !(EntI(pLocal, g_offFlags) & FL_ONGROUND)
+            && fabsf(EntV3(pLocal, g_offVelocity).z - pin) < as::k_pinTol;
+    };
+    const auto velXY = [&]() { const Vec3 v = EntV3(pLocal, g_offVelocity); return Vec3(v.x, v.y, 0.f); };
+    // across-face velocity this tick should end with (reads the entity's origin as it stands)
+    const float dt = TickInterval();
+    const auto target = [&]() -> float {
+        if (creep) {
+            const Vec3 o = EntV3(pLocal, g_offOrigin);
+            TraceFilterWorldProps fil; fil.Setup(pLocal);
+            GameTrace_t tr{};
+            TraceHull(o, o - n * 2.f, EntV3(pLocal, g_offMins), EntV3(pLocal, g_offMaxs), MASK_PLAYERSOLID, &fil, &tr);
+            const float gap = tr.startsolid ? 0.f : tr.fraction * 2.f;
+            const float ulp = std::max(nextafterf(fabsf(o.x), INFINITY) - fabsf(o.x),
+                                       nextafterf(fabsf(o.y), INFINITY) - fabsf(o.y));
+            return gap > 2.f * ulp ? -0.5f * gap / dt : -(gap + ulp) / dt;
+        }
+        if (!anchor) return k_awayTarget;
+        const Vec3 o = EntV3(pLocal, g_offOrigin);
+        const float e = (anchor->x - o.x) * n.x + (anchor->y - o.y) * n.y;
+        return std::clamp(e / dt, -MV_SURF_EPS, MV_SURF_EPS);
+    };
+    // the change a tick that would end at vNone still needs
+    const auto want = [&](const Vec3& vNone) -> Vec3 {
+        const float across = vNone.x * n.x + vNone.y * n.y;
+        const float tgt = target();
+        if (!stopAlong) return n * (tgt - across);
+        return n * tgt - vNone;
+    };
+    const auto oneTick = [&](const Vec3& dir, float m) -> Vec3 {
+        MV_WriteWishWorld(cmd, dir, m);
+        RestoreToFrame(frame);
+        Pred_Simulate(pLocal, cmd);
+        ++simsUsed;
+        const Vec3 v = velXY();
+        RestoreToFrame(frame);
+        return v;
+    };
+    if (SimsLeft() < horizon + 2) return r;
+
+    RestoreToFrame(frame);
+    const Vec3 v0    = velXY();
+    const Vec3 vNone = oneTick(Vec3(), 0.f);
+    const Vec3 offs  = vNone - v0;   // what a bare tick does on its own (clip epsilons)
+    float k = CvarFloat("sv_airaccelerate", 10.f) * TickInterval();
+    {
+        const Vec3  d  = want(vNone);
+        const float dl = d.Length2D();
+        if (dl > 2.f * k_awayTarget)
+        {
+            // half the change: still short of the target, so no clip bends the measurement
+            const Vec3  u     = d * (1.f / dl);
+            const float mHalf = std::min(450.f, 0.5f * dl / k);
+            const float got   = (oneTick(u, mHalf) - vNone).Dot(u);
+            if (got > 0.2f * k * mHalf && got < 5.f * k * mHalf)
+                k = got / mHalf;
+        }
+    }
+    r.k = k;
+    r.vaNone = vNone.x * n.x + vNone.y * n.y;
+
+    RestoreToFrame(frame);
+    const int  base = EntI(pLocal, g_offTickBase);
+    const Vec3 o0   = EntV3(pLocal, g_offOrigin);
+    for (int z = 0; z < horizon && SimsLeft() > 0; z++)
+    {
+        const Vec3  d = want(velXY() + offs);
+        const float l = d.Length2D();
+        const Vec3  u = l > 1e-7f ? d * (1.f / l) : Vec3();
+        const float m = l > 1e-7f ? std::min(450.f, l / k) : 0.f;
+        MV_WriteWishWorld(cmd, u, m);
+        if (z == 0) { r.fwd = cmd->forwardmove; r.side = cmd->sidemove; r.wish = u * m; }
+        EntSetI(pLocal, g_offTickBase, base + z);
+        Pred_Simulate(pLocal, cmd);
+        ++simsUsed;
+        if (!on_pin()) break;
+        r.held++;
+    }
+    const Vec3 o1 = EntV3(pLocal, g_offOrigin);
+    r.doff = (o1.x - o0.x) * n.x + (o1.y - o0.y) * n.y;
+    RestoreToFrame(frame);
+    cmd->forwardmove = r.fwd;
+    cmd->sidemove    = r.side;
+    return r;
+}
+
+// ---- SURF STICK: a pin seen once is held like a TB ride ----------------------------------
+// The flat-wall scan in AutoAlign re-earns its wall every tick (axis-aligned only, nearest face,
+// 1u reach) and proves its press ONE tick ahead. On a live ride that is the wrong question: the
+// pin already proved this face holds us. And since Valve's Oct 2026 ClipVelocity (backoff -=
+// DIST_EPSILON) a hull that stops pressing drifts off the face and the ride is gone next tick.
+// So: last tick ended pinned (vz = -halfgrav) against an upright brush face = latch that face,
+// and every tick after press into it like TBC_Align does (least press first, but never zero
+// before the rest). The player's along-wall input rides on top of the press. Lets go on ground /
+// keys off the wall / face gone / the first tick no move pins (player's move handed back). PixelSurf runs
+// after and keeps a cmd that pins.
+// THE PROOF IS LONG, NOT 2 TICKS. 11-08 log: a 2-tick proof passed 3 ticks running (press 30 ->
+// 50) and the ride still fell on the 4th -- greedy "pins the next 2" picks presses that walk the
+// hull into a state no press can hold. Each candidate now flies k_stickHorizon ticks and the one
+// that holds LONGEST wins (ties: list order = least press, steer kept); a full hold exits early,
+// so a healthy ride costs one candidate.
+// STANCE IS NOT OURS. The crouch is PixelSurf's (its flip hunt picks the tick to duck / stand, which
+// a held-from-now flip cannot: 11-08 log, a "flip now" pass won 0 ticks out of every ride). The
+// sims fly whatever buttons the cmd carries -- PixelSurf's latched duck is already on it -- and
+// PixelSurf runs after us and flips when our press stops holding
+static bool  s_aaStick      = false;
+static Vec3  s_aaStickN{};           // latched face normal, xy only
+static float s_aaStickPress = 10.f;  // last press that pinned: the no-proof fallback reuses it
+static bool  s_aaStickPredPin = false;   // last cmd's pick said the next tick pins (div diag)
+static int   s_aaStickRideTick = 0;      // ticks since latch, for the per-tick trace
+static Vec3  s_aaStickAnchor{};          // origin of the latch tick (a real pin): drift hold 'a' steers back to it
+// diag, per second: full = held the whole horizon, part = held some ticks, div = picked a move
+// the sim said pins and the real tick did not (sim lie, not a dead end)
+static int   s_aaStickTicks = 0, s_aaStickFull = 0, s_aaStickPart = 0, s_aaStickMissTot = 0;
+static int   s_aaStickDiv = 0, s_aaStickBestSum = 0;
+
+static void AutoAlignStickDrop(const char* why)
+{
+    if (s_aaStick)
+        DebugLog("AA: stick release %s z=%.3f vz=%.2f xy=%.1f", why, s_prePredOrigin.z, s_prePredVel.z,
+                 s_prePredVel.Length2D());
+    s_aaStick = false;
+    s_aaStickPredPin = false;
+}
+
+static bool TbBindOn()
+{
+    return On(g_textureBug, g_textureBugKey, g_textureBugMode) || On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);
+}
+
+// true = the stick owns this cmd (AutoAlign's scan path is skipped)
+static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
+{
+    if (!g_aaSurfStick)
+        { AutoAlignStickDrop("off"); return false; }
+    if ((s_prePredFlags & FL_ONGROUND) || !EntAlive(pLocal) || EntMoveType(pLocal) != MOVETYPE_WALK)
+        { AutoAlignStickDrop("ground"); return false; }
+    // NOT OUR RIDE. A texture bug crease, a head surf, an air stuck, a wall climb catch all read
+    // as "pinned against a wall" too, and those features run AFTER us and read the cmd we leave as
+    // the player's keys -- a stick that zeroes the move there breaks them. Their flags still
+    // hold last cmd's answer here, which is the right question: whose ride is this
+    if (s_textureBugHit || s_tbOwnsCmd || s_headSurfHit || s_headBounceHit || s_airStuckHit
+        || s_wallClimbHit || s_wallClimbActive || AutoBounceOwnsCmd() || s_psAssistHopActive)
+        { AutoAlignStickDrop("other"); return false; }
+
+    const float pin = TargetPredictZVel();
+    // as::k_pinTol: Valve's DIST_EPSILON clip ends a top-plane pin at -halfgrav + 0.03125
+    const auto on_pin = [pin](float vz) { return fabsf(vz - pin) < as::k_pinTol; };
+    const bool pinned_now = on_pin(s_prePredVel.z);
+    if (s_aaStick && s_aaStickPredPin && !pinned_now)
+        s_aaStickDiv++;
+    s_aaStickPredPin = false;
+
+    const int frame = PredCommandsPredicted() - 1;
+    RestoreToFrame(frame);
+    const Vec3 org  = EntV3(pLocal, g_offOrigin);
+    const Vec3 mins = EntV3(pLocal, g_offMins);
+    const Vec3 maxs = EntV3(pLocal, g_offMaxs);
+    TraceFilterWorldProps fil; fil.Setup(pLocal);
+
+    if (!s_aaStick)
+    {
+        // "even for just a tick": one pinned tick in contact with a dead-vertical face
+        // xy < 1 = a hang (air stuck / park), not a surf (as::SurfPinned): latching it would keep
+        // pressing after AS lets go
+        Vec3 n{};
+        if (!pinned_now || s_prePredVel.Length2D() < 1.f || !PsWallTouch(pLocal, n, org))
+            return false;
+        // a crate against the wall clips vz the same way: never latch a prop (MV_PinOnProp)
+        if (MV_PinOnProp(org, mins, maxs, fil))
+            return false;
+        s_aaStickN = Vec3(n.x, n.y, 0.f);
+        s_aaStickN.Normalize();
+        s_aaStick = true;
+        s_aaStickPress = 10.f;
+        s_aaStickRideTick = 0;
+        s_aaStickAnchor = org;
+        DebugLog("AA: stick latch n=%.3f,%.3f z=%.3f vz=%.2f xy=%.1f duck=%d", s_aaStickN.x, s_aaStickN.y,
+                 org.z, s_prePredVel.z, s_prePredVel.Length2D(), (s_prePredFlags & FL_DUCKING) ? 1 : 0);
+    }
+
+    // the face this tick: short hull sweep straight into the latched normal. A bent seam is
+    // followed (normal re-read when it stays within ~25 deg); nothing within 2u = ride over
+    float flGap = 0.f;
+    {
+        GameTrace_t tr{};
+        TraceHull(org, org - s_aaStickN * 2.f, mins, maxs, MASK_PLAYERSOLID, &fil, &tr);
+        if (tr.fraction >= 1.f || tr.startsolid)
+            { AutoAlignStickDrop("wall"); return false; }
+        flGap = tr.fraction * 2.f;
+        const Vec3 nn(tr.plane.normal.x, tr.plane.normal.y, 0.f);
+        if (fabsf(tr.plane.normal.z) < 0.7f && nn.Length2D() > 0.5f)
+        {
+            Vec3 cand = nn; cand.Normalize();
+            if (cand.Dot(s_aaStickN) > 0.9f)
+            {
+                // a bent seam: the old spot's across distance means nothing on the new face
+                if (cand.Dot(s_aaStickN) < 0.9999f) s_aaStickAnchor = org;
+                s_aaStickN = cand;
+            }
+        }
+    }
+
+    // keys off the face = the player is leaving (same 0.5 as PixelSurf's hold k_leave_dot)
+    if (TB_SteeringAwayFromWall(pCmd, s_aaStickN, pCmd->forwardmove, pCmd->sidemove, 0.5f))
+        { AutoAlignStickDrop("leave"); return false; }
+
+    // the player's move, handed back untouched on any tick the stick cannot hold
+    const float flUserFwd = pCmd->forwardmove, flUserSide = pCmd->sidemove;
+
+    Vec3 vFwd, vRight;
+    AngleVectors(Vec3(0.f, pCmd->viewangles.y, 0.f), &vFwd, &vRight, nullptr);
+    Vec3 vWish = vFwd * pCmd->forwardmove + vRight * pCmd->sidemove;
+    vWish.z = 0.f;
+    const Vec3  vInto(-s_aaStickN.x, -s_aaStickN.y, 0.f);
+    const Vec3  vTan(s_aaStickN.y, -s_aaStickN.x, 0.f);
+    const float flTan = std::clamp(vWish.Dot(vTan), -450.f, 450.f);
+
+    // how far a candidate is flown; a full hold this long ends the search
+    const int k_stickHorizon = as::TicksScaled(8, TickInterval());
+    // the stick's own share of the cmd's sims: a dying ride runs every candidate to its break
+    // tick, and TB / AS / WC / PS still need theirs after us
+    constexpr int k_stickSimCap = 96;
+    int simsUsed = 0;
+
+    // ticks the move keeps the pin, 0..horizon (same cmd every tick)
+    const auto proof = [&](const Vec3& mv) -> int
+    {
+        MV_WriteWishWorld(pCmd, mv, mv.Length2D());
+        RestoreToFrame(frame);
+        const int base = EntI(pLocal, g_offTickBase);
+        int held = 0;
+        for (int z = 0; z < k_stickHorizon && SimsLeft() > 0; z++)
+        {
+            EntSetI(pLocal, g_offTickBase, base + z);
+            Pred_Simulate(pLocal, pCmd);
+            ++simsUsed;
+            if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || !on_pin(EntV3(pLocal, g_offVelocity).z))
+                break;
+            held++;
+        }
+        RestoreToFrame(frame);
+        return held;
+    };
+
+    // ---- DRIFT HOLD first: stop the across-face drift, do not press (MV_DriftHold, the why is there) ----
+    const int k_driftHorizon = as::TicksScaled(16, TickInterval());
+    MvDrift dh = MV_DriftHold(pLocal, pCmd, frame, s_aaStickN, false, k_driftHorizon, simsUsed);
+    // short of the horizon = try steering back onto the latch spot (anchor, why at MV_DriftHold).
+    // A healthy ride never pays for it; ties keep the plain hold
+    // then creep (close half the gap a tick, MV_DriftHold has the why), then the anchor
+    char driftMode = 'd';
+    if (dh.held < k_driftHorizon)
+    {
+        const MvDrift dc = MV_DriftHold(pLocal, pCmd, frame, s_aaStickN, false, k_driftHorizon, simsUsed,
+                                        nullptr, true);
+        if (dc.held > dh.held) { dh = dc; driftMode = 'c'; }
+    }
+    if (dh.held < k_driftHorizon)
+    {
+        const MvDrift da = MV_DriftHold(pLocal, pCmd, frame, s_aaStickN, false, k_driftHorizon, simsUsed,
+                                        &s_aaStickAnchor);
+        if (da.held > dh.held) { dh = da; driftMode = 'a'; }
+    }
+    const int   heldDrift  = dh.held;
+    const float flDriftK   = dh.k, flVaNone = dh.vaNone, flDriftOff = dh.doff;
+    const float flAway0    = s_prePredVel.x * s_aaStickN.x + s_prePredVel.y * s_aaStickN.y;
+
+    // ---- PRESS SEARCH: fallback when the drift hold cannot keep the pin -----------------------
+    // air accel caps the wish at 30 but scales accel by the full wish: into-wall gain per tick is
+    // airaccel * press * dt up to 30 u/s, so 200 already = the cap and 450 only matters with a
+    // tangent eating the cap. 0 last: a press is what keeps the hull on the face
+    static constexpr float k_press[] = { 10.f, 20.f, 30.f, 50.f, 75.f, 100.f, 200.f, 450.f, 0.f };
+    int   best = 0;
+    float bestPress = s_aaStickPress;
+    Vec3  bestMove = vInto * s_aaStickPress + vTan * flTan;   // no proof = keep pressing, keep steering
+    const bool bDriftWins = heldDrift >= k_stickHorizon;
+    for (int pass = 0; pass < 2 && best < k_stickHorizon && !bDriftWins; pass++)
+    {
+        // pass 0 keeps the player's along-wall input, pass 1 drops it (the ride beats the steer)
+        const float t = pass == 0 ? flTan : 0.f;
+        if (pass == 0 && fabsf(t) < 10.f)
+            continue;
+        for (const float m : k_press)
+        {
+            if (SimsLeft() < k_stickHorizon || simsUsed + k_stickHorizon > k_stickSimCap)
+                break;
+            const Vec3 mv = vInto * m + vTan * t;
+            const int h = proof(mv);
+            if (h > best) { best = h; bestMove = mv; bestPress = m; }
+            if (best >= k_stickHorizon) break;
+        }
+    }
+    // NOTHING PINS = NOT A SURF ANY MORE: let go THIS tick with the player's move back. The old
+    // 4-tick miss window kept writing a press / a zero move over the fall, i.e. over whatever the
+    // player or an earlier feature (edge bug, strafe) had in the cmd
+    // simsUsed 0 = the pool was empty (TB ran first and spent it), nothing was flown: that is no
+    // proof the ride is over, so keep the no-proof press (bestMove) instead of dropping a live ride
+    if (heldDrift == 0 && best == 0 && simsUsed > 0)
+    {
+        pCmd->forwardmove = flUserFwd;
+        pCmd->sidemove    = flUserSide;
+        s_aaStickTicks++; s_aaStickMissTot++;
+        AutoAlignStickDrop("lost");
+        return false;
+    }
+    s_aaWallDetected = true;   // PixelSurf's hunt gate: we are on a wall
+
+    // drift hold wins outright when it holds a press-search horizon, and on any tie below it
+    const bool bDrift = heldDrift > 0 && (bDriftWins || heldDrift >= best);
+    if (bDrift)
+    {
+        pCmd->forwardmove = dh.fwd;
+        pCmd->sidemove    = dh.side;
+        best = std::min(heldDrift, k_stickHorizon);   // stats stay on the press horizon
+        bestPress = dh.wish.Dot(vInto);               // + = into the face, - = away
+    }
+    else
+    {
+        MV_WriteWishWorld(pCmd, bestMove, bestMove.Length2D());
+        if (best > 0 && bestPress > 0.f)
+            s_aaStickPress = bestPress;
+    }
+    // sv_wallbug 0: a press pick owns the cmd too. PixelSurf's hold would swap it for a 450 gain
+    // strafe proven 2 ticks, and every gain strafe re-clips the face (+DIST_EPSILON off it): the
+    // 8-tick proof loses to a 2-tick greedy one and the drift ends the ride a few ticks later.
+    // No gain is possible there anyway: at ride speed only a near-across wish accelerates.
+    // Cvar not on the client = Valve's default, 0
+    s_aaStickOwns = bDrift || (best > 0 && CvarFloat("sv_wallbug", 0.f) < 0.5f);
+    s_aaStickPredPin = best > 0;
+
+    s_aaStickTicks++;
+    s_aaStickBestSum += best;
+    if (best >= k_stickHorizon) s_aaStickFull++;
+    else if (best > 0) s_aaStickPart++;
+    else s_aaStickMissTot++;
+
+    // per-tick ride trace: gap = hull to face, off = origin across the face normal (drift off the
+    // lip shows as off creeping), best = ticks the pick holds. First 32 ticks of a ride, then only
+    // the ticks that see the end coming, so a 10s hold is not 660 lines
+    // mode d = drift hold, c = creep (half the gap a tick), a = steering back to the latch spot (press = solved wish, dh = ticks the closed loop held of k_driftHorizon,
+    // doff = origin move off the face over that loop, va = across-face vel now / after a bare tick,
+    // k = measured gain), p = press search
+    if (g_debugLogEnable && (s_aaStickRideTick < 32 || best < k_stickHorizon))
+        DebugLog("AA: stick t=%d %c pin=%d best=%d press=%.4f dh=%d doff=%.5f va=%.5f/%.5f k=%.4f tan=%.0f "
+                 "gap=%.4f off=%.4f anc=%.4f vz=%.3f xy=%.1f duck=%d/%d sims=%d",
+                 s_aaStickRideTick, bDrift ? driftMode : 'p', pinned_now ? 1 : 0, best, bestPress, heldDrift,
+                 flDriftOff, flAway0, flVaNone, flDriftK, flTan, flGap,
+                 org.x * s_aaStickN.x + org.y * s_aaStickN.y,
+                 s_aaStickAnchor.x * s_aaStickN.x + s_aaStickAnchor.y * s_aaStickN.y, s_prePredVel.z, s_prePredVel.Length2D(),
+                 (s_prePredFlags & FL_DUCKING) ? 1 : 0, (pCmd->buttons & IN_DUCK) ? 1 : 0, simsUsed);
+    s_aaStickRideTick++;
+    return true;
+}
+
 // ---- Auto align (nudge movement into a nearby wall to set up / hold a pixel surf) ----
 static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
 {
     static float s_startCircle = 0.f;
     static int   s_aaPropRej = 0;   // faces refused for being a prop (diag, per second)
 
+    s_aaStickOwns = false;   // per cmd: only the stick's pick below sets it
     if (!g_autoAlign) // plain on/off, no bind (user pick)
     {
         s_aaWallDetected = false;
+        AutoAlignStickDrop("off");
         return;
     }
 
@@ -1820,6 +2228,28 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
     // and to the assist's seam press, for the same reason: it writes forwardmove /
     // sidemove reproducing PixelFinder's probe, and AutoAlign runs after it and assigns both
     if (s_psAssistPressIn)
+        return;
+
+    // stick diag, per second: full = held the whole horizon, part = some ticks, miss = none,
+    // avg = mean ticks held, div = sim said pin and the real tick fell
+    if (g_debugLogEnable && s_aaStickTicks > 0)
+    {
+        static int s_stickSec = -1;
+        const int sec = g_globalVars ? (int)g_globalVars->curtime : 0;
+        if (sec != s_stickSec)
+        {
+            s_stickSec = sec;
+            DebugLog("AA: stick ticks=%d full=%d part=%d miss=%d avg=%.1f div=%d press=%.0f",
+                     s_aaStickTicks, s_aaStickFull, s_aaStickPart, s_aaStickMissTot,
+                     float(s_aaStickBestSum) / float(s_aaStickTicks), s_aaStickDiv, s_aaStickPress);
+            s_aaStickTicks = s_aaStickFull = s_aaStickPart = s_aaStickMissTot = 0;
+            s_aaStickDiv = s_aaStickBestSum = 0;
+        }
+    }
+    // TB bind on = the stick runs AFTER TextureBug instead (AutoAlignStickAfterTb): run here it
+    // latched the first pinned tick before TB could catch the crease, wrote a press over the
+    // player's keys that TB then read as input, and spent the sims TB hunts with
+    if (!TbBindOn() && AutoAlignStick(pLocal, pCmd))
         return;
 
     if (EntI(pLocal, g_offFlags) & FL_ONGROUND)
@@ -1975,6 +2405,28 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
         pCmd->forwardmove = flCosRot * 10.f;
         pCmd->sidemove = -flSinRot * 10.f;
     }
+    // sv_wallbug 0, hull already at the face: the 10 u/s press reaches the face's shell every tick,
+    // its clip pushes the hull off (+DIST_EPSILON) and the lip below is skipped -- 11-08 log: ~50
+    // air wall ticks, zero pinned. Creep instead (MV_DriftHold creep: half the gap a tick, never
+    // touching), so the lip is still being closed on when the feet cross its top. Approach from
+    // further out keeps the press
+    static int s_aaCreep = 0;
+    if (!bDetect && CvarFloat("sv_wallbug", 0.f) < 0.5f && SimsLeft() >= 3)
+    {
+        Vec3 n(trace.plane.normal.x, trace.plane.normal.y, 0.f);
+        n.Normalize();
+        TraceFilterWorldProps fil; fil.Setup(pLocal);
+        GameTrace_t gt{};
+        RestoreOriginal();
+        const Vec3 o = EntV3(pLocal, g_offOrigin);
+        TraceHull(o, o - n * 2.f, vMins, vMaxs, MASK_PLAYERSOLID, &fil, &gt);
+        if (!gt.startsolid && gt.fraction * 2.f < 0.25f)
+        {
+            int sims = 0;
+            MV_DriftHold(pLocal, pCmd, nBasePredicted - 1, n, false, 1, sims, nullptr, true);
+            ++s_aaCreep;
+        }
+    }
 
     // AutoAlign shipped with NO diag at all, so 6056 lines of debug.log had 3551 TB:
     // and zero AA:, and "it aligns worse than TB" had nothing to read. 120th like TB's ramp
@@ -1992,15 +2444,35 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
             const Vec3 v = EntV3(pLocal, g_offVelocity);
             // prop= is the new one: ticks whose nearest face was a prop and was refused. A ride
             // that used to end in a wedge now reads as prop counting up with det holding
-            DebugLog("AA: ticks=%d det=%d prop=%d ang=%.2f nx=%.2f ny=%.2f nz=%.3f frac=%.3f "
+            DebugLog("AA: ticks=%d det=%d crp=%d prop=%d ang=%.2f nx=%.2f ny=%.2f nz=%.3f frac=%.3f "
                      "tan=%.1f xy=%.0f vz=%.1f look=%.1f fwd=%.1f side=%.1f",
-                     s_aaTicks, s_aaDet, s_aaPropRej, flFoundAngle, trace.plane.normal.x,
+                     s_aaTicks, s_aaDet, s_aaCreep, s_aaPropRej, flFoundAngle, trace.plane.normal.x,
                      trace.plane.normal.y,
                      trace.plane.normal.z, trace.fraction, flTangentInput, v.Length2D(), v.z,
                      v.Length2D() * TickInterval(), pCmd->forwardmove, pCmd->sidemove);
-            s_aaTicks = 0; s_aaDet = 0; s_aaPropRej = 0;
+            s_aaTicks = 0; s_aaDet = 0; s_aaPropRej = 0; s_aaCreep = 0;
         }
     }
+}
+
+// ---- surf stick with the TB bind on: runs right after TextureBug ----------------------------
+// TB gets the cmd first with the player's own keys and the full sim pool. Any tick TB touched the
+// cmd (ride, hug, wallstrafe, its own run-up align -- same pre/post compare as tbx's `acted`) is
+// TB's, and the stick lets go; a pin TB did not claim (plain pixel surf) is still held. The
+// stick's own "other" gate now reads THIS cmd's TB flags, not last cmd's
+static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
+{
+    if (!g_autoAlign || s_psAssistPressIn || !TbBindOn())
+        return;
+    if (pCmd->forwardmove != s_wcPreTbFwd || pCmd->sidemove != s_wcPreTbSide || pCmd->buttons != s_wcPreTbButtons)
+        { AutoAlignStickDrop("tb"); return; }
+    // TB's align already flew the presses on this pinned START and none holds the next tick: a TB
+    // crease ending. A fresh latch there re-proved the same thing with up to 96 sims on ticks TB
+    // already spent 3-6 ms on (15:29 log: 122 latches, 122 'lost' the same tick). A live ride
+    // still runs: the stick's wider search (drift / 450 / tangent) is what it is for
+    if (!s_aaStick && s_tbAlignDead)
+        return;
+    AutoAlignStick(pLocal, pCmd);
 }
 
 // TB pin tests, ceiling detect, the sweep helpers and HeadSurf all moved INTO
@@ -2022,6 +2494,10 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
 // include trick texturebug.inl uses -- the code keeps this file's static prediction
 // helpers (Pred_Simulate / RestoreToFrame / SimsLeft / s_prePredFlags / s_prePredVel).
 #include "psassist.inl"
+
+// pixeljump's pixel hop (botox css SgPixelHop): needs psassist.inl's s_psAssistHopActive / k_psLaunchVz and
+// airstuck.inl's AsClock, so after both
+#include "pixelhop.inl"
 
 // the route calculator, and it is included AFTER psassist.inl on purpose -- it flies
 // the assist's own choreography (PsHopInputs) and snaps its markers onto the finder's points,
@@ -2240,7 +2716,9 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             PsSurfFixTick(pLocal, pCmd);   // hold duck a couple ticks into a fresh ride
             AutoAlign(pLocal, pCmd);
             s_wcPreTbFwd = pCmd->forwardmove; s_wcPreTbSide = pCmd->sidemove; s_wcPreTbButtons = pCmd->buttons;
+            s_tbAlignDead = false;
             TextureBug(pLocal, pCmd);
+            AutoAlignStickAfterTb(pLocal, pCmd);   // TB bind on only; off = it ran inside AutoAlign
             // cumidere style only: the botox style runs its own head_bounce inside TextureBug
             // and has no head surf (botox csgo texturebug.cpp has none)
             if (g_tbStyle == 0)
@@ -2250,6 +2728,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
                 // one-tick clip, and HeadBounce returns outright when TB or HS owns the tick
                 HeadBounce(pLocal, pCmd);
             }
+            // botox css / sergowebz order (z.dll FUN_18001adc0): texture bug, pixel hop, then wall stuck (AS / PS)
+            PixelHop(pLocal, pCmd);
             // AS moved ABOVE WallClimb. coldtires states the order outright -- "priority high ->
             // low: texture_bug, air_stuck, wall_climb, edge_bug" -- and ours had AS dead last,
             // yielding to WC and arriving at a drained sim pool. HS stays above it: HS is TB's
@@ -2273,6 +2753,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s_headBounceHit = false;
         s_wallClimbHit = s_wallClimbActive = s_wcLanded = s_wcSyncWant = false;
         s_airStuckHit = false;
+        s_pixelHopHit = false;
         s_asHolding = false;
         s_shouldPixelSurf = false;
         s_psShouldSurf = s_psShouldUnduck = false;
@@ -2365,7 +2846,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s.astOn    = On(g_psAssist, g_psAssistKey, g_psAssistMode);
         s.astHit   = s_psAssistHopActive && !s_psAssistHopPj;
         s.pjOn     = On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode);
-        s.pjHit    = s_psAssistHopActive && s_psAssistHopPj;
+        s.pjHit    = (s_psAssistHopActive && s_psAssistHopPj) || s_pixelHopHit;
         s.ebOn     = On(g_edgeBug, g_edgeBugKey, g_edgeBugMode);
         s.ebHit    = s_ebDetected;           // publish runs after EdgeBugPost, so this is final
         // ...and so is the plan the overlay draws. One publish point, so every early return and
@@ -2631,21 +3112,15 @@ static void __fastcall h_CreateMove_impl(void* rcx, int seq, float frametime, bo
 // already; all this adds is what dih's own hook wrapper added -- the eject drain counter and the
 // g_eject early-out. Without the guard, MH_Uninitialize could free a trampoline while the
 // movement pipeline is still running inside it.
-// botox create_move_proxy.cpp:481/505 -- air_stuck_final_stamp + air_stuck_shot_proof, the LAST
-// writer of the cmd: the aimbot (silent aim's CorrectMovement) runs after the movement pipeline
-// and re-expresses forwardmove/sidemove, which breaks an exact-float pin. The stamp rotates the
-// proven move into the final view, the proof re-sims it and swaps to a pinned neighbour if not
+// the LAST writer of the cmd: the aimbot (silent aim's CorrectMovement) runs after the movement
+// pipeline and re-expresses view / forwardmove / sidemove, which breaks an exact-float pin.
+// AS_FinalStamp (airstuck.inl) puts the cmd AS proved back ("use movement fix" decides how)
 static void AS_LastWriterImpl(UserCmd_t* pCmd)
 {
     const int idx = GetLocalPlayerIndex();
     void* pLocal = idx > 0 ? GetClientEntity(idx) : nullptr;
-    if (!pLocal || !EntAlive(pLocal)) { s_asProof.valid = false; return; }
+    if (!pLocal || !EntAlive(pLocal)) return;
     AS_FinalStamp(pCmd);
-    if (!s_asProof.valid) return;
-    // the sims below need the prediction bracket; Movement_RunImpl closed its own already
-    if (!Pred_Start(pLocal, pCmd)) { s_asProof.valid = false; return; }
-    AS_ShotProof(pLocal, pCmd);
-    Pred_End(pLocal, pCmd);
 }
 // __try and the guard object cannot share a function (C2712)
 static void AS_LastWriterSeh(UserCmd_t* pCmd)

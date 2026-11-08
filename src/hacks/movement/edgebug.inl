@@ -756,7 +756,15 @@ static void EbDonorPost(void* pLocal, UserCmd_t* pCmd, int style)
             const Vec3 newView(pCmd->viewangles.x, yaw, pCmd->viewangles.z);
             pCmd->viewangles.y = yaw;
             if (g_edgeBugDelSilent) { pCmd->viewangles = viewBackup; EbDonorFixMove(pLocal, pCmd, newView); }
-            else { Vec3 v = newView; EngineSetViewAngles(v); }   // botox donor_frame_start, per tick
+            else
+            {
+                // botox donor_frame_start reads the view at cmd entry, not this cmd: silent writers
+                // before us (FastMovement roll 270) would land on screen and the roll never clears
+                Vec3 v = viewBackup;
+                EngineGetViewAngles(v);
+                v.y = yaw; v.z = 0.f;
+                EngineSetViewAngles(v);
+            }
         }
         else
         {
@@ -786,6 +794,195 @@ static void EbDonorMouseFix(UserCmd_t* pCmd)
 }
 
 // ============================================================================
+//  style 3 hotwheels (botox hw_post / hw_detect / hw_frame_start / hw_mouse 1:1)
+//  TF2: botox's -6 / -7 vz bands are the 64-tick half gravity tick (6.25) -> read off EbHalfGravTick
+//  (6.0 at 66.67); no FL_DUCKING force (air duck shifts 20u, the flag alone = wrong hull); the
+//  origin compare takes the duck shift out (same as EbDonorCheck); no low-fps gate.
+// ============================================================================
+struct EbHw_t
+{
+    bool willEb = false, willFail = false, strafing = false, ducking = false;
+    float yawDelta = 0.f, startYaw = 0.f, pitch = 0.f, side = 0.f, fwd = 0.f, savedMouseDx = 0.f;
+    int ticksToStop = 0, lastTick = 0;
+};
+static EbHw_t s_ebHw;
+static float  s_ebLastTickYaw = 0.f;   // botox g_ctx.m_last_tick_yaw: last cmd's sent yaw
+
+static void EbHwReset()
+{
+    s_ebHw.ducking = false;
+    s_ebHw.lastTick = 0;
+    s_ebHw.ticksToStop = 0;
+    s_ebHw.willEb = false;
+    s_ebHw.willFail = false;
+}
+
+static void EbHwDetect(void* pLocal, UserCmd_t* c, float grav, float shift)
+{
+    const int mt = EntMoveType(pLocal);
+    if (s_prePredVel.z > 0.f || mt == MOVETYPE_OBSERVER || mt == MOVETYPE_NOCLIP) { s_ebHw.willEb = false; s_ebHw.willFail = true; return; }
+    const Vec3 vel = EntV3(pLocal, g_offVelocity);
+    const int fl = EntI(pLocal, g_offFlags);
+    const float hg = EbHalfGravTick(grav);
+    const float band = -(hg - 0.25f);   // botox -6
+    float rise = EntV3(pLocal, g_offOrigin).z - s_prePredOrigin.z;
+    const bool dNow = (fl & FL_DUCKING) != 0, dStart = (s_prePredFlags & FL_DUCKING) != 0;
+    if (dNow != dStart) rise += dNow ? -shift : shift;
+    if (roundf(vel.z) == 0.f || (s_prePredFlags & FL_ONGROUND)) { s_ebHw.willEb = false; s_ebHw.willFail = true; }
+    else if (s_prePredVel.z < band && vel.z > s_prePredVel.z && vel.z < band && !(fl & FL_ONGROUND) && rise < 0.f)
+    {
+        // botox: floor(start) < -7 && floor(vel) == -7 = gravity just reset to one half tick
+        if (s_prePredVel.z < -hg - 0.75f && fabsf(vel.z + hg) < 0.5f && vel.Length2D() >= s_prePredVel.Length2D())
+        {
+            s_ebHw.willEb = true;
+            s_ebHw.willFail = false;
+        }
+        else
+        {
+            const float prev = vel.z;
+            Pred_Simulate(pLocal, c);
+            const float expected = roundf(-grav * TickInterval() + prev);
+            s_ebHw.willEb = expected == roundf(EntV3(pLocal, g_offVelocity).z);
+            s_ebHw.willFail = !s_ebHw.willEb;
+        }
+    }
+}
+
+static void EbHwPost(void* pLocal, UserCmd_t* pCmd)
+{
+    if (s_ebMoveType == MOVETYPE_NOCLIP || s_ebMoveType == MOVETYPE_OBSERVER) return;   // botox: latch kept
+    if (!On(g_edgeBug, g_edgeBugKey, g_edgeBugMode)) { EbHwReset(); s_ebDetected = false; return; }
+    s_ebHw.pitch = pCmd->viewangles.x;   // botox frame start reads backup_data pitch: this cmd's
+
+    const int ticks = std::clamp(g_edgeBugHwTicks, 0, k_ebMaxTicks - 2);
+    const float lim = 180.f / (float)ticks;
+    const float yawDelta = std::clamp(NormalizeAngle(pCmd->viewangles.y - s_ebLastTickYaw), -lim, lim);
+    const float origFwd = pCmd->forwardmove, origSide = pCmd->sidemove;
+    const Vec3 origView = pCmd->viewangles;
+    const int tickCount = g_globalVars->tickcount;
+    const bool wasFound = s_ebHw.willEb;
+    const float grav = CvarFloat("sv_gravity", 800.f);
+    const float shift = EbDuckShiftZ(pLocal);
+    static Vec3 path[k_ebMaxTicks + 1];
+    int sims = 0;
+
+    auto loop = [&](bool ducked, bool strafe)
+    {
+        if (s_ebHw.willEb) return;
+        RestoreEntityToPredicted();
+        s_ebHw.startYaw = origView.y;
+        int pathN = 0;
+        path[pathN++] = EntV3(pLocal, g_offOrigin);
+        for (int i = 0; i <= ticks; i++)
+        {
+            UserCmd_t sim = *pCmd;
+            sim.buttons &= ~IN_JUMP;   // TF2: scout air jump
+            if (ducked) sim.buttons |= IN_DUCK; else sim.buttons &= ~IN_DUCK;
+            if (!strafe)
+            {
+                s_ebHw.strafing = false;
+                sim.forwardmove = 0.f;
+                sim.sidemove = 0.f;
+                sim.buttons &= ~(IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
+            }
+            else
+            {
+                s_ebHw.strafing = true;
+                sim.forwardmove = origFwd;
+                sim.sidemove = origSide;
+                sim.viewangles.y = NormalizeAngle(origView.y + yawDelta * (float)i);
+            }
+            const Vec3 preO = EntV3(pLocal, g_offOrigin), preV = EntV3(pLocal, g_offVelocity);
+            Pred_Simulate(pLocal, &sim);
+            sims++;
+            if (pathN <= k_ebMaxTicks) path[pathN++] = EntV3(pLocal, g_offOrigin);
+            if ((s_prePredFlags & FL_ONGROUND) || roundf(s_prePredVel.z) >= 0.f || (EntI(pLocal, g_offFlags) & FL_ONGROUND))
+            {
+                s_ebHw.willEb = false;
+                break;
+            }
+            if (!s_ebHw.willEb) EbHwDetect(pLocal, &sim, grav, shift);
+            if (s_ebHw.willEb && EbOffPlayer(pLocal, preO, preV)) { s_ebHw.willEb = false; break; }   // never eb off players
+            if (s_ebHw.willEb)
+            {
+                s_ebHw.savedMouseDx = fabsf((float)sim.mousedx);
+                s_ebHw.ticksToStop = i + 1;
+                s_ebHw.lastTick = tickCount;
+                s_ebHw.ducking = ducked;
+                if (strafe) { s_ebHw.yawDelta = yawDelta; s_ebHw.fwd = origFwd; s_ebHw.side = origSide; }
+                else s_ebHw.fwd = s_ebHw.side = 0.f;
+                EbVizSet(path, pathN);
+                break;
+            }
+            if (s_ebHw.willFail) { s_ebHw.willFail = false; break; }
+        }
+        RestoreEntityToPredicted();
+    };
+
+    loop(false, false);
+    loop(true, false);
+    if (g_edgeBugHwAdvanced && yawDelta < g_edgeBugHwStrafeDeltaMax / 10000.f)
+    {
+        loop(false, true);
+        loop(true, true);
+    }
+    if (!wasFound && s_ebHw.willEb)
+        DebugLog("EB: style=3 find t=%d duck=%d strafe=%d yd=%.3f fwd=%.0f side=%.0f sims=%d lim=%d vz=%.2f",
+                 s_ebHw.ticksToStop, s_ebHw.ducking ? 1 : 0, s_ebHw.strafing ? 1 : 0, s_ebHw.yawDelta,
+                 s_ebHw.fwd, s_ebHw.side, sims, ticks, s_prePredVel.z);
+
+    if (s_ebHw.willEb)
+    {
+        RestoreEntityToPredicted();
+        if (tickCount < s_ebHw.ticksToStop + s_ebHw.lastTick + 1)
+        {
+            pCmd->buttons &= ~(IN_JUMP | IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
+            if (s_ebHw.strafing)
+            {
+                pCmd->sidemove = s_ebHw.side;
+                pCmd->forwardmove = s_ebHw.fwd;
+                pCmd->viewangles.y = NormalizeAngle(s_ebHw.startYaw + s_ebHw.yawDelta * (float)(tickCount - s_ebHw.lastTick));
+            }
+            else { pCmd->sidemove = 0.f; pCmd->forwardmove = 0.f; }
+            if (s_ebHw.ducking) pCmd->buttons |= IN_DUCK; else pCmd->buttons &= ~IN_DUCK;
+        }
+        else EbHwReset();
+    }
+
+    s_ebDetected = s_ebHw.willEb;
+    if (s_ebDetected)
+    {
+        s_ebFoundTick = s_ebHw.lastTick + s_ebHw.ticksToStop;
+        s_ebLockTicks = s_ebHw.ticksToStop;
+        s_ebCurrentTick = tickCount - s_ebHw.lastTick + 1;
+    }
+    else s_ebCurrentTick = 0;
+}
+
+// FrameStageNotify FRAME_START (skins.cpp): turn the view along the strafe at fps
+void EdgeBug_FrameStart()
+{
+    if (!g_edgeBug || g_edgeBugStyle != 3 || !s_ebHw.willEb || !s_ebHw.strafing || !g_globalVars) return;
+    if (s_ebMoveType == MOVETYPE_NOCLIP || s_ebMoveType == MOVETYPE_OBSERVER) return;
+    const float ipt = TickInterval();
+    const float hit = (float)s_ebHw.ticksToStop * ipt;
+    const float cur = g_globalVars->curtime - (float)s_ebHw.lastTick * ipt;
+    if (hit <= 0.f) return;
+    Vec3 wish(s_ebHw.pitch, s_ebHw.startYaw + NormalizeAngle(s_ebHw.yawDelta * ((float)s_ebHw.ticksToStop * (cur / hit))), 0.f);
+    EngineSetViewAngles(wish);
+}
+
+static void EbHwMouse(float* x, float* y)
+{
+    if (!s_ebHw.willEb || !x || *x == 0.f || !g_globalVars) return;
+    const float amt = g_edgeBugHwLockAmt;
+    const int left = s_ebHw.lastTick + s_ebHw.ticksToStop - g_globalVars->tickcount;
+    const float factor = 100.f / ((float)std::pow(s_ebHw.ticksToStop, left / *x) + 100.f + amt * s_ebHw.savedMouseDx);
+    if (!std::isnan(factor)) *x *= factor;
+    if (y && *y != 0.f) *y *= 1.f - (0.1f * amt * 10.f);
+}
+
+// ============================================================================
 //  pre / post
 // ============================================================================
 static void EdgeBugPre(void* pLocal, UserCmd_t* pCmd)
@@ -805,12 +1002,15 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
     // raw mouse, not view delta: mouse lock holds the view still while the hand still turns
     const float mouseYaw = -CvarFloat("m_yaw", 0.022f) * s_ebMouseX;
     s_ebMouseX = 0.f;
+    // botox create_move_proxy end: m_last_tick_yaw = the yaw this cmd sends (EB writes last)
+    struct LastYaw_t { UserCmd_t* c; ~LastYaw_t() { s_ebLastTickYaw = c->viewangles.y; } } lastYaw{ pCmd };
 
     if (!g_frameReady || g_offVelocity <= 0 || g_offFlags <= 0 || g_offOrigin <= 0
         || g_offMins <= 0 || g_offMaxs <= 0 || g_offTickBase <= 0 || !EntAlive(pLocal))
     {
         EbDropPlan("off");
         EbDonorReset();
+        EbHwReset();
         return;
     }
     const EbTimeGuard timeGuard(EntI(pLocal, g_offTickBase));
@@ -822,11 +1022,19 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
 
     if (const int style = g_edgeBugStyle; style != 0)
     {
-        if (bTaken) { EbDonorReset(); return; }
+        if (bTaken) { EbDonorReset(); EbHwReset(); return; }
+        if (style == 3)
+        {
+            if (s_ebDonor.ebLength) EbDonorReset();
+            EbHwPost(pLocal, pCmd);
+            return;
+        }
+        if (s_ebHw.willEb) EbHwReset();
         EbDonorPost(pLocal, pCmd, style);
         EbDonorMouseFix(pCmd);
         return;
     }
+    if (s_ebHw.willEb) EbHwReset();
     if (s_ebDonor.ebLength) EbDonorReset();
 
     if (!On(g_edgeBug, g_edgeBugKey, g_edgeBugMode)) { EbDropPlan("key"); return; }
@@ -1427,6 +1635,8 @@ void EdgeBug_MouseInput(float* x, float* y)
     s_ebMouseX = std::clamp(s_ebMouseX + *x, -100000.f, 100000.f);
     const int style = g_edgeBugStyle;
     const bool live = style == 1 ? s_ebDonor.ticksLeft != 0 : s_ebDetected;
+    // hotwheels lock has no toggle: always on while found, its own scale
+    if (live && style == 3) { EbHwMouse(x, y); return; }
     if (!live || !g_edgeBugMouseLock) return;
     const float strength = std::clamp(g_edgeBugLockStrength, 0.f, 100.f) / 100.f;
     const int type = g_edgeBugLockType;

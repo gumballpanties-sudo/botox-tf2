@@ -174,6 +174,13 @@ struct ShareCore {
         char     lo[kShareMaxBytes];              // their loadout lines, raw -- decoded by the owner
     };
     static constexpr uint32_t kProbeMs = 10000, kExpireMs = 30000, kMineMs = 1000;
+    // A player who never answered gets kColdProbes probes, then none: each one is a Steam P2P
+    // session attempt and steamclient prints "[SteamNetworkingSockets] No ISteamUtils: Using local
+    // time!" per attempt (24-player server = 23 lines every 10 s). Discovery is two-way: a botox
+    // player joining later probes us, and first contact is answered on the spot (OnMessage).
+    static constexpr int kColdProbes = 2;
+    struct Cold { uint64_t sid; int n; };
+    Cold      cold[64]; int nCold = 0;            // only sids in elig (SetEligible prunes)
 
     Peer      peers[kShareMaxPeers];
     ShareElig elig[64]; int nElig = 0; int nPlayers = 0;
@@ -189,7 +196,16 @@ struct ShareCore {
     const ShareElig* FindElig(uint64_t sid) const { for (int i = 0; i < nElig; ++i) if (elig[i].sid == sid) return &elig[i]; return nullptr; }
 
     void Drop(Peer& p) { if (p.hasLo) ++gen; p.sid = 0; p.idx = 0; p.ready = p.rShare = p.rRecv = p.hasLo = p.logged = false; p.nonce = p.lastRx = p.loHash = 0; p.loLen = 0; p.name[0] = 0; }
-    void Reset() { for (Peer& p : peers) if (p.sid) Drop(p); myNonce = 0; nElig = 0; nPlayers = 0; lastProbe = 0; sentHash = 0; }
+    void Reset() { for (Peer& p : peers) if (p.sid) Drop(p); myNonce = 0; nElig = 0; nPlayers = 0; lastProbe = 0; sentHash = 0; nCold = 0; }
+
+    // false once sid has had its kColdProbes
+    bool ColdProbe(uint64_t sid)
+    {
+        for (int i = 0; i < nCold; ++i)
+            if (cold[i].sid == sid) return cold[i].n < kColdProbes ? (++cold[i].n, true) : false;
+        if (nCold < 64) cold[nCold++] = { sid, 1 };
+        return true;
+    }
 
     // The server's player list, minus us. Peers that left it are dropped (same_server by construction).
     void SetEligible(const ShareElig* e, int n, int players)
@@ -201,6 +217,9 @@ struct ShareCore {
             const ShareElig* el = FindElig(p.sid);
             if (!el) Drop(p); else p.idx = el->idx;
         }
+        int k = 0;
+        for (int i = 0; i < nCold; ++i) if (FindElig(cold[i].sid)) cold[k++] = cold[i];
+        nCold = k;
     }
     // Our loadout lines; sent to ready peers that want them when the bytes change.
     void SetBody(const char* b, size_t n)
@@ -268,7 +287,10 @@ struct ShareCore {
         }
         if (!lastProbe || now - lastProbe >= kProbeMs) {
             lastProbe = now;
-            for (int i = 0; i < nElig; ++i) SendTo(Find(elig[i].sid), elig[i].sid, send);
+            for (int i = 0; i < nElig; ++i) {
+                Peer* p = Find(elig[i].sid);
+                if (p || ColdProbe(elig[i].sid)) SendTo(p, elig[i].sid, send);
+            }
         }
     }
 

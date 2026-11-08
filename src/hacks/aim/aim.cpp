@@ -29,6 +29,17 @@ static bool s_bTried  = false;
 
 bool Aim_Active() { return s_bActive; }
 
+// Amalgam Binds.cpp gate: chat messagemode / class menu / motd all turn the vgui cursor on
+// (hud_basechat.cpp StartMessageMode), game ui = console + pause menu. Demos keep binds: the
+// demo ui shows the cursor too. Plain bool reads in vguimatsurface/engine, any thread.
+bool Aim_VguiInputUp()
+{
+	if (I::EngineVGui && I::EngineVGui->IsGameUIVisible())
+		return true;
+	return I::MatSystemSurface && I::MatSystemSurface->IsCursorVisible()
+		&& !(I::EngineClient && I::EngineClient->IsPlayingDemo());
+}
+
 // CBaseHudChat::ChatPrintf (vtable 19). Text goes in as the format: caller strips '%'.
 void Aim_ChatPrint(const char* text)
 {

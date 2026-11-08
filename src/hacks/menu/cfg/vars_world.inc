@@ -1,7 +1,5 @@
 // world cfg rows, spliced into config.cpp kEntries: { "key", CfgEntry::BOOL, &g_x, 0 },
     { "wdWorldFov",              CfgEntry::FLOAT,  &g_wdWorldFov, 0 },
-    { "wdSunSpeed",              CfgEntry::FLOAT,  &g_wdSunSpeed, 0 },
-    { "wdSunShadowDist",         CfgEntry::FLOAT,  &g_wdSunShadowDist, 0 },
     { "wdFlipGunOtherSide",      CfgEntry::BOOL,   &g_wdFlipGunOtherSide, 0 },
     { "wdDlightLocal",           CfgEntry::BOOL,   &g_wdDlightLocal, 0 },
     { "wdDlightLocalColor",      CfgEntry::FLOAT4, g_wdDlightLocalColor, 0 },

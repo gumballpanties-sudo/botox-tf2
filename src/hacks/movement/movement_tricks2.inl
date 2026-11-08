@@ -44,7 +44,7 @@ static void BounceAssist(void* pLocal, UserCmd_t* pCmd)
     if (EntMoveType(pLocal) != MOVETYPE_WALK || EntGround(pLocal)) return;
     // everyone who already owns the cmd outranks a redirect -- this never fights a live ride
     if (s_ab.ownsCmd || s_textureBugHit || s_headSurfHit || s_headBounceHit || s_airStuckHit || s_wallClimbHit
-        || s_psAssistHopActive || s_shouldPixelSurf || s_psRidingNow)
+        || s_psAssistHopActive || s_shouldPixelSurf || s_psRidingNow || s_pixelHopHit)
         return;
 
     const Vec3 vel = EntV3(pLocal, g_offVelocity);

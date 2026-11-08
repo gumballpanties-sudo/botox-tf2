@@ -48,6 +48,14 @@ constexpr int    kAirDuckMax  = 2;         // TF_AIRDUCKED_COUNT
 constexpr float  kSurfLo      = -0.01f;
 constexpr float  kSurfHi      = 0.03f;
 constexpr float  kInf         = 1e9f;
+// LANDING SET (botox route_engine.cpp proj-rc-landing-set-1010). A ground marker over the feet is a
+// box top: the hull lands on it on whatever tick it crosses the box's EDGE, and that is the
+// player's horizontal, not a press. Crossing near the apex lands on a rising tick inside the 2u
+// catch (hovering up to 2u), crossing later lands on the falling clip -- two different states
+// for the same buttons. Each landing is weighted by the crossing ticks that end on it (botox
+// clear_ticks), a row's odds = the share of crossings its buttons still work from, and a row
+// under kOddsMin is not listed (botox drops < 80%): it is the "impossible combo" you play 6x
+constexpr float  kOddsMin     = 0.8f;
 
 struct Params
 {
@@ -688,7 +696,8 @@ struct Options
 
 // presses / switches: binds hit, and how often two presses in a row are different binds. The list
 // is sorted on those two first, so they are what "easiest at the top" means
-struct Combo { std::string text; int cost = 0; float margin = kInf; int presses = 0, switches = 0; };
+// odds: share of box-edge crossings these buttons work from (kOddsMin), 1 = every one
+struct Combo { std::string text; int cost = 0; float margin = kInf; int presses = 0, switches = 0; float odds = 1.f; };
 
 struct Result
 {
@@ -706,6 +715,8 @@ struct Result
     std::vector<float> highest;      // per marker: highest feet (head, headbang) got over its z
     bool   capped = false;
     bool   timedOut = false;         // worker hit its wall-clock ceiling before Finish() ran
+    int    chancy = 0;               // press sequences left off the list: odds under kOddsMin
+    bool   onlyChancy = false;       // ...and nothing else worked, so those ARE the list (tagged)
     long long ticks = 0;
 };
 
@@ -723,7 +734,7 @@ public:
         m_layers.assign(1, {}); m_edges.assign(1, {}); m_keys.assign(1, {});
         Node n;
         n.s = st.s;
-        n.best.push_back({ 0, kInf, -1, -1, 0, 0, -1 });
+        n.best.push_back({ 0, kInf, -1, -1, 0, 0, -1, 1.f });
         n.count = 1.0;
         m_layers[0].push_back(n);
         m_layer = 0; m_next = 0;
@@ -771,9 +782,12 @@ private:
     // presses in a row on DIFFERENT binds. The panel leads with the easiest, so the search keeps the
     // easiest K per node too: "jump -> longjump -> longjump" over "longjump -> jump -> longjump",
     // "minijump x3" over "longjump -> jumpbug -> jump". cost/margin only break ties now
-    struct Best { int cost; float margin; int edge; int rank; int presses; int switches; int lastBind; };
-    static bool Easier(int pA, int sA, int cA, float mA, int pB, int sB, int cB, float mB)
+    // prob: this path's share of the box-edge crossings (product over its landings, kOddsMin). A
+    // likelier path first (botox lists odds desc first), so a node's K paths are never all chancy
+    struct Best { int cost; float margin; int edge; int rank; int presses; int switches; int lastBind; float prob; };
+    static bool Easier(float qA, int pA, int sA, int cA, float mA, float qB, int pB, int sB, int cB, float mB)
     {
+        if (std::fabs(qA - qB) > 1e-6f) return qA > qB;
         if (pA != pB) return pA < pB;
         if (sA != sB) return sA < sB;
         if (cA != cB) return cA < cB;
@@ -791,7 +805,10 @@ private:
     // tick by tick for the drawn arc (TraceBest). Three bytes, not a second search.
     // duckApex too: a forced-duck landing replayed without its duck flies the standing arc, misses
     // the arrival it was built from, and the drawn line for that answer was silently dropped
-    struct Edge { int from; int dep; int arr; int cost; float margin; int8_t sc; int8_t ride; bool jb; bool duckApex; };
+    // cross / prob: the box-edge crossing tick that flew it (-1 = the old aboveT floor) and the
+    // share of crossings that land like it (FlyCross). The replay needs cross to fly the same ticks
+    struct Edge { int from; int dep; int arr; int cost; float margin; int8_t sc; int8_t ride; bool jb; bool duckApex;
+                  int16_t cross; float prob; };
     struct Key
     {
         uint32_t z, vz, bits, duckTime; int since, aduck;
@@ -836,14 +853,23 @@ private:
         int  psPinI = 0;        // ...for the pin on this cmd index
         int  creep = 0;         // pixeljump: ticks the feet started over the lip (- DIST_EPSILON)
         bool lipIn = false;     // ...enough of them: the hull has crept in over it, it is a floor
+        // the tick the hull crosses the target box's edge: -1 = under it as soon as the feet are
+        // over its top (every non-box leg), kNoCross = never (FlyCross's free flight)
+        int  crossAt = -1;
     };
+    static constexpr int kNoCross = INT_MAX;
     // edges out of a just-caught pixelsurf, gathered over every ride length before they are added
-    struct Pending { State s; std::string dep, arr; int cost; float margin; int ride; int sc; bool jb; bool duckApex; };
+    struct Pending { State s; std::string dep, arr; int cost; float margin; int ride; int sc; bool jb; bool duckApex;
+                     int cross; float prob; };
     std::vector<Pending>* m_collect = nullptr;
     int m_ride = 0;
     int  m_curSc = SC_FALL;      // the plan the leg being flown right now is running
     bool m_curJb = false;
     bool m_curDuckApex = false;
+    int   m_curCross = -1;       // ...and the crossing it is on (FlyCross), with its share
+    float m_curProb = 1.f;
+    bool  m_noEdge = false;      // FlyCross's free flight / one-tick probes: fly, add nothing
+    int   m_replayCross = -1;    // TraceBest: the crossing the replayed edge was flown on
     // ---- replay recorder (TraceBest): the arc of ONE known-good edge, not a search ----
     std::vector<float>* m_rec = nullptr;   // z after every tick of the leg being replayed
     std::vector<ArcTick>* m_recArc = nullptr;  // what the drawn line needs on top of z
@@ -910,9 +936,10 @@ private:
     void AddEdge(const Leg& L, const State& arrived, const std::string& dep, const std::string& arr,
                  int cost, float margin)
     {
-        if (arrived.edgy) return;
+        if (arrived.edgy || m_noEdge) return;
         if (m_rec) { RecArrive(arrived); return; }     // a replay never touches the DAG
-        if (m_collect) { m_collect->push_back({ arrived, dep, arr, cost, margin, m_ride, m_curSc, m_curJb, m_curDuckApex }); return; }
+        if (m_collect) { m_collect->push_back({ arrived, dep, arr, cost, margin, m_ride, m_curSc, m_curJb, m_curDuckApex,
+                                                m_curCross, m_curProb }); return; }
         const int into = L.layer + 1;
         const int di = Label(dep), ai = Label(arr);
         std::vector<Node>& layer = m_layers[into];
@@ -935,7 +962,8 @@ private:
         // cap: many arrivals merging into one popular state is exactly the unbounded growth path
         std::vector<Edge>& edges = m_edges[into];
         if (edges.size() >= m_o.maxEdges) { m_res.capped = true; return; }
-        edges.push_back({ L.from, di, ai, cost, margin, (int8_t)m_curSc, (int8_t)m_ride, m_curJb, m_curDuckApex });
+        edges.push_back({ L.from, di, ai, cost, margin, (int8_t)m_curSc, (int8_t)m_ride, m_curJb, m_curDuckApex,
+                          (int16_t)m_curCross, m_curProb });
         const int ei = (int)edges.size() - 1;
         const Node& u = m_layers[L.layer][L.from];
         Node& n = layer[v];
@@ -949,9 +977,10 @@ private:
             int pr = u.best[r].presses, sw = u.best[r].switches, lb = u.best[r].lastBind;
             Press(depBind, pr, sw, lb);
             Press(arrBind, pr, sw, lb);
-            const Best c{ u.best[r].cost + cost, std::min(u.best[r].margin, margin), ei, r, pr, sw, lb };
+            const Best c{ u.best[r].cost + cost, std::min(u.best[r].margin, margin), ei, r, pr, sw, lb,
+                          u.best[r].prob * m_curProb };
             auto pos = std::find_if(n.best.begin(), n.best.end(), [&](const Best& b)
-                { return Easier(c.presses, c.switches, c.cost, c.margin, b.presses, b.switches, b.cost, b.margin); });
+                { return Easier(c.prob, c.presses, c.switches, c.cost, c.margin, b.prob, b.presses, b.switches, b.cost, b.margin); });
             if ((int)n.best.size() >= m_o.topK && pos == n.best.end()) break;
             n.best.insert(pos, c);
             if ((int)n.best.size() > m_o.topK) n.best.pop_back();
@@ -1095,6 +1124,7 @@ private:
                 // the edge carries the SHORTEST ride of the run and the plan that flew it: that is
                 // the one TraceBest re-flies, and the one the printed run starts at
                 m_ride = lo; m_curSc = e->sc; m_curJb = e->jb; m_curDuckApex = e->duckApex;
+                m_curCross = e->cross; m_curProb = e->prob;
                 AddEdge(L, e->s, dep, e->arr, e->cost, e->margin);
                 lo = hi;
             }
@@ -1133,7 +1163,8 @@ private:
         const bool tFloor = FloorLike(L.T->type) && (L.T->type != PT_PIXELJUMP || f.lipIn);
         bool any = false, player = false; float best = 0.f;
         if (!f.leftDep && L.depFloor) { any = true; best = L.depFloorEff; player = L.depPlayer; }
-        if (tFloor && (f.falling || f.aboveT) && (!any || L.T->z > best))
+        const bool crossed = f.crossAt < 0 || f.i >= f.crossAt;   // over the box's edge yet (FlyCross)
+        if (tFloor && (f.falling || f.aboveT) && crossed && (!any || L.T->z > best))
         {
             any = true; best = L.T->z; player = L.T->player;
         }
@@ -1153,6 +1184,7 @@ private:
     void RunLeg(const Leg& L, State s, const Plan& pl)
     {
         m_curSc = pl.sc; m_curJb = pl.jb; m_curDuckApex = pl.duckApex;
+        m_curCross = -1; m_curProb = 1.f;
         World g; g.floor = L.depFloor; g.floorEff = L.depFloorEff;
         if (pl.sc == SC_DELAY)
         {
@@ -1262,145 +1294,205 @@ private:
     // only OR IN_DUCK in after it. Every button below is one of those features' own
     void Fly(const Leg& L, const Plan& pl, Fs f, const Params& p)
     {
+        const std::string dep = DepName(L, pl);
+        const int cost = PlanCost(pl, L.srcGround);
+        if (m_rec) f.crossAt = m_replayCross;       // a replay flies the crossing its edge was built on
+        // a ground marker the feet start UNDER is a box top you come up onto: its landing tick is
+        // the player's crossing, not one deterministic tick. A floor at or under the feet (a bhop
+        // on one floor, a drop) is under the hull already; a jumpbug is AutoJumpbug's own trace
+        else if (L.T->type == PT_GROUND && !pl.jb && f.s.z < L.T->z - 0.001f) { FlyCross(L, pl, f, p, dep, cost); return; }
+        for (; f.i < m_o.maxLegTicks; f.i++)
+            if (FlyTick(L, pl, f, p, dep, cost)) return;
+    }
+
+    static bool SameFs(const Fs& a, const Fs& b)
+    {
+        return SameButClock(a.s, b.s) && a.s.tick == b.s.tick && a.s.releaseTick == b.s.releaseTick
+            && Bits(a.s.duckTime) == Bits(b.s.duckTime) && a.mem.mjHold == b.mem.mjHold
+            && a.leftDep == b.leftDep && a.falling == b.falling && a.aboveT == b.aboveT && a.psDuck == b.psDuck
+            && a.psPinI == b.psPinI && a.creep == b.creep && a.lipIn == b.lipIn;
+    }
+
+    // ---- THE LANDING SET (botox expand_one per state, land_floor clear_ticks) ------------------
+    // Fly the leg once with the box never under the hull, keeping the tick-start Fs of every
+    // airborne tick the feet are over its top: each is a tick the player can cross its edge on.
+    // Crossing on tick t = the box is there from t on. One tick flown with it there that ends
+    // in the same Fs the free flight reached means the box changed nothing on t, so crossing on t
+    // lands wherever crossing on t+1 does: only the ticks where it DOES change something (the
+    // rising 2u catch, the falling clip, CanUnduck / MiniJump reading a floor 20..48u under) fly a
+    // whole fork. Each fork's share = the crossing ticks that end on it / all of them.
+    void FlyCross(const Leg& L, const Plan& pl, const Fs& f0, const Params& p, const std::string& dep, int cost)
+    {
+        const float top = L.T->z - 0.001f;
+        std::vector<Fs> snap;
+        const bool noEdge = m_noEdge;
+        m_noEdge = true;
+        {
+            Fs fr = f0; fr.crossAt = kNoCross;
+            for (; fr.i < m_o.maxLegTicks; fr.i++)
+            {
+                if (!fr.s.ground && fr.s.z >= top) snap.push_back(fr);
+                if (FlyTick(L, pl, fr, p, dep, cost)) break;
+            }
+        }
+        const int n = (int)snap.size();
+        int run = 0;
+        for (int k = 0; k < n; k++)
+        {
+            Fs g = snap[k]; g.crossAt = g.i;
+            if (k + 1 < n && snap[k + 1].i == g.i + 1)
+            {
+                Fs q = g;
+                m_noEdge = true;
+                if (!FlyTick(L, pl, q, p, dep, cost) && SameFs(q, snap[k + 1])) { run++; continue; }
+            }
+            m_noEdge = noEdge;
+            m_curCross = g.i; m_curProb = (float)(run + 1) / (float)n;
+            run = 0;
+            for (; g.i < m_o.maxLegTicks; g.i++)
+                if (FlyTick(L, pl, g, p, dep, cost)) break;
+        }
+        m_noEdge = noEdge;
+        m_curCross = -1; m_curProb = 1.f;
+    }
+
+    // one cmd of a leg; true = the leg is over
+    bool FlyTick(const Leg& L, const Plan& pl, Fs& f, const Params& p, const std::string& dep, int cost)
+    {
         const Point& T = *L.T;
         const bool tFloor = FloorLike(T.type);
         const bool walk = pl.sc == SC_WALKOFF || pl.sc == SC_WALKOFFDUCK;
-        const std::string dep = DepName(L, pl);
-        const int cost = PlanCost(pl, L.srcGround);
         const int li = L.layer;
-
-        for (; f.i < m_o.maxLegTicks; f.i++)
+        const int i = f.i;
+        State& s = f.s;
+        if (tFloor && s.z >= T.z - 0.001f) f.aboveT = true;
+        // ---- PIXELJUMP: the lip is a floor only once the hull is over it -----------------
+        // botox route_engine.cpp point_step: a tick that STARTS with the feet at or over the
+        // lip (- DIST_EPSILON) is one tick of pressing in over it; kPjCreepTicks of them and it
+        // grounds you. The tick it turns solid must clear it on its own (the move flown with no
+        // lip under it ends on or over the top), else that tick passes and the next one tries
+        if (T.type == PT_PIXELJUMP)
         {
-            const int i = f.i;
-            State& s = f.s;
-            if (tFloor && s.z >= T.z - 0.001f) f.aboveT = true;
-            // ---- PIXELJUMP: the lip is a floor only once the hull is over it -----------------
-            // botox route_engine.cpp point_step: a tick that STARTS with the feet at or over the
-            // lip (- DIST_EPSILON) is one tick of pressing in over it; kPjCreepTicks of them and it
-            // grounds you. The tick it turns solid must clear it on its own (the move flown with no
-            // lip under it ends on or over the top), else that tick passes and the next one tries
-            if (T.type == PT_PIXELJUMP)
+            const bool pushed = s.z >= T.z - kDistEps;
+            if (pushed) f.creep++;
+            f.lipIn = f.creep >= kPjCreepTicks;
+            if (f.lipIn && pushed && f.creep == kPjCreepTicks)
             {
-                const bool pushed = s.z >= T.z - kDistEps;
-                if (pushed) f.creep++;
-                f.lipIn = f.creep >= kPjCreepTicks;
-                if (f.lipIn && pushed && f.creep == kPjCreepTicks)
-                {
-                    Fs g = f; g.lipIn = false;
-                    const World wr = WorldFor(L, g);
-                    ScriptMem m = f.mem; State r = s;
-                    const Cmd rc = ScriptCmd(pl.sc, i, r, m, wr, p);
-                    Tick(r, rc, wr, p); m_res.ticks++;
-                    f.lipIn = r.z >= T.z;
-                }
+                Fs g = f; g.lipIn = false;
+                const World wr = WorldFor(L, g);
+                ScriptMem m = f.mem; State r = s;
+                const Cmd rc = ScriptCmd(pl.sc, i, r, m, wr, p);
+                Tick(r, rc, wr, p); m_res.ticks++;
+                f.lipIn = r.z >= T.z;
             }
-            World w = WorldFor(L, f);
-            const bool walkTick = walk && i == 0 && L.srcGround;
-            if (walkTick) w.floor = false;
-
-            // ---- the player's keys, then AutoJumpbug (idle while PixelSurf's ride is latched) ----
-            Cmd c = ScriptCmd(pl.sc, i, s, f.mem, w, p);
-            if (pl.sc == SC_MINI && i > 0) c.duck = false;   // MiniJump past cmd A = hold bit 4 below
-            const bool scriptPost = (pl.sc == SC_LONG || pl.sc == SC_MINI) && c.duck;
-            if (scriptPost) c.duck = false;                      // LongJump / MiniJump: after prediction
-            const bool latched = s.psAge < 17;
-            bool band = false; float jbMargin = kInf;
-            if (pl.jb && !(p.pixelSurf && p.jbYieldSurf && (s.psRiding || latched)))
-                JumpbugCmd(s, w, p, c, band, jbMargin);
-            if (pl.duckApex && !s.ground && s.vz <= 0.f) c.duck = true;
-
-            // ---- the prediction, then the features that read it ----
-            State pr = s;
-            Tick(pr, c, w, p); m_res.ticks++;
-            if (scriptPost) c.duck = true;
-            if (s.hold & 4)
-            {
-                bool h = true;
-                if (MiniHold(s, w, p, h)) c.duck = true;
-                if (!h) s.hold &= ~4;
-            }
-            bool psClear = false;
-            const bool sv = SurfVel(s.vz, p) && (!s.ground || latched);
-            if (p.pixelSurf)
-            {
-                if (s.ground || pr.ground)
-                {
-                    // feet on something (either view): the ride and its hold end, no duck sent
-                    s.hold &= ~2; f.psDuck = false; psClear = latched;
-                }
-                else
-                {
-                    if (latched)
-                    {
-                        if (s.psAge + 1 >= 17 && !SurfVel(pr.vz, p)) { psClear = true; f.psDuck = false; }
-                    }
-                    else if (T.type == PT_SURF)
-                        Hunt(f, c, w, p, T);
-                    const bool latchNow = s.psAge < 17 && !psClear;
-                    if ((latchNow && f.psDuck && i >= f.psPinI - 1) || (s.hold & 2))
-                    {
-                        c.duck = true;
-                        s.hold |= 2;
-                    }
-                }
-            }
-
-            const State pre = s;
-            TickInfo ti;
-            Tick(s, c, w, p, &ti); m_res.ticks++; Rec(s, &ti);
-
-            // ---- feature memory the next cmd reads ----
-            s.psRiding = sv && pre.psPrevSurf;
-            s.psPrevSurf = sv;
-            if (psClear) s.psAge = 17;
-            else if (s.psAge < 17) s.psAge = std::min(s.psAge + 1, 16);
-            if (pl.sc == SC_MINI && i == 0) s.hold |= 4;        // MiniJump holds from cmd B on
-            if (s.ground) s.hold &= ~6;                          // PixelSurf / MiniJump let go on a touch
-
-            if (band && ti.jumped)
-            {
-                // off T = the jumpbug; off anything else it jumped somewhere the route never said
-                if (ti.unducked && !s.edgy && w.floor && std::fabs(w.floorEff - T.z) < 0.001f)
-                {
-                    State j = s; j.hold = 0;                     // the player lets go of duck to jump
-                    AddEdge(L, j, dep, "jumpbug", cost + 2, jbMargin);
-                }
-                return;
-            }
-            if (!TickOk(L, pl, i, scriptPost || pl.sc == SC_WALKOFFDUCK, ti, s)) return;
-            if (!s.ground)
-            {
-                if (ti.moveVz < 0.f) { f.falling = true; f.leftDep = true; }
-                else if (ti.moveVz > 0.f) f.falling = false;
-            }
-            if (walkTick) f.leftDep = true;
-            {
-                // a headbang and a texturebug are reached by the HEAD, everything else by the feet
-                const bool byHead = T.type == PT_HEADBANG || T.type == PT_TEXTUREBUG;
-                const float over = byHead ? s.z + HullH(s, p) - T.z : s.z - T.z;
-                // the duckApex retry is a fallback flight, not the arc the miss message describes --
-                // it must not change what "best was Xu short" is measured against
-                if (!pl.duckApex && over > m_res.highest[li]) m_res.highest[li] = over;
-            }
-
-            if (Arrive(L, pl, pre, f, ti, w, dep, cost, p)) return;
-
-            // ---- give up: nothing below can raise the hull again ----
-            if (s.ground) return;                                  // landed on something else
-            // botox lip_missed (passed down by the lip with the hull still outside it) is the floor
-            // give-up below: falling under a FloorLike z ends the leg, crept in or not
-            if (f.falling)
-            {
-                if (T.type == PT_HEADBANG) return;
-                // a standing hull still has PixelSurf's +20 duck pass
-                if (T.type == PT_SURF && s.z < T.z - 1.f - (s.fDuck ? 0.f : DuckShift(p))) return;
-                // a texturebug is the head crossing B, so the band only closes once the
-                // STANDING head (the tallest it could become) is under the seam
-                if (T.type == PT_TEXTUREBUG && s.z + StandH(p) < T.z - 1.f) return;
-                if (tFloor && s.z < T.z - 0.001f) return;
-            }
-            if (s.z < T.z - 8192.f) return;
         }
+        World w = WorldFor(L, f);
+        const bool walkTick = walk && i == 0 && L.srcGround;
+        if (walkTick) w.floor = false;
+
+        // ---- the player's keys, then AutoJumpbug (idle while PixelSurf's ride is latched) ----
+        Cmd c = ScriptCmd(pl.sc, i, s, f.mem, w, p);
+        if (pl.sc == SC_MINI && i > 0) c.duck = false;   // MiniJump past cmd A = hold bit 4 below
+        const bool scriptPost = (pl.sc == SC_LONG || pl.sc == SC_MINI) && c.duck;
+        if (scriptPost) c.duck = false;                      // LongJump / MiniJump: after prediction
+        const bool latched = s.psAge < 17;
+        bool band = false; float jbMargin = kInf;
+        if (pl.jb && !(p.pixelSurf && p.jbYieldSurf && (s.psRiding || latched)))
+            JumpbugCmd(s, w, p, c, band, jbMargin);
+        if (pl.duckApex && !s.ground && s.vz <= 0.f) c.duck = true;
+
+        // ---- the prediction, then the features that read it ----
+        State pr = s;
+        Tick(pr, c, w, p); m_res.ticks++;
+        if (scriptPost) c.duck = true;
+        if (s.hold & 4)
+        {
+            bool h = true;
+            if (MiniHold(s, w, p, h)) c.duck = true;
+            if (!h) s.hold &= ~4;
+        }
+        bool psClear = false;
+        const bool sv = SurfVel(s.vz, p) && (!s.ground || latched);
+        if (p.pixelSurf)
+        {
+            if (s.ground || pr.ground)
+            {
+                // feet on something (either view): the ride and its hold end, no duck sent
+                s.hold &= ~2; f.psDuck = false; psClear = latched;
+            }
+            else
+            {
+                if (latched)
+                {
+                    if (s.psAge + 1 >= 17 && !SurfVel(pr.vz, p)) { psClear = true; f.psDuck = false; }
+                }
+                else if (T.type == PT_SURF)
+                    Hunt(f, c, w, p, T);
+                const bool latchNow = s.psAge < 17 && !psClear;
+                if ((latchNow && f.psDuck && i >= f.psPinI - 1) || (s.hold & 2))
+                {
+                    c.duck = true;
+                    s.hold |= 2;
+                }
+            }
+        }
+
+        const State pre = s;
+        TickInfo ti;
+        Tick(s, c, w, p, &ti); m_res.ticks++; Rec(s, &ti);
+
+        // ---- feature memory the next cmd reads ----
+        s.psRiding = sv && pre.psPrevSurf;
+        s.psPrevSurf = sv;
+        if (psClear) s.psAge = 17;
+        else if (s.psAge < 17) s.psAge = std::min(s.psAge + 1, 16);
+        if (pl.sc == SC_MINI && i == 0) s.hold |= 4;        // MiniJump holds from cmd B on
+        if (s.ground) s.hold &= ~6;                          // PixelSurf / MiniJump let go on a touch
+
+        if (band && ti.jumped)
+        {
+            // off T = the jumpbug; off anything else it jumped somewhere the route never said
+            if (ti.unducked && !s.edgy && w.floor && std::fabs(w.floorEff - T.z) < 0.001f)
+            {
+                State j = s; j.hold = 0;                     // the player lets go of duck to jump
+                AddEdge(L, j, dep, "jumpbug", cost + 2, jbMargin);
+            }
+            return true;
+        }
+        if (!TickOk(L, pl, i, scriptPost || pl.sc == SC_WALKOFFDUCK, ti, s)) return true;
+        if (!s.ground)
+        {
+            if (ti.moveVz < 0.f) { f.falling = true; f.leftDep = true; }
+            else if (ti.moveVz > 0.f) f.falling = false;
+        }
+        if (walkTick) f.leftDep = true;
+        {
+            // a headbang and a texturebug are reached by the HEAD, everything else by the feet
+            const bool byHead = T.type == PT_HEADBANG || T.type == PT_TEXTUREBUG;
+            const float over = byHead ? s.z + HullH(s, p) - T.z : s.z - T.z;
+            // the duckApex retry is a fallback flight, not the arc the miss message describes --
+            // it must not change what "best was Xu short" is measured against
+            if (!pl.duckApex && over > m_res.highest[li]) m_res.highest[li] = over;
+        }
+
+        if (Arrive(L, pl, pre, f, ti, w, dep, cost, p)) return true;
+
+        // ---- give up: nothing below can raise the hull again ----
+        if (s.ground) return true;                                  // landed on something else
+        // botox lip_missed (passed down by the lip with the hull still outside it) is the floor
+        // give-up below: falling under a FloorLike z ends the leg, crept in or not
+        if (f.falling)
+        {
+            if (T.type == PT_HEADBANG) return true;
+            // a standing hull still has PixelSurf's +20 duck pass
+            if (T.type == PT_SURF && s.z < T.z - 1.f - (s.fDuck ? 0.f : DuckShift(p))) return true;
+            // a texturebug is the head crossing B, so the band only closes once the
+            // STANDING head (the tallest it could become) is under the seam
+            if (T.type == PT_TEXTUREBUG && s.z + StandH(p) < T.z - 1.f) return true;
+            if (tFloor && s.z < T.z - 0.001f) return true;
+        }
+        if (s.z < T.z - 8192.f) return true;
+        return false;
     }
 
     // true = this branch is finished
@@ -1524,7 +1616,7 @@ private:
         if (m_res.deadPoint < 0 && (int)m_layers.size() <= N) m_res.deadPoint = (int)m_layers.size() - 1;
         if (m_res.deadPoint >= 0 || (int)m_layers.size() <= N) return;
 
-        struct Pick { int cost; float margin; int node; int rank; int presses; int switches; };
+        struct Pick { int cost; float margin; int node; int rank; int presses; int switches; float prob; };
         std::vector<Pick> all;
         double total = 0.0;
         for (int v = 0; v < (int)m_layers[N].size(); v++)
@@ -1532,16 +1624,20 @@ private:
             const Node& n = m_layers[N][v];
             total += n.count;
             for (int r = 0; r < (int)n.best.size(); r++)
-                all.push_back({ n.best[r].cost, n.best[r].margin, v, r, n.best[r].presses, n.best[r].switches });
+                all.push_back({ n.best[r].cost, n.best[r].margin, v, r, n.best[r].presses, n.best[r].switches, n.best[r].prob });
         }
-        // easiest first: fewest binds pressed, then fewest switches between binds (Best)
+        // likeliest, then easiest first: fewest binds pressed, then fewest switches between binds (Best)
         std::stable_sort(all.begin(), all.end(), [](const Pick& a, const Pick& b)
-            { return Easier(a.presses, a.switches, a.cost, a.margin, b.presses, b.switches, b.cost, b.margin); });
+            { return Easier(a.prob, a.presses, a.switches, a.cost, a.margin, b.prob, b.presses, b.switches, b.cost, b.margin); });
         m_res.total = total;
         // one line per press sequence: paths that differ only in ride lengths merge (RideText).
         // With every path materialised the count is exact too
         const bool whole = (double)all.size() >= total;
-        struct Group { Combo best; std::vector<std::string> variants; };
+        // odds: paths with the SAME text (ride steps and all) are the same buttons landing on
+        // different crossings, so their shares add up; texts that differ only in ride lengths are
+        // the player's choice of ride, so the line is as good as its best one
+        struct Group { Combo best; std::vector<std::string> variants; std::unordered_map<std::string, float> odds;
+                       int node, rank; };
         std::vector<Group> groups;
         std::unordered_map<std::string, size_t> at;
         for (const Pick& pk : all)
@@ -1565,14 +1661,38 @@ private:
             }
             const std::string key = StripRide(text);
             auto it = at.find(key);
+            size_t gi;
             if (it == at.end())
             {
-                at.emplace(key, groups.size());
-                groups.push_back({ { text, pk.cost, pk.margin, pk.presses, pk.switches }, { text } });
+                gi = groups.size();
+                at.emplace(key, gi);
+                groups.push_back({ { text, pk.cost, pk.margin, pk.presses, pk.switches }, {}, {}, pk.node, pk.rank });
             }
             else
-                groups[it->second].variants.push_back(text);
+                gi = it->second;
+            Group& G = groups[gi];
+            auto o = G.odds.find(text);
+            if (o == G.odds.end()) { G.variants.push_back(text); G.odds.emplace(text, pk.prob); }
+            else o->second += pk.prob;
         }
+        for (Group& G : groups)
+        {
+            float odds = 0.f;
+            for (const auto& o : G.odds) odds = std::max(odds, o.second);
+            G.best.odds = std::min(odds, 1.f);
+        }
+        // safe lines first, then the rest by their odds (botox row_key: tier, -odds, ...); inside one
+        // odds level the easiest-first order the groups were made in stays
+        auto rung = [](float q) { return q >= 0.999f ? 1.f : q; };
+        std::stable_sort(groups.begin(), groups.end(), [&](const Group& a, const Group& b)
+            { return rung(a.best.odds) > rung(b.best.odds) + 1e-6f; });
+        size_t keep = 0;
+        while (keep < groups.size() && groups[keep].best.odds >= kOddsMin - 1e-4f) keep++;
+        m_res.chancy = (int)(groups.size() - keep);
+        // nothing works often enough: the chancy lines ARE the answer, said as such (routecalc.inl
+        // tags them) -- "no combination" would be a lie about a route that does exist
+        m_res.onlyChancy = keep == 0 && !groups.empty();
+        if (!m_res.onlyChancy) groups.resize(keep);
         for (size_t g = 0; g < groups.size() && (int)m_res.combos.size() < m_o.topK; g++)
         {
             Combo c = groups[g].best;
@@ -1580,8 +1700,8 @@ private:
             m_res.combos.push_back(c);
         }
         if (whole) m_res.total = (double)groups.size();
-        // the first printed combo is the first pick: keep where it ends so its arc can be re-flown
-        if (!all.empty() && !m_res.combos.empty()) { m_bestNode = all[0].node; m_bestRank = all[0].rank; }
+        // the first printed combo's likeliest path: keep where it ends so its arc can be re-flown
+        if (!groups.empty() && !m_res.combos.empty()) { m_bestNode = groups[0].node; m_bestRank = groups[0].rank; }
     }
 
 public:
@@ -1608,7 +1728,7 @@ public:
         const int N = (int)m_pts.size();
         if ((int)m_layers.size() <= N) return false;
 
-        struct Hop { int layer, from, to, sc, ride; bool jb, duckApex; };
+        struct Hop { int layer, from, to, sc, ride; bool jb, duckApex; int cross; };
         std::vector<Hop> hops;
         int layer = N, node = m_bestNode, rank = m_bestRank;
         while (layer > 0)
@@ -1619,7 +1739,7 @@ public:
             const Best& b = bs[rank];
             if (b.edge < 0 || b.edge >= (int)m_edges[layer].size()) return false;
             const Edge& e = m_edges[layer][b.edge];
-            hops.push_back({ layer - 1, e.from, node, e.sc, e.ride, e.jb, e.duckApex });
+            hops.push_back({ layer - 1, e.from, node, e.sc, e.ride, e.jb, e.duckApex, e.cross });
             node = e.from; rank = b.rank; layer--;
         }
         std::reverse(hops.begin(), hops.end());
@@ -1641,11 +1761,11 @@ public:
             }
             const Leg L = MakeLeg(h.layer, h.from);
             m_rec = &z; m_recArc = arc ? &a : nullptr;
-            m_recTo = &m_layers[h.layer + 1][h.to].s; m_recHit = false; m_recLen = 0;
+            m_recTo = &m_layers[h.layer + 1][h.to].s; m_recHit = false; m_recLen = 0; m_replayCross = h.cross;
             RunLeg(L, s, { h.sc, h.jb, h.duckApex });
             const bool hit = m_recHit;
             const size_t len = m_recLen;
-            m_rec = nullptr; m_recArc = nullptr; m_recTo = nullptr;
+            m_rec = nullptr; m_recArc = nullptr; m_recTo = nullptr; m_replayCross = -1;
             // the replay must reach the SAME arrival the edge was built from -- the key is what the
             // search merges on, so a miss means this is not the flight that made the edge and the
             // line would be a drawing of something that was never on the panel. Draw nothing then.

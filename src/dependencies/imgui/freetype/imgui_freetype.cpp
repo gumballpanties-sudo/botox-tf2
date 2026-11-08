@@ -43,6 +43,7 @@
 #include FT_MODULE_H            // <freetype/ftmodapi.h>
 #include FT_GLYPH_H             // <freetype/ftglyph.h>
 #include FT_SYNTHESIS_H         // <freetype/ftsynth.h>
+#include FT_STROKER_H           // <freetype/ftstroke.h>
 
 #ifdef _MSC_VER
 #pragma warning (push)
@@ -147,6 +148,9 @@ namespace
         unsigned int    UserFlags;          // = ImFontConfig::RasterizerFlags
         FT_Int32        LoadFlags;
         FT_Render_Mode  RenderMode;
+        // botox Stroke: zeroed with the build's src array, freed in CloseFont. Stroked = last LoadGlyph's outline
+        FT_Stroker      Stroker;
+        FT_Glyph        Stroked;
     };
 
     // From SDL_ttf: Handy routines for converting from fixed point
@@ -189,6 +193,10 @@ namespace
         if (UserFlags & ImGuiFreeTypeBuilderFlags_LoadColor)
             LoadFlags |= FT_LOAD_COLOR;
 
+        // 1px (64 in 26.6), round joins
+        if ((UserFlags & ImGuiFreeTypeBuilderFlags_Stroke) && FT_Stroker_New(ft_library, &Stroker) == 0)
+            FT_Stroker_Set(Stroker, 64, FT_STROKER_LINECAP_ROUND, FT_STROKER_LINEJOIN_ROUND, 0);
+
         memset(&Info, 0, sizeof(Info));
         SetPixelHeight((uint32_t)cfg.SizePixels);
 
@@ -197,6 +205,16 @@ namespace
 
     void FreeTypeFont::CloseFont()
     {
+        if (Stroked)
+        {
+            FT_Done_Glyph(Stroked);
+            Stroked = nullptr;
+        }
+        if (Stroker)
+        {
+            FT_Stroker_Done(Stroker);
+            Stroker = nullptr;
+        }
         if (Face)
         {
             FT_Done_Face(Face);
@@ -229,6 +247,12 @@ namespace
 
     const FT_Glyph_Metrics* FreeTypeFont::LoadGlyph(uint32_t codepoint)
     {
+        if (Stroked)
+        {
+            FT_Done_Glyph(Stroked);
+            Stroked = nullptr;
+        }
+
         uint32_t glyph_index = FT_Get_Char_Index(Face, codepoint);
         if (glyph_index == 0)
             return nullptr;
@@ -258,12 +282,35 @@ namespace
             //slot->metrics.height = bbox.yMax - bbox.yMin;
         }
 
+        // outer border only = the glyph grown by the stroke radius; bitmap glyphs stay plain
+        if (Stroker && slot->format == FT_GLYPH_FORMAT_OUTLINE && FT_Get_Glyph(slot, &Stroked) == 0 &&
+            FT_Glyph_StrokeBorder(&Stroked, Stroker, 0, 1) != 0)
+        {
+            FT_Done_Glyph(Stroked);
+            Stroked = nullptr;
+        }
+
         return &slot->metrics;
     }
 
     const FT_Bitmap* FreeTypeFont::RenderGlyphAndGetInfo(GlyphInfo* out_glyph_info)
     {
         FT_GlyphSlot slot = Face->glyph;
+
+        if (Stroked)
+        {
+            if (FT_Glyph_To_Bitmap(&Stroked, RenderMode, nullptr, 1) != 0)
+                return nullptr;
+            const FT_BitmapGlyph bg = (FT_BitmapGlyph)Stroked;
+            out_glyph_info->Width = (int)bg->bitmap.width;
+            out_glyph_info->Height = (int)bg->bitmap.rows;
+            out_glyph_info->OffsetX = bg->left;
+            out_glyph_info->OffsetY = -bg->top;
+            out_glyph_info->AdvanceX = (float)FT_CEIL(slot->advance.x);
+            out_glyph_info->IsColored = false;
+            return &bg->bitmap;
+        }
+
         FT_Error error = FT_Render_Glyph(slot, RenderMode);
         if (error != 0)
             return nullptr;

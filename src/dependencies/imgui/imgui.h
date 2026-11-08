@@ -605,6 +605,10 @@ namespace ImGui
     IMGUI_API float         GetRowFrameRight();
     IMGUI_API float         GetRowFrameWidth();
     IMGUI_API void          IndentRow();
+    IMGUI_API void          SetSearchFilter(const char* query);   // null / "" = off. on = labelled rows outside popups hide unless they match
+    IMGUI_API int           GetSearchHits();                       // rows matched since the filter was set
+    IMGUI_API bool          IsSearchHidden();                      // the filter hid the current row: skip hand-drawn extras tied to it
+    IMGUI_API bool          SearchSkip(const char* label, const char* label_end = NULL, bool attached = false);   // true = skip this widget; attached = follows the row before
     IMGUI_API void          Label(const char* fmt, ...);
     IMGUI_API bool          SliderScalarN(const char* label, ImGuiDataType data_type, void* p_data, int components, const void* p_min, const void* p_max, const char* format = NULL, ImGuiSliderFlags flags = 0);
     IMGUI_API bool          VSliderFloat(const char* label, const ImVec2& size, float* v, float v_min, float v_max, const char* format = "%.3f", ImGuiSliderFlags flags = 0);

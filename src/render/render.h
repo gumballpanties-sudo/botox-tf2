@@ -32,6 +32,10 @@ void h_PaintTraverse(void* panels, VPANEL_t vpanel, bool forceRepaint, bool allo
 void* VGui_GetPanelInterface();   // VGUI_Panel009, or null if vgui2.dll has not loaded yet
 void  VGui_ResetPanelCache();     // device Reset / level change: FocusOverlayPanel is remade
 DWORD Render_PresentTid();        // the render thread, 0 until the first Present
+// RENDER THREAD: a texture swapped out mid-frame. Built lists may still bind it, so it is
+// released only once a later frame rebuilt them (Present). Flush = Reset / device change / eject.
+void  Render_DeferRelease(IUnknown* p);
+void  Render_FlushDeferred();
 
 // -- Performance / latency ---------------------------------------------------------
 void Perf_Tick();          // applies g_hiTimerRes on change (100ms tick)

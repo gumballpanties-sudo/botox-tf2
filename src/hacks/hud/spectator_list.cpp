@@ -125,7 +125,11 @@ static const std::vector<SpecEntry>& RawEntries()
     const int localIdx = GetLocalPlayerIndex();
     if (localIdx < 1) return s_raw;
 
-    for (int i = 1; i <= 64; ++i)
+    // only slots 1..maxclients are players: past that sit props/weapons far smaller than
+    // m_iObserverMode (0x164C), so reading it walks off the object (AV at a page edge, junk otherwise)
+    const int maxCl = VCall<int>(g_engine, 21);   // IVEngineClient::GetMaxClients
+
+    for (int i = 1; i <= maxCl; ++i)
     {
         void* pEnt = GetClientEntity(i);
         if (!pEnt) continue;
@@ -134,7 +138,7 @@ static const std::vector<SpecEntry>& RawEntries()
         if (!ReadObsState(pEnt, mode, handle, life) || life == 0) continue;   // alive = not a spectator
 
         const int target = n_util::DecodeEHandleIndex(handle);
-        if (target < 1 || target > 64) continue;
+        if (target < 1 || target > maxCl) continue;
         void* pTarget = GetClientEntity(target);
         int targetLife = 1;
         if (!pTarget || !ReadLife(pTarget, targetLife) || targetLife != 0) continue;
@@ -1144,7 +1148,7 @@ namespace {
         EyeTex& row = s_eyeTex[(emoji ? 2 : 0) + (open ? 1 : 0)];
         if (row.face == l.face && (row.tex || row.failed)) return row.tex;
         if (!g_d3dDev) return nullptr;
-        if (row.tex) { row.tex->Release(); row.tex = nullptr; }
+        Render_DeferRelease(row.tex); row.tex = nullptr;   // mid-build: a list built earlier may bind it
         row.face = l.face;
         row.failed = true;
 

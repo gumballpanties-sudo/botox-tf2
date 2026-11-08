@@ -452,6 +452,18 @@ namespace
         char cmd[16];
         snprintf(cmd, sizeof(cmd), "slot%d", slot + 1);
         const char* b = I::EngineClient->Key_LookupBinding(cmd);   // row with no key binding shows nothing
+        // Key_LookupBinding is exact: "slot1;" / "slot1; r_drawviewmodel 0" miss it. Find a key whose
+        // bind starts with the slot command, then look that exact bind up for the key name.
+        // ponytail: first command only; aliases wrapping slotN still show nothing
+        const size_t n = strlen(cmd);
+        for (ButtonCode_t c = 1; !b && c <= 112; c++)   // KEY_0 .. MOUSE_WHEEL_DOWN (ButtonCode.h)
+        {
+            const char* bind = I::EngineClient->Key_BindingForKey(c);
+            if (!bind) continue;
+            while (*bind == ' ') bind++;
+            if (_strnicmp(bind, cmd, n) == 0 && (bind[n] == 0 || bind[n] == ';' || bind[n] == ' '))
+                b = I::EngineClient->Key_LookupBinding(bind);
+        }
         if (!b) return;
         char up[16];
         strncpy_s(up, b, _TRUNCATE);

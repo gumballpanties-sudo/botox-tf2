@@ -162,10 +162,17 @@ void Avatar_ReleaseAll()
 
 void Avatar_OnMapChange() { s_mapChanged = true; }
 
+void Render_DeferRelease(IUnknown* p);   // render.cpp: freed once no built list binds it
+
 void Avatar_Tick(IDirect3DDevice9* dev)
 {
     if (!dev) return;
-    if (s_mapChanged.exchange(false)) Avatar_ReleaseAll();
+    // Present, BEFORE it draws this frame's lists -- which may still bind these. Defer, never Release.
+    if (s_mapChanged.exchange(false))
+    {
+        for (auto& kv : s_cache) Render_DeferRelease(kv.second.tex);
+        s_cache.clear();
+    }
 
     std::vector<PendingUpload> ups;
     {
@@ -179,7 +186,7 @@ void Avatar_Tick(IDirect3DDevice9* dev)
         n_avatar::RgbaToBgraInPlace(up.rgba.data(), (size_t)up.width * up.height);
 
         AvatarEntry& e = s_cache[up.key];
-        if (e.tex) { e.tex->Release(); e.tex = nullptr; }
+        Render_DeferRelease(e.tex); e.tex = nullptr;
 
         IDirect3DTexture9* tex = nullptr;
         // DYNAMIC + DEFAULT only -- MANAGED does not exist on this engine's d3d9ex device.

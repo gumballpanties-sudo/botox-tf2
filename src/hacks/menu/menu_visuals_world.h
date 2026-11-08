@@ -7,7 +7,7 @@
 // SliderF/GroupToggle -- those are menu.cpp file-local helpers this file does not own).
 void Menu_Visuals_Camera();
 
-// dlight, sun angle, world/prop texture tint, weather particle colour. Same
+// dlight, world/prop texture tint, weather particle colour. Same
 // drop-in contract as Menu_Visuals_Camera -- a later pass wires it into the
 // visuals/world sub-tab with one call.
 void Menu_Visuals_World();

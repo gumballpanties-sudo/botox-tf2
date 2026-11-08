@@ -37,6 +37,13 @@ struct MiscHookGuard {
     ~MiscHookGuard() { --g_miscHookDepth; }
 };
 
+// -- Bind gate (render.cpp, botox input::keys_blocked) -----------------------------
+// Keys are being typed (chat / console / menu text box) or the game is not focused: hold
+// binds read up. Toggle binds read Binds_Toggled: the key's toggle bit with every press made
+// while blocked taken back out, so typing a bound letter in chat never flips it.
+bool Binds_Blocked();
+bool Binds_Toggled(int vk);
+
 // -- Menu ------------------------------------------------------------------------
 extern bool g_showMenu;
 extern int  g_menuKey;
@@ -175,7 +182,6 @@ extern char  g_discordImageKey[128];
 extern bool  g_msOpen, g_msNight;                    // minesweeper panel + night skin
 extern int   g_msDiff, g_msWidth, g_msHeight, g_msMines;
 
-extern bool  g_debugMenuEnable;
 extern float g_consoleColor[4];   // ConsoleColorPrint tint (rgb; a unused, FLOAT4 config slot)
 
 // -- Movement indicators: vars live in hacks/hud/indicators.h (botox variables.h names) --
@@ -430,9 +436,6 @@ extern bool  g_dlightEnable;               // IVEfx::CL_AllocDlight, keyed to th
 extern float g_dlightRadius;
 extern float g_dlightColor[4];
 
-extern bool  g_sunAngleEnable;             // env_sun's DT_Sun::m_vDirection (glow sprite only)
-extern float g_sunAnglePitch;
-extern float g_sunAngleYaw;
 
 extern bool  g_worldTintEnable;            // IMaterial::ColorModulate, TEXTURE_GROUP_WORLD
 extern float g_worldTintColor[4];
@@ -665,8 +668,16 @@ extern int   g_edgeBugDelTicks;     extern bool g_edgeBugDelAdvanced; extern flo
 extern int   g_edgeBugDelSearch;    extern bool g_edgeBugDelSilent;   extern bool  g_edgeBugDelMouseFix;
 extern float g_edgeBugDnaScan;      extern bool g_edgeBugDnaAdvanced; extern int   g_edgeBugDnaRange;
 extern bool  g_edgeBugDnaCustomAngle; extern float g_edgeBugDnaAngleLimit;
+extern int   g_edgeBugHwTicks;      extern float g_edgeBugHwLockAmt;  extern bool  g_edgeBugHwAdvanced;
+extern float g_edgeBugHwStrafeDeltaMax;
 extern bool  g_edgeBugViz;        // draw the latched plan: its flight path + a pad on the bug tick
 extern float g_edgeBugVizSize;     // half-width of that pad, world units (def 16 = the hull)
+extern float g_edgeBugVizColor[4]; // botox edgebug visualize popup: line color / thickness,
+extern float g_edgeBugVizThick;    //   pad shape (0 square 1 circle), fill (0 outline 1 filled
+extern int   g_edgeBugVizShape;    //   2 both), fill color + its alpha scale
+extern int   g_edgeBugVizFill;
+extern float g_edgeBugVizFillAlpha;
+extern float g_edgeBugVizPadColor[4];
 extern bool g_pixelSurf;   extern int g_pixelSurfKey;   extern int g_pixelSurfMode;
 extern int  g_pixelSurfPredictTicks; // seam look-ahead horizon, ticks (def 8, 1-32)
 extern int  g_psWallStrafe;   // ride gain: 0 off / 1 when your keys press into the wall (botox) / 2 always
@@ -674,9 +685,10 @@ extern bool g_psParkAtEnd;    // sim the runout, brake so the ride stops on the 
 // approach aids for the pixel surf FEATURE (both off by default)
 // -- park at the end of a surf (measure the runout, brake the tangent into it)
 extern bool g_autoAlign;   // plain on/off, no bind
+extern bool g_aaSurfStick; // auto align: hold a pixel surf once one is seen
 extern bool g_textureBug;  extern int g_textureBugKey;  extern int g_textureBugMode;
 extern int g_tbStyle;              // 0 cumidere (texturebug.inl TextureBugCumidere) / 1 botox
-extern bool g_tbcAlign;            // cumidere style: cumidere auto align first (texturebug.inl TBC_Align)
+extern bool g_tbcAlign;            // both tb styles: cumidere auto align ride half (texturebug.inl TBC_Align)
 extern bool g_tbcAutoCrouch;       // cumidere style: duck pass on a standing miss (texturebug.inl TextureBugCumidere)
 extern float g_tbReach;            // botox style: wall scan reach (def 8, 0-48)
 extern int   g_tbTypes;            // botox style: bit0 ducking / bit1 standing (def 3)
@@ -705,6 +717,7 @@ extern int  g_delayHopTicks;    // air ticks to wait before pressing jump (def 6
 extern bool g_goomba;      extern int g_goombaKey;      extern int g_goombaMode;
 extern int  g_goombaHow;       // auto goomba type: 0 sticky jump, 1 rocket jump, 2 regular jump
 extern int  g_goombaLead;      // auto goomba extra lead ticks (ping/rocket flight are automatic)
+extern bool g_autoPogo;    extern int g_autoPogoKey;    extern int g_autoPogoMode;   // demo sticky pogo (aim/autopogo.cpp)
 extern bool g_autoCrouch;  extern int g_autoCrouchKey;  extern int g_autoCrouchMode;
 extern int  g_autoCrouchTicks;  // look-ahead ticks for the landing trace (def 6)
 extern bool g_djStrafe;    extern int g_djStrafeKey;    extern int g_djStrafeMode;   // scout double jump keeps velocity dir
@@ -732,11 +745,12 @@ extern bool g_psFinderHeadbounce; // PixelFinder: also probe for ceiling (ascent
 extern bool g_psFinderPixeljump;  // PixelFinder: pixel jump LIPS (botox pf_pixel_jump), yellow
 extern bool g_psFinderJumpSurf;   // PixelFinder: keep jump-only (no-fall) pins, own list, orange
 extern bool g_psSurfFix;        // hold duck for a couple ticks into a ride so a flicker can't drop it
-extern int  g_edgeBugStyle;     // 0 botox search / 1 delusional donor / 2 dna donor
+extern int  g_edgeBugStyle;     // 0 botox search / 1 delusional donor / 2 dna donor / 3 hotwheels
 extern bool g_edgeBugMouseLock; // scale mouse x in OverrideMouseInput while a plan flies
 extern bool g_edgeBugSound;     // TF2 game sound the tick after a real edgebug
 extern int  g_edgeBugSoundId;   // which TF2 game sound plays on a real EB
 void EdgeBug_MouseInput(float* x, float* y);   // IClientMode::OverrideMouseInput hook body
+void EdgeBug_FrameStart();                     // FSN FRAME_START: hotwheels (style 3) view turn
 void EdgeBug_InstallMouseHook();
 // -- Edge skip port (movement_edge.inl): edge skip + blockbot, defaults OFF ------------------------
 extern bool g_edgeSkip;    extern int g_edgeSkipKey;    extern int g_edgeSkipMode;
@@ -775,10 +789,8 @@ void FakeMove_DemoTick();   // FrameStageNotify stage 3: replays fake jump anim/
 // botox air_stuck knobs (m_air_stuck_extra_reach / m_air_stuck_budget)
 extern float g_asExtraReach;       // wall scan reach past the hull, units (def 4, 0-32; > 2 arms the wide B scan)
 extern float g_asBudget;           // search clock, percent of one tick (def 50, 10-90)
-extern int g_asStyle;              // 0 cumidere (airstuck.inl AirStuckCumidere) / 1 botox / 2 aletherium (AirStuckAletherium)
-// Aletherium AirStuckCore knobs
-extern float g_asaCatchEps, g_asaReach, g_asaFlushTol, g_asaDriftGain;
-extern int   g_asaSimBudget;
+extern bool g_asMovementFix;       // botox "use movement fix" (def true) -- off forces the pin view+move onto the cmd
+extern bool g_asDriftHang;         // air stuck: drift hang first on a pinned start (sv_wallbug 0)
 // wave 3 (Aletherium): pixel surf finder + assist
 extern bool g_psFinder;    extern int g_psFinderKey;    extern int g_psFinderMode;
 extern float g_psFinderMargin;     // scan margin above/below the aimed column (def 8, 0-64)
@@ -814,6 +826,7 @@ extern bool g_pixelJump;  extern int g_pixelJumpKey;  extern int g_pixelJumpMode
 extern bool g_pjUnsafe;            // "unsafe pixeljump": any pin catches, no moved proof
 extern bool g_pjCrouch;            // "pixeljump crouch": jump + lj again, duck from descent
 extern bool g_pjReadout;           // "<launch> to surf at <z>" popup on a pixeljump
+extern bool g_pjHop;               // "pixel hop" (pixelhop.inl, botox css SgPixelHop): space held = land on pixels, hop off them
 // ---- uneven ground ----
 extern bool  g_psGroundHelp;       // grounded: silently steer your own move at the target you are
                                    // planning for, so walking up to a seam lands you under it
@@ -1032,7 +1045,6 @@ extern char  g_chamsTeamUberCfg[160];
 extern char  g_chamsTeamCloakCfg[160];
 extern char  g_chamsWeaponCfg[160];
 extern char  g_chamsArmsCfg[160];
-extern char  g_chamsSleeveCfg[160];
 extern float g_glowVisColor[4];
 extern float g_glowInvisColor[4];
 extern int   g_glowStyle;               // 0 soft, 1 outline

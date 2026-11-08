@@ -5,9 +5,6 @@
 // ---- world group (botox variables.h :660-765) ----
 inline float g_wdWorldFov = 0.f;                                   // m_world_fov: ADDED to the view fov (-30..60)
 
-inline float g_wdSunSpeed = 0.f;                                   // m_sun_angle_speed, deg/s of yaw drift
-inline float g_wdSunShadowDist = 0.f;                              // m_sun_angle_shadow_distance, 0 = map's own
-
 inline bool  g_wdFlipGunOtherSide = false;                         // m_flip_world_mirror_hand
 
 inline bool  g_wdDlightLocal = false;                              // m_dlight_local

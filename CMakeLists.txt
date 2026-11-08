@@ -53,7 +53,6 @@ add_library(botox SHARED
     src/hacks/misc/minesweeper.cpp
     src/hacks/misc/game_extras.cpp
     src/hacks/misc/names.cpp
-    src/hacks/menu/debugmenu.cpp
     src/hacks/menu/menu_misc.cpp
     src/hacks/hud/indicators.cpp
     src/hacks/menu/menu.cpp
@@ -333,6 +332,10 @@ add_executable(aspect_stretch_test tests/aspect_stretch_test.cpp)
 # Build + run: cmake --build build --config Release --target dpi_test && build\Release\dpi_test.exe
 add_executable(dpi_test tests/dpi_test.cpp)
 
+# Gate test for the texture graveyard (src/render/deferred_release.h): swapped-out textures outlive
+# the lists that bind them. Build + run: cmake --build build --config Release --target deferred_release_test && build\Release\deferred_release_test.exe
+add_executable(deferred_release_test tests/deferred_release_test.cpp)
+
 # Gate test for the strafe air-accel math (src/hacks/movement/airlean.h): the closed-form best-gain and
 # free-turn wish angles vs a brute-force sweep of the same AirAccelerate tick.
 # Build + run: cmake --build build --config Release --target airlean_test && build\Release\airlean_test.exe
@@ -420,6 +423,25 @@ add_executable(metaball_test tests/metaball_test.cpp)
 # across the join. The squash & stretch: text fallback AND inside the migoo.h picture.
 # Build + run: cmake --build build --config Release --target miwarp_test && build\Release\miwarp_test.exe
 add_executable(miwarp_test tests/miwarp_test.cpp)
+
+# Gate test for ImGuiFreeTypeBuilderFlags_Stroke (font flag "outline" twin): real tahoma bake, the twin
+# covers + grows past every glyph on all four sides with the base advance, AA / mono / bold monospace.
+# Build + run: cmake --build build --config Release --target font_stroke_test && build\Release\font_stroke_test.exe
+add_executable(font_stroke_test tests/font_stroke_test.cpp
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/freetype/imgui_freetype.cpp
+)
+target_include_directories(font_stroke_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${IMGUI_DIR} "${FREETYPE_STATIC_DIR}/include")
+target_link_directories(font_stroke_test PRIVATE
+    "${FREETYPE_STATIC_DIR}/lib" "$<$<CONFIG:Debug>:${FREETYPE_STATIC_DIR}/debug/lib>")
+target_link_libraries(font_stroke_test PRIVATE optimized freetype debug freetyped user32 gdi32)
+target_compile_definitions(font_stroke_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+set_target_properties(font_stroke_test PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Gate test for the mitosis split (src/hacks/hud/migoo.h): the chamfer distance transform against
 # brute force, the furrow only ever thinning letters (never adding ink), the cut, the timeline,

@@ -83,15 +83,6 @@ inline void RagdollForce(int mode, float strength, float f[3])
     }
 }
 
-// botox edicts.cpp sun drift: yaw += speed * dt, wrapped; dt outside (0,1) is a hitch, not motion;
-// speed 0 parks the drift back at 0.
-inline float SunDrift(float drift, float speed, float dt)
-{
-    if (speed == 0.f) return 0.f;
-    if (dt > 0.f && dt < 1.f) drift = std::fmod(drift + speed * dt, 360.f);
-    return drift;
-}
-
 // TF2 vgui panel names for botox's remove hud elements list (index = g_wdNoHudElems slot).
 // Every name is the panel's own constructor name in the 2013 SDK client (src/game/client/tf): the
 // BaseClass(NULL, "...") string, or the class name for DECLARE_HUDELEMENT panels built with
