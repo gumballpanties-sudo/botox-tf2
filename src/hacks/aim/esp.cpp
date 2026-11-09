@@ -32,14 +32,15 @@ namespace
 
 	// c_base_entity::get_bounding_box: the 8 collision-box corners, every one in front of the camera.
 	// tight (players, buildings) = Amalgam GetDrawBounds: hull turned to the view yaw, so it never
-	// reads ~1.4x wide seen corner-on, then trimmed to its middle 75% (TF2 hull is wider than the model)
-	bool ScreenBox(const Vec3& o, const Vec3& mn, const Vec3& mx, SBox& box, bool tight = false)
+	// reads ~1.4x wide seen corner-on, then trimmed to its middle 75% (TF2 hull is wider than the model).
+	// flYaw (radians) is the caller's view yaw: esp preview runs its own camera, so this never reads
+	// I::EngineClient itself (DrawPlayer, which calls this with tight=true, must stay entity/engine free).
+	bool ScreenBox(const Vec3& o, const Vec3& mn, const Vec3& mx, SBox& box, bool tight = false, float flYaw = 0.f)
 	{
 		float sy = 0.f, cy = 1.f;
 		if (tight)
 		{
-			const float yaw = DEG2RAD(I::EngineClient->GetViewAngles().y);
-			sy = sinf(yaw); cy = cosf(yaw);
+			sy = sinf(flYaw); cy = cosf(flYaw);
 		}
 		float l = FLT_MAX, t = FLT_MAX, r = -FLT_MAX, b = -FLT_MAX;
 		for (int i = 0; i < 8; i++)
@@ -569,7 +570,6 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 	const Vec3 vView = I::EngineClient->GetViewAngles();
 	const float flYaw = DEG2RAD(vView.y);
 	const Vec3 vLocalOrigin = pLocal->GetAbsOrigin(), vEye = pLocal->GetEyePosition();
-	const float h = FontH();
 
 	for (auto pEntity : H::Entities.GetGroup(EntityEnum::PlayerAll))
 	{
@@ -594,7 +594,7 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 		int iVis = -1;
 		auto visible = [&]() { if (iVis < 0) iVis = SDK::VisPos(pLocal, pPlayer, vEye, vOrigin + pPlayer->m_vecViewOffset()) ? 1 : 0; return iVis == 1; };
 
-		// ---- out of fov arrows (players() :628-701) ----
+		// ---- out of fov arrows (players() :628-701); screen-space ring, never shown in esp preview ----
 		if (g_espOofArrows && g_espOofType != 1 && !SDK::IsOnScreen(pPlayer, vOrigin))
 		{
 			const Vec3 d = vLocalOrigin - vOrigin;
@@ -612,75 +612,59 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 				PushRingArrow(pos, dir.x, dir.y, col);
 		}
 
-		Part p;
-		p.a = a; p.vOrigin = vOrigin; p.vMins = pPlayer->m_vecMins(); p.vMaxs = pPlayer->m_vecMaxs();
-		if (!ScreenBox(vOrigin, p.vMins, p.vMaxs, p.box, true))
+		// ---- gather: everything DrawPlayer needs, read once here (botox players() gather half).
+		// ScreenBox runs twice per player (here, to gate ++m_nDrawn without recomputing it inside the
+		// shared DrawPlayer; again inside DrawPlayer itself, off the struct's raw origin/mins/maxs/yaw,
+		// since DrawPlayer must stay entity-free for esp preview). Cheap, deterministic, same result. ----
+		const Vec3 vMins = pPlayer->m_vecMins(), vMaxs = pPlayer->m_vecMaxs();
+		SBox box;
+		if (!ScreenBox(vOrigin, vMins, vMaxs, box, true, flYaw))
 			continue;
 		++m_nDrawn;
-		const auto& b = p.box;
+
+		EspPlayer player;
+		player.m_alpha = a;
+		player.m_origin = vOrigin; player.m_mins = vMins; player.m_maxs = vMaxs;
+		player.m_viewYaw = flYaw;
+		player.m_distance = flDist;
 
 		const int iHealth = pPlayer->m_iHealth();
 		int iMaxHealth = 0;
 		if (auto pResource = H::Entities.GetResource())
 			iMaxHealth = pResource->m_iMaxHealth(iIndex);
 		if (iMaxHealth <= 0) iMaxHealth = std::max(iHealth, 1);
+		player.m_health = iHealth;
 
-		char hp[16];
-		snprintf(hp, sizeof(hp), g_espHealthSuffix ? "%dhp" : "%d", iHealth);
 		m_flAnimHealth[iIndex] = EspMath::AnimateHealth(m_flAnimHealth[iIndex], (float)iHealth, I::GlobalVars->frametime);
 		// TF2 overheal goes past max: the bar tops out full (botox has no overheal)
-		const float factor = std::clamp(m_flAnimHealth[iIndex] / (float)iMaxHealth, 0.f, 1.f);
-		float hue[4] = { 0, 0, 0, 1 };
-		EspMath::Hsb(EspMath::HealthHue(factor), hue);
+		player.m_healthFactor = std::clamp(m_flAnimHealth[iIndex] / (float)iMaxHealth, 0.f, 1.f);
 
-		PartRounding(p, g_espBox);
-		if (g_espBoxFill)
-			PartFill(p);
-		if (g_espBox)
-			PartBox(p, g_espBoxVisColors ? (visible() ? g_espBoxVisibleColor : g_espBoxInvisibleColor) : g_espBoxColor);
+		std::string sName;
+		if (auto pResource = H::Entities.GetResource())
+			if (const char* n = pResource->GetName(iIndex))
+				sName = TruncateUtf8(n, 24);
+		player_info_t tInfo;
+		if (I::EngineClient->GetPlayerInfo(iIndex, &tInfo) && tInfo.fakeplayer)
+			sName.insert(0, "[bot] ");
+		player.m_name = std::move(sName);
 
-		const uint64_t sid = g_espAvatar ? SteamId(iIndex) : 0;
-		if (g_espName)
-		{
-			std::string sName;
-			if (auto pResource = H::Entities.GetResource())
-				if (const char* n = pResource->GetName(iIndex))
-					sName = TruncateUtf8(n, 24);
-			player_info_t tInfo;
-			if (I::EngineClient->GetPlayerInfo(iIndex, &tInfo) && tInfo.fakeplayer)
-				sName.insert(0, "[bot] ");
-			const float y = PartName(p, sName, g_espNameVisColors ? (visible() ? g_espNameVisibleColor : g_espNameInvisibleColor) : g_espNameColor);
-			if (sid && g_espAvatarPosition == 0 && !sName.empty())   // an empty name queues no text to sit left of
-			{
-				const float size = g_espAvatarSize;
-				const float ay = y + (h - size) * 0.5f;
-				EspQ::Avatar(-size - 3.f, ay, -3.f, ay + size, sid, a, size * 0.5f, true);
-			}
-		}
-
-		if (g_espHealthText && g_espHealthTextStyle == 0)
-			PartBottomText(p, hp, EspCol(g_espHealthTextCustomColor ? g_espHealthTextColor : hue, a));
+		player.m_steamId = g_espAvatar ? SteamId(iIndex) : 0;
 
 		if (auto pWeapon = pPlayer->m_hActiveWeapon()->As<CTFWeaponBase>())
 		{
-			// :989-1021 ammo bar: guns only (TF2: a weapon with a clip)
+			player.m_weaponId = pWeapon->GetWeaponID();
+			// :989-1021 ammo bar: guns only (TF2: a weapon with a clip). g_espAmmoBar also gates the
+			// m_flAmmo animation below (shared mutable per-entity state), not just the draw toggle --
+			// stays here so the state doesn't drift while the bar happens to be off, same as live.
 			const int iMaxClip = pWeapon->GetMaxClip1();
 			if (g_espAmmoBar && iMaxClip > 0 && pWeapon->m_iClip1() >= 0)
 			{
 				const float ammo = (float)pWeapon->m_iClip1();
 				m_flAmmo[iIndex] = m_flAmmo[iIndex] > ammo ? m_flAmmo[iIndex] - 2.f * I::GlobalVars->frametime : ammo;
-				const float f = std::clamp(m_flAmmo[iIndex] / (float)iMaxClip, 0.f, 1.f);
-				EspQ::Rect((float)b.l, b.b + 3.f, (float)(b.l + b.w), b.b + 5.f, Black(a), Black(a), false, 0.f, 1.f, ESPF_OUT_OUTER);
-				EspQ::Rect((float)b.l, b.b + 3.f, b.l + b.w * f, b.b + 5.f, EspCol(g_espAmmoBarColor, a), Black(a), false, 0.f, 1.f, ESPF_OUT_OUTER);
-				p.pad[PAD_BOTTOM] += 6.f;
+				player.m_hasAmmo = true;
+				player.m_ammoFactor = std::clamp(m_flAmmo[iIndex] / (float)iMaxClip, 0.f, 1.f);
 			}
-			if (g_espWeaponName)
-				if (const char* w = WeaponName(pWeapon->GetWeaponID()))
-					PartBottomText(p, w, EspCol(g_espWeaponNameColor, a));
 		}
-
-		if (g_espDistance)
-			PartDistance(p, flDist);
 
 		if (g_espFlags)
 		{
@@ -690,88 +674,168 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 				pPlayer->InCond(TF_COND_BURNING), pPlayer->InCond(TF_COND_BLEEDING), pPlayer->InCond(TF_COND_URINE),
 				pPlayer->InCond(TF_COND_MAD_MILK), pPlayer->InCond(TF_COND_MARKEDFORDEATH), iHealth > iMaxHealth,
 				pPlayer->InCond(TF_COND_PHASE), pPlayer->InCond(TF_COND_SHIELD_CHARGE) };
-			// alert = what changes whether you take the fight right now
-			static const bool kAlert[EF_COUNT] = { true, true, false, false, false, false, false, false, false, false, false, false, true, true };
-			FlagRow rows[EF_COUNT]; int n = 0;
 			for (int i = 0; i < EF_COUNT; i++)
-				if ((g_espFlagList & (1 << i)) && bOn[i])
-					rows[n++] = { EspFlagNames()[i], kAlert[i] };
-			PartFlags(p, rows, n);
+				player.m_flags[i] = bOn[i];
 		}
 
-		if (g_espHealthBar)
-			PartHealthBar(p, factor, hp, g_espBox, g_espHealthText && g_espHealthTextStyle == 1);
-
-		// ---- bones: skeleton, hitboxes, head avatar ----
-		const bool bWantBones = g_espSkeleton || g_espHitboxes && g_espHitboxesMode == 0 || sid && g_espAvatarPosition == 3;
+		// ---- bones: skeleton, hitboxes, head avatar (botox players() :833-873) ----
+		const bool bWantBones = g_espSkeleton || g_espHitboxes && g_espHitboxesMode == 0 || player.m_steamId && g_espAvatarPosition == 3;
 		const auto pModel = bWantBones ? pPlayer->GetModel() : nullptr;
 		const auto pHdr = pModel ? I::ModelInfoClient->GetStudiomodel(pModel) : nullptr;
-		matrix3x4 aBones[MAXSTUDIOBONES];
+		matrix3x4 aBones[MAXSTUDIOBONES];   // stack local: outlives the DrawPlayer(player) call below, same scope
 		if (pHdr && pPlayer->SetupBones(aBones, MAXSTUDIOBONES, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime))
 		{
-			if (g_espSkeleton)   // :1409-1511
-			{
-				const uint32_t col = EspCol(g_espSkeletonVisColors ? (visible() ? g_espSkeletonVisibleColor : g_espSkeletonInvisibleColor) : g_espSkeletonColor, a);
-				const matrix3x4* m = aBones;
-				const int nBones = std::min(pHdr->numbones, (int)MAXSTUDIOBONES);
-				std::vector<SkelEdge> edges;
-				for (int i = 0; i < nBones; i++)
-				{
-					if (!(BoneFlags(pHdr, i) & BONE_USED_BY_HITBOX)) continue;
-					int par = BoneParent(pHdr, i);
-					while (par >= 0 && par < nBones && !(BoneFlags(pHdr, par) & BONE_USED_BY_HITBOX))
-						par = BoneParent(pHdr, par);
-					if (par < 0 || par >= nBones) continue;
-					const Vec3 c = BonePos(m, i), pp = BonePos(m, par);
-					if (g_espSkeletonType == 2)
-					{
-						edges.push_back({ i, par, c, pp });
-						continue;
-					}
-					Vec3 s0, s1;
-					if (SDK::W2S(c, s0) && SDK::W2S(pp, s1))
-						EspQ::Line(s0.x, s0.y, s1.x, s1.y, col, g_espSkeletonThickness);
-				}
-				if (g_espSkeletonType == 2)
-					SmoothSkeleton(edges, col, g_espSkeletonThickness);
-			}
-
-			if (g_espHitboxes && g_espHitboxesMode == 0)
-			{
-				std::vector<std::array<Vec3, 8>> boxes;
-				HitboxCorners(pHdr, aBones, boxes);
-				PushHitboxes(boxes, EspCol(g_espHitboxColor, a), g_espHitboxesThickness);
-			}
-
+			player.m_studio = pHdr;
+			player.m_bones = aBones;
 
 			auto pHeadSet = pHdr->pHitboxSet(0);
 			auto pHead = pHeadSet && pHeadSet->numhitboxes > 0 ? pHeadSet->pHitbox(0) : nullptr;   // TF2 hitbox 0 = head
-			if (sid && g_espAvatarPosition == 3 && pHead && pHead->bone >= 0 && pHead->bone < MAXSTUDIOBONES)   // :1549-1583 cover head
+			if (player.m_steamId && g_espAvatarPosition == 3 && pHead && pHead->bone >= 0 && pHead->bone < MAXSTUDIOBONES)   // :1549-1583 cover head
 			{
 				// TF2 hitboxes have no radius: half the head box's longest side
 				const Vec3 e = pHead->bbmax - pHead->bbmin;
-				const float flHeadR = std::max(std::max(e.x, e.y), e.z) * 0.5f;
-				auto pBox = pHead;
-				Vec3 vHead, vRight, sh, se;
-				Math::VectorTransform((pBox->bbmin + pBox->bbmax) * 0.5f, aBones[pBox->bone], vHead);
-				Math::AngleVectors(vView, nullptr, &vRight);
-				if (SDK::W2S(vHead, sh) && SDK::W2S(vHead + vRight * flHeadR, se))
-				{
-					const float r = fabsf(se.x - sh.x) * g_espAvatarHeadScale;
-					if (r > 0.5f)
-						EspQ::Avatar(sh.x - r, sh.y - r, sh.x + r, sh.y + r, sid, a, r);
-				}
+				player.m_headRadius = std::max(std::max(e.x, e.y), e.z) * 0.5f;
+				Math::VectorTransform((pHead->bbmin + pHead->bbmax) * 0.5f, aBones[pHead->bone], player.m_head);
+				Math::AngleVectors(vView, nullptr, &player.m_viewRight);
+				player.m_hasHead = true;
 			}
 		}
 
-		if (sid && (g_espAvatarPosition == 1 || g_espAvatarPosition == 2))   // :1584-1601 above / below box
+		// trace only when a visibility colour reads it: box / name / skeleton, same shared cache as oof arrows
+		const bool wantVis = (g_espBox && g_espBoxVisColors) || (g_espName && g_espNameVisColors) ||
+			(player.m_bones && g_espSkeleton && g_espSkeletonVisColors);
+		player.m_visible = wantVis && visible();
+
+		DrawPlayer(player);
+	}
+}
+
+void CEsp::DrawPlayer(const EspPlayer& player)
+{
+	// box (:36-61 ScreenBox tight, with the caller's view yaw -- never I::EngineClient here, so this
+	// is identical whether player came from the live loop above or esp preview's fake one)
+	SBox box;
+	if (!ScreenBox(player.m_origin, player.m_mins, player.m_maxs, box, true, player.m_viewYaw))
+		return;
+
+	char hp[16];
+	snprintf(hp, sizeof(hp), g_espHealthSuffix ? "%dhp" : "%d", player.m_health);
+	const float factor = player.m_healthFactor;
+	float hue[4] = { 0, 0, 0, 1 };
+	EspMath::Hsb(EspMath::HealthHue(factor), hue);
+
+	Part p;
+	p.box = box; p.a = player.m_alpha; p.vOrigin = player.m_origin; p.vMins = player.m_mins; p.vMaxs = player.m_maxs;
+	const auto& b = p.box;
+	const float a = player.m_alpha;
+	const uint64_t sid = player.m_steamId;
+
+	PartRounding(p, g_espBox);
+	if (g_espBoxFill)
+		PartFill(p);
+	if (g_espBox)
+		PartBox(p, g_espBoxVisColors ? (player.m_visible ? g_espBoxVisibleColor : g_espBoxInvisibleColor) : g_espBoxColor);
+
+	if (g_espName)
+	{
+		const float y = PartName(p, player.m_name, g_espNameVisColors ? (player.m_visible ? g_espNameVisibleColor : g_espNameInvisibleColor) : g_espNameColor);
+		if (sid && g_espAvatarPosition == 0 && !player.m_name.empty())   // an empty name queues no text to sit left of
 		{
 			const float size = g_espAvatarSize;
-			const bool below = g_espAvatarPosition == 2;
-			const float x = b.l + (b.w - size) * 0.5f;
-			const float y = below ? b.b + 2 + p.pad[PAD_BOTTOM] : b.t - 5 - size - p.pad[PAD_TOP];
-			EspQ::Avatar(x, y, x + size, y + size, sid, a, size * 0.5f);
+			const float ay = y + (FontH() - size) * 0.5f;
+			EspQ::Avatar(-size - 3.f, ay, -3.f, ay + size, sid, a, size * 0.5f, true);
 		}
+	}
+
+	if (g_espHealthText && g_espHealthTextStyle == 0)
+		PartBottomText(p, hp, EspCol(g_espHealthTextCustomColor ? g_espHealthTextColor : hue, a));
+
+	if (player.m_hasAmmo)   // :989-1021 ammo bar; the clip/max-clip gather already applied g_espAmmoBar
+	{
+		EspQ::Rect((float)b.l, b.b + 3.f, (float)(b.l + b.w), b.b + 5.f, Black(a), Black(a), false, 0.f, 1.f, ESPF_OUT_OUTER);
+		EspQ::Rect((float)b.l, b.b + 3.f, b.l + b.w * player.m_ammoFactor, b.b + 5.f, EspCol(g_espAmmoBarColor, a), Black(a), false, 0.f, 1.f, ESPF_OUT_OUTER);
+		p.pad[PAD_BOTTOM] += 6.f;
+	}
+	if (g_espWeaponName)
+		if (const char* w = WeaponName(player.m_weaponId))
+			PartBottomText(p, w, EspCol(g_espWeaponNameColor, a));
+
+	if (g_espDistance)
+		PartDistance(p, player.m_distance);
+
+	if (g_espFlags)
+	{
+		// alert = what changes whether you take the fight right now
+		static const bool kAlert[EF_COUNT] = { true, true, false, false, false, false, false, false, false, false, false, false, true, true };
+		FlagRow rows[EF_COUNT]; int n = 0;
+		for (int i = 0; i < EF_COUNT; i++)
+			if ((g_espFlagList & (1 << i)) && player.m_flags[i])
+				rows[n++] = { EspFlagNames()[i], kAlert[i] };
+		PartFlags(p, rows, n);
+	}
+
+	if (g_espHealthBar)
+		PartHealthBar(p, factor, hp, g_espBox, g_espHealthText && g_espHealthTextStyle == 1);
+
+	// ---- bones: skeleton, hitboxes, head avatar ----
+	if (player.m_studio && player.m_bones)
+	{
+		const studiohdr_t* pHdr = player.m_studio;
+		const matrix3x4* aBones = player.m_bones;
+
+		if (g_espSkeleton)   // :1409-1511
+		{
+			const uint32_t col = EspCol(g_espSkeletonVisColors ? (player.m_visible ? g_espSkeletonVisibleColor : g_espSkeletonInvisibleColor) : g_espSkeletonColor, a);
+			const matrix3x4* m = aBones;
+			const int nBones = std::min(pHdr->numbones, (int)MAXSTUDIOBONES);
+			std::vector<SkelEdge> edges;
+			for (int i = 0; i < nBones; i++)
+			{
+				if (!(BoneFlags(pHdr, i) & BONE_USED_BY_HITBOX)) continue;
+				int par = BoneParent(pHdr, i);
+				while (par >= 0 && par < nBones && !(BoneFlags(pHdr, par) & BONE_USED_BY_HITBOX))
+					par = BoneParent(pHdr, par);
+				if (par < 0 || par >= nBones) continue;
+				const Vec3 c = BonePos(m, i), pp = BonePos(m, par);
+				if (g_espSkeletonType == 2)
+				{
+					edges.push_back({ i, par, c, pp });
+					continue;
+				}
+				Vec3 s0, s1;
+				if (SDK::W2S(c, s0) && SDK::W2S(pp, s1))
+					EspQ::Line(s0.x, s0.y, s1.x, s1.y, col, g_espSkeletonThickness);
+			}
+			if (g_espSkeletonType == 2)
+				SmoothSkeleton(edges, col, g_espSkeletonThickness);
+		}
+
+		if (g_espHitboxes && g_espHitboxesMode == 0)
+		{
+			std::vector<std::array<Vec3, 8>> boxes;
+			HitboxCorners(pHdr, aBones, boxes);
+			PushHitboxes(boxes, EspCol(g_espHitboxColor, a), g_espHitboxesThickness);
+		}
+
+		if (sid && g_espAvatarPosition == 3 && player.m_hasHead)   // :1549-1583 cover head
+		{
+			Vec3 sh, se;
+			if (SDK::W2S(player.m_head, sh) && SDK::W2S(player.m_head + player.m_viewRight * player.m_headRadius, se))
+			{
+				const float r = fabsf(se.x - sh.x) * g_espAvatarHeadScale;
+				if (r > 0.5f)
+					EspQ::Avatar(sh.x - r, sh.y - r, sh.x + r, sh.y + r, sid, a, r);
+			}
+		}
+	}
+
+	if (sid && (g_espAvatarPosition == 1 || g_espAvatarPosition == 2))   // :1584-1601 above / below box
+	{
+		const float size = g_espAvatarSize;
+		const bool below = g_espAvatarPosition == 2;
+		const float x = b.l + (b.w - size) * 0.5f;
+		const float y = below ? b.b + 2 + p.pad[PAD_BOTTOM] : b.t - 5 - size - p.pad[PAD_TOP];
+		EspQ::Avatar(x, y, x + size, y + size, sid, a, size * 0.5f);
 	}
 }
 
@@ -814,6 +878,7 @@ void CEsp::DrawBuildings(CTFPlayer* pLocal)
 	if (!g_espBuildings && !g_espBldTeam)
 		return;
 	const Vec3 vLocalOrigin = pLocal->GetAbsOrigin();
+	const float flYaw = DEG2RAD(I::EngineClient->GetViewAngles().y);   // ScreenBox tight trim, see esp.h EspPlayer::m_viewYaw
 	const float h = FontH();
 	for (auto pEntity : H::Entities.GetGroup(EntityEnum::BuildingAll))
 	{
@@ -838,7 +903,7 @@ void CEsp::DrawBuildings(CTFPlayer* pLocal)
 
 		Part p;
 		p.a = a; p.vOrigin = vOrigin; p.vMins = pObj->m_vecMins(); p.vMaxs = pObj->m_vecMaxs();
-		if (!ScreenBox(vOrigin, p.vMins, p.vMaxs, p.box, true))
+		if (!ScreenBox(vOrigin, p.vMins, p.vMaxs, p.box, true, flYaw))
 			continue;
 		const int iIdx = pObj->entindex();
 		if (iIdx <= 0 || iIdx >= 2048)

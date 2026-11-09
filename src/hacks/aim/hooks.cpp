@@ -12,6 +12,7 @@
 #include "nospread_hitscan.h"
 #include "movesim.h"
 #include "esp.h"
+#include "../visuals/esp_preview.h"
 #include "backtrack.h"
 #include "scope_fov.h"
 #include "hud_aim.h"   // botox hud group data, collected in IEngineVGui_Paint
@@ -1188,6 +1189,10 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 		}
 		H::Draw.End();
 	}
+
+	// esp preview: menu (ui panels) and in game, frame-gated inside
+	if (iMode & (PAINT_UIPANELS | PAINT_INGAMEPANELS))
+		EspPreview::Paint();
 
 	CALL_ORIGINAL(rcx, iMode);
 

@@ -102,6 +102,7 @@ add_library(botox SHARED
     src/hacks/menu/fonts.cpp
     src/hacks/visuals/lsd_chams.cpp
     src/hacks/visuals/player_stencil.cpp
+    src/hacks/visuals/esp_preview_tex.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp

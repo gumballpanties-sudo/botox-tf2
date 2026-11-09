@@ -617,7 +617,6 @@ static void TextureBugCumidere(void* pLocal, UserCmd_t* pCmd)
 //   hull 82 / 62 (csgo 72 / 54), an air duck moves the feet 20 (csgo 9)
 //   no air duck speed crop: CGameMovement::HandleDuckingSpeedCrop is ground-only (csgo 0.34)
 //   jump 289 flat (tf_gamemovement.cpp:1315), no stamina; sv_airaccelerate default 10
-//   tung surf key arms texture_bug too, with its widened vertical gate (TungRampBand)
 // Not ported, TF2 has no such thing here: ladders, edge surf, fireman, air freeze, the pixel
 // finder trick log, the wall climb caught/active gates (WC runs AFTER tb in this pipeline and
 // yields to s_tbRideHold itself).
@@ -977,10 +976,9 @@ static void TextureBugImpl(void* pLocal, UserCmd_t* cmd, const bool tb_on, const
         cmd->buttons     = c.buttons;
     };
 
-    /* nearest vertical face along 8 world yaws, within reach of the hull. tung surf widens the
-       vertical gate to its own band (TungRampBand), that is all tung is on top of this */
+    /* nearest vertical face along 8 world yaws, within reach of the hull */
     const float reach  = std::clamp(g_tbReach, 0.f, 48.f);
-    const float nz_max = TungRampBand(tung_on, g_tungMaxNz, 0.05f);
+    const float nz_max = 0.05f;
     Vec3  n{};
     float yaw_in = 0.f;
     {
@@ -2280,8 +2278,7 @@ static void Off()
 static void TB_PreserveMove(void* pLocal, UserCmd_t* pCmd)
 {
     const bool tb   = On(g_textureBug, g_textureBugKey, g_textureBugMode);
-    const bool tung = !tb && On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);   // tung rides tbx too
-    if (!pCmd || !EntAlive(pLocal) || !g_tbWallstrafe || !(tung || (tb && g_tbStyle == 1)))
+    if (!pCmd || !EntAlive(pLocal) || !g_tbWallstrafe || !(tb && g_tbStyle == 1))
         return;
     if (Recorder_OwnsCmd() || On(g_airStuck, g_airStuckKey, g_airStuckMode) || s_wallClimbHit) {
         tbx::s_tb.reset_command();
@@ -2320,14 +2317,14 @@ static void TextureBugBotox(void* pLocal, UserCmd_t* pCmd, const bool bTbOn, con
 static void TextureBug(void* pLocal, UserCmd_t* pCmd)
 {
     const bool bTbOn   = On(g_textureBug, g_textureBugKey, g_textureBugMode);
-    const bool bTungOn = !bTbOn && On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);
     if (bTbOn && g_tbStyle == 0)
     {
         tbx::Off();
         TextureBugCumidere(pLocal, pCmd);
         return;
     }
-    TextureBugBotox(pLocal, pCmd, bTbOn, bTungOn);
+    // tung surf is its own engine now (tungsurf.inl), botox tung_surf: it never arms texture_bug
+    TextureBugBotox(pLocal, pCmd, bTbOn, false);
 }
 
 // ============================================================================

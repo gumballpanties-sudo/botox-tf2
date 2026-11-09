@@ -728,7 +728,8 @@ extern bool g_jumpstats;        // botox jump stats: clean landing -> chat line 
 // ps fix, from botox csgo-sdk. Simplified where the botox source is a full sim-planner or a
 // second search engine (see movement_tricks2.inl's header comment) -- defaults OFF.
 extern bool g_tungSurf;    extern int g_tungSurfKey;    extern int g_tungSurfMode;
-extern float g_tungMaxNz;       // texturebug.inl's ramp_band widened to this while tung is on (def .25, .05-.5)
+extern float g_tungSnap;        // tungsurf.inl: snap planes this far past the natural z (botox m_tung_surf_snap, 0-32 u)
+extern bool  g_tungPress;       // tungsurf.inl: press into the wall when it keeps / makes the pin (m_tung_surf_press)
 extern bool g_autoBounce;  extern int g_autoBounceKey;  extern int g_autoBounceMode;
 extern int   g_abMode;        // auto bounce plan: 0 drop in / 1 keep speed / 2 stop
 extern float g_abMinGain;     // speed it must add over your own xy (def 0, 0-500)
@@ -802,6 +803,7 @@ extern bool  g_psFinderTb;         // also mark texturebug seams on the column (
 extern bool  g_psFinderNoProps;    // finder traces refuse props (static + prop_* ents)
 extern bool  g_psFinderLength;     // walk each found surf along its wall, draw how long it runs (heroin finder_length)
 extern bool  g_psMapLines;         // show whole-map scan lines -- survives the finder going off
+extern float g_psMapMaxDist;       // max visible distance of map-scan marks (0 = no limit; skybox = far)
 extern bool g_psAssist;    extern int g_psAssistKey;    extern int g_psAssistMode;
 extern int  g_psSetPointKey;       // save aimed finder point as assist target (edge press)
 extern int  g_psDeletePointKey;    // delete aimed finder/assist point (edge press)
@@ -984,6 +986,7 @@ extern int  g_offAirDash;       // m_iAirDash -- scout double jump budget
 extern int  g_offItemDefIndex;  // m_iItemDefinitionIndex (DT_EconEntity) -- Atomizer detect
 extern int  g_offTeamNum;       // m_iTeamNum -- friendly team brushes are not solid to us
 extern int  g_offCollGroup;     // m_CollisionGroup -- solid-to-player-movement objects still are
+extern int  g_offSkyArea;       // m_Local.m_skybox3d.area -- 3D skybox BSP area, 255 = none
 // The interp-removal netvars that used to sit here (m_flSimulationTime, m_flOldSimulationTime,
 // m_iObserverMode, m_hObserverTarget, m_PlayerAnimState, m_flTauntYaw, m_bAllowMoveDuringTaunt,
 // m_nPlayerCondEx2, m_flCycle, m_nSequence, m_bSequenceLoops) went with that feature. Eight of

@@ -2,6 +2,7 @@
 #include "../../globals/pinned_thread.h"   // routecalc.inl solver worker
 #include "movement.h"
 #include "../hud/avatar_cache.h"   // Avatar_Pump piggybacks this game-thread tick
+#include "../../hooks/crashlog.h"   // CrashSpan: stutter probe on the whole pipeline
 #include "../lua/lua.h"            // lua create_move / pre_prediction (no-aim CreateMove path)
 #include "prediction.h"   // engine prediction core (Pred_*, restore, sim pool, snapshots)
 #include "recorder.h"      // movement recorder (record/play owns the cmd before features run)
@@ -538,6 +539,43 @@ static bool MV_PointUnusable(const Vec3& p)
 {
     if ((MV_PointContents(p) & 0x1) != 0) return true;      // CONTENTS_SOLID
     return s_mvOutsideOk == 1 && MV_PointOutsideWorld(p);
+}
+
+// ---- which BSP AREA a point sits in (-1 = could not ask) ---------------------------------
+// IVEngineClient GetBSPTreeQuery 42 + GetLeavesArea 57 (cdll_int.h order, == Amalgam x64
+// IVEngineClient.h, counted from the confirmed GetLevelName 51) and ISpatialQuery slot 1
+// EnumerateLeavesAtPoint (bsptreedata.h:71: LeafCount 0, then the enumerators, no dtor). The
+// whole-map scan asks it to tell the 3D skybox (its own area) from the map.
+// Validated once like PointOutsideWorld: the tree's LeafCount (its slot 0) has to equal the
+// engine's LevelLeafCount (41). Anything else = not the interface we think, gate stays off.
+struct MvLeafCatch   // ISpatialLeafEnumerator: one virtual, first leaf wins, stop
+{
+    virtual bool EnumerateLeaf(int leaf, intptr_t ctx) { *reinterpret_cast<int*>(ctx) = leaf; return false; }
+};
+static MvLeafCatch s_mvLeafCatch;
+static int s_mvAreaOk = -1;               // -1 not asked yet, 0 do not trust, 1 trusted
+static int MV_PointArea(const Vec3& p)
+{
+    if (!g_engine) return -1;
+    __try {
+        void** ve = *(void***)g_engine;
+        void* q = ((void*(__fastcall*)(void*))ve[42])(g_engine);
+        if (!q) return -1;
+        void** vq = *(void***)q;
+        if (s_mvAreaOk < 0)
+        {
+            const int nTree = ((int(__fastcall*)(void*))vq[0])(q);
+            const int nLvl  = ((int(__fastcall*)(void*))ve[41])(g_engine);
+            s_mvAreaOk = (nTree > 0 && nTree == nLvl) ? 1 : 0;
+            DebugLog("MV: BSP area query self-check: tree leaves %d, level leaves %d -> %s",
+                     nTree, nLvl, s_mvAreaOk ? "ok" : "MISMATCH, area gate OFF");
+        }
+        if (s_mvAreaOk != 1) return -1;
+        int leaf = -1;
+        ((bool(__fastcall*)(void*, const Vec3&, void*, intptr_t))vq[1])(q, p, &s_mvLeafCatch, (intptr_t)&leaf);
+        if (leaf < 0) return -1;
+        return ((int(__fastcall*)(void*, int*, int))ve[57])(g_engine, &leaf, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 
 // WorldProps now rejects trigger / non-solid volumes itself -> the two filters are
@@ -1979,7 +2017,7 @@ static void AutoAlignStickDrop(const char* why)
 
 static bool TbBindOn()
 {
-    return On(g_textureBug, g_textureBugKey, g_textureBugMode) || On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);
+    return On(g_textureBug, g_textureBugKey, g_textureBugMode);
 }
 
 // true = the stick owns this cmd (AutoAlign's scan path is skipped)
@@ -2222,7 +2260,6 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
     static int   s_aaPropRej = 0;   // faces refused for being a prop (diag, per second)
 
     s_aaStickOwns = false;   // per cmd: only the stick's pick below sets it
-    s_aaCreepOn   = false;   // per cmd: only the creep below sets it
     if (!g_autoAlign) // plain on/off, no bind (user pick)
     {
         s_aaWallDetected = false;
@@ -2416,30 +2453,10 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
         pCmd->forwardmove = flCosRot * 10.f;
         pCmd->sidemove = -flSinRot * 10.f;
     }
-    // sv_wallbug 0, hull already at the face: the 10 u/s press reaches the face's shell every tick,
-    // its clip pushes the hull off (+DIST_EPSILON) and the lip below is skipped -- 11-08 log: ~50
-    // air wall ticks, zero pinned. Creep instead (MV_DriftHold creep: half the gap a tick, never
-    // touching), so the lip is still being closed on when the feet cross its top. Approach from
-    // further out keeps the press
-    static int s_aaCreep = 0;
-    if (!bDetect && CvarFloat("sv_wallbug", 0.f) < 0.5f && SimsLeft() >= 3)
-    {
-        Vec3 n(trace.plane.normal.x, trace.plane.normal.y, 0.f);
-        n.Normalize();
-        TraceFilterWorldProps fil; fil.Setup(pLocal);
-        GameTrace_t gt{};
-        RestoreOriginal();
-        const Vec3 o = EntV3(pLocal, g_offOrigin);
-        TraceHull(o, o - n * 2.f, vMins, vMaxs, MASK_PLAYERSOLID, &fil, &gt);
-        if (!gt.startsolid && gt.fraction * 2.f < 0.25f)
-        {
-            int sims = 0;
-            MV_DriftHold(pLocal, pCmd, nBasePredicted - 1, n, false, 1, sims, nullptr, true);
-            ++s_aaCreep;
-            s_aaCreepOn = true;   // PixelSurf's hunt re-solves this every simulated tick (pixelsurf.inl creep mirror)
-            s_aaCreepN  = n;
-        }
-    }
+    // sv_wallbug 0 keeps botox's 10 u/s press too (= botox-css AA, same 1/32 clip nudge). The 11-08
+    // creep fallback (half the gap a tick) was deleted 11-09: 08:02 log, every creep catch was shallow
+    // (pd >= 0.0293, 0-1 tick rides) while PS hold's hard-press catches rode 10-15. Ride length = catch
+    // depth (css RULE), and a ~0 closing speed approach is the shallow one
 
     // AutoAlign shipped with NO diag at all, so 6056 lines of debug.log had 3551 TB:
     // and zero AA:, and "it aligns worse than TB" had nothing to read. 120th like TB's ramp
@@ -2457,13 +2474,13 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
             const Vec3 v = EntV3(pLocal, g_offVelocity);
             // prop= is the new one: ticks whose nearest face was a prop and was refused. A ride
             // that used to end in a wedge now reads as prop counting up with det holding
-            DebugLog("AA: ticks=%d det=%d crp=%d prop=%d ang=%.2f nx=%.2f ny=%.2f nz=%.3f frac=%.3f "
+            DebugLog("AA: ticks=%d det=%d prop=%d ang=%.2f nx=%.2f ny=%.2f nz=%.3f frac=%.3f "
                      "tan=%.1f xy=%.0f vz=%.1f look=%.1f fwd=%.1f side=%.1f",
-                     s_aaTicks, s_aaDet, s_aaCreep, s_aaPropRej, flFoundAngle, trace.plane.normal.x,
+                     s_aaTicks, s_aaDet, s_aaPropRej, flFoundAngle, trace.plane.normal.x,
                      trace.plane.normal.y,
                      trace.plane.normal.z, trace.fraction, flTangentInput, v.Length2D(), v.z,
                      v.Length2D() * TickInterval(), pCmd->forwardmove, pCmd->sidemove);
-            s_aaTicks = 0; s_aaDet = 0; s_aaPropRej = 0; s_aaCreep = 0;
+            s_aaTicks = 0; s_aaDet = 0; s_aaPropRej = 0;
         }
     }
 }
@@ -2544,6 +2561,9 @@ static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
 // edge skip + blockbot. After movement_ex.inl -- reuses its AutoCrouch-shaped
 // trace helpers conceptually but shares nothing directly, just the file's own statics.
 #include "movement_edge.inl"
+// tung surf = botox tung_surf (local server snap-to-pixelsurf). Last: it reads every other
+// feature's owns flags (s_ab, s_esActive, s_asHolding) and fakemove.inl's hooks call into it
+#include "tungsurf.inl"
 
 // ==== per-cmd pipeline (Aletherium RunPre -> prediction -> RunPost -> restore) ====
 static void Movement_RunImpl(UserCmd_t* pCmd)
@@ -2641,6 +2661,10 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     PsCmdStart(pLocal);   // botox ps_cmd_start: a duck key flipped on a live ride bails pixel surf
     const bool probesOK = g_frameReady && g_offVelocity > 0 && g_offOrigin > 0
                        && g_offMins > 0 && g_offMaxs > 0 && g_offFlags > 0;
+    // botox create_move_proxy:408 -- tung surf before every sim: its snap (ProcessMovement hook)
+    // has to be in all of them, Pred_Start's own tick included
+    if (!bMoveBlocked && probesOK && g_predReady && (g_tungSurf || s_tungStance >= 0))
+        TungSurf(pLocal, pCmd);
     // the movement half is asked for only on a cmd the movement features may act on --
     // a blocked cmd runs none of them, so starting prediction for them would buy one wasted sim
     const bool needPredMove = !bMoveBlocked
@@ -2951,6 +2975,7 @@ void Movement_Run(UserCmd_t* pCmd)
     // out here, not at the end of RunImpl: every early return and the SEH above have to
     // clear it too, or one blocked cmd leaves every later sim of the session forced to walk
     g_predWalkSims = false;
+    g_predInSim    = false;
     // the IN_JUMP bit the server is about to see = m_nOldButtons for the NEXT cmd. Every
     // feature that presses jump on a ground tick (mini jump's chain, wall climb's launch, the
     // PS assist launch) has to know whether the engine will take that press or refuse it as a
@@ -3168,6 +3193,7 @@ void Movement_RunGuarded(UserCmd_t* pCmd)
 void __fastcall h_CreateMove(void* rcx, int seq, float frametime, bool active)
 {
     MiscHookGuard _g;   // the whole movement pipeline runs under this -- drain it on eject
+    CrashSpan _s("cm/move");   // routecalc / prediction / sims: the per-tick cost nothing else measures
     h_CreateMove_impl(rcx, seq, frametime, active);
 }
 

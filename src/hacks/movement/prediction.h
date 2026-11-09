@@ -215,6 +215,10 @@ int       SimsLeft();
 // be undone by a RestoreToFrame (which reloads the engine's real noclip frame) and the live
 // entity outside a sim keeps the movetype the server gave it. Set per cmd by Movement_RunImpl.
 extern bool g_predWalkSims;
+// true only while Pred_Simulate's own ProcessMovement runs (botox g_prediction.m_in_begin). The
+// client ProcessMovement hook tells our sims (gate: tick base) from the engine's replays (gate:
+// start origin) with it. Cleared in Movement_Run too, so a faulted sim cannot leave it set.
+extern bool g_predInSim;
 
 // ==== the prediction chain ====
 datamap_t* EntPredDescMap(void* e);

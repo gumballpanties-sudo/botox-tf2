@@ -21,6 +21,7 @@ RestoreFrame_t g_fnRestoreFrame = nullptr;
 
 bool g_predDirty     = true;   // the entity no longer holds the restore frame
 bool g_predWalkSims  = false;  // sim as MOVETYPE_WALK (see prediction.h)
+bool g_predInSim     = false;  // inside Pred_Simulate's ProcessMovement (see prediction.h)
 int  g_simsThisCmd   = 0;
 int  g_simReserve    = 0;
 
@@ -304,7 +305,9 @@ void Pred_Simulate(void* pLocal, UserCmd_t* pCmd)
 
     ((SetupMove_t)predVt[kPred_SetupMove])(g_prediction, pLocal, pCmd, g_moveHelper, &s_moveData);
     void** gmVt = *(void***)g_gameMovement;
+    g_predInSim = true;   // botox g_prediction.m_in_begin: the ProcessMovement hook knows our sims from engine replays
     ((ProcessMove_t)gmVt[kGM_ProcessMovement])(g_gameMovement, pLocal, &s_moveData);
+    g_predInSim = false;
     ((FinishMove_t)predVt[kPred_FinishMove])(g_prediction, pLocal, pCmd, &s_moveData);
 
     ((SetHost_t)mhVt[kMH_SetHost])(g_moveHelper, nullptr);

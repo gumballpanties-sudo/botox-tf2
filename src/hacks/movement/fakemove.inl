@@ -649,8 +649,14 @@ static void FM_PostSafe(CMoveData* mv, FmCtx& c)
     __try { FM_Post(mv, c); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// tung surf's snap (tungsurf.inl, included after this file), botox process_movement.cpp: the
+// slot's origin goes on BEFORE the move, then every fake movement edit sees the snapped start
+static void TungApplySv(CMoveData* mv);
+static void TungApplyCl(void* player, CMoveData* mv);
+
 static void __fastcall h_ProcessMovementSv(void* thisptr, void* player, CMoveData* mv)
 {
+    TungApplySv(mv);
     FmCtx c;
     const bool on = FM_PreSafe(player, mv, true, c);
     if (!c.skip) o_ProcessMovementSv(thisptr, player, mv);
@@ -667,6 +673,7 @@ static void __fastcall h_ProcessMovementSv(void* thisptr, void* player, CMoveDat
 
 static void __fastcall h_ProcessMovementCl(void* thisptr, void* player, CMoveData* mv)
 {
+    TungApplyCl(player, mv);
     FmCtx c;
     const bool on = FM_PreSafe(player, mv, false, c);
     if (!c.skip) o_ProcessMovementCl(thisptr, player, mv);

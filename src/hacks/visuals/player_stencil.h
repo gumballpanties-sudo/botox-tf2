@@ -30,9 +30,15 @@ struct PlayerStencilSettings
 	PlayerStencilCapsule capsules[kMaxCapsules];
 };
 
-// Main thread, after the stencil marking draws. Copies s.
-void PlayerStencil_Submit(const PlayerStencilSettings& s);
-// shaders refused / targets failed for good: outline + inner glow off, glow back to the halo
+// Main thread, after the stencil marking draws. Copies s. bPreview = false routes to the live,
+// screen-sized target set (unchanged default: every existing call site keeps drawing the live
+// instance); true routes to the second, 520x800-ish esp-preview target set (aim/chams.cpp
+// Glow_RenderPreview) so the two never thrash rebuilding each other's D3DPOOL_DEFAULT textures
+// every frame over their differing sizes.
+void PlayerStencil_Submit(const PlayerStencilSettings& s, bool bPreview = false);
+// shaders refused / targets failed for good: outline + inner glow off, glow back to the halo.
+// Device-level (shaders are shared by both instances), so this covers the preview path too.
 bool PlayerStencil_Failed();
-// render.cpp h_Reset: the DEFAULT-pool targets must be gone before the device resets (shaders survive)
+// render.cpp h_Reset: the DEFAULT-pool targets must be gone before the device resets (shaders
+// survive). Releases both instances' targets.
 void PlayerStencil_ReleaseTargets();

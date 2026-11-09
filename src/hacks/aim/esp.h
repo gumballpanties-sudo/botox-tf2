@@ -1,13 +1,49 @@
 #pragma once
 #include "sdk.h"
 #include "projsim.h"   // ProjectileInfo / F::ProjSim -- grenade/projectile path draw reuses this
+#include "../esp/esp_vars.h"   // EF_COUNT -- EspPlayer::m_flags size
 #include <array>
+#include <cstdint>
+#include <string>
 
 // Player + building esp = botox hacks/visuals/players/players.cpp, ported 1:1 onto the TF2 SDK.
 // Recorded into hacks/esp/esp_queue.h (botox m_draw_data) on the game thread, replayed by
 // render.cpp RenderEspQueue in the ImGui frame. World entities (ammo, weapons, projectiles,
 // paths, sound pings) stay on the vgui surface (H::Draw) they were written for.
 // Vars: hacks/esp/esp_vars.h (plain primitives, dih side), not the aim ConfigVar tree.
+
+// botox n_players::esp_player_t, ported 1:1. Everything CEsp::DrawPlayer reads, gathered from the
+// entity (CEsp::DrawPlayers) or made up (esp preview, on a fake player). DrawPlayer must never read
+// H::Entities / pLocal: every number it needs lives here. esp.h is aim-only (hacks/aim/*.cpp), so
+// this struct is safe to define here rather than in a separate aim-only header -- esp_preview.cpp
+// (the orchestrator's unit, also under hacks/aim/) includes esp.h to fill one of these.
+struct EspPlayer
+{
+	float m_alpha = 1.f;
+	Vec3 m_origin{}, m_mins{}, m_maxs{};   // world hull: ScreenBox tight (2d box) + the box_3d corners
+	float m_viewYaw = 0.f;                 // radians; ScreenBox's tight trim (live: camera; preview: its own)
+
+	std::string m_name;                    // truncated to 24 + "[bot] " prefix already applied
+	int m_health = 0;
+	float m_healthFactor = 0.f;            // animated health / max, clamped 0..1
+	bool m_visible = false;                // visibility trace result (lazy: only run if a vis-colour feature asked)
+	float m_distance = 0.f;
+
+	uint64_t m_steamId = 0;                // 0 = no avatar (bot / lookup failed)
+	int m_weaponId = 0;                    // ETFWeaponType; 0 = no active weapon -> WeaponName() returns null
+	bool m_hasAmmo = false;                // active weapon has a clip and the ammo bar is on (bakes in g_espAmmoBar: it also gates the m_flAmmo animation, a shared mutable state update, not just a draw toggle)
+	float m_ammoFactor = 0.f;              // animated clip / max clip, clamped 0..1
+
+	bool m_flags[EF_COUNT] = {};           // EspFlagBit row shown (all false if g_espFlags is off)
+
+	const studiohdr_t* m_studio = nullptr; // null = no skeleton / hitboxes / head avatar this player
+	const matrix3x4* m_bones = nullptr;    // caller-owned array (stack local in DrawPlayers); must outlive the DrawPlayer call
+
+	bool m_hasHead = false;                // true only if bones resolved AND hitbox 0 (head) is valid
+	Vec3 m_head{}, m_viewRight{};          // world head centre + camera right vector, for the head avatar's screen radius
+	float m_headRadius = 0.f;
+};
+
 class CEsp
 {
 private:
@@ -38,6 +74,9 @@ private:
 public:
 	// aim/hooks.cpp IEngineVGui::Paint, game thread, once a frame
 	void Draw(CTFPlayer* pLocal);
+	// botox n_players::draw_player, split out of DrawPlayers so esp preview can feed it a fake
+	// player. Pure draw: every EspQ:: emission below, no entity / H::Entities / pLocal reads.
+	void DrawPlayer(const EspPlayer& p);
 	// aim/events.cpp player_hurt (our hits only): damage numbers + on-hit hitboxes
 	void OnPlayerHurt(CTFPlayer* pVictim, int iDamage);
 };

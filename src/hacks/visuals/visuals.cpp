@@ -13,6 +13,7 @@
 #include "world_fx2.h"    // WorldFx2_Tick/_OnFindMaterial -- dlight, tints
 #include "mc_world.h"     // MCWorld_OnSkyBoxDrawn -- minecraft sky behind the 2D sky draw
 #include "../misc/game_extras.h"   // ChatTranslator_OnUserMessage -- DispatchUserMessage
+#include "../../hooks/crashlog.h"     // CrashSpan: stutter probe on DrawModelExecute (chams, frame blend bones)
 #include <intrin.h>       // _ReturnAddress -- net_graph must still read the real lerp
 
 // ConVar-string redirect scratch, file-local because nothing outside this file has ever
@@ -1378,6 +1379,7 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
 void __fastcall h_DrawModelExecute(void* rcx, const void* pState, const void* pInfo, const void* pBones)
 {
     MiscHookGuard _g;
+    CrashSpan _s("dme/model");   // includes the engine's own draw: max = one slow model, sum = the frame's models
     h_DrawModelExecute_impl(rcx, pState, pInfo, pBones);
 }
 

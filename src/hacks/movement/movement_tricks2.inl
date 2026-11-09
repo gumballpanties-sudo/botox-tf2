@@ -13,8 +13,7 @@
 //
 // Ported as OPTIONS of what already works, not as second engines, where the botox source is
 // itself a full sim-planner or a second search algorithm:
-//   tung surf   -- a relaxed-tolerance knob on TextureBug (texturebug.inl), not botox's own
-//                  ~700-line sim/replay/learn engine (itself flagged UNTESTED + low priority)
+//   (tung surf is no longer here: botox's own engine, ported whole in tungsurf.inl)
 //   bounce / auto bounce -- one real-time wall-tangent redirect below, not botox's sim-searched
 //                  point planner (n_assist::run/programs/budgets) -- no points file this pass
 //   pixel finder headbounce/pixeljump -- two new probe/classify branches added to psassist.inl's

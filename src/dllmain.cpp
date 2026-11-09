@@ -671,7 +671,7 @@ bool g_jumpstats = false;
 
 // -- Movement tricks 2 port (movement_tricks2.inl): tung/bounce/pf modes/eb presets/ps fix ---------
 bool g_tungSurf = false;   int g_tungSurfKey = 0;   int g_tungSurfMode = 1;
-float g_tungMaxNz = 0.25f;
+float g_tungSnap = 0.f;   bool g_tungPress = false;
 bool g_autoBounce = false; int g_autoBounceKey = 0; int g_autoBounceMode = 1;
 // auto bounce = botox auto_bounce.cpp (autobounce.inl), defaults = botox variables.h:1250-1257
 int   g_abMode = 0;           // 0 drop in / 1 keep speed / 2 stop
@@ -737,6 +737,7 @@ bool  g_psFinderTb = true;      // run the texturebug seam pass too (the red rin
 bool  g_psFinderNoProps = true; // props are not map geometry -- finder traces refuse them
 bool  g_psFinderLength = true;  // walk found surfs along the wall, draw their length
 bool  g_psMapLines = true;      // draw the whole-map scan's lines (own switch, not the finder's)
+float g_psMapMaxDist = 0.f;     // map-scan marks farther than this from you not drawn (0 = no limit)
 float g_psFinderBudget = 16.f;  // ms per cmd the chunked finder scan may spend (;
                                 // raised 2 -> 16: the scan no longer shares the TB clock, so this
                                 // is the whole bound. A sim measures ~8.8us in the log, so
@@ -807,6 +808,7 @@ int  g_prBotClass = 5;        // index into k_prClassArg -- 5 = heavy (biggest d
 
 // -- ESP (src/hacks/aim/esp.cpp, extern list hacks/esp/esp_vars.h) -- botox defaults --
 bool  g_espEnable = false;
+bool  g_espPreview = false;   // visuals > esp "esp preview" checkbox, src/hacks/visuals/esp_preview.h
 bool  g_espTeammates = false;
 float g_espMaxDistance = 0.f;
 bool  g_espDistanceFade = false;

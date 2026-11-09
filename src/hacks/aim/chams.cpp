@@ -18,11 +18,13 @@
 #include "../visuals/chams_layers.h"
 #include "../visuals/lsd_chams.h"   // LsdChams_Begin/End: the "lsd" layer
 #include "../visuals/player_stencil.h"   // botox player stencil / internal glow / full-res glow (d3d9 pass)
+#include "../visuals/esp_preview.h"  // EspPreview::Drawing/GhostStream: the preview chams branch below
 #include "../menu/cfg/vars_esp.h"            // g_esx* stencil + inner glow vars (primitives only)
 #include "../menu/cfg/vars_btchams.h"   // g_chamsBacktrack*
 #include "backtrack.h"
 #include "../esp/esp_fx.h"   // EspFx_NowMs: one clock for the sound stamp (game thread) and the draw
 #include <cmath>
+#include <cstring>
 
 void DebugLog(const char* fmt, ...);   // dllmain.cpp
 bool Aim_Active();                     // aim.cpp: false = I::/S:: never initialised, chams stays off
@@ -584,6 +586,7 @@ bool Chams_BacktrackActive()
 
 bool Chams_AnyActive()
 {
+	if (EspPreview::Drawing()) return true;   // the preview model always takes the chams branch: it stamps the stencil
 	if (g_espEnable && g_glowEnable) return true;
 	if (g_chamsEnable && (s_visible.Get().used || s_occluded.Get().used || s_backtrack.Get().used || s_sound.Get().used)) return true;
 	if (g_chamsTeam && (s_teamVisible.Get().used || s_teamOccluded.Get().used)) return true;
@@ -611,6 +614,113 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 		const char* sOrig = pOrigMat->GetName();
 		if (!sOrig || !strstr(sOrig, "invulnfx"))
 			return false;
+	}
+
+	// ---- esp preview: EspPreview::Paint() draws a fake CBaseFlex into its own target, same hook,
+	// pInfo's entity_index is not real. Unlike the live path below (no stencil -- Glow_Render marks
+	// the real scene separately, after the fact), the preview model draws once, so it has to stamp
+	// its own stencil ref 2 here for Glow_RenderPreview (chams.cpp "player glow" section) to read
+	// back off the preview target's depth-stencil. Menu has no local player: must return before pLocal.
+	if (EspPreview::Drawing())
+	{
+		const DrawCtx ctx{ fnOriginal, rcx, pState, pInfo, pBones, pOrigMat, iOrigType };
+
+		float aOrigColor[3] = { 1.f, 1.f, 1.f };
+		I::RenderView->GetColorModulation(aOrigColor);
+		const float flOrigBlend = I::RenderView->GetBlend();
+		auto Restore = [&]()
+		{
+			ForceMaterial(pOrigMat, iOrigType);
+			I::RenderView->SetColorModulation(aOrigColor);
+			I::RenderView->SetBlend(flOrigBlend);
+		};
+
+		// IMatRenderContext stencil slots 117 enable / 118 fail / 119 zfail / 120 pass / 121 cmp /
+		// 122 ref / 123 testmask / 124 writemask (verified, named kMatSysGetRenderContext etc. in the
+		// "player glow" section below -- literal 98 here only because that section's named constants
+		// are declared after this function in the file). GetRenderContext hands back a ref-counted
+		// context we must Release (1) ourselves -- unlike Glow_Render's own rc, covered separately there.
+		void* rc = VCallAt<void*>(g_matSystem, 98 /*GetRenderContext*/);
+		auto PreviewStencil = [&](int cmp, int pass)
+		{
+			if (!rc) return;
+			VCallAt<void>(rc, 117, true);
+			VCallAt<void>(rc, 121, cmp);
+			VCallAt<void>(rc, 122, 2);
+			VCallAt<void>(rc, 123, 0xFFu);
+			VCallAt<void>(rc, 124, 0xFFu);
+			VCallAt<void>(rc, 118, 1 /*keep*/);
+			VCallAt<void>(rc, 119, 1 /*keep*/);
+			VCallAt<void>(rc, 120, pass);
+		};
+
+		PreviewStencil(8 /*always*/, 3 /*replace*/);
+
+		if (!g_chamsEnable)
+			ctx.Draw();
+		else
+		{
+			// live order minus backtrack (moved to the end, after the stencil switch below):
+			// sound at alpha 1 if it has layers, occluded (ignorez), visible (or a plain draw)
+			if (s_sound.Get().used) DrawLayers(s_sound.Get(), true, 1.f, ctx);
+			if (s_occluded.Get().used) DrawLayers(s_occluded.Get(), true, 1.f, ctx);
+
+			bool bDrewModel = false;
+			if (s_visible.Get().used) bDrewModel = DrawLayers(s_visible.Get(), false, 1.f, ctx);
+			if (!bDrewModel) ctx.Draw();
+
+			if (s_backtrack.Get().used)
+			{
+				// ghosts always behind the model: stencil != 2, never written
+				PreviewStencil(6 /*notequal*/, 1 /*keep*/);
+
+				// ModelRenderInfo_t::pModel (+0x20, fbbones.h kMriModel) -> studiohdr_t, bones = the
+				// live pose this draw already got (pBones): EspPreview's stream, not a real backtrack
+				auto pModel = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(pInfo) + 0x20);
+				auto pHdr = pModel && I::ModelInfoClient ? I::ModelInfoClient->GetStudiomodel(reinterpret_cast<const model_t*>(pModel)) : nullptr;
+				const int nBones = pHdr ? std::clamp(pHdr->numbones, 0, (int)MAXSTUDIOBONES) : 0;
+				const auto* pSrc = reinterpret_cast<const matrix3x4*>(pBones);
+				// one buffer per ghost: a queued studio draw may read its bones after the next ghost is built
+				static matrix3x4 s_previewGhost[CBacktrack::kMaxRecords][MAXSTUDIOBONES];
+				int nGhost = 0;
+
+				const EspPreview::Stream stream = EspPreview::GhostStream();
+				const int records = stream.records;
+
+				auto DrawGhost = [&](int i, float alpha)
+				{
+					if (alpha <= 0.f || nBones <= 0 || nGhost >= CBacktrack::kMaxRecords) return;
+					matrix3x4* ghost = s_previewGhost[nGhost++];
+					const float shift = static_cast<float>(i + 1) * stream.step;
+					memcpy(ghost, pSrc, sizeof(matrix3x4) * nBones);
+					for (int b = 0; b < nBones; ++b) ghost[b][1][3] -= shift;   // world -y = screen right
+					DrawLayers(s_backtrack.Get(), g_chamsBacktrackXqz, alpha, ctx, ghost);
+				};
+
+				if (records > 0)
+				{
+					if (g_chamsBacktrackType == 1)
+					{
+						// botox DrawBacktrack case 1: cap thins, never shortens -- newest + oldest
+						// always, rest evenly spaced, oldest drawn first
+						const int iMax = std::clamp(g_chamsBacktrackMaxGhosts, 2, records);
+						const int iDrawn = records < iMax ? records : iMax;
+						for (int pick = iDrawn - 1; pick >= 0; --pick)
+						{
+							const int i = iDrawn > 1 ? int(float(pick) * float(records - 1) / float(iDrawn - 1) + 0.5f) : 0;
+							const float flTick = g_chamsBacktrackGradient && records > 1 ? 1.f - float(i) / float(records - 1) : 1.f;
+							DrawGhost(i, flTick);
+						}
+					}
+					else
+						DrawGhost(records - 1, 1.f);   // type 0 / 2: oldest record only
+				}
+			}
+		}
+
+		if (rc) { VCallAt<void>(rc, 117, false); VCallAt<void>(rc, 1 /*Release*/); }
+		Restore();
+		return true;
 	}
 
 	auto pLocal = H::Entities.GetLocal();
@@ -818,9 +928,14 @@ namespace
 	constexpr int kRcSetRT = 6, kRcGetRT = 7, kRcClearBuffers = 12, kRcClearColor4ub = 73, kRcDrawSSRect = 103;
 	constexpr int kRcStencilEnable = 117, kRcStencilFail = 118, kRcStencilZFail = 119, kRcStencilPass = 120,
 	              kRcStencilCmp = 121, kRcStencilRef = 122, kRcStencilTestMask = 123, kRcStencilWriteMask = 124;
-	constexpr int kMatSysBackBufferDims = 31, kMatSysBeginRTAlloc = 82, kMatSysEndRTAlloc = 83,
-	              kMatSysCreateNamedRTEx = 85, kMatSysGetRenderContext = 98;
+	constexpr int kMatSysBackBufferDims = 31, kMatSysGetBackBufferFormat = 32, kMatSysBeginRTAlloc = 82,
+	              kMatSysEndRTAlloc = 83, kMatSysCreateNamedRTEx = 85, kMatSysGetRenderContext = 98;
 	constexpr int kTexIncRef = 10, kTexDecRef = 11;
+	// Aletherium-main/Amalgam/src/SDK/Definitions/Main/ITexture.h declaration order: GetName 0 ..
+	// IncrementReferenceCount 10, DecrementReferenceCount 11 (matches kTexIncRef/kTexDecRef above),
+	// SetTextureRegenerator 12, Download 13, GetApproximateVidMemBytes 14, IsError 15. No overload
+	// groups above it (AddRef/Release are plain non-virtual inline wrappers), so the slot is exact.
+	constexpr int kTexIsError = 15;
 	// public/materialsystem/imaterialsystem.h StencilComparisonFunction_t / StencilOperation_t
 	constexpr int kStencilEqual = 3, kStencilAlways = 8, kOpKeep = 1, kOpReplace = 3;
 	constexpr int kStudioRender = 0x1, kStudioNoShadows = 0x80;   // public/model_types.h
@@ -831,6 +946,13 @@ namespace
 	bool          s_glowReady = false;
 	volatile bool s_glowRendering = false;
 	bool          s_glowLoggedDraw = false;
+
+	// esp preview targets + its own halo/blur materials (chams_api.h Glow_PreviewTarget / Glow_RenderPreview).
+	// Made once by Glow_PreviewInit (main thread): they must survive GlowRelease() (called on every map's
+	// live-glow rebuild); a reinject makes them again under the same names, like rb1/rb2.
+	void*         s_previewTarget = nullptr, *s_previewRB1 = nullptr, *s_previewRB2 = nullptr;   // ITexture*
+	IMaterial*    s_previewMatHalo = nullptr, *s_previewMatBlurX = nullptr, *s_previewMatBlurY = nullptr;
+	ChamsMatVar*  s_previewBloom = nullptr;
 
 	struct GlowItem { CBaseEntity* pEnt; float c[4]; };
 	std::vector<GlowItem> s_glowItems;
@@ -889,8 +1011,13 @@ namespace
 
 	// no C++ unwinding inside: __try (C2712)
 	// bHalo = the material system glow (pass 2 + blur + halo); pVisMat = also mark the pixels the
-	// player is visible on with stencil 2 (z-tested, invisible draw) for player_stencil.cpp's mask
-	__declspec(noinline) void GlowPasses_SEH(void* rc, int w, int h, int iStencil, float flBlur, bool bHalo, IMaterial* pVisMat)
+	// player is visible on with stencil 2 (z-tested, invisible draw) for player_stencil.cpp's mask.
+	// pRB1/pRB2 + the halo/blur materials are parameters (not the module statics) so Glow_RenderPreview
+	// can run the exact same passes against the preview target's own RTs/materials.
+	// false = faulted: the CALLER decides what goes off (a preview fault used to drop the live s_glowReady).
+	__declspec(noinline) bool GlowPasses_SEH(void* rc, int w, int h, int iStencil, float flBlur, bool bHalo, IMaterial* pVisMat,
+	                                          void* pRB1, void* pRB2, IMaterial* pMatHalo, IMaterial* pMatBlurX, IMaterial* pMatBlurY,
+	                                          ChamsMatVar* pBloom)
 	{
 		__try
 		{
@@ -922,26 +1049,26 @@ namespace
 				I::RenderView->SetColorModulation(aColor);
 				I::RenderView->SetBlend(flBlend);
 				ForceMaterial(pOrigMat, iOrigType);
-				return;
+				return true;
 			}
 
 			// SetupMid: coloured models into rb1
 			VCallAt<void>(rc, kRcStencilEnable, false);
 			void* pSavedRT = VCallAt<void*>(rc, kRcGetRT);
-			VCallAt<void>(rc, kRcSetRT, s_glowRB1);
+			VCallAt<void>(rc, kRcSetRT, pRB1);
 			VCallAt<void>(rc, kRcClearColor4ub, (unsigned char)0, (unsigned char)0, (unsigned char)0, (unsigned char)0);
 			VCallAt<void>(rc, kRcClearBuffers, true, false, false);
 			GlowDrawAll(true);
 			VCallAt<void>(rc, kRcSetRT, pSavedRT);
 
 			// SetupEnd
-			if (flBlur > 0.f && s_glowBloom)
+			if (flBlur > 0.f && pBloom)
 			{
-				s_glowBloom->SetFloatValue(flBlur);
-				VCallAt<void>(rc, kRcSetRT, s_glowRB2);
-				GlowSSRect(rc, s_glowMatBlurX, 0, 0, w, h);
-				VCallAt<void>(rc, kRcSetRT, s_glowRB1);
-				GlowSSRect(rc, s_glowMatBlurY, 0, 0, w, h);
+				pBloom->SetFloatValue(flBlur);
+				VCallAt<void>(rc, kRcSetRT, pRB2);
+				GlowSSRect(rc, pMatBlurX, 0, 0, w, h);
+				VCallAt<void>(rc, kRcSetRT, pRB1);
+				GlowSSRect(rc, pMatBlurY, 0, 0, w, h);
 				VCallAt<void>(rc, kRcSetRT, pSavedRT);
 			}
 
@@ -951,31 +1078,31 @@ namespace
 			if (iStencil > 0)
 			{
 				const int iSide = (iStencil + 1) / 2, iCorner = iStencil / 2;
-				GlowSSRect(rc, s_glowMatHalo, -iSide, 0, w, h);
-				GlowSSRect(rc, s_glowMatHalo, 0, -iSide, w, h);
-				GlowSSRect(rc, s_glowMatHalo, iSide, 0, w, h);
-				GlowSSRect(rc, s_glowMatHalo, 0, iSide, w, h);
+				GlowSSRect(rc, pMatHalo, -iSide, 0, w, h);
+				GlowSSRect(rc, pMatHalo, 0, -iSide, w, h);
+				GlowSSRect(rc, pMatHalo, iSide, 0, w, h);
+				GlowSSRect(rc, pMatHalo, 0, iSide, w, h);
 				if (iCorner)
 				{
-					GlowSSRect(rc, s_glowMatHalo, -iCorner, -iCorner, w, h);
-					GlowSSRect(rc, s_glowMatHalo, iCorner, iCorner, w, h);
-					GlowSSRect(rc, s_glowMatHalo, iCorner, -iCorner, w, h);
-					GlowSSRect(rc, s_glowMatHalo, -iCorner, iCorner, w, h);
+					GlowSSRect(rc, pMatHalo, -iCorner, -iCorner, w, h);
+					GlowSSRect(rc, pMatHalo, iCorner, iCorner, w, h);
+					GlowSSRect(rc, pMatHalo, iCorner, -iCorner, w, h);
+					GlowSSRect(rc, pMatHalo, -iCorner, iCorner, w, h);
 				}
 			}
 			if (flBlur > 0.f)
-				GlowSSRect(rc, s_glowMatHalo, 0, 0, w, h);
+				GlowSSRect(rc, pMatHalo, 0, 0, w, h);
 			VCallAt<void>(rc, kRcStencilEnable, false);
 
 			I::RenderView->SetColorModulation(aColor);
 			I::RenderView->SetBlend(flBlend);
 			ForceMaterial(pOrigMat, iOrigType);
+			return true;
 		}
 		__except (EXCEPTION_EXECUTE_HANDLER)
 		{
 			s_glowRendering = false;
-			DebugLog("glow: exception in the glow pass, glow off until the next map");
-			s_glowReady = false;
+			return false;
 		}
 	}
 
@@ -1059,6 +1186,75 @@ namespace
 		st.thickness = std::clamp(g_esxStencilThickness, 0.5f, 8.f);
 		PlayerStencil_Submit(st);
 	}
+
+	// StencilSubmit's preview twin: capsules off the GIVEN bones/hdr (EspPreview's fake model,
+	// no CTFPlayer/SetupBones) projected with the GIVEN world-to-projection (EspPreview's own
+	// camera, not WorldToScreenMatrix()). Submitted to player_stencil.cpp's second ("preview")
+	// target set so it never fights the live, screen-sized one over a rebuild every frame.
+	void StencilSubmitPreview(bool bOutline, bool bInner, const float (*w2p)[4], const void* pBonesVoid, int nBones, const void* pHdrVoid)
+	{
+		static PlayerStencilSettings st;
+		st.outline = bOutline; st.glow = false; st.inner = bInner;
+		Rgba(st.innerVisible, g_esxInnerGlowVisColor);
+		Rgba(st.innerInvisible, g_esxInnerGlowInvisColor);
+		st.innerReach[0] = std::clamp(g_esxInnerGlowIntensity, 0.25f, 4.f);
+		// fx_stencil.hlsl's gauss() loop ([loop] for i<=32) reads c7.z as its own iteration bound:
+		// doubled for the 2x target, capped at 31 so it never asks the loop to run past its hard
+		// limit. Capsule sigma below is NOT doubled: it is in NDC units and the shader already
+		// scales it by the bound viewport's own half-height (ps_capsule has no loop at all).
+		st.innerReach[2] = std::min(std::clamp(g_esxInnerGlowSize, 2.f, 30.f) * 2.f, 31.f);
+		st.innerBones = bInner && g_esxInnerGlowBones;
+		st.nCapsules = 0;
+
+		const auto* pHdr = static_cast<const studiohdr_t*>(pHdrVoid);
+		const auto* pBones = static_cast<const matrix3x4*>(pBonesVoid);
+
+		if (st.innerBones && pHdr && pBones && nBones > 0 && w2p)
+		{
+			const float focal = sqrtf(w2p[1][0] * w2p[1][0] + w2p[1][1] * w2p[1][1] + w2p[1][2] * w2p[1][2]);
+			const float width = std::clamp(g_esxInnerGlowBoneWidth, 10.f, 150.f) / 100.f;
+			auto project = [&](const Vec3& p, float ndc[2], float& w) {
+				w = w2p[3][0] * p.x + w2p[3][1] * p.y + w2p[3][2] * p.z + w2p[3][3];
+				if (w < 1.f) return false;
+				ndc[0] = (w2p[0][0] * p.x + w2p[0][1] * p.y + w2p[0][2] * p.z + w2p[0][3]) / w;
+				ndc[1] = (w2p[1][0] * p.x + w2p[1][1] * p.y + w2p[1][2] * p.z + w2p[1][3]) / w;
+				return true;
+			};
+			auto pSet = pHdr->pHitboxSet(0);
+			if (pSet)
+			{
+				for (int i = 0; i < pSet->numhitboxes && st.nCapsules < PlayerStencilSettings::kMaxCapsules; i++)
+				{
+					auto pBox = pSet->pHitbox(i);
+					if (!pBox || pBox->bone < 0 || pBox->bone >= nBones) continue;
+					const Vec3 c = (pBox->bbmin + pBox->bbmax) * 0.5f, e = (pBox->bbmax - pBox->bbmin) * 0.5f;
+					const int ax = e.x >= e.y && e.x >= e.z ? 0 : e.y >= e.z ? 1 : 2;
+					const float ext[3] = { e.x, e.y, e.z };
+					const float radius = (ext[(ax + 1) % 3] + ext[(ax + 2) % 3]) * 0.5f;
+					if (radius <= 0.f) continue;
+					Vec3 a = c, b = c;
+					(&a.x)[ax] -= std::max(ext[ax] - radius, 0.f);
+					(&b.x)[ax] += std::max(ext[ax] - radius, 0.f);
+					Vec3 wa, wb;
+					Math::VectorTransform(a, pBones[pBox->bone], wa);
+					Math::VectorTransform(b, pBones[pBox->bone], wb);
+					PlayerStencilCapsule& cap = st.capsules[st.nCapsules];
+					float fa = 0.f, fb = 0.f;
+					if (!project(wa, cap.a, fa) || !project(wb, cap.b, fb)) continue;
+					cap.sigma[0] = radius * width * focal / fa;
+					cap.sigma[1] = radius * width * focal / fb;
+					st.nCapsules++;
+				}
+			}
+		}
+
+		Rgba(st.visible, g_esxStencilVisColor);
+		Rgba(st.invisible, g_esxStencilInvisColor);
+		// c0.z in ps_rows/ps_columns: a texel-space constant against the MASK texture's own
+		// resolution (not NDC), so it needs the same x2 + 31 cap as innerReach above.
+		st.thickness = std::min(std::clamp(g_esxStencilThickness, 0.5f, 8.f) * 2.f, 31.f);
+		PlayerStencil_Submit(st, true /*preview instance*/);
+	}
 }
 
 ForcedMaterialOverride_t o_ForcedMaterialOverride = nullptr;
@@ -1076,9 +1272,72 @@ void Glow_LevelUnload() {}
 // CViewRender::LevelInit (flipworld.cpp hook) + once at inject (thread.cpp PollThread, Amalgam
 // CCore::Load style) so a mid-map inject glows without a map reload.
 // The RTs and materials live across maps (fpsoverlay vmglow) and follow the frame buffer size.
+// esp preview targets + its own halo/blur materials, once, MAIN THREAD ONLY: flipworld.cpp LevelInit
+// (map load) or the preview's own first open out of a map (esp_preview.cpp Init) -- never the inject
+// PollThread. Not part of the live glow's lifetime (GlowRelease never drops them).
+void Glow_PreviewInit()
+{
+	if (!g_matSystem) return;
+	// the preview glow draws its silhouettes with the live dev/glow_color: a mid-session inject has none yet
+	// (GlowRelease drops this one ref like its own, the next Glow_LevelInit finds it again)
+	if (!s_glowMatColor)
+	{
+		s_glowMatColor = VCallAt<IMaterial*>(g_matSystem, kMatSysFindMaterial, "dev/glow_color", "Other textures", false, (const char*)nullptr);
+		if (s_glowMatColor && !s_glowMatColor->IsErrorMaterial()) s_glowMatColor->IncrementReferenceCount();
+		else s_glowMatColor = nullptr;
+	}
+	if (s_previewTarget) return;
+	{
+		using CreateRT_t = void*(__fastcall*)(void*, const char*, int, int, int, int, int, unsigned, unsigned);
+		using Fmt_t      = int(__fastcall*)(void*);
+		auto fnCreate = (CreateRT_t)(*reinterpret_cast<void***>(g_matSystem))[kMatSysCreateNamedRTEx];
+		const int bbFmt = ((Fmt_t)(*reinterpret_cast<void***>(g_matSystem))[kMatSysGetBackBufferFormat])(g_matSystem);
+		constexpr int pw = int(EspPreview::kWidth * EspPreview::kRtScale), ph = int(EspPreview::kHeight * EspPreview::kRtScale);
+
+		auto IsMissing = [](void* tex) { return !tex || VCallAt<bool>(tex, kTexIsError); };
+		auto FindOrCreate = [&](const char* name, void*& out)
+		{
+			// no FindTexture first: off the main thread (inject PollThread) an unknown name takes the disk load
+			// path and faults in materialsystem (crash.log 11-09 14:25, +0x15DA0). Same name again = the live rb1/rb2 way.
+			out = fnCreate(g_matSystem, name, pw, ph, 0 /*RT_SIZE_NO_CHANGE*/, bbFmt, 1 /*MATERIAL_RT_DEPTH_SEPARATE*/, 0xCu /*CLAMPS|CLAMPT*/, 1u /*HDR*/);
+		};
+
+		VCallAt<void>(g_matSystem, kMatSysBeginRTAlloc);
+		FindOrCreate("botox_esp_preview", s_previewTarget);
+		FindOrCreate("botox_esp_preview_rb1", s_previewRB1);
+		FindOrCreate("botox_esp_preview_rb2", s_previewRB2);
+		VCallAt<void>(g_matSystem, kMatSysEndRTAlloc);
+
+		if (IsMissing(s_previewTarget) || IsMissing(s_previewRB1) || IsMissing(s_previewRB2))
+		{
+			DebugLog("preview: render target creation FAILED (%p %p %p)", s_previewTarget, s_previewRB1, s_previewRB2);
+			s_previewTarget = s_previewRB1 = s_previewRB2 = nullptr;
+		}
+		else
+		{
+			VCallAt<void>(s_previewTarget, kTexIncRef);
+			VCallAt<void>(s_previewRB1, kTexIncRef);
+			VCallAt<void>(s_previewRB2, kTexIncRef);
+
+			s_previewMatHalo = CreateFromVMT("botox_glow_halo_preview", "\"UnlitGeneric\"\n{\n\t\"$basetexture\" \"botox_esp_preview_rb1\"\n\t\"$additive\" \"1\"\n}\n");
+			if (!Glow_Dx8())
+			{
+				s_previewMatBlurX = CreateFromVMT("botox_glow_blurx_preview", "\"BlurFilterX\"\n{\n\t\"$basetexture\" \"botox_esp_preview_rb1\"\n}\n");
+				s_previewMatBlurY = CreateFromVMT("botox_glow_blury_preview", "\"BlurFilterY\"\n{\n\t\"$basetexture\" \"botox_esp_preview_rb2\"\n}\n");
+				s_previewBloom = s_previewMatBlurY ? FindVar(s_previewMatBlurY, "$bloomamount") : nullptr;
+			}
+			DebugLog("preview: render targets %dx%d ok, halo=%p blurx=%p blury=%p bloom=%p",
+				pw, ph, (void*)s_previewMatHalo, (void*)s_previewMatBlurX, (void*)s_previewMatBlurY, (void*)s_previewBloom);
+		}
+	}
+}
+
 void Glow_LevelInit()
 {
 	if (!g_matSystem) return;
+	// no Glow_PreviewInit here: this also runs on the inject PollThread, and 3 more RTs + 3 materials made
+	// off the main thread raced the main menu's model panel draw (crash.log 11-09 14:55, materialsystem
+	// +0x4F3B1 reading 0x20 under h_PaintTraverse). flipworld.cpp LevelInit / EspPreview make them instead.
 	if (s_glowReady) return;
 	int w, h; GlowBackBuffer(w, h);
 	if (w <= 0 || h <= 0) return;
@@ -1103,7 +1362,7 @@ void Glow_LevelInit()
 	VCallAt<void>(s_glowRB2, kTexIncRef);
 
 	// Amalgam CGlow::Initialize materials, through CreateFromVMT (KeyValues -> CreateMaterial, one IncRef)
-	s_glowMatColor = VCallAt<IMaterial*>(g_matSystem, kMatSysFindMaterial, "dev/glow_color", "Other textures", false, (const char*)nullptr);
+		s_glowMatColor = VCallAt<IMaterial*>(g_matSystem, kMatSysFindMaterial, "dev/glow_color", "Other textures", false, (const char*)nullptr);
 	if (s_glowMatColor && !s_glowMatColor->IsErrorMaterial()) s_glowMatColor->IncrementReferenceCount();
 	else s_glowMatColor = nullptr;
 	s_glowMatHalo  = CreateFromVMT("botox_glow_halo",  "\"UnlitGeneric\"\n{\n\t\"$basetexture\" \"botox_glow_rb1\"\n\t\"$additive\" \"1\"\n}\n");
@@ -1123,6 +1382,8 @@ void Glow_LevelInit()
 		(void*)s_glowMatBlurX, (void*)s_glowMatBlurY, (void*)s_glowBloom);
 	if (!s_glowReady) GlowRelease();
 }
+
+void* Glow_PreviewTarget() { return s_previewTarget; }
 
 // DoPostScreenSpaceEffects, before the original (Amalgam CClientModeShared_DoPostScreenSpaceEffects):
 // the 3D scene is done, viewmodel and HUD are not drawn yet.
@@ -1203,7 +1464,13 @@ void Glow_Render()
 	const float flBlur = bOutlineStyle ? 0.f : std::clamp(g_glowSize, 1.f, 10.f) / 3.f;
 
 	const bool bMask = bOutline || bInner;
-	GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr);
+	if (!GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr,
+	                     s_glowRB1, s_glowRB2, s_glowMatHalo, s_glowMatBlurX, s_glowMatBlurY, s_glowBloom))
+	{
+		DebugLog("glow: exception in the glow pass, glow off until the next map");
+		s_glowReady = false;
+		return;
+	}
 	if (bMask)
 		StencilSubmit(bOutline, bInner);
 
@@ -1212,4 +1479,64 @@ void Glow_Render()
 		s_glowLoggedDraw = true;
 		DebugLog("glow: first glow pass (%d models, stencil %d, blur %.2f)", (int)s_glowItems.size(), iStencil, flBlur);
 	}
+}
+
+// Called by EspPreview right after its chams draw, still inside Push3DView on the preview target
+// (bound): Glow_Render for one item, the preview entity, g_glowVisColor (it is always "seen").
+// pBones/nBones/pHdr/worldToProjection are the preview model's own (EspPreview's camera and bones,
+// not WorldToScreenMatrix()/SetupBones -- there is no real player or screen behind this draw).
+//
+// Re-enters h_DrawModelExecute through pEnt->DrawModel() exactly like the live GlowDrawAll: that
+// hook's `if (Glow_Rendering()) { draw plain; return; }` (visuals.cpp:1323, before the chams
+// branch) already keeps this from re-running the preview chams branch on every glow sub-pass --
+// the same guard that keeps the live glow from re-chamsing a player 3x a frame.
+void Glow_RenderPreview(void* pEnt, const float (*worldToProjection)[4], const void* pBones, int nBones, const void* pHdr)
+{
+	if (!pEnt) return;
+	const bool bGlow = g_espEnable && g_glowEnable;
+	const bool bLive = g_espEnable && !PlayerStencil_Failed();
+	const bool bOutline = bLive && g_esxStencil, bInner = bLive && g_esxInnerGlow;
+	if (!bGlow && !bOutline && !bInner) return;
+	if (!s_glowMatColor || !s_previewMatHalo) return;   // own targets/materials + the shared dev/glow_color; not the live s_glowReady
+	if (!g_matSystem || !g_modelRender || !I::RenderView) return;
+
+	void* rc = VCallAt<void*>(g_matSystem, kMatSysGetRenderContext);
+	if (!rc) return;
+
+	const int w = int(EspPreview::kWidth * EspPreview::kRtScale), h = int(EspPreview::kHeight * EspPreview::kRtScale);
+
+	// Amalgam CGlow::Store, one item: swap the live item list out for just the preview entity so
+	// GlowDrawAll (unmodified) draws only it. IsPlayer() is false for the fake CBaseFlex, so
+	// GlowDrawAll already takes its "else: just DrawModel" branch (no invisibility dance needed).
+	std::vector<GlowItem> saved;
+	saved.swap(s_glowItems);
+	s_glowItems.push_back(GlowItem{ reinterpret_cast<CBaseEntity*>(pEnt),
+		{ g_glowVisColor[0], g_glowVisColor[1], g_glowVisColor[2], g_glowVisColor[3] } });
+
+	const bool bOutlineStyle = g_glowStyle == 1 || Glow_Dx8();
+	const int iStencil = std::min((bOutlineStyle ? (int)std::clamp(g_glowSize + 0.5f, 1.f, 6.f) : 1) * 2, 31);
+	// $bloomamount (BlurFilterX/Y.cpp:116, pixel shader constant 3) is a brightness multiplier on
+	// the blurred result, not a tap radius: the taps themselves are spaced by 1/src_texture->
+	// GetActualHeight(), read from the real render target at draw time, so they already widen on
+	// the 2x preview target with no change here. Doubling flBlur would double brightness, not reach.
+	const float flBlur = bOutlineStyle ? 0.f : std::clamp(g_glowSize, 1.f, 10.f) / 3.f;
+
+	const bool bMask = bOutline || bInner;
+	const bool ok = GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr,
+	                                s_previewRB1, s_previewRB2, s_previewMatHalo, s_previewMatBlurX, s_previewMatBlurY, s_previewBloom);
+
+	s_glowItems.swap(saved);
+
+	if (!ok)
+	{
+		// preview only: the live glow (s_glowReady) stays up
+		DebugLog("preview: exception in the preview glow pass, preview glow off");
+		s_previewMatHalo = nullptr;   // leaked on purpose, same as the ent: its state is unknown
+		VCallAt<void>(rc, 1 /*Release*/);
+		return;
+	}
+	if (bMask)
+		StencilSubmitPreview(bOutline, bInner, worldToProjection, pBones, nBones, pHdr);
+
+	VCallAt<void>(rc, 1 /*Release*/);
 }

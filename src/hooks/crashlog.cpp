@@ -327,7 +327,8 @@ static LONG CALLBACK Veh(EXCEPTION_POINTERS* ep)
 // Per-tag max / sum / count since the last summary. Written from the game thread and the render
 // thread without a lock: a torn number costs one odd figure in a diagnostic line.
 struct Span { const char* tag; double maxMs, sumMs; long n; };
-static Span s_span[16];
+static constexpr int k_spans = 32;
+static Span s_span[k_spans];
 static int  s_spanCount = 0;
 static LARGE_INTEGER s_spanFreq{};
 
@@ -336,7 +337,7 @@ void CrashLog_Span(const char* tag, double ms)
     if (!tag) return;
     int i = 0;
     for (; i < s_spanCount; ++i) if (s_span[i].tag == tag) break;
-    if (i == s_spanCount) { if (i >= 16) return; s_span[i] = { tag, 0, 0, 0 }; ++s_spanCount; }
+    if (i == s_spanCount) { if (i >= k_spans) return; s_span[i] = { tag, 0, 0, 0 }; ++s_spanCount; }
     if (ms > s_span[i].maxMs) s_span[i].maxMs = ms;
     s_span[i].sumMs += ms; ++s_span[i].n;
 }
@@ -354,6 +355,27 @@ CrashSpan::~CrashSpan()
 static constexpr double k_stutterMs   = 33.0;    // one frame of 30 fps
 static constexpr double k_spanNoteMs  = 4.0;     // a span worth naming even in a smooth window
 static constexpr int    k_maxSummaries = 180;    // 30 minutes of 10 s windows
+
+// The 4 worst single runs this window. Spans nest (overlay/build holds ov/*), so the one
+// worst span is always the parent -- the runners-up name the child that made it slow.
+static void PrintTopSpans()
+{
+    int top[4] = { -1, -1, -1, -1 };
+    for (int i = 0; i < s_spanCount; ++i)
+        for (int k = 0; k < 4; ++k)
+            if (top[k] < 0 || s_span[i].maxMs > s_span[top[k]].maxMs) {
+                for (int j = 3; j > k; --j) top[j] = top[j - 1];
+                top[k] = i;
+                break;
+            }
+    char line[256]; int n = 0; line[0] = '\0';
+    for (int k = 0; k < 4 && top[k] >= 0 && s_span[top[k]].maxMs >= 0.5; ++k) {
+        const int w = _snprintf(line + n, sizeof(line) - n - 1, "%s%s %.1f", n ? ", " : "", s_span[top[k]].tag, s_span[top[k]].maxMs);
+        if (w <= 0) break;
+        n += w; line[n] = '\0';
+    }
+    Out("   spans: %s", n ? line : "(all < 0.5 ms)");
+}
 
 // Every 10 s: the window's stutter frames + the spans that stood out. Caller holds nothing.
 static void StutterSummary(double worstFrameMs, int stutterFrames, double windowMs)
@@ -376,6 +398,7 @@ static void StutterSummary(double worstFrameMs, int stutterFrames, double window
             iMax >= 0 ? s_span[iMax].tag : "-", worstMax, iMax >= 0 ? s_span[iMax].n : 0L, iMax >= 0 ? s_span[iMax].sumMs : 0.0,
             iSum >= 0 ? s_span[iSum].tag : "-", worstSum, iSum >= 0 ? s_span[iSum].n : 0L,
             (iSum >= 0 && s_span[iSum].n) ? s_span[iSum].sumMs / s_span[iSum].n : 0.0);
+        PrintTopSpans();
         if (s_summaries == k_maxSummaries) Out("   (stutter summary cap reached -- no further lines)");
         LeaveCriticalSection(&s_cs);
     }
@@ -418,6 +441,7 @@ void CrashLog_Frame()
     Out("[%02d:%02d:%02d] HITCH %.0f ms on the main thread (vgui frame gap)",
         t.wHour, t.wMinute, t.wSecond, ms);
     PrintMarks();
+    PrintTopSpans();   // worst runs so far this 10 s window: one near `ms` is the culprit
     if (s_hitches == k_maxHitches) Out("   (hitch cap reached -- no further hitch lines)");
     LeaveCriticalSection(&s_cs);
 }

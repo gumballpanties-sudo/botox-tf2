@@ -530,6 +530,9 @@ static void __fastcall h_FlipLevelInit(void* rcx)
     if (!g_eject) Chams_LevelInit();
     // Glow (visuals.cpp) rides the same hook for the same reason.
     if (!g_eject) Glow_LevelInit();
+    // esp preview targets: main thread, level load (no queued render thread yet). Never from the
+    // inject PollThread (chams.cpp Glow_LevelInit note). No-op once made.
+    if (!g_eject) Glow_PreviewInit();
     // old map's steamids are stale -- drop the avatar cache next Avatar_Tick.
     if (!g_eject) Avatar_OnMapChange();
     // lua level_init (botox LevelInitPostEntity: after the original)

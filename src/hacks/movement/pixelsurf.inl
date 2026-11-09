@@ -54,11 +54,6 @@ static float s_psDiagNear = 1e9f, s_psDiagNearVz = 0.f, s_psDiagNearXy = 0.f;
 // 15:29 log: every pin read -6.000 exact, zero drift = no DIST_EPSILON clip on that server. wb = sv_wallbug as the
 // client sees it (-1 = cvar not found), pvz = mean real pinned vz (-5.969 = Valve clip live, -6.000 = old clip)
 static double s_psDiagPinVz = 0.0;
-// AutoAlign crept this cmd (sv_wallbug 0, hull < 0.25u off the face): its move is a ONE-tick solve, re-solved every
-// real tick. Set in AutoAlign (movement.cpp, after this include), read by the hunt. cmir = hunts that mirrored it / finds
-static bool s_aaCreepOn = false;
-static Vec3 s_aaCreepN{};
-static int  s_psDiagCmir = 0, s_psDiagCmirFinds = 0;
 
 /* botox ps_cmd_start: your own duck key flipped on a live ride = you bailed, PS lets go until the ground */
 static void PsCmdStart(void* pLocal)
@@ -183,54 +178,14 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
     /* xy < 1 = wall hang ( stuck ), not a surf. 10-07 21:28 log: all 3 rides spd 0, one hung 53 ticks */
     const auto pinned = [pin](const Vec3& v) { return as::SurfPinned(v.z, v.Length2D(), pin); };
 
-    /* CREEP MIRROR. 21:08 log (wb=0): no PSU: latch anywhere, hunts finds=0 / hclip ~0 every second, while
-       the real ticks caught at the 640 spot. The hunt flew AutoAlign's creep move FIXED for 8 ticks, and that
-       move is a one-tick solve (close half the gap to the face's shell): replayed it keeps accelerating, the sim
-       hull hits the shell, the clip pushes it +DIST_EPSILON off and the lip below is skipped. So no duck flip
-       ever latched. When AutoAlign crept, every hunt tick re-solves the creep the way the real tick will
-       (MV_DriftHold creep, stopAlong off: across velocity only, bare-tick offset measured once) */
-    const bool creep_mirror = s_aaCreepOn && CvarFloat("sv_wallbug", 0.f) < 0.5f;
-    const auto creep_move = [&](const Vec3& offs) {
-        const Vec3& n = s_aaCreepN;
-        const Vec3 o  = EntV3(pLocal, g_offOrigin);
-        TraceFilterWorldProps fil; fil.Setup(pLocal);
-        GameTrace_t tr{};
-        TraceHull(o, o - n * 2.f, EntV3(pLocal, g_offMins), EntV3(pLocal, g_offMaxs), MASK_PLAYERSOLID, &fil, &tr);
-        const float gap = tr.startsolid ? 0.f : tr.fraction * 2.f;
-        if (gap >= 0.25f)
-            return false;   // AutoAlign creeps only inside 0.25u: out here the cmd's own move stands
-        const float dt  = TickInterval();
-        const float ulp = std::max(nextafterf(fabsf(o.x), INFINITY) - fabsf(o.x), nextafterf(fabsf(o.y), INFINITY) - fabsf(o.y));
-        const float tgt = gap > 2.f * ulp ? -0.5f * gap / dt : -(gap + ulp) / dt;
-        const Vec3 v    = EntV3(pLocal, g_offVelocity);
-        const float across = (v.x + offs.x) * n.x + (v.y + offs.y) * n.y;
-        const float dl  = tgt - across;
-        const float k   = CvarFloat("sv_airaccelerate", 10.f) * dt;
-        MV_WriteWishWorld(cmd, dl >= 0.f ? n : n * -1.f, std::min(450.f, fabsf(dl) / std::max(k, 1e-4f)));
-        return true;
-    };
-
     const auto hunt = [&](const int buttons, const int n, const int delay = 0) {
         const int live = cmd->buttons;
-        const float live_fwd = cmd->forwardmove, live_side = cmd->sidemove;
         RestoreToFrame(frame);
-        Vec3 offs{};
-        if (creep_mirror) {   // what a bare tick adds on its own (the clip epsilon), MV_DriftHold's offs
-            const Vec3 v0 = EntV3(pLocal, g_offVelocity);
-            cmd->buttons = buttons;
-            cmd->forwardmove = cmd->sidemove = 0.f;
-            Pred_Simulate(pLocal, cmd);
-            const Vec3 v1 = EntV3(pLocal, g_offVelocity);
-            offs = Vec3(v1.x - v0.x, v1.y - v0.y, 0.f);
-            RestoreToFrame(frame);
-            ++s_psDiagCmir;
-        }
         const int base = EntI(pLocal, g_offTickBase);
         int found = -1, run = 0;
         float pvz = EntV3(pLocal, g_offVelocity).z;
         for (int z = 0; z <= n && found < 0; z++) {
             cmd->buttons = z < delay ? live : buttons;
-            if (creep_mirror && !creep_move(offs)) { cmd->forwardmove = live_fwd; cmd->sidemove = live_side; }
             EntSetI(pLocal, g_offTickBase, base + z);
             Pred_Simulate(pLocal, cmd);
             if (EntI(pLocal, g_offFlags) & FL_ONGROUND) {
@@ -245,12 +200,10 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
             if (run == 2)
                 found = z - 1;
         }
-        cmd->buttons     = live;
-        cmd->forwardmove = live_fwd;
-        cmd->sidemove    = live_side;
+        cmd->buttons = live;
         RestoreToFrame(frame);
         ++s_psDiagHunts;
-        if (found >= 0) { ++s_psDiagFinds; if (creep_mirror) ++s_psDiagCmirFinds; }
+        if (found >= 0) ++s_psDiagFinds;
         return found;
     };
 
@@ -538,7 +491,6 @@ static void PixelSurf(void* pLocal, UserCmd_t* pCmd)
     s_psParkHold = g_psParkAtEnd && !(s_prePredFlags & FL_ONGROUND)
                 && fabsf(s_prePredVel.z - TargetPredictZVel()) < as::k_pinTol && s_prePredVel.Length2D() < 1.f;
     PixelSurfImpl(pLocal, pCmd);
-    s_aaCreepOn = false;   // this cmd's creep is used up; AutoAlign sets it again next cmd
     {
         static int s_lastAct = 0;
         int end = -1;
@@ -570,14 +522,12 @@ static void PixelSurf(void* pLocal, UserCmd_t* pCmd)
         {
             s_sec = sec;
             if (g_debugLogEnable && (s_psDiagWall > 0 || s_psDiagPin > 0 || s_psDiagYield[0] + s_psDiagYield[1] + s_psDiagYield[2] > 0))
-                DebugLog("PSU: sec wall=%d hunts=%d finds=%d yield=%d/%d/%d air=%d pin=%d zup=%d hclip=%d hland=%d near=%.3f vz=%.2f xy=%.0f wb=%.0f pvz=%.4f cmir=%d/%d",
+                DebugLog("PSU: sec wall=%d hunts=%d finds=%d yield=%d/%d/%d air=%d pin=%d zup=%d hclip=%d hland=%d near=%.3f vz=%.2f xy=%.0f wb=%.0f pvz=%.4f",
                          s_psDiagWall, s_psDiagHunts, s_psDiagFinds, s_psDiagYield[0], s_psDiagYield[1], s_psDiagYield[2],
                          s_psDiagAir, s_psDiagPin, s_psDiagZup, s_psDiagHClip, s_psDiagHLand,
                          s_psDiagNear < 1e8f ? s_psDiagNear : -1.f, s_psDiagNearVz, s_psDiagNearXy,
-                         CvarFloat("sv_wallbug", -1.f), s_psDiagPin > 0 ? s_psDiagPinVz / s_psDiagPin : 0.0,
-                         s_psDiagCmir, s_psDiagCmirFinds);
+                         CvarFloat("sv_wallbug", -1.f), s_psDiagPin > 0 ? s_psDiagPinVz / s_psDiagPin : 0.0);
             s_psDiagPinVz = 0.0;
-            s_psDiagCmir = s_psDiagCmirFinds = 0;
             s_psDiagWall = s_psDiagHunts = s_psDiagFinds = 0;
             s_psDiagYield[0] = s_psDiagYield[1] = s_psDiagYield[2] = 0;
             s_psDiagAir = s_psDiagPin = s_psDiagZup = s_psDiagHClip = s_psDiagHLand = 0;

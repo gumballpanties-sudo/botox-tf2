@@ -13,14 +13,10 @@ inline bool BounceTangentShouldFlip(float nx, float ny, float dirx, float diry)
     return (tx * dirx + ty * diry) < 0.f;
 }
 
-// Tung surf's widened ramp band: never stricter than TB's own band, clamped to a sane ceiling.
-// Matches movement_tricks2.inl / texturebug.inl's hook:
-// `bTungOn ? std::clamp(g_tungMaxNz, flTbBand, 0.5f) : flTbBand`
-inline float TungRampBand(bool tungOn, float wantNz, float tbBand)
+// Tung surf (tungsurf.inl) plane rank, botox tung_grid_rank: map brushes sit on the 16u grid,
+// so a snap plane on 16 is tried first, odd planes last. 0 best .. 4 worst
+inline int TungGridRank(float p)
 {
-    if (!tungOn) return tbBand;
-    float band = wantNz;
-    if (band < tbBand) band = tbBand;
-    if (band > 0.5f)   band = 0.5f;
-    return band;
+    const int i = static_cast<int>(p);
+    return i % 16 == 0 ? 0 : i % 8 == 0 ? 1 : i % 4 == 0 ? 2 : i % 2 == 0 ? 3 : 4;
 }

@@ -142,6 +142,7 @@ int g_offAirDash       = 0;  // m_iAirDash (DT_TFPlayer m_Shared) -- scout doubl
 int g_offItemDefIndex  = 0;  // m_iItemDefinitionIndex (DT_EconEntity m_AttributeManager.m_Item) -- Atomizer detect
 int g_offTeamNum       = 0;  // m_iTeamNum (DT_BaseEntity) -- team brush pass-through in the trace filter
 int g_offCollGroup     = 0;  // m_CollisionGroup (DT_BaseEntity) -- buildings stay solid to both teams
+int g_offSkyArea       = 0;  // m_Local.m_skybox3d.area (DT_Local, int, 255 = no 3D sky) -- map scan skips it
 // m_flSimulationTime / m_iObserverMode / m_hObserverTarget / m_flDuckJumpTime were resolved here
 // and read by nothing but the DebugLog below. Three belonged to the deleted interp removal; the
 // fourth is named for a mini jump gate that never used it. Four FindPropOffset table walks gone.
@@ -179,14 +180,15 @@ void Movement_ResolveExtraNetvars()
     g_offItemDefIndex  = find(FindNetworkTable("DT_EconEntity"), "m_iItemDefinitionIndex");
     g_offTeamNum       = find(pBase, "m_iTeamNum");
     g_offCollGroup     = find(pBase, "m_CollisionGroup");
+    g_offSkyArea       = find(pTFPlayer, "m_skybox3d.area");
 
     s_done = true;
     DebugLog("movement netvars: org=0x%X vel=0x%X mins=0x%X maxs=0x%X maxspd=0x%X tickbase=0x%X constraint=0x%X water=0x%X scale=0x%X cond=0x%X team=0x%X collgrp=0x%X",
              g_offOrigin, g_offVelocity, g_offMins, g_offMaxs, g_offMaxspeed,
              g_offTickBase, g_offConstraintEnt, g_offWaterLevel, g_offModelScale, g_offCond,
              g_offTeamNum, g_offCollGroup);
-    DebugLog("duck netvars: ducking=0x%X ducked=0x%X ducktime=0x%X ducktimer=0x%X airducked=0x%X",
-             g_offDucking, g_offDucked, g_offDuckTime, g_offDuckTimer, g_offAirDucked);
+    DebugLog("duck netvars: ducking=0x%X ducked=0x%X ducktime=0x%X ducktimer=0x%X airducked=0x%X skyarea=0x%X",
+             g_offDucking, g_offDucked, g_offDuckTime, g_offDuckTimer, g_offAirDucked, g_offSkyArea);
 }
 
 // The auto-backstab netvars (m_angEyeAngles[1], m_nPlayerCondEx, m_flNextAttack,

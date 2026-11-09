@@ -4,6 +4,7 @@
 #include "../aim/aim.h"   // the aimbot's vars ride in this same file
 #include "../visuals/skins.h"     // and so does the skinchanger's per-weapon block
 #include "../visuals/hats.h"      // and the hat changer's slots
+#include "../visuals/esp_preview.h"   // g_espPreview
 #include "../visuals/skinshare.h" // and the sharing toggles
 #include "../misc/names.h"        // and custom names' cycle lists + aliases
 #include "../movement/detections.h"    // movement extras
@@ -566,7 +567,8 @@ static const CfgEntry kEntries[] = {
     { "tungSurf",          CfgEntry::BOOL,  &g_tungSurf, 0 },
     { "tungSurfKey",       CfgEntry::INT,   &g_tungSurfKey, 0 },
     { "tungSurfMode",      CfgEntry::INT,   &g_tungSurfMode, 0 },
-    { "tungMaxNz",         CfgEntry::FLOAT, &g_tungMaxNz, 0 },
+    { "tungSnap",          CfgEntry::FLOAT, &g_tungSnap, 0 },
+    { "tungPress",         CfgEntry::BOOL,  &g_tungPress, 0 },
     { "autoBounce",        CfgEntry::BOOL,  &g_autoBounce, 0 },
     { "autoBounceKey",     CfgEntry::INT,   &g_autoBounceKey, 0 },
     { "autoBounceMode",    CfgEntry::INT,   &g_autoBounceMode, 0 },
@@ -652,6 +654,7 @@ static const CfgEntry kEntries[] = {
     { "psFinderNoProps",  CfgEntry::BOOL,   &g_psFinderNoProps, 0 },
     { "psFinderLength",   CfgEntry::BOOL,   &g_psFinderLength, 0 },
     { "psMapLines",       CfgEntry::BOOL,   &g_psMapLines, 0 },
+    { "psMapMaxDist",     CfgEntry::FLOAT,  &g_psMapMaxDist, 0 },
     { "psAssist",         CfgEntry::BOOL,   &g_psAssist, 0 },
     { "psAssistKey",      CfgEntry::INT,    &g_psAssistKey, 0 },
     { "psAssistMode",     CfgEntry::INT,    &g_psAssistMode, 0 },
@@ -721,6 +724,7 @@ static const CfgEntry kEntries[] = {
     { "prBotClass",       CfgEntry::INT,    &g_prBotClass, 0 },
 
     { "espEnable",               CfgEntry::BOOL,   &g_espEnable, 0 },
+    { "espPreview",              CfgEntry::BOOL,   &g_espPreview, 0 },
     { "espTeammates",            CfgEntry::BOOL,   &g_espTeammates, 0 },
     { "espMaxDistance",          CfgEntry::FLOAT,  &g_espMaxDistance, 0 },
     { "espDistanceFade",         CfgEntry::BOOL,   &g_espDistanceFade, 0 },

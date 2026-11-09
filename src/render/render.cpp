@@ -34,6 +34,7 @@
 #include "../hacks/hud/points.h"
 #include "../hacks/hud/spectator_list.h"
 #include "../hacks/esp/esp_queue.h"  // botox m_draw_data: esp recorded on the game thread, replayed in RenderEspQueue
+#include "../hacks/visuals/esp_preview.h"   // EspPreview::DropTexture in h_Reset
 #include "../hacks/visuals/player_stencil.h"  // PlayerStencil_ReleaseTargets in h_Reset
 #include "../hacks/visuals/lsd_chams.h"       // SheenNormal_Tick
 #include "../hacks/menu/fonts.h"          // fonts tab: indicator face picked at runtime
@@ -327,7 +328,10 @@ static void RenderPsOverlay()
         if (!g_psFinderPixeljump)  pj.clear();
         if (!g_psFinderJumpSurf)   js.clear();
         if (bFinder && g_psFinderTb) tb = d.tbPts;
-        if (g_psMapLines) tb.insert(tb.end(), d.mapTbPts.begin(), d.mapTbPts.end());
+        if (g_psMapLines)
+            for (const Vec3& p : d.mapTbPts)   // max visible distance: skybox seams stay hidden
+                if (g_psMapMaxDist <= 0.f || d.localOrigin.DistTo(p) <= g_psMapMaxDist)
+                    tb.push_back(p);
 
         const std::vector<Vec3>* live[kPfTypes] = { &hb, &pj, bFinder ? &d.finderPts : &none, &tb, &js };
         for (int t = 0; t < kPfTypes; t++) PfFade(s_fndAnim[t], *live[t], dt);
@@ -420,7 +424,7 @@ static void RenderPsOverlay()
     // (kFine); the middle stays on the old 64u grid, so a long seam costs ~len/64 + 8 lines.
     // the finder's surf lengths (g_psFinderLength) are the same kind of mark, drawn the same way
     // in the finder's surf colour
-    auto DrawSegs = [&](const std::vector<Vec3>& segs, int r, int g, int b8)
+    auto DrawSegs = [&](const std::vector<Vec3>& segs, int r, int g, int b8, float maxDist = 0.f)
     {
         constexpr float kPiece = 64.f;   // middle of the line
         constexpr float kFine  = 6.f;    // inside a fade zone: one alpha step per piece
@@ -434,6 +438,13 @@ static void RenderPsOverlay()
             const Vec3 dir = b - a;
             const float len = dir.Length();
             if (len < 0.01f) continue;
+            // max visible distance: nearest point of the segment to you, so a long seam you
+            // stand at the end of still draws (skybox seams are thousands of units out)
+            if (maxDist > 0.f)
+            {
+                const float t = Clamp01((d.localOrigin - a).Dot(dir) / (len * len));
+                if (d.localOrigin.DistTo(a + dir * t) > maxDist) continue;
+            }
             // a short run cannot spend 48u per side -- it gets a third of itself instead, so a
             // 32u stub still reads as a fading mark and not as a solid dash
             const float fade = std::min(kFadeU, len * 0.34f);
@@ -453,7 +464,7 @@ static void RenderPsOverlay()
         }
     };
     if (g_psMapLines && d.mapLines.size() >= 2)
-        DrawSegs(d.mapLines, 255, 255, 255);
+        DrawSegs(d.mapLines, 255, 255, 255, g_psMapMaxDist);
     if (bFinder && g_psFinderLength && d.finderLines.size() >= 2)
         DrawSegs(d.finderLines, kPfRgb[2][0], kPfRgb[2][1], kPfRgb[2][2]);
 
@@ -1306,6 +1317,7 @@ static void SplitDrawData()
     ImGuiWindow* menuRoot = ImGui::FindWindowByName("botox");
     ImGuiWindow* psRoot   = ImGui::FindWindowByName("ps point");
     ImGuiWindow* msRoot   = ImGui::FindWindowByName(Minesweeper_WindowName());   // own window, fades with the menu
+    ImGuiWindow* espRoot  = ImGui::FindWindowByName("botox-esp-preview");      // esp preview window, same
 
     for (int i = 0; i < dd->CmdListsCount; ++i)
     {
@@ -1325,7 +1337,7 @@ static void SplitDrawData()
             ImGuiWindow* w = g.Windows[wi];
             if (w->DrawList != dl) continue;
             for (ImGuiWindow* p = w; p; p = p->ParentWindowInBeginStack)
-                if (p == menuRoot || p == psRoot || p == msRoot) { menu = true; fade = (p != psRoot); break; }
+                if (p == menuRoot || p == psRoot || p == msRoot || p == espRoot) { menu = true; fade = (p != psRoot); break; }
             break;
         }
 
@@ -1761,29 +1773,13 @@ static void RecolourVertsY(ImDrawList* dl, int first, uint32_t topCol, uint32_t 
     }
 }
 
-static void RenderEspQueue()
+// replay half of RenderEspQueue, pulled out so esp preview's DrawBody (hacks/aim/esp_preview.cpp)
+// can draw its own EspFrame through the same command interpreter. Font / text-look / avatar lookup
+// stay the render.cpp statics they always were: a preview frame is built and replayed on this same
+// render thread, same ImGui frame, so nothing here needs to change for that caller.
+void EspQ_ReplayFrame(ImDrawList* dl, const EspFrame& f)
 {
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
     ImFont* font = s_fontEsp ? s_fontEsp : ImGui::GetFont();
-    // copied out under the lock, replayed outside it: Avatar_Get can create a texture, and the game
-    // thread's Commit must never spin behind that. s_rtEspSeq = the frame this build is for (multicore)
-    static EspFrame f;
-    EspQ::CopyFrame(s_rtEspSeq, f);
-    if (f.cmds.empty() || GetTickCount64() - f.stampMs > 250)
-        return;
-    // esp.cpp projects in ENGINE screen pixels (H::Draw size); ImGui draws in its DisplaySize (window
-    // client rect). Windowed + DPI scaling makes them differ, and unscaled every box and name lands
-    // off by that ratio. Everything this replay adds is rescaled at the end.
-    const ImGuiIO& io = ImGui::GetIO();
-    const float sx = f.srcW > 0.f ? io.DisplaySize.x / f.srcW : 1.f, sy = f.srcH > 0.f ? io.DisplaySize.y / f.srcH : 1.f;
-    static bool s_loggedSize = false;
-    if (!s_loggedSize)
-    {
-        s_loggedSize = true;
-        DebugLog("esp: engine screen %.0fx%.0f, imgui display %.0fx%.0f -> replay scale %.3f x %.3f",
-            f.srcW, f.srcH, io.DisplaySize.x, io.DisplaySize.y, sx, sy);
-    }
-    const int firstVtx = dl->VtxBuffer.Size;
     const auto pt = [&](int i) { return ImVec2(f.pts[i * 2], f.pts[i * 2 + 1]); };
     float lastTextLeft = 0.f;
     ImVec2 buf[64];
@@ -1888,6 +1884,31 @@ static void RenderEspQueue()
         }
         }
     }
+}
+
+static void RenderEspQueue()
+{
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    // copied out under the lock, replayed outside it: Avatar_Get can create a texture, and the game
+    // thread's Commit must never spin behind that. s_rtEspSeq = the frame this build is for (multicore)
+    static EspFrame f;
+    EspQ::CopyFrame(s_rtEspSeq, f);
+    if (f.cmds.empty() || GetTickCount64() - f.stampMs > 250)
+        return;
+    // esp.cpp projects in ENGINE screen pixels (H::Draw size); ImGui draws in its DisplaySize (window
+    // client rect). Windowed + DPI scaling makes them differ, and unscaled every box and name lands
+    // off by that ratio. Everything this replay adds is rescaled at the end.
+    const ImGuiIO& io = ImGui::GetIO();
+    const float sx = f.srcW > 0.f ? io.DisplaySize.x / f.srcW : 1.f, sy = f.srcH > 0.f ? io.DisplaySize.y / f.srcH : 1.f;
+    static bool s_loggedSize = false;
+    if (!s_loggedSize)
+    {
+        s_loggedSize = true;
+        DebugLog("esp: engine screen %.0fx%.0f, imgui display %.0fx%.0f -> replay scale %.3f x %.3f",
+            f.srcW, f.srcH, io.DisplaySize.x, io.DisplaySize.y, sx, sy);
+    }
+    const int firstVtx = dl->VtxBuffer.Size;
+    EspQ_ReplayFrame(dl, f);
     if (fabsf(sx - 1.f) > 1e-3f || fabsf(sy - 1.f) > 1e-3f)
         for (int i = firstVtx; i < dl->VtxBuffer.Size; ++i)
             dl->VtxBuffer[i].pos.x *= sx, dl->VtxBuffer[i].pos.y *= sy;
@@ -2040,53 +2061,68 @@ static void BuildImGuiFrame()
         s_espSettle.Due(Fonts_EspSig(), s_espImApplied, GetTickCount64()) ||
         HudFonts_Due())   // fonts tab > net graph
     {
+        CrashSpan _s("ov/fonts");
         BuildFontAtlas();
         ImGui_ImplDX9_InvalidateDeviceObjects();   // NewFrame re-uploads the atlas texture
         s_popCount = 0;
         Menu_DropPopupGhosts();                    // ghosts point at the old atlas texture
     }
     // dpi font twins: same safe point, same reason (botox update_dpi_fonts)
-    if (Dpi_UpdateFonts(g_d3dDev))
+    if (CrashSpan _s("ov/dpifonts"); Dpi_UpdateFonts(g_d3dDev))
     {
         s_popCount = 0;
         Menu_DropPopupGhosts();                    // ghosts point at the old twin texture
     }
 
-    ImGui_ImplDX9_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    Dpi_BeginFrame();      // io.DisplaySize -> logical px for NewFrame (botox on_end_scene)
-    ImGui::NewFrame();
-    Dpi_AfterNewFrame();   // ...and back to the screen for every overlay below
-    ImGui::GetIO().MouseDrawCursor = menuUp;
+    {
+        CrashSpan _s("ov/newframe");   // NewFrame re-uploads the atlas texture after a rebuild
+        ImGui_ImplDX9_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        Dpi_BeginFrame();      // io.DisplaySize -> logical px for NewFrame (botox on_end_scene)
+        ImGui::NewFrame();
+        Dpi_AfterNewFrame();   // ...and back to the screen for every overlay below
+        ImGui::GetIO().MouseDrawCursor = menuUp;
+    }
 
-    RenderEspQueue();     // botox: esp under every other overlay (background list, first in)
-    RenderWorldFx3();     // background list too, under the HUD overlays
-    RenderThirdPersonCrosshair();
-    s_chOverBlur = RenderMenuBlur();   // menu bg blur: blurs game + esp + world fx above, every HUD panel below stays sharp
-    RenderBootScreen();   // foreground draw list draws last regardless of call order: always on top
-    RenderPsOverlay();
-    RenderRouteOverlay();
-    RenderEdgeBugOverlay();
-    RenderAutoBounceOverlay();
-    RenderWallClimbOverlay();
-    // AspectStretch_Run = botox aspect ratio "stretch cheat overlays" / "stretch
-    // crosshair" (screen-space panels only; draws straight through while those are off)
-    AspectStretch_Run(RenderWatermark, AsPanel);
-    AspectStretch_Run(RenderMediaPlayer, AsPanel);         // after the watermark: it stacks under the box that just drew
-    AspectStretch_Run(RenderIndicators, AsPanel);   // botox order: velocity, graph, keybinds, particles, keystrokes
-    Recorder_Render();           // path, route starts, timer, clipper box, clip editor
-    RenderHudExtras();           // aimbot fov circle + custom net graph
-    AspectStretch_Run(RenderRadar, AsPanel);   // csgo radar (hud/radar.cpp)
-    RenderCrosshairList();       // own list: the one overlay drawn inside the game's frame
-    AspectStretch_Run(RenderSpectatorList, AsPanel);       // misc HUD
-    AspectStretch_Run(RenderHitMarker, AsPanel);
-    RenderKillEffects();
-    AspectStretch_Run(RenderPoints, AsPanel);
-    RenderMiscOverlays();        // healthshot effect, low fps warning, displayed logs
-    RenderLuaQueue();            // lua render.* (botox: paint_traverse lua last, under the menu)
-    RenderPsPointWindow();
-    RenderMenu();   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
+    // stutter probe sub-spans: overlay/build only says "the overlay"; these say which part
+    { CrashSpan _s("ov/esp"); RenderEspQueue(); }     // botox: esp under every other overlay (background list, first in)
+    {
+        CrashSpan _s("ov/world");
+        RenderWorldFx3();     // background list too, under the HUD overlays
+        RenderThirdPersonCrosshair();
+        s_chOverBlur = RenderMenuBlur();   // menu bg blur: blurs game + esp + world fx above, every HUD panel below stays sharp
+        RenderBootScreen();   // foreground draw list draws last regardless of call order: always on top
+        RenderPsOverlay();
+        RenderRouteOverlay();
+        RenderEdgeBugOverlay();
+        RenderAutoBounceOverlay();
+        RenderWallClimbOverlay();
+    }
+    {
+        CrashSpan _s("ov/hud");
+        // AspectStretch_Run = botox aspect ratio "stretch cheat overlays" / "stretch
+        // crosshair" (screen-space panels only; draws straight through while those are off)
+        AspectStretch_Run(RenderWatermark, AsPanel);
+        AspectStretch_Run(RenderMediaPlayer, AsPanel);         // after the watermark: it stacks under the box that just drew
+        AspectStretch_Run(RenderIndicators, AsPanel);   // botox order: velocity, graph, keybinds, particles, keystrokes
+        Recorder_Render();           // path, route starts, timer, clipper box, clip editor
+        RenderHudExtras();           // aimbot fov circle + custom net graph
+        AspectStretch_Run(RenderRadar, AsPanel);   // csgo radar (hud/radar.cpp)
+        RenderCrosshairList();       // own list: the one overlay drawn inside the game's frame
+    }
+    {
+        CrashSpan _s("ov/hud2");
+        AspectStretch_Run(RenderSpectatorList, AsPanel);       // misc HUD
+        AspectStretch_Run(RenderHitMarker, AsPanel);
+        RenderKillEffects();
+        AspectStretch_Run(RenderPoints, AsPanel);
+        RenderMiscOverlays();        // healthshot effect, low fps warning, displayed logs
+        RenderLuaQueue();            // lua render.* (botox: paint_traverse lua last, under the menu)
+        RenderPsPointWindow();
+    }
+    { CrashSpan _s("ov/menu"); RenderMenu(); }   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
 
+    CrashSpan _s("ov/render");
     ImGui::EndFrame();
     Dpi_BeforeRender();    // the software cursor is drawn by Render on the 1:1 foreground list: screen mouse
     ImGui::Render();
@@ -2478,6 +2514,7 @@ HRESULT __stdcall h_Present(IDirect3DDevice9* dev, const RECT* src, const RECT* 
 chain:
     if (g_imguiInit)
     {
+        CrashSpan _sp("present/ours");   // our half of Present; o_Present (driver, vsync) is outside it
         // Periodic engine-touching updates on render thread (safe)
         static DWORD s_lastUpdate = 0;
         static bool  s_wasInGame  = false;
@@ -2485,6 +2522,7 @@ chain:
         const bool bSlowTick = (now - s_lastUpdate > 100);
         bool inGame = false;
         if (bSlowTick) {
+            CrashSpan _s("present/slowtick");
             s_lastUpdate = now;
             UpdateNetStats();
             UpdateVisualsCvars();
@@ -2516,9 +2554,12 @@ chain:
         // creates/frees a client entity -- skins.cpp h_FrameStageNotify(5) runs it instead.
         // Cover art upload. Here and not in the frame build: the build can run from the vgui
         // pass on the MAIN thread, and CreateTexture/LockRect there would race Present.
-        MediaPlayer_Tick(dev);
-        Avatar_Tick(dev);   // uploads any avatar pixels Avatar_Pump fetched on the game thread
-        SheenNormal_Tick(); // normal blend sheen: lazy DIP hook the first frame it is on
+        {
+            CrashSpan _s("present/uploads");
+            MediaPlayer_Tick(dev);
+            Avatar_Tick(dev);   // uploads any avatar pixels Avatar_Pump fetched on the game thread
+            SheenNormal_Tick(); // normal blend sheen: lazy DIP hook the first frame it is on
+        }
 
         // No unusual: suppression sweep on the 100ms tick, restore on the off-transition.
         // (No hats bodygroups are computed on the game thread, skins.cpp FrameStageNotify.)
@@ -2589,6 +2630,7 @@ HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     Indicators_ReleaseTextures();         // mitosis morph texture; rebuilt on the next split
     Avatar_ReleaseAll();               // avatar textures are DEFAULT-pool too
     PlayerStencil_ReleaseTargets();    // esp: player stencil mask/blur targets, DEFAULT-pool
+    EspPreview::DropTexture();         // esp preview: its target is remade, the d3d texture with it
     GifTex_ReleaseAll();               // gif frame texture, GDI+ bitmap survives the reset
     SpectatorList_ReleaseTextures();   // spectator list: eyes style row textures, DEFAULT-pool
     Radar_ReleaseTextures();           // csgo radar overview, DEFAULT-pool; the baked pixels rebuild it

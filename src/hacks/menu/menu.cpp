@@ -19,6 +19,7 @@
 #include "../../dependencies/imgui/imgui_internal.h"
 #include "menu_chrome.h"  // the panels, the group box flow and every metric they use
 #include "../misc/minesweeper.h"
+#include "../visuals/esp_preview.h"   // g_espPreview, EspPreview::DrawBody/kWidth/kHeight
 
 #include <cmath>   // isfinite -- SliderF refuses a NaN/inf value as a range bound
 #include <cctype>  // tolower -- the searchable warpaint/particle combos
@@ -1541,12 +1542,14 @@ static void Page_MovementMain()
         ImGui::EndDisabled();
 
         // not gated by "enabled" -- runs on its own toggle
-        ImGui::Checkbox("tung surf", &g_tungSurf);
+        ImGui::Checkbox("tung surf (local)", &g_tungSurf);
         if (g_tungSurf)
             ImGui::OptionPopup("tung surf settings", [&]() {
                 ImGui::Label("tung surf keybind");
                 ImGui::Keybind("tung surf key", &g_tungSurfKey, &g_tungSurfMode);
-                SliderF("max surface tilt", &g_tungMaxNz, 0.05f, 0.5f, "%.2f nz");
+                SliderF("snap to pixelsurfs##tungsnap", &g_tungSnap, 0.f, 32.f, "%.0f u");
+                // a catch / ride needs a move INTO the wall: presses when your keys don't, never when they point away
+                ImGui::Checkbox("press into wall##tungpress", &g_tungPress);
             }, ImVec2(220.f, -1));
     }
     menu_group_end();
@@ -1620,6 +1623,9 @@ static void Page_MovementMain()
                 if (ImGui::Button(pmLabel, ImVec2(-1.f, 0.f)))
                     PS_MapScanToggle();
                 ImGui::Checkbox("show map lines##pm", &g_psMapLines);
+                // skybox seams sit thousands of units out: cap how far map marks draw (0 = all)
+                SliderF("max visible distance##pm", &g_psMapMaxDist, 0.f, 8192.f,
+                        g_psMapMaxDist <= 0.f ? "no limit" : "%.0f");
                 if (ms.busy || ms.lines > 0 || ms.tb > 0)
                 {
                     char pmInfo[96];
@@ -4329,7 +4335,56 @@ void RenderMenu()
 
     ImGui::End();
 
+    // own window right of the menu, visuals > esp page only, menu band look: botox csgo-sdk
+    // hacks/menu/menu.cpp ~1024-1057 (g_esp_preview.draw_body()). Fades with the menu: render.cpp SplitDrawData.
+    float sideX = wp.x + wz.x + 10.f;
+    if (s_tab == TAB_VISUALS && s_visualsSub == 0 && !s_search[0] && g_espPreview)
+    {
+        const float padding = st.WindowPadding.x;
+        const ImVec2 size(EspPreview::kWidth + padding * 2.f, mf::kHeaderH + EspPreview::kHeight + padding * 2.f);
+
+        ImGui::SetNextWindowPos(ImVec2(sideX, wp.y), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+
+        // this imgui fork defaults WindowMinSize to 300 wide: the window grew past the band + outline
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(1.f, 1.f));
+        const bool open = ImGui::Begin("botox-esp-preview", nullptr,
+                          ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
+                              ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
+                              ImGuiWindowFlags_NoSavedSettings | (s_animProgress < 0.999f ? ImGuiWindowFlags_NoInputs : 0));
+        ImGui::PopStyleVar();
+        if (open)
+        {
+            ImDrawList* pdl = ImGui::GetWindowDrawList();
+            const ImVec2 pp = ImGui::GetWindowPos();
+
+            // band, like the root window's top band above (kBandBg/rnd reused from there)
+            pdl->PushClipRect(pp, ImVec2(pp.x + size.x, pp.y + mf::kHeaderH), false);
+            pdl->AddRectFilled(pp, ImVec2(pp.x + size.x, pp.y + mf::kHeaderH), kBandBg(), rnd, ImDrawFlags_RoundCornersTop);
+            pdl->PopClipRect();
+            RenderFadedGradientLine(pdl, ImVec2(pp.x, pp.y + mf::kHeaderH - 1.f), ImVec2(size.x, 1.f), ImColor(Accent()));
+
+            ImGui::PushFont(BoldFont());
+            const char* title = "esp preview";
+            const ImVec2 titleSize = ImGui::CalcTextSize(title);
+            pdl->AddText(ImVec2(pp.x + (size.x - titleSize.x) * 0.5f, pp.y + (mf::kHeaderH - titleSize.y) * 0.5f),
+                         ImGui::GetColorU32(ImGuiCol_Text), title);
+            ImGui::PopFont();
+
+            ImGui::SetCursorPos(ImVec2(padding, mf::kHeaderH + padding));
+            EspPreview::DrawBody();
+
+            // window outline last, over everything else in the window
+            pdl->PushClipRect(pp, ImVec2(pp.x + size.x, pp.y + size.y), false);
+            pdl->AddRect(pp, ImVec2(pp.x + size.x, pp.y + size.y), kWindowBorder(), rnd);
+            pdl->PopClipRect();
+        }
+        ImGui::End();
+
+        sideX += size.x + 10.f;
+    }
+
     // own window, still in the style scope: menu colours + font, fades with the menu (render.cpp SplitDrawData)
     const MsSettings ms = { &g_msOpen, &g_msNight, &g_msDiff, &g_msWidth, &g_msHeight, &g_msMines };
-    Minesweeper_Draw(ms, BoldFont(), g_fontMs19, s_animProgress >= 0.999f, ImVec2(wp.x + wz.x + 10.f, wp.y));
+    Minesweeper_Draw(ms, BoldFont(), g_fontMs19, s_animProgress >= 0.999f, ImVec2(sideX, wp.y));
 }

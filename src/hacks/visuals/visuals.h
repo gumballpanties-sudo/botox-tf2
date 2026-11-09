@@ -142,4 +142,5 @@ void Chams_LevelUnload();
 // $ignorez overlay pass, no 2nd MinHook). Lifecycle rides the same LevelInit/LevelShutdown
 // flipworld.cpp already hooks, called from there right next to Chams_LevelInit/Unload.
 void Glow_LevelInit();
+void Glow_PreviewInit();   // aim/chams.cpp, esp preview targets (main thread only)
 void Glow_LevelUnload();
