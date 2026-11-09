@@ -113,12 +113,12 @@ namespace
 	}
 
 	// ---- material table (botox impl_t::m_materials[index][ignorez]) ----
+	// No IMaterialVar* kept here: a material reload rebuilds the var array (the IncRef keeps the
+	// IMaterial, not its vars), and a held var then crashes in SetVecValue (crash.log 11-09
+	// DrawLayers / GlowPasses_SEH, garbage vtable). FindVar at use, like visuals.cpp does.
 	struct Mat
 	{
 		IMaterial*   pMat = nullptr;
-		ChamsMatVar* pEnvTint = nullptr;
-		ChamsMatVar* pPhongTint = nullptr;
-		ChamsMatVar* pFresnel = nullptr;   // $phongfresnelranges -- glow thickness
 		bool         bShared = false;      // ambient: one found material serves both variants
 	};
 	Mat  s_mats[ChamsLayers::Count][2];
@@ -161,14 +161,6 @@ namespace
 		return pMat;
 	}
 
-	void StoreVars(Mat& m)
-	{
-		if (!m.pMat) return;
-		m.pEnvTint   = FindVar(m.pMat, "$envmaptint");
-		m.pPhongTint = FindVar(m.pMat, "$phongtint");
-		m.pFresnel   = FindVar(m.pMat, "$phongfresnelranges");
-	}
-
 	// botox make_variants: the depth/fog flags are appended per variant, never inside `body`
 	// (FindKey returns the first match -- a duplicate would win).
 	void MakeVariants(int index, const char* name, const char* shader, const char* body)
@@ -182,7 +174,6 @@ namespace
 			sprintf_s(sName, "botox_chams_%s%s", name, v ? "_xqz" : "");
 			sprintf_s(sVMT, "\"%s\"\n{\n%s\t\"$model\" \"1\"\n%s}\n", shader, body, kFlags[v]);
 			s_mats[index][v].pMat = CreateFromVMT(sName, sVMT);
-			StoreVars(s_mats[index][v]);
 		}
 	}
 
@@ -229,7 +220,7 @@ namespace
 			if (pMat && !pMat->IsErrorMaterial())
 			{
 				pMat->IncrementReferenceCount();
-				for (int v = 0; v < 2; ++v) { s_mats[Ambient][v].pMat = pMat; s_mats[Ambient][v].bShared = true; StoreVars(s_mats[Ambient][v]); }
+				for (int v = 0; v < 2; ++v) { s_mats[Ambient][v].pMat = pMat; s_mats[Ambient][v].bShared = true; }
 			}
 			else
 				DebugLog("chams: debug/debugambientcube not found");
@@ -313,10 +304,11 @@ namespace
 	{
 		SetModulation(c, alphaScale);
 		const bool bGold = index == ChamsLayers::Gold;
-		if (m.pEnvTint)
-			bGold ? m.pEnvTint->SetVecValue(c[0] * kGoldEnv[0], c[1] * kGoldEnv[1], c[2] * kGoldEnv[2]) : m.pEnvTint->SetVecValue(c[0], c[1], c[2]);
-		if (m.pPhongTint)
-			bGold ? m.pPhongTint->SetVecValue(c[0] * kGoldPhong[0], c[1] * kGoldPhong[1], c[2] * kGoldPhong[2]) : m.pPhongTint->SetVecValue(c[0], c[1], c[2]);
+		if (!m.pMat) return;
+		if (auto pEnvTint = FindVar(m.pMat, "$envmaptint"))
+			bGold ? pEnvTint->SetVecValue(c[0] * kGoldEnv[0], c[1] * kGoldEnv[1], c[2] * kGoldEnv[2]) : pEnvTint->SetVecValue(c[0], c[1], c[2]);
+		if (auto pPhongTint = FindVar(m.pMat, "$phongtint"))
+			bGold ? pPhongTint->SetVecValue(c[0] * kGoldPhong[0], c[1] * kGoldPhong[1], c[2] * kGoldPhong[2]) : pPhongTint->SetVecValue(c[0], c[1], c[2]);
 	}
 
 	// one model draw through the original DrawModelExecute, optionally on other bones
@@ -942,7 +934,7 @@ namespace
 
 	void*         s_glowRB1 = nullptr, *s_glowRB2 = nullptr;      // ITexture*
 	IMaterial*    s_glowMatColor = nullptr, *s_glowMatHalo = nullptr, *s_glowMatBlurX = nullptr, *s_glowMatBlurY = nullptr;
-	ChamsMatVar*  s_glowBloom = nullptr;
+	bool          s_glowBloom = false;      // blury has $bloomamount (found at init; the var itself is looked up per pass)
 	bool          s_glowReady = false;
 	volatile bool s_glowRendering = false;
 	bool          s_glowLoggedDraw = false;
@@ -952,7 +944,7 @@ namespace
 	// live-glow rebuild); a reinject makes them again under the same names, like rb1/rb2.
 	void*         s_previewTarget = nullptr, *s_previewRB1 = nullptr, *s_previewRB2 = nullptr;   // ITexture*
 	IMaterial*    s_previewMatHalo = nullptr, *s_previewMatBlurX = nullptr, *s_previewMatBlurY = nullptr;
-	ChamsMatVar*  s_previewBloom = nullptr;
+	bool          s_previewBloom = false;
 
 	struct GlowItem { CBaseEntity* pEnt; float c[4]; };
 	std::vector<GlowItem> s_glowItems;
@@ -1016,8 +1008,7 @@ namespace
 	// can run the exact same passes against the preview target's own RTs/materials.
 	// false = faulted: the CALLER decides what goes off (a preview fault used to drop the live s_glowReady).
 	__declspec(noinline) bool GlowPasses_SEH(void* rc, int w, int h, int iStencil, float flBlur, bool bHalo, IMaterial* pVisMat,
-	                                          void* pRB1, void* pRB2, IMaterial* pMatHalo, IMaterial* pMatBlurX, IMaterial* pMatBlurY,
-	                                          ChamsMatVar* pBloom)
+	                                          void* pRB1, void* pRB2, IMaterial* pMatHalo, IMaterial* pMatBlurX, IMaterial* pMatBlurY)
 	{
 		__try
 		{
@@ -1062,7 +1053,8 @@ namespace
 			VCallAt<void>(rc, kRcSetRT, pSavedRT);
 
 			// SetupEnd
-			if (flBlur > 0.f && pBloom)
+			ChamsMatVar* pBloom = flBlur > 0.f && pMatBlurY ? FindVar(pMatBlurY, "$bloomamount") : nullptr;   // fresh: see Mat
+			if (pBloom)
 			{
 				pBloom->SetFloatValue(flBlur);
 				VCallAt<void>(rc, kRcSetRT, pRB2);
@@ -1112,7 +1104,7 @@ namespace
 		auto Drop = [](IMaterial*& p) { if (p) { p->DecrementReferenceCount(); p->DeleteIfUnreferenced(); p = nullptr; } };
 		Drop(s_glowMatHalo); Drop(s_glowMatBlurX); Drop(s_glowMatBlurY);
 		if (s_glowMatColor) { s_glowMatColor->DecrementReferenceCount(); s_glowMatColor = nullptr; }   // engine's, never deleted
-		s_glowBloom = nullptr;
+		s_glowBloom = false;
 		if (s_glowRB1) { VCallAt<void>(s_glowRB1, kTexDecRef); s_glowRB1 = nullptr; }
 		if (s_glowRB2) { VCallAt<void>(s_glowRB2, kTexDecRef); s_glowRB2 = nullptr; }
 	}
@@ -1324,10 +1316,10 @@ void Glow_PreviewInit()
 			{
 				s_previewMatBlurX = CreateFromVMT("botox_glow_blurx_preview", "\"BlurFilterX\"\n{\n\t\"$basetexture\" \"botox_esp_preview_rb1\"\n}\n");
 				s_previewMatBlurY = CreateFromVMT("botox_glow_blury_preview", "\"BlurFilterY\"\n{\n\t\"$basetexture\" \"botox_esp_preview_rb2\"\n}\n");
-				s_previewBloom = s_previewMatBlurY ? FindVar(s_previewMatBlurY, "$bloomamount") : nullptr;
+				s_previewBloom = s_previewMatBlurY && FindVar(s_previewMatBlurY, "$bloomamount");
 			}
-			DebugLog("preview: render targets %dx%d ok, halo=%p blurx=%p blury=%p bloom=%p",
-				pw, ph, (void*)s_previewMatHalo, (void*)s_previewMatBlurX, (void*)s_previewMatBlurY, (void*)s_previewBloom);
+			DebugLog("preview: render targets %dx%d ok, halo=%p blurx=%p blury=%p bloom=%d",
+				pw, ph, (void*)s_previewMatHalo, (void*)s_previewMatBlurX, (void*)s_previewMatBlurY, (int)s_previewBloom);
 		}
 	}
 }
@@ -1373,13 +1365,13 @@ void Glow_LevelInit()
 	{
 		s_glowMatBlurX = CreateFromVMT("botox_glow_blurx", "\"BlurFilterX\"\n{\n\t\"$basetexture\" \"botox_glow_rb1\"\n}\n");
 		s_glowMatBlurY = CreateFromVMT("botox_glow_blury", "\"BlurFilterY\"\n{\n\t\"$basetexture\" \"botox_glow_rb2\"\n}\n");
-		s_glowBloom = s_glowMatBlurY ? FindVar(s_glowMatBlurY, "$bloomamount") : nullptr;
+		s_glowBloom = s_glowMatBlurY && FindVar(s_glowMatBlurY, "$bloomamount");
 	}
 
 	s_glowReady = s_glowMatColor && s_glowMatHalo && (bDx8 || (s_glowMatBlurX && s_glowMatBlurY && s_glowBloom));
-	DebugLog("glow: level init %dx%d dx8=%d ok=%d rb1=%p rb2=%p color=%p halo=%p blurx=%p blury=%p bloom=%p",
+	DebugLog("glow: level init %dx%d dx8=%d ok=%d rb1=%p rb2=%p color=%p halo=%p blurx=%p blury=%p bloom=%d",
 		w, h, (int)bDx8, (int)s_glowReady, s_glowRB1, s_glowRB2, (void*)s_glowMatColor, (void*)s_glowMatHalo,
-		(void*)s_glowMatBlurX, (void*)s_glowMatBlurY, (void*)s_glowBloom);
+		(void*)s_glowMatBlurX, (void*)s_glowMatBlurY, (int)s_glowBloom);
 	if (!s_glowReady) GlowRelease();
 }
 
@@ -1465,7 +1457,7 @@ void Glow_Render()
 
 	const bool bMask = bOutline || bInner;
 	if (!GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr,
-	                     s_glowRB1, s_glowRB2, s_glowMatHalo, s_glowMatBlurX, s_glowMatBlurY, s_glowBloom))
+	                     s_glowRB1, s_glowRB2, s_glowMatHalo, s_glowMatBlurX, s_glowMatBlurY))
 	{
 		DebugLog("glow: exception in the glow pass, glow off until the next map");
 		s_glowReady = false;
@@ -1490,7 +1482,7 @@ void Glow_Render()
 // hook's `if (Glow_Rendering()) { draw plain; return; }` (visuals.cpp:1323, before the chams
 // branch) already keeps this from re-running the preview chams branch on every glow sub-pass --
 // the same guard that keeps the live glow from re-chamsing a player 3x a frame.
-void Glow_RenderPreview(void* pEnt, const float (*worldToProjection)[4], const void* pBones, int nBones, const void* pHdr)
+void Glow_RenderPreview(void* pEnt, void* pGun, const float (*worldToProjection)[4], const void* pBones, int nBones, const void* pHdr)
 {
 	if (!pEnt) return;
 	const bool bGlow = g_espEnable && g_glowEnable;
@@ -1512,6 +1504,12 @@ void Glow_RenderPreview(void* pEnt, const float (*worldToProjection)[4], const v
 	saved.swap(s_glowItems);
 	s_glowItems.push_back(GlowItem{ reinterpret_cast<CBaseEntity*>(pEnt),
 		{ g_glowVisColor[0], g_glowVisColor[1], g_glowVisColor[2], g_glowVisColor[3] } });
+	if (pGun)   // live Glow_Render: the held weapon glows in its owner's colour
+	{
+		GlowItem it = s_glowItems[0];
+		it.pEnt = reinterpret_cast<CBaseEntity*>(pGun);
+		s_glowItems.push_back(it);
+	}
 
 	const bool bOutlineStyle = g_glowStyle == 1 || Glow_Dx8();
 	const int iStencil = std::min((bOutlineStyle ? (int)std::clamp(g_glowSize + 0.5f, 1.f, 6.f) : 1) * 2, 31);
@@ -1523,7 +1521,7 @@ void Glow_RenderPreview(void* pEnt, const float (*worldToProjection)[4], const v
 
 	const bool bMask = bOutline || bInner;
 	const bool ok = GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr,
-	                                s_previewRB1, s_previewRB2, s_previewMatHalo, s_previewMatBlurX, s_previewMatBlurY, s_previewBloom);
+	                                s_previewRB1, s_previewRB2, s_previewMatHalo, s_previewMatBlurX, s_previewMatBlurY);
 
 	s_glowItems.swap(saved);
 

@@ -8,6 +8,8 @@
 // slot 91 = UpdateVisibility (SetModelByIndex calls [vt+0x2d8] after OnNewModel [vt+0x2f0]).
 // Its lightcache hook wrote the light state through the 3rd arg (stats); the real args are
 // (origin, LightingState_t&, stats, flags, bDebug) (engine call at 0xed546), fixed here.
+// The held shotgun is a second fake ent built the same way; no bone merge without a move parent, so its
+// renderable SetupBones is swapped for one that returns the soldier's bones by name (MergeGunBones).
 #include "sdk.h"
 #include "esp.h"
 #include "backtrack.h"
@@ -32,7 +34,14 @@ namespace
 {
 	// ---- TF2 x64, disasm-checked 11-09 (client / engine / materialsystem, see the port notes) ----
 	constexpr const char* kModel = "models/player/soldier.mdl";
-	constexpr const char* kSequence = "stand_LOSER";   // every class has it, holds nothing (the ent has no weapon)
+	constexpr const char* kSequence = "stand_SECONDARY";   // shotgun idle (soldier.mdl has it, checked in the vpk)
+	// stock shotgun world model: bones weapon_bone / weapon_bone_1 are soldier.mdl's own (merged by name),
+	// vm_weapon_bone / vm_weapon_bone_1 / c_weapon_stattrack are not (placed off their parent's local pose)
+	constexpr const char* kGunModel = "models/weapons/c_models/c_shotgun/c_shotgun.mdl";
+	constexpr int   kGunMenuIndex = 2;                  // kMenuIndex's twin for the gun ent
+	constexpr int   kRvtSlots = 64;                     // IClientRenderable vtable (~40 slots), copy past it
+	constexpr int   kSlotSetupBones = 16;               // IClientRenderable::SetupBones (aim/defs.h)
+	constexpr int   kBoneStride = 0xD8, kBoneParent = 0x4, kBonePos = 0x20, kBoneQuat = 0x2C;   // mstudiobone_t (esp.cpp)
 	constexpr int   kSequenceIndex = -1;                // -1 = look the label up in the local sequences
 	constexpr float kHullMins[3] = { -24.f, -24.f, 0.f }, kHullMaxs[3] = { 24.f, 24.f, 82.f };   // VEC_HULL
 	constexpr float kRunSpeed = 240.f;                  // soldier max speed: ghosts trail like a target running sideways
@@ -45,11 +54,13 @@ namespace
 	constexpr int   kStudioRender = 0x1;
 
 	// IMatRenderContext / IMaterialSystem / IStudioRender / IVModelRender slots (disasm, tf2 == css)
+	// SetIntRenderingParameter 115: counted off Amalgam IMaterialSystem.h, the count lands on all 7 slots above it here
 	constexpr int kRcRelease = 1, kRcBindCubemap = 5, kRcClearBuffers = 12, kRcAmbientCube = 16, kRcClearColor4ub = 73,
-	              kRcSetToneMapScale = 153, kRcGetToneMapScale = 154, kRcLightingOrigin = 157;
+	              kRcSetIntRenderingParameter = 115, kRcSetToneMapScale = 153, kRcGetToneMapScale = 154, kRcLightingOrigin = 157;
 	constexpr int kMatFindTexture = 79, kMatGetRenderContext = 98;
 	constexpr int kStudioAmbientColors = 17, kStudioLocalLights = 18;   // CStudioRenderContext: 17 = Vector4D* (16 = Vector*, w forced 1)
 	constexpr int kMdlForcedMaterialOverride = 1, kMdlSuppressEngineLighting = 22;
+	constexpr int kParmWriteDepthToDestAlpha = 9;   // public/renderparm.h INT_RENDERPARM_WRITE_DEPTH_TO_DESTALPHA
 
 	template <typename R, typename... A>
 	R VCall(void* p, int idx, A... a) { return reinterpret_cast<R(__fastcall*)(void*, A...)>((*reinterpret_cast<void***>(p))[idx])(p, a...); }
@@ -82,6 +93,25 @@ namespace
 	alignas(16) matrix3x4 s_bones[MAXSTUDIOBONES];
 	int s_nBones = 0;
 
+	// the held shotgun: a second fake ent, same build; its renderable SetupBones hands back s_gunBones
+	// (soldier bones by name), which is how the engine's draw and the chams ghosts get its pose
+	CBaseEntity* s_gun = nullptr;
+	void* s_gunVt[kVtSlots + 1] = {};
+	void* s_gunRvt[kRvtSlots + 1] = {};
+	const model_t* s_gunModel = nullptr;
+	int  s_gunBuiltConnected = -1, s_gunBuiltIndex = -2;
+	alignas(16) matrix3x4 s_gunBones[MAXSTUDIOBONES];
+	int  s_nGunBones = 0;
+	int  s_gunMerge[MAXSTUDIOBONES];   // gun bone -> soldier bone, -1 = none
+	const studiohdr_t* s_gunMergeHdr = nullptr;
+
+	bool __fastcall GunSetupBones(void*, matrix3x4* pOut, int nMax, int, float)
+	{
+		if (pOut && s_nGunBones > 0)
+			std::memcpy(pOut, s_gunBones, sizeof(matrix3x4) * std::min(s_nGunBones, nMax));
+		return s_nGunBones > 0;
+	}
+
 	std::atomic<int>   s_frame{ -1 };
 	int                s_seenFrame = -1;
 	double             s_lastRender = -1.0;
@@ -104,8 +134,11 @@ MAKE_HOOK(CModelInfoClient_GetModel,
 	U::Memory.FindSignature("engine.dll", "83 FA ? 0F 8C ? ? ? ? 48 8D 0D ? ? ? ? E9 ? ? ? ? CC CC CC CC CC CC CC CC CC CC CC 48 89 5C 24"),
 	const model_t*, void* rcx, int iIndex)
 {
-	if (iIndex == kMenuIndex && s_model && InOurCall() && !I::EngineClient->IsConnected())
-		return s_model;
+	if ((iIndex == kMenuIndex || iIndex == kGunMenuIndex) && InOurCall() && !I::EngineClient->IsConnected())
+	{
+		const model_t* p = iIndex == kMenuIndex ? s_model : s_gunModel;
+		if (p) return p;
+	}
 	return CALL_ORIGINAL(rcx, iIndex);
 }
 
@@ -159,25 +192,104 @@ namespace
 		return false;
 	}
 
-	// model_t* + the ent's model index for the current state: in game the precache index, out of a map our model on index 1
-	bool SetModel()
+	// model_t* + the ent's model index for the current state: in game the precache index, out of a map our model
+	// on menuIndex (the GetModel hook answers it). 0 = not usable now, 1 = as built, 2 = just (re)built, -1 = faulted
+	int BuildModel(CBaseEntity* ent, const char* path, int menuIndex, const model_t*& model, int& builtConnected, int& builtIndex)
 	{
 		const bool connected = I::EngineClient->IsConnected();
-		const int index = connected ? I::ModelInfoClient->GetModelIndex(kModel) : -1;
-		if (s_builtConnected >= 0 && connected == (s_builtConnected == 1) && (!connected || index == s_builtIndex))   // -1 = never built
+		const int index = connected ? I::ModelInfoClient->GetModelIndex(path) : -1;
+		if (builtConnected >= 0 && connected == (builtConnected == 1) && (!connected || index == builtIndex))   // -1 = never built
 			return !connected || index >= 0;
 		if (connected && index < 0)
-			return false;   // mid level load: keep the last image
+			return 0;   // mid level load (or, for the gun, not precached on this server): keep the last image
 		CallScope _c;
-		s_model = I::ModelInfoClient->FindOrLoadModel(kModel);
-		if (!s_model) return false;
-		if (!Seh([&]() { s_setModelByIndex(s_ent, index >= 0 ? index : kMenuIndex); }))
+		model = I::ModelInfoClient->FindOrLoadModel(path);
+		if (!model) return 0;
+		if (!Seh([&]() { s_setModelByIndex(ent, index >= 0 ? index : menuIndex); }))
+			return -1;
+		builtConnected = connected ? 1 : 0;
+		builtIndex = index;
+		return 2;
+	}
+
+	bool SetModel()
+	{
+		const int r = BuildModel(s_ent, kModel, kMenuIndex, s_model, s_builtConnected, s_builtIndex);
+		if (r < 0)
 			return Fail("SetModelByIndex faulted, preview off");
-		s_builtConnected = connected ? 1 : 0;
-		s_builtIndex = index;
-		const studiohdr_t* pHdr = I::ModelInfoClient->GetStudiomodel(s_model);
-		s_sequence = FindSequence(pHdr);
-		return true;
+		if (r == 2)
+			s_sequence = FindSequence(I::ModelInfoClient->GetStudiomodel(s_model));
+		return r > 0;
+	}
+
+	// the gun is extra: any trouble drops it, never the preview
+	bool SetGunModel()
+	{
+		if (!s_gun) return false;
+		const int r = BuildModel(s_gun, kGunModel, kGunMenuIndex, s_gunModel, s_gunBuiltConnected, s_gunBuiltIndex);
+		if (r < 0)
+		{
+			DebugLog("[preview] gun SetModelByIndex faulted, gun off");
+			s_gun = nullptr;   // leaked on purpose, same as s_ent
+		}
+		return r > 0;
+	}
+
+	// fake C_BaseFlex: zeroed block through the ctor, private primary vtable (UpdateVisibility would put the
+	// ent in the client leaf system, drawn in the world)
+	CBaseEntity* MakeEnt(void** vtOut)
+	{
+		auto ent = static_cast<CBaseEntity*>(std::calloc(1, kEntSize));
+		if (!ent) return nullptr;
+		CallScope _c;
+		if (!Seh([&]() { s_ctor(ent); }))
+			return nullptr;   // leaked on purpose: its state is unknown
+		void** vt = *reinterpret_cast<void***>(ent);
+		std::memcpy(vtOut, vt - 1, sizeof(void*) * (kVtSlots + 1));
+		vtOut[1 + kSlotUpdateVisibility] = reinterpret_cast<void*>(&NoUpdateVisibility);
+		*reinterpret_cast<void***>(ent) = vtOut + 1;
+		return ent;
+	}
+
+	// gun bones = soldier bones by name; the rest off their parent's local pose (QuaternionMatrix + pos)
+	void MergeGunBones(const studiohdr_t* pBody, float yaw)
+	{
+		s_nGunBones = 0;
+		const studiohdr_t* pGun = s_gunModel ? I::ModelInfoClient->GetStudiomodel(s_gunModel) : nullptr;
+		if (!pGun || !pBody || s_nBones <= 0) return;
+		const int n = std::min(pGun->numbones, int(MAXSTUDIOBONES));
+		auto Bone = [](const studiohdr_t* h, int i) { return reinterpret_cast<const uint8_t*>(h) + h->boneindex + i * kBoneStride; };
+		auto Name = [&](const studiohdr_t* h, int i) { const uint8_t* b = Bone(h, i); return reinterpret_cast<const char*>(b + *reinterpret_cast<const int*>(b)); };
+		if (s_gunMergeHdr != pGun)
+		{
+			for (int i = 0; i < n; i++)
+			{
+				s_gunMerge[i] = -1;
+				for (int j = 0; j < s_nBones; j++)
+					if (!_stricmp(Name(pGun, i), Name(pBody, j))) { s_gunMerge[i] = j; break; }
+			}
+			s_gunMergeHdr = pGun;
+		}
+		matrix3x4 root;
+		Math::AngleMatrix(Vec3(0.f, yaw, 0.f), root);
+		for (int i = 0; i < n; i++)
+		{
+			if (s_gunMerge[i] >= 0)
+			{
+				std::memcpy(s_gunBones[i], s_bones[s_gunMerge[i]], sizeof(matrix3x4));
+				continue;
+			}
+			const uint8_t* b = Bone(pGun, i);
+			const int parent = *reinterpret_cast<const int*>(b + kBoneParent);
+			const float* p = reinterpret_cast<const float*>(b + kBonePos);
+			const float* q = reinterpret_cast<const float*>(b + kBoneQuat);   // x y z w
+			matrix3x4 local = {
+				{ 1.f - 2.f * (q[1] * q[1] + q[2] * q[2]), 2.f * (q[0] * q[1] - q[3] * q[2]), 2.f * (q[0] * q[2] + q[3] * q[1]), p[0] },
+				{ 2.f * (q[0] * q[1] + q[3] * q[2]), 1.f - 2.f * (q[0] * q[0] + q[2] * q[2]), 2.f * (q[1] * q[2] - q[3] * q[0]), p[1] },
+				{ 2.f * (q[0] * q[2] - q[3] * q[1]), 2.f * (q[1] * q[2] + q[3] * q[0]), 1.f - 2.f * (q[0] * q[0] + q[1] * q[1]), p[2] } };
+			Math::ConcatTransforms(parent >= 0 && parent < i ? s_gunBones[parent] : root, local, s_gunBones[i]);
+		}
+		s_nGunBones = n;
 	}
 
 	// one step per paint: sigs, interfaces, targets, model load, ent, done
@@ -221,28 +333,34 @@ namespace
 			s_model = I::ModelInfoClient->FindOrLoadModel(kModel);
 			if (!s_model)
 				return Fail("soldier.mdl missing, preview off");
+			s_gunModel = I::ModelInfoClient->FindOrLoadModel(kGunModel);
+			if (!s_gunModel)
+				DebugLog("[preview] c_shotgun.mdl missing, no gun");
 			break;
 		}
 		case 4:
 		{
-			s_ent = static_cast<CBaseEntity*>(std::calloc(1, kEntSize));
+			s_ent = MakeEnt(s_vt);
 			if (!s_ent)
-				return Fail("alloc failed, preview off");
-			CallScope _c;
-			if (!Seh([&]() { s_ctor(s_ent); }))
-				return Fail("C_BaseFlex ctor faulted, preview off");
-			// private vtable: UpdateVisibility would put the ent in the client leaf system (drawn in the world)
-			void** vt = *reinterpret_cast<void***>(s_ent);
-			std::memcpy(s_vt, vt - 1, sizeof(s_vt));
-			s_vt[1 + kSlotUpdateVisibility] = reinterpret_cast<void*>(&NoUpdateVisibility);
-			*reinterpret_cast<void***>(s_ent) = s_vt + 1;
+				return Fail("C_BaseFlex alloc / ctor faulted, preview off");
+			if (s_gunModel && (s_gun = MakeEnt(s_gunVt)))
+			{
+				// renderable vtable (+8) too: SetupBones hands back the merged pose, the engine's draw reads it
+				IClientRenderable* pRend = s_gun;
+				void** rvt = *reinterpret_cast<void***>(pRend);
+				std::memcpy(s_gunRvt, rvt - 1, sizeof(s_gunRvt));
+				s_gunRvt[1 + kSlotSetupBones] = reinterpret_cast<void*>(&GunSetupBones);
+				*reinterpret_cast<void***>(pRend) = s_gunRvt + 1;
+			}
+			else if (s_gunModel)
+				DebugLog("[preview] gun ent faulted, no gun");
 			break;
 		}
 		default:
 			if (!SetModel())
 				return s_failed ? false : (s_ready = false);
 			s_ready = true;
-			DebugLog("[preview] ready (sequence %d)", s_sequence);
+			DebugLog("[preview] ready (sequence %d, gun %d)", s_sequence, s_gun ? 1 : 0);
 			return true;
 		}
 		s_stage++;
@@ -257,6 +375,7 @@ namespace
 	{
 		if (!SetModel())
 			return;
+		const bool gunModel = SetGunModel();   // own CallScope: never inside the one below (its dtor ends ours)
 
 		const float yaw = s_yaw.load();
 		auto pAnim = s_ent->As<CBaseAnimating>();
@@ -303,6 +422,11 @@ namespace
 				if (!s_ent->SetupBones(s_bones, MAXSTUDIOBONES, BONE_USED_BY_ANYTHING, I::GlobalVars->curtime))
 					s_nBones = 0;
 			});
+			const bool gun = drawn && gunModel && Seh([&]() {
+				*reinterpret_cast<int*>(uintptr_t(s_gun) + nSkin) = 0;   // red
+				s_setAbsAngles(s_gun, Vec3(0.f, yaw, 0.f));
+				MergeGunBones(pHdr, yaw);
+			}) && s_nGunBones > 0;
 
 			Frustum frustum;
 			if (drawn)
@@ -311,6 +435,10 @@ namespace
 				const Vec3 lightOrigin(0.f, 0.f, 40.f);
 				VCall<void>(rc, kRcLightingOrigin, &lightOrigin);
 				I::RenderView->Push3DView(view, 0x1 | 0x2 | 0x20 /* clear color, depth, stencil */, reinterpret_cast<ITexture*>(s_texture), frustum);
+				// in a map the main view leaves depth-to-dest-alpha on (viewrender.cpp:890): the model's alpha
+				// came out as its depth and ImGui blended it see-through. Valve's own model panels turn it off the
+				// same way (modelimagepanel.cpp:140) and leave it: every view sets it again
+				VCall<void>(rc, kRcSetIntRenderingParameter, kParmWriteDepthToDestAlpha, 0);
 
 				// in a map the auto exposure scales every shader output (white chams read grey): neutral here
 				Vec3 toneMap(1.f, 1.f, 1.f);
@@ -333,9 +461,14 @@ namespace
 				// live passes + ghosts: aim/chams.cpp preview branch (DrawModel -> h_DrawModelExecute)
 				g_espPreviewDrawing = true;
 				drawn = Seh([&]() { s_ent->DrawModel(kStudioRender); });
+				if (drawn && gun && !Seh([&]() { s_gun->DrawModel(kStudioRender); }))
+				{
+					DebugLog("[preview] gun draw faulted, gun off");
+					s_gun = nullptr;   // leaked on purpose, same as s_ent
+				}
 				// outline / glow / inner glow: the live pass on this target
 				if (drawn)
-					drawn = Seh([&]() { Glow_RenderPreview(s_ent, worldToProjection.m, s_bones, s_nBones, pHdr); });
+					drawn = Seh([&]() { Glow_RenderPreview(s_ent, gun ? s_gun : nullptr, worldToProjection.m, s_bones, s_nBones, pHdr); });
 				if (drawn)
 					EspPreview::QueueTextureCapture();   // the target is bound: its d3d texture for ImGui
 				g_espPreviewDrawing = false;
@@ -428,9 +561,9 @@ namespace
 			p.m_visible = true;
 			p.m_distance = kDistance;
 			p.m_steamId = g_espAvatar ? LocalSteamId() : 0;   // TF2 bots have no portrait: your own avatar
-			p.m_weaponId = TF_WEAPON_ROCKETLAUNCHER;
+			p.m_weaponId = TF_WEAPON_SHOTGUN_SOLDIER;   // the held gun
 			p.m_hasAmmo = g_espAmmoBar;
-			p.m_ammoFactor = 3.f / 4.f;   // rocket launcher clip
+			p.m_ammoFactor = 4.f / 6.f;   // shotgun clip
 			if (g_espFlags)
 				for (bool& f : p.m_flags) f = true;   // the flag list picks which ones show
 			p.m_studio = pHdr;
