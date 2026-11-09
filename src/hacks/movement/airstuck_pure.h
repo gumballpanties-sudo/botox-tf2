@@ -96,4 +96,13 @@ inline constexpr float k_pinTol = 0.05f;
 // botox pixel_surf `pinned`: vz on the pin AND still sliding ( xy < 1 = a wall hang, not a surf )
 inline bool SurfPinned(float vz, float vxy, float pin) { return std::fabs(vz - pin) < k_pinTol && vxy >= 1.f; }
 
+// air stuck approach: wall face seen by the line column but hull not on it. Lumi's fan only pins
+// a hull already flush ( its wishes are 1..120 at 78..90 deg off straight-in = ~0.3 u/s per tick of
+// pull ), so a face further than k_fanGap u off the hull edge gets a straight-in full press instead
+// ( AirAccelerate cap 30 u/s wish = 4.5 u/s per tick, 15x the pull ). frac * reach = hit distance
+// from the box centre, edge = hull extent along that heading
+inline constexpr float k_fanGap = 2.f;
+inline float WallGap(float frac, float reach, float edge) { return frac * reach - edge; }
+inline bool  WallFar(float frac, float reach, float edge) { return WallGap(frac, reach, edge) > k_fanGap; }
+
 }   // namespace as

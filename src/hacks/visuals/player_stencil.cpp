@@ -90,7 +90,6 @@ namespace
 			{ 0, 32, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1 },
 			D3DDECL_END() };
 		ok = ok && SUCCEEDED(dev->CreateVertexDeclaration(el, &s_capsuleDecl)) && s_capsuleDecl;
-		ok = ok && ScreenFx_QuadReady(dev);
 		if (!ok)
 		{
 			DebugLog("player stencil: shader failed -- outline / inner glow off, glow back to the halo");
@@ -356,7 +355,9 @@ namespace
 			s_dev = dev;
 		}
 		IDirect3DSurface9* target = nullptr;
-		if (dev && EnsureShaders(dev) && SUCCEEDED(dev->GetRenderTarget(0, &target)) && target)
+		// ScreenFx_QuadReady EVERY call, not once in EnsureShaders: ScreenFx_Destroy (depth rebuild,
+		// Reset) drops the shared quad vs/decl, and BindQuad with nulls = DrawPrimitiveUP crash in d3d9
+		if (dev && EnsureShaders(dev) && ScreenFx_QuadReady(dev) && SUCCEEDED(dev->GetRenderTarget(0, &target)) && target)
 		{
 			IDirect3DSurface9* ds = nullptr;
 			if (FAILED(dev->GetDepthStencilSurface(&ds))) ds = nullptr;

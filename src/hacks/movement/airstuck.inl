@@ -172,7 +172,8 @@ static struct { int cmd = -1; Vec3 view{}; float fwd = 0.f, side = 0.f; int butt
 // unpinned: that approach steers the hull into the catch.
 //   hold    START pinned by last tick's 3+ pin -> replay it, 1 sim proves it
 //   resend  START pinned, nothing re-pins 3+ -> resend last tick's cmd (botox :379, server pins our sim misses)
-// Wall: 0.05u hull contact first (the face we touch), else 16-heading x 1u line column, reach hull edge + 0.05..2.
+// Wall: 0.05u hull contact first (the face we touch), else 16-heading x 1u line column, reach hull edge + "extra
+// reach" (0.05..32). Face past as::k_fanGap off the hull = approach (straight-in full press, no sims), else fan.
 // ============================================================================
 static bool s_asHolding = false;   // a 3+ tick pin (or its hold / resend) went out this cmd
 static struct
@@ -363,11 +364,15 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         if (tr.DidHit() && fabsf(tr.plane.normal.z) <= 0.35f) { found = true; n = tr.plane.normal; }
     }
     if (found) s_as.startAng = atan2f(-n.y, -n.x);
-    const float extra = std::clamp(g_asExtraReach, 0.f, 32.f);
+    // the column reaches the full "extra reach" slider (was capped at 2u here, so 4 = 2): a face past
+    // as::k_fanGap is an APPROACH target below, not a fan target
+    const float extra = std::clamp(g_asExtraReach, 0.05f, 32.f);
+    float gap = 0.f;   // hull edge -> face along the found heading, 0 = hull contact
     for (float a = s_as.startAng; !found && a < s_as.startAng + 6.2831853f; a += 0.3926991f)
     {
         const float c = cosf(a), s = sinf(a);
-        const float reach = (std::min)(extX / (std::max)(fabsf(c), 1e-6f), extY / (std::max)(fabsf(s), 1e-6f)) + std::clamp(extra, 0.05f, 2.f);
+        const float edge  = (std::min)(extX / (std::max)(fabsf(c), 1e-6f), extY / (std::max)(fabsf(s), 1e-6f));
+        const float reach = edge + extra;
         float bestFrac = 1.f;
         for (float z = origin.z + mins.z; z <= origin.z + maxs.z; z += 1.f)
         {
@@ -377,12 +382,32 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
             if (tr.fraction < 1.f && fabsf(tn.z) <= 0.35f && tn.x * c + tn.y * s <= -0.1f && tr.fraction < bestFrac)
                 { found = true; bestFrac = tr.fraction; n = tn; }
         }
-        if (found) s_as.startAng = a;
+        if (found) { s_as.startAng = a; gap = (std::max)(0.f, as::WallGap(bestFrac, reach, edge)); }
     }
     if (!found)
     {
         ++s_as.nowall;
         if (!resend()) { s_as.startAng = 0.f; end("nowall"); }
+        RestoreToFrame(nBase - 1);
+        return;
+    }
+
+    // ---- approach: face in reach, hull not on it -> straight-in full press, no sims ---------------------
+    // Falling past a wall the window is a few ticks. Lumi's steer ( 1..120 wish, 78..90 deg off straight-in )
+    // pulls ~0.3 u/s per tick; a full press straight in is the AirAccelerate cap ( 30 u/s wish = 4.5 u/s per
+    // tick ), hull flush in the fewest ticks, THEN the fan pins it. Resend keeps a pinned START ( botox :380 )
+    if (gap > as::k_fanGap)
+    {
+        if (resend()) return;
+        const float wallYaw = RAD2DEGF(atan2f(-n.y, -n.x));
+        ++s_as.steers;
+        send(wallYaw, 450.f, false, "approach");
+        static int s_aLog = -1000;
+        if (g_debugLogEnable && cmd->command_number - s_aLog > 16)
+        {
+            s_aLog = cmd->command_number;
+            DebugLog("AS: approach n=%.3f,%.3f gap=%.2f yaw=%.1f vz=%.2f xy=%.1f", n.x, n.y, gap, wallYaw, vel.z, vel.Length2D());
+        }
         RestoreToFrame(nBase - 1);
         return;
     }
