@@ -6,6 +6,7 @@
 #include "../visuals/chams_layers.h"   // ChamsLayers::SoundAlpha = botox n_sound_esp::alpha
 #include "../hud/avatar_pure.h"        // n_avatar::FriendIdToSteam64 -- plain arithmetic, no Steam/d3d9 types
 #include "../menu/cfg/vars_esp.h"         // 11-01 vars: edicts group (primitives only)
+#include "../misc/names.h"               // Names_SkipEsp: player list esp mode
 #include <cfloat>
 #include <cstdio>
 
@@ -581,6 +582,8 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 			continue;
 		const int iIndex = pPlayer->entindex();
 		if (iIndex <= 0 || iIndex > 64)
+			continue;
+		if (Names_SkipEsp(iIndex))   // misc > player list: esp ignore / only esp
 			continue;
 
 		const Vec3 vOrigin = pPlayer->GetAbsOrigin();

@@ -115,6 +115,44 @@ static void PsSurfFixTick(void* pLocal, UserCmd_t* pCmd)
 // Mouse lock lives in edgebug.inl (EdgeBug_MouseInput).
 static const char* const kEbSounds[] = { "TFPlayer.CritHit", "TFPlayer.CritHitMini",
     "TFPlayer.DoubleDonk", "Achievement.Earned", "MVM.PlayerUpgraded" };
+static constexpr int kEbSoundCustom = 5;   // menu combo index after kEbSounds
+
+// botox play_trick_sound custom branch. A file in C:\botox-tf2\sounds wins: the engine only opens
+// sounds under its GAME search path, so copy it into tf\sound\botox\ (instead of botox's ".."
+// climb) and play that. Else the path is taken as tf/sound-relative (tf/custom/*/sound works too).
+// playvol precaches + plays at 0..1; volume > 1 stacks emits like botox.
+static void EbPlayCustom()
+{
+    const char* name = g_edgeBugSoundPath;
+    if (!name[0]) return;
+    const char* base = name;
+    for (const char* p = name; *p; ++p) if (*p == '\\' || *p == '/') base = p + 1;
+    char rel[192];
+    snprintf(rel, sizeof(rel), "%s", name);
+    char src[MAX_PATH];
+    snprintf(src, sizeof(src), "C:\\botox-tf2\\sounds\\%s", name);
+    const DWORD attr = GetFileAttributesA(src);
+    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY) && base[0])
+    {
+        // ponytail: recopies only when the name changes; edit the file in place = rename it or restart
+        static char s_copied[128] = "";
+        if (strcmp(s_copied, name))
+        {
+            char dst[MAX_PATH];   // client.dll = <tf>\bin\x64\client.dll
+            if (!GetModuleFileNameA(GetModuleHandleA("client.dll"), dst, MAX_PATH)) return;
+            for (int up = 0; up < 3; ++up) if (char* s = strrchr(dst, '\\')) *s = 0;
+            strncat_s(dst, "\\sound\\botox", _TRUNCATE);
+            CreateDirectoryA(dst, nullptr);
+            strncat_s(dst, "\\", _TRUNCATE);
+            strncat_s(dst, base, _TRUNCATE);
+            if (!CopyFileA(src, dst, FALSE)) { DebugLog("eb sound: copy %s -> %s failed %lu", src, dst, GetLastError()); return; }
+            snprintf(s_copied, sizeof(s_copied), "%s", name);
+        }
+        snprintf(rel, sizeof(rel), "botox/%s", base);
+    }
+    for (float left = g_edgeBugSoundVol; left > 0.f; left -= 1.f)
+        PrCmd("playvol \"%s\" %.2f", rel, std::min(left, 1.f));
+}
 
 static void EdgeBugSoundPre(void* pLocal)
 {
@@ -134,6 +172,7 @@ static void EdgeBugSoundPre(void* pLocal)
     s_prevVz = vz; s_prevAir = air;
     if (!hit || !assisted || !g_edgeBugSound) return;
     s_assistGrace = 0;   // one sound per assisted EB
+    if (g_edgeBugSoundId == kEbSoundCustom) { EbPlayCustom(); return; }
     const int i = std::clamp(g_edgeBugSoundId, 0, (int)(sizeof(kEbSounds) / sizeof(*kEbSounds)) - 1);
     PrCmd("playgamesound %s", kEbSounds[i]);   // client EmitSound on local player, no cheat flag
 }

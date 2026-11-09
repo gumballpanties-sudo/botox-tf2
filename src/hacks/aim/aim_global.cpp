@@ -3,6 +3,7 @@
 #include "aimbot.h"
 #include "ticks.h"
 #include "aim_fovreject.h"   // bounding-sphere FOV reject (pure, gate-tested)
+#include "../misc/names.h"   // Names_SkipAim: player list aim mode
 
 void CAimbotGlobal::SortTargets(std::vector<Target_t>& vTargets, int iMethod)
 {	// Sort by preference
@@ -207,6 +208,10 @@ bool CAimbotGlobal::ShouldIgnore(CBaseEntity* pEntity, CTFPlayer* pLocal, CTFWea
 	{
 		auto pPlayer = pEntity->As<CTFPlayer>();
 		if (pPlayer == pLocal || !pPlayer->IsAlive() || pPlayer->IsAGhost())
+			return true;
+
+		// misc > player list: aimbot ignore / only aimbot
+		if (Names_SkipAim(pPlayer->entindex()))
 			return true;
 
 		if (!FriendlyFire() && pLocal->m_iTeamNum() == pEntity->m_iTeamNum())

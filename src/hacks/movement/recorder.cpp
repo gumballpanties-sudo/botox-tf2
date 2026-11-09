@@ -255,14 +255,22 @@ static bool WriteClip(const std::filesystem::path& path, const RecClip& c)
     return ok;
 }
 
+// Disk work runs outside s_lock: Recorder_CmdEnd (game thread) takes the same lock, so reading
+// every clip under it stalled CreateMove for longer the more clips got saved. Only the swap locks.
 static void RefreshClips(bool onlyIfChanged)
 {
-    std::lock_guard<std::recursive_mutex> l(s_lock);
-    EnsureRoot();
+    std::string map;
+    size_t oldStamp;
+    {
+        std::lock_guard<std::recursive_mutex> l(s_lock);
+        EnsureRoot();
+        map = s_map;
+        oldStamp = s_clipsStamp;
+    }
 
     // listing stamp: re-parsing every clip each 5 s is the stall botox measured
     std::vector<std::filesystem::path> files;
-    std::wstring stamp(s_map.begin(), s_map.end());
+    std::wstring stamp(map.begin(), map.end());
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator(Root(), ec))
     {
@@ -273,17 +281,21 @@ static void RefreshClips(bool onlyIfChanged)
         files.push_back(e.path());
     }
     const size_t hash = std::hash<std::wstring>{}(stamp);
-    if (onlyIfChanged && hash == s_clipsStamp) return;
-    s_clipsStamp = hash;
+    if (onlyIfChanged && hash == oldStamp) return;
 
-    s_clips.clear();
+    std::vector<RecClip> clips;
     for (const auto& p : files)
     {
         RecClip c;
         if (!ReadClip(p, c)) continue;
-        if (!s_map.empty() && !c.map.empty() && c.map != s_map) continue;
-        s_clips.push_back(std::move(c));
+        if (!map.empty() && !c.map.empty() && c.map != map) continue;
+        clips.push_back(std::move(c));
     }
+
+    std::lock_guard<std::recursive_mutex> l(s_lock);
+    if (map != s_map) return;   // map changed mid-read: stamp left stale, the next call redoes it
+    s_clipsStamp = hash;
+    s_clips.swap(clips);
     if (s_selected >= (int)s_clips.size()) s_selected = -1;
     if (s_editorClip >= (int)s_clips.size()) s_editorOpen = false;
 }
@@ -863,15 +875,20 @@ static void RenderPath(ImDrawList* dl, const std::vector<RecFrame>& frames, unsi
 
     WorldFloorDisc(dl, FramePos(frames[0]), k_startRadius * 0.45f, Rgba(0, 0, 0, 100), AccentU32(0.85f), 64, 1.5f);
 
+    // strided past 4096 points: a full redraw cost one projection + line per recorded tick per
+    // frame, so fps fell the longer a recording ran. Last frame always drawn.
+    const size_t n = frames.size(), step = n > 4096 ? n / 4096 : 1;
     ImVec2 prev;
     bool hasPrev = false;
-    for (const RecFrame& f : frames)
+    for (size_t i = 0;; i += step)
     {
+        if (i >= n) i = n - 1;
         ImVec2 cur;
-        const bool on = W2S_Project(FramePos(f), cur);
+        const bool on = W2S_Project(FramePos(frames[i]), cur);
         if (on && hasPrev) dl->AddLine(prev, cur, col, 0.5f);
         prev = cur;
         hasPrev = on;
+        if (i == n - 1) break;
     }
 }
 

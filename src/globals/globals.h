@@ -656,6 +656,7 @@ extern bool g_edgeBug;     extern int g_edgeBugKey;     extern int g_edgeBugMode
 // botox n_edgebug knobs (edgebug.inl)
 extern float g_edgeBugPredictTime;   // search window seconds (def 0.35, 0.02-2)
 extern int   g_edgeBugDetectMode;    // 0 normal / 1 enhanced / 2 ebanat
+extern int   g_edgeBugSearchAmount;  // 1-4, enhanced only (botox m_edgebug_search_amount)
 extern bool  g_edgeBugToEdge;        // autostrafe to edge = the search's autostrafe switch
 extern bool  g_edgeBugPlayers;       // allow bugs off enemy players
 extern float g_edgeBugStrafeAngleMax; // max path bend off course (def 180 = off)
@@ -664,6 +665,7 @@ extern int   g_edgeBugPaths;         // plans kept per search when steering (1-8
 extern int   g_edgeBugLockType;      // 0 smooth / 1 full
 extern float g_edgeBugLockStrength;  // 0-100 %
 extern int   g_edgeBugStance;        // 0 any (jump-eating ducked find = fallback) / 1 ducked / 2 stand
+extern bool  g_edgeBugCurStance;     // duck held -> ducked only, else standing only (all styles)
 extern int   g_edgeBugDelTicks;     extern bool g_edgeBugDelAdvanced; extern float g_edgeBugDelAngleLimit;
 extern int   g_edgeBugDelSearch;    extern bool g_edgeBugDelSilent;   extern bool  g_edgeBugDelMouseFix;
 extern float g_edgeBugDnaScan;      extern bool g_edgeBugDnaAdvanced; extern int   g_edgeBugDnaRange;
@@ -718,6 +720,8 @@ extern bool g_goomba;      extern int g_goombaKey;      extern int g_goombaMode;
 extern int  g_goombaHow;       // auto goomba type: 0 sticky jump, 1 rocket jump, 2 regular jump
 extern int  g_goombaLead;      // auto goomba extra lead ticks (ping/rocket flight are automatic)
 extern bool g_autoPogo;    extern int g_autoPogoKey;    extern int g_autoPogoMode;   // demo sticky pogo (aim/autopogo.cpp)
+extern bool g_autoRJ;      extern int g_autoRJKey;      extern int g_autoRJMode;     // unibox auto rocket jump (aim/autorocketjump.cpp)
+extern bool g_autoFaN;     extern int g_autoFaNKey;     extern int g_autoFaNMode;    // unibox auto FaN jump (aim/autofanjump.cpp)
 extern bool g_autoCrouch;  extern int g_autoCrouchKey;  extern int g_autoCrouchMode;
 extern int  g_autoCrouchTicks;  // look-ahead ticks for the landing trace (def 6)
 extern bool g_djStrafe;    extern int g_djStrafeKey;    extern int g_djStrafeMode;   // scout double jump keeps velocity dir
@@ -750,6 +754,8 @@ extern int  g_edgeBugStyle;     // 0 botox search / 1 delusional donor / 2 dna d
 extern bool g_edgeBugMouseLock; // scale mouse x in OverrideMouseInput while a plan flies
 extern bool g_edgeBugSound;     // TF2 game sound the tick after a real edgebug
 extern int  g_edgeBugSoundId;   // which TF2 game sound plays on a real EB
+extern char g_edgeBugSoundPath[128]; // custom EB wav (sound id = custom)
+extern float g_edgeBugSoundVol;      // custom EB wav volume 0..2
 void EdgeBug_MouseInput(float* x, float* y);   // IClientMode::OverrideMouseInput hook body
 void EdgeBug_FrameStart();                     // FSN FRAME_START: hotwheels (style 3) view turn
 void EdgeBug_InstallMouseHook();
@@ -758,6 +764,7 @@ extern bool g_edgeSkip;    extern int g_edgeSkipKey;    extern int g_edgeSkipMod
 extern int  g_edgeSkipTicks;     // search window, ticks (def 23, ~botox's 0.35s predict_time)
 extern int  g_edgeSkipDepth;     // budget multiplier 1-4 (botox m_edge_skip_search_amount, def 2)
 extern float g_edgeSkipMaxBend;  // max degrees off course before a strafe counts as bent (def 180 = off)
+extern bool g_edgeSkipUseEb;     // true = window/depth/bend come from edge bug's knobs (botox m_edge_skip_use_eb)
 extern bool g_blockBot;    extern int g_blockBotKey;    extern int g_blockBotMode;
 
 // -- Fake movement (fakemove.inl): ProcessMovement edits, LOCAL SERVER ONLY -----------------------

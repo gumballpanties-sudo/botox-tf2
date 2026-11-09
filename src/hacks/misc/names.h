@@ -41,6 +41,12 @@ void Names_OnGameEvent(void* pEvent);
 bool Names_HasAlias(uint32_t account);
 void Names_AddAlias(uint32_t account, int index);   // name hint = slot's real name; no-op if present
 
+// ---- per-player aim / esp mode (misc > player list "aim" / "esp" buttons) ----
+// ignore = never a target / never drawn. only = while anyone has it, everyone without it is skipped.
+// Game thread: aim_global.cpp ShouldIgnore, esp.cpp DrawPlayers. Free while no mode is set.
+bool Names_SkipAim(int index);
+bool Names_SkipEsp(int index);
+
 // misc > player list page body (menu.cpp Page_MiscPlayerList)
 void Names_PlayerListMenu();
 // fpsoverlay MenuEntryList: rows + "+ add" button for one cycle list

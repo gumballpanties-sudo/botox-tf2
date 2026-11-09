@@ -4,6 +4,7 @@
 #include "../screen/screenfx.h"   // ScreenFx_FindClientMode
 #include "visuals.h"    // Chams_LevelInit/LevelUnload -- piggybacked on this file's LevelInit hook
 #include "../hud/avatar_cache.h"   // Avatar_OnMapChange piggybacks the same hook
+#include "world_fx3.h"   // WorldFx3_LevelShutdown
 
 // Port of fpsoverlay's flipworld.cpp (itself Aletherium's CFlipWorld + CMisc::FlipWorldInput).
 // Every engine number used here is a flipslot:: constant (flipmath.h); fpsoverlay's
@@ -549,6 +550,7 @@ static void __fastcall h_FlipLevelShutdown(void* rcx)
         s_flipReady = false;
         FlipRunTick(true);
     }
+    if (OnGameThread()) WorldFx3_LevelShutdown();   // old map's world/prop texture refs + saved lists
     Chams_LevelUnload();
     Glow_LevelUnload();
     o_FlipLevelShutdown(rcx);

@@ -74,14 +74,23 @@ void CDraw::Start(bool bBadFontCheck)
 	{
 		// fonts tab esp page changed (debounced in fonts.cpp): recreate the face here, the
 		// same paint-thread spot the lost-font check below already reloads from
+		// lost-font retry below is capped: vgui never frees a font handle, so a face that never
+		// builds leaked one handle + one GDI build per second forever. A fonts tab change re-arms it.
+		static int s_nLostRetries = 0;
 		if (Fonts_EspDue())
+		{
+			s_nLostRetries = 0;
 			H::Fonts.Reload(Vars::Menu::Scale[DEFAULT_BIND]);
+		}
 
 		static Timer tTimer = {};
-		if (tTimer.Run(1.f))
+		if (s_nLostRetries < 5 && tTimer.Run(1.f))
 		{
 			if (!GetTextSize("", H::Fonts.GetFont(FONT_INDICATORS)).y)
+			{
+				++s_nLostRetries;
 				H::Fonts.Reload(Vars::Menu::Scale[DEFAULT_BIND]);
+			}
 		}
 	}
 }

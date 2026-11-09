@@ -301,10 +301,15 @@ static bool EsFamily(void* pLocal, UserCmd_t* pCmd, bool bFirstNeg)
 
 static void EsSearch(void* pLocal, UserCmd_t* pCmd)
 {
-    s_esMaxWindow = std::clamp(g_edgeSkipTicks, 2, k_esMaxTicks);
+    // botox knob(): "use edgebug settings" reads edge bug's predict time / search amount / max bend
+    const bool bUseEb = g_edgeSkipUseEb;
+    const int window = bUseEb ? (int)std::round(std::clamp(g_edgeBugPredictTime, 0.02f, 2.f) / TickInterval())
+                              : g_edgeSkipTicks;
+    s_esMaxWindow = std::clamp(window, 2, k_esMaxTicks);
     const bool bWalkOff = s_esHadGround && s_esAir >= 1 && s_esAir <= EsTicks(6);
 
-    const int depth = std::clamp(g_edgeSkipDepth, 1, 4);
+    const int depth = std::clamp(bUseEb ? (g_edgeBugDetectMode == 1 ? g_edgeBugSearchAmount : 2)
+                                        : g_edgeSkipDepth, 1, 4);
     s_esBudget.Start(0.15f * (float)depth);
     s_esSims = 0; s_esBends = 0; s_esFoundBug = -1;
     Pred_SnapReserve(65);   // slot 0 (grab()'s base) + up to 64 candidate slots per EsGrab call
@@ -322,7 +327,7 @@ static void EsSearch(void* pLocal, UserCmd_t* pCmd)
     const Vec3 vVel0   = EntV3(pLocal, g_offVelocity);
     const bool bDucked0 = (EntI(pLocal, g_offFlags) & FL_DUCKING) != 0;
     s_esCourseYaw = RAD2DEGF(atan2f(vVel0.y, vVel0.x));
-    s_esMaxBend   = vVel0.Length2D() > 1.f ? std::clamp(g_edgeSkipMaxBend, 0.f, 180.f) : 180.f;
+    s_esMaxBend   = vVel0.Length2D() > 1.f ? std::clamp(bUseEb ? g_edgeBugStrafeAngleMax : g_edgeSkipMaxBend, 0.f, 180.f) : 180.f;
 
     int src = 0;
     if (bWalkOff && EsGrab(pLocal, pCmd, 0, s_esGroundZ, s_esTurnLeft, s_esMaxWindow))
@@ -363,10 +368,10 @@ static void EsSearch(void* pLocal, UserCmd_t* pCmd)
 
     if (bWalkOff || bReach)
         DebugLog("ES: src=%d wo=%d air=%d gz=%.2f z=%.2f vz=%.2f turn=%d win=%d reach=%d sims=%d "
-                 "found=%d bug=%d at=%d bend=%d/%.0f depth=%d",
+                 "found=%d bug=%d at=%d bend=%d/%.0f depth=%d eb=%d",
                  src, bWalkOff ? 1 : 0, s_esAir, s_esGroundZ, vOrg0.z, vVel0.z, s_esTurnLeft ? 1 : 0,
                  s_esMaxWindow, bReach ? 1 : 0, s_esSims, src ? 1 : 0, s_esFoundBug,
-                 src ? s_esLast : -1, s_esBends, s_esMaxBend, depth);
+                 src ? s_esLast : -1, s_esBends, s_esMaxBend, depth, bUseEb ? 1 : 0);
 
     if (!src) return;
     s_esActive = true;

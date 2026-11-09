@@ -1285,6 +1285,8 @@ static void Page_MovementMain()
                         SliderF("max strafe delta##ebhwdelta", &g_edgeBugHwStrafeDeltaMax, 0.1f, 100.f, "%.1f%%");
                 }
                 ImGui::Checkbox("bug off players##ebplayers", &g_edgeBugPlayers);
+                // standing -> standing ebs only, holding duck -> ducked ebs only
+                ImGui::Checkbox("current stance only##ebcurstance", &g_edgeBugCurStance);
                 if (style == 0)
                 {
                     SliderF("edge bug predict time", &g_edgeBugPredictTime, 0.02f, 2.f, "%.2f s");
@@ -1295,8 +1297,9 @@ static void Page_MovementMain()
                     if (g_edgeBugMouseSteer)
                         SliderI("paths##ebpaths", &g_edgeBugPaths, 1, 8);
                     // TF2: a ducked bug that lands still ducked eats the next jump
-                    ImGui::Combo("stance##ebstance", &g_edgeBugStance,
-                                 "prefer standing\0" "ducked only\0" "standing only\0");
+                    if (!g_edgeBugCurStance)
+                        ImGui::Combo("stance##ebstance", &g_edgeBugStance,
+                                     "prefer standing\0" "ducked only\0" "standing only\0");
                 }
                 if (style < 3)
                     ImGui::Checkbox("lock mouse on find", &g_edgeBugMouseLock);
@@ -1308,9 +1311,21 @@ static void Page_MovementMain()
                 }
                 ImGui::Checkbox("sound on hit##ebsound", &g_edgeBugSound);
                 if (g_edgeBugSound)
-                    ImGui::Combo("sound##ebsoundid", &g_edgeBugSoundId, "crit hit\0mini crit\0double donk\0achievement\0upgrade\0");
+                {
+                    ImGui::Combo("sound##ebsoundid", &g_edgeBugSoundId, "crit hit\0mini crit\0double donk\0achievement\0upgrade\0custom\0");
+                    if (g_edgeBugSoundId == 5)   // botox: custom path + volume
+                    {
+                        ImGui::InputTextWithHint("sound path##ebsndpath", "name.wav (C:\\botox-tf2\\sounds)",
+                                                 g_edgeBugSoundPath, sizeof(g_edgeBugSoundPath));
+                        SliderF("sound volume##ebsndvol", &g_edgeBugSoundVol, 0.f, 2.f, "%.2f");
+                    }
+                }
                 if (style == 0)
+                {
                     ImGui::Combo("detection mode##ebdetectmode", &g_edgeBugDetectMode, "normal\0enhanced\0ebanat\0");
+                    if (g_edgeBugDetectMode == 1)
+                        SliderI("search amount##ebsearch", &g_edgeBugSearchAmount, 1, 4);
+                }
             }, ImVec2(200.f, -1));
 
         ImGui::Checkbox("edge skip", &g_edgeSkip);
@@ -1318,6 +1333,9 @@ static void Page_MovementMain()
             ImGui::OptionPopup("edge skip settings", [&]() {
                 ImGui::Label("edge skip keybind");
                 ImGui::Keybind("edge skip key", &g_edgeSkipKey, &g_edgeSkipMode);
+                ImGui::Checkbox("use edgebug settings##esuseeb", &g_edgeSkipUseEb);
+                if (g_edgeSkipUseEb)
+                    return;
                 SliderI("search window (ticks)", &g_edgeSkipTicks, 2, 132);
                 SliderI("search depth", &g_edgeSkipDepth, 1, 4);
                 SliderF("max bend", &g_edgeSkipMaxBend, 0.f, 180.f, "%.0f deg (180 = off)");

@@ -2378,17 +2378,32 @@ static IDirect3DDevice9* s_imguiDev = nullptr;
 // old one, so without this every visual draws with foreign objects and shows nothing. The old
 // device is still alive -- ImGui_ImplDX9_Init AddRef'd it -- so releasing on it is legal, and
 // ImGui_ImplDX9_Shutdown drops that last ref.
+// Every DEFAULT-pool object we own. Shared by h_Reset and Render_RebindDevice: rebind used to miss
+// the last seven, so a device swap kept the old device alive (its VRAM leaked) and blur kept
+// binding the old device's targets.
+static void Render_ReleaseDeviceObjects()
+{
+    CsgoCrosshair_ReleaseTextures();   // rebuilt next frame; a DEFAULT-pool atlas is lost here
+    ColorCorr_Destroy();               // shader + two DEFAULT-pool textures, remade on the next graded frame
+    Bloom_Destroy();                   // same story: two shaders and three DEFAULT-pool targets
+    ScreenFx_Destroy();                // INTZ + probe targets, all DEFAULT-pool: a live one fails the Reset
+    ScreenFxPasses_Destroy();          // one shader + one DEFAULT-pool scene copy
+    MediaPlayer_ReleaseTexture();      // cover art is DEFAULT-pool too; the decoded pixels rebuild it
+    Indicators_ReleaseTextures();      // mitosis morph texture; rebuilt on the next split
+    Avatar_ReleaseAll();               // avatar textures are DEFAULT-pool too
+    PlayerStencil_ReleaseTargets();    // esp: player stencil mask/blur targets, DEFAULT-pool
+    EspPreview::DropTexture();         // esp preview: its target is remade, the d3d texture with it
+    GifTex_ReleaseAll();               // gif frame texture, GDI+ bitmap survives the reset
+    SpectatorList_ReleaseTextures();   // spectator list: eyes style row textures, DEFAULT-pool
+    Radar_ReleaseTextures();           // csgo radar overview, DEFAULT-pool; the baked pixels rebuild it
+    BlurRect_Destroy();                // blur scratch targets + shader
+    Render_FlushDeferred();            // swapped-out DEFAULT-pool textures: a live one fails the Reset
+}
+
 static void Render_RebindDevice(IDirect3DDevice9* dev)
 {
     DebugLog("render: device changed %p -> %p, rebuilding device objects", (void*)s_imguiDev, (void*)dev);
-    CsgoCrosshair_ReleaseTextures();
-    ColorCorr_Destroy();
-    Bloom_Destroy();
-    ScreenFx_Destroy();
-    ScreenFxPasses_Destroy();
-    MediaPlayer_ReleaseTexture();   // DEFAULT pool, and it belongs to the device being dropped
-    Indicators_ReleaseTextures();      // mitosis morph texture, same story
-    Render_FlushDeferred();            // old device's swapped-out textures (lists cleared below)
+    Render_ReleaseDeviceObjects();     // old device's objects (lists cleared below)
     ImGui_ImplDX9_Shutdown();
     ImGui_ImplDX9_Init(dev);
     s_imguiDev = dev;
@@ -2621,21 +2636,7 @@ chain:
 HRESULT __stdcall h_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
     ++g_hookDepth;
     struct Dec { ~Dec() { --g_hookDepth; } } _dec;
-    CsgoCrosshair_ReleaseTextures();   // rebuilt next frame; a DEFAULT-pool atlas is lost here
-    ColorCorr_Destroy();               // shader + two DEFAULT-pool textures, remade on the next graded frame
-    Bloom_Destroy();                   // same story: two shaders and three DEFAULT-pool targets
-    ScreenFx_Destroy();                // INTZ + probe targets, all DEFAULT-pool: a live one fails the Reset
-    ScreenFxPasses_Destroy();          // one shader + one DEFAULT-pool scene copy
-    MediaPlayer_ReleaseTexture();      // cover art is DEFAULT-pool too; the decoded pixels rebuild it
-    Indicators_ReleaseTextures();         // mitosis morph texture; rebuilt on the next split
-    Avatar_ReleaseAll();               // avatar textures are DEFAULT-pool too
-    PlayerStencil_ReleaseTargets();    // esp: player stencil mask/blur targets, DEFAULT-pool
-    EspPreview::DropTexture();         // esp preview: its target is remade, the d3d texture with it
-    GifTex_ReleaseAll();               // gif frame texture, GDI+ bitmap survives the reset
-    SpectatorList_ReleaseTextures();   // spectator list: eyes style row textures, DEFAULT-pool
-    Radar_ReleaseTextures();           // csgo radar overview, DEFAULT-pool; the baked pixels rebuild it
-    BlurRect_Destroy();               // blur scratch targets + shader
-    Render_FlushDeferred();           // swapped-out DEFAULT-pool textures: a live one fails the Reset
+    Render_ReleaseDeviceObjects();
     if (g_imguiInit) ImGui_ImplDX9_InvalidateDeviceObjects();
     // The split arrays point at draw lists from the frame being dropped -- a Present that
     // renders them after a Reset would submit freed geometry.

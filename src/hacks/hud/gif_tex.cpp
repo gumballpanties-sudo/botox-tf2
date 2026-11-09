@@ -170,6 +170,9 @@ static std::string UrlPath(const std::string& setting)
     const DWORD attr = GetFileAttributesA(local);
     if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) return local;
 
+    // the path box is read live every frame: while it is being typed in, every partial url was a
+    // new s_urlStarted entry + its own download thread. Start only once editing stops.
+    if (ImGui::GetCurrentContext() && ImGui::IsAnyItemActive()) return {};
     std::lock_guard<std::mutex> lock(s_urlMutex);
     if (s_urlStarted.insert(url).second)
     {

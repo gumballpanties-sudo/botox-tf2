@@ -28,6 +28,15 @@
 //          lands you.
 // Untouched radius = 0.85 ramping to 1 over tf_sticky_radius_ramp_time after the arm convar
 // (GetDamageRadius, pipebomb.cpp:1429).
+//
+//  launch -- on the ground it never dets standing (82 hull). The launch sticky is planned for a
+//          crouch jump: once it is armed, cmd J sends IN_JUMP|IN_DUCK (Duck() runs before the
+//          jump, so the grounded duck only starts; tf_gamemovement.cpp:3249), cmd J+1 is in the
+//          air so OnDuck FinishDucks at once (:3267, origin +20, gamemovement.cpp:4242) and that
+//          cmd dets -> 55 force hull (tf_player.cpp:10252). J+1's client prediction ran before we
+//          add IN_DUCK, so it shows us unducked: the det there is forced, not scored.
+//          Fully ducked on the ground can't jump (tf_gamemovement.cpp:1221) -> stand first; a
+//          held jump is latched (:1235) -> one cmd released first.
 
 extern bool g_autoPogo;
 extern int  g_autoPogoKey, g_autoPogoMode;
@@ -62,19 +71,38 @@ namespace
 	bool  s_bWaitPush = false;
 	int   s_iLastDet = 0;
 	float s_flDetVz = 0.f, s_flKickZ = 0.f;
+	int   s_iJumpTick = 0;              // launch: tick of the cmd that sent IN_JUMP|IN_DUCK, det on the next
+	int   s_iDuckHold = 0;              // cmds to keep IN_DUCK after the launch det
 
 	// one "POGO R:" line per bind hold: what every cmd was refused for
-	struct Diag { int cmds = 0, waiting = 0, noAtk = 0, plans = 0, cand = 0, noInfo = 0, noReach = 0, fired = 0, dets = 0, lastChance = 0, armedCmds = 0; float bestPush = 0.f, bestDetPush = 0.f; } s_tDiag;
+	struct Diag { int cmds = 0, waiting = 0, noAtk = 0, plans = 0, cand = 0, noInfo = 0, noReach = 0, fired = 0, dets = 0, lastChance = 0, armedCmds = 0, jumps = 0, standUp = 0; float bestPush = 0.f, bestDetPush = 0.f; } s_tDiag;
 	void DiagFlush()
 	{
 		const Diag& d = s_tDiag;
 		if (d.cmds)
-			DebugLog("POGO R: cmds=%d waiting=%d noAtk=%d plans=%d cand=%d noInfo=%d noReach=%d fired=%d dets=%d lastChance=%d armedCmds=%d bestPush=%.0f bestDetPush=%.0f",
-				d.cmds, d.waiting, d.noAtk, d.plans, d.cand, d.noInfo, d.noReach, d.fired, d.dets, d.lastChance, d.armedCmds, d.bestPush, d.bestDetPush);
+			DebugLog("POGO R: cmds=%d waiting=%d noAtk=%d plans=%d cand=%d noInfo=%d noReach=%d fired=%d dets=%d lastChance=%d armedCmds=%d jumps=%d standUp=%d bestPush=%.0f bestDetPush=%.0f",
+				d.cmds, d.waiting, d.noAtk, d.plans, d.cand, d.noInfo, d.noReach, d.fired, d.dets, d.lastChance, d.armedCmds, d.jumps, d.standUp, d.bestPush, d.bestDetPush);
 		s_tDiag = {};
 	}
 
 	gmb::V GV(const Vec3& v) { return { v.x, v.y, v.z }; }
+
+	// us at the launch det: b = the grounded sim at the det cmd, the jump was the cmd before.
+	// 2 ticks of a 289 jump (tf_gamemovement.cpp:1315), air duck lifts the feet 82 - 62 = 20.
+	// ponytail: no mod_jump_height attribs -- add if a jump-height item launches wrong.
+	gmb::Body JumpBody(gmb::Body b, float g)
+	{
+		const float t = 2.f * TICK_INTERVAL;
+		b.org.z += 20.f + gmb::Rise(289.f, g, t);
+		b.vel.z = 289.f - g * t;
+		b.hullZ = 62.f;
+		return b;
+	}
+	float Gravity()
+	{
+		static auto sv_gravity = H::ConVars.FindVar("sv_gravity");
+		return sv_gravity ? sv_gravity->GetFloat() : 800.f;
+	}
 
 	// velocity we leave the blast with: up (stay afloat) + along the view, sideways off the
 	// view line costs double -- straight lines where you look, not wherever the blast throws you
@@ -210,7 +238,9 @@ namespace
 		const float flLive = SDK::AttribHookValue(tf_grenadelauncher_livetime ? tf_grenadelauncher_livetime->GetFloat() : 0.8f, "sticky_arm_time", pWeapon);
 		const int   iArm = int(ceilf(flLive / TICK_INTERVAL - 0.01f));
 		const Vec3  vShift = Vec3(q[f].org.x - q[0].org.x, q[f].org.y - q[0].org.y, q[f].org.z - q[0].org.z);   // shoot pos rides with us
-		const bool  bLaunch = pGround[0];   // on the ground: the launch sticky, a grounded det is the point
+		const bool  bLaunch = pGround[0];   // on the ground: the launch sticky, det = crouch jump body (JumpBody)
+		const Blast tBlast = { b.dmg, b.radius, b.duck || bLaunch };
+		const float flGrav = Gravity();
 		const int   iFlags = ProjSimEnum::Trace | ProjSimEnum::InitCheck | ProjSimEnum::PredictCmdNum | (f ? ProjSimEnum::NoRandomAngles : 0);
 
 		// one aim -> its best det tick + score (-1e9 = no det tick pushes us >= kMinPush)
@@ -262,13 +292,14 @@ namespace
 			const int iLast = tSim.land >= 0 ? kPath : int(tSim.vPath.size());   // gone after its last sim step
 			for (int m = iArm; f + m < kPath && m <= iLast; m++)
 			{
-				if (!bLaunch && pGround[f + m])
-					break;   // we touched down first: the pogo is over on this aim
-				const gmb::V vPush = ShotPush(tSim, b, m, q[f + m]);
+				if (bLaunch ? !pGround[f + m - 1] : pGround[f + m])
+					break;   // air: we touched down first, the pogo is over. ground: walked off, no jump cmd
+				const gmb::Body me = bLaunch ? JumpBody(q[f + m], flGrav) : q[f + m];
+				const gmb::V vPush = ShotPush(tSim, tBlast, m, me);
 				d.bestPush = (std::max)(d.bestPush, vPush.z);
 				if (vPush.z < kMinPush)
 					continue;
-				const float s = Score(q[f + m], vPush, vFwd) - 1.f * m;   // sooner = shorter guess of your steering
+				const float s = Score(me, vPush, vFwd) - 1.f * m;   // sooner = shorter guess of your steering
 				if (s > flRes)
 				{
 					flRes = s;
@@ -322,7 +353,7 @@ void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 	{
 		if (s_iHold)
 			pCmd->buttons &= ~IN_ATTACK;   // bind let go mid-press: the launch fires with your view, as a normal tap would
-		s_iHold = 0;
+		s_iHold = 0, s_iJumpTick = 0, s_iDuckHold = 0;
 		if (!pLocal->IsAlive() || pWeapon && pWeapon->GetWeaponID() != TF_WEAPON_PIPEBOMBLAUNCHER)
 			s_vShots.clear();   // dead / swapped: those stickies are not ours to time any more
 		DiagFlush();
@@ -373,9 +404,10 @@ void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 				break;
 			}
 		}
-		// summed push of every shot armed by the det at k cmds from now (only those blow)
-		auto PushAt = [&](int k, bool& bArmed) -> gmb::V
+		// summed push on me of every shot armed by the det at k cmds from now (only those blow)
+		auto PushAt = [&](int k, const gmb::Body& me, bool bDuck, bool& bArmed) -> gmb::V
 		{
+			const Blast b = { tBlast.dmg, tBlast.radius, bDuck };
 			gmb::V v = {};
 			bArmed = false;
 			for (size_t i = 0; i < s_vShots.size(); i++)
@@ -385,42 +417,104 @@ void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 				if (m < t.arm || (t.land < 0 && m > int(t.vPath.size())))
 					continue;   // not armed then / past its sim (left the map, fizzled)
 				bArmed = true;
-				v = v + (vReal[i] ? gmb::SelfStickyPush(GV(*vReal[i]), q[k], tBlast.dmg, tBlast.radius, tBlast.duck) : ShotPush(t, tBlast, m, q[k]));
+				v = v + (vReal[i] ? gmb::SelfStickyPush(GV(*vReal[i]), me, b.dmg, b.radius, b.duck) : ShotPush(t, b, m, me));
 			}
 			return v;
 		};
-
-		bool bAny;
-		const gmb::V vNow = PushAt(0, bAny);
-		if (bAny)
+		auto Det = [&](const gmb::V& vNow, const char* szWhy)
 		{
-			s_tDiag.armedCmds++;
-			s_tDiag.bestDetPush = (std::max)(s_tDiag.bestDetPush, vNow.z);
-			const float flNow = Score(q[0], vNow, vFwd);
-			float flLater = -1e9f;
-			bool  bLanding = true;   // no airborne tick ahead = this is the last one
-			for (int k = 1; k <= kLook && k < kPath; k++)
+			pCmd->buttons |= IN_ATTACK2;
+			s_tDiag.dets++;
+			s_bWaitPush = true, s_iLastDet = iTick, s_flDetVz = q[0].vel.z, s_flKickZ = vNow.z;
+			const gmb::V v = q[0].vel + vNow;   // what we leave with, in the view frame
+			DebugLog("POGO: det push=%.0f/%.0f/%.0f vz %.0f -> %.0f fwd=%.0f side=%.0f%s", vNow.x, vNow.y, vNow.z, q[0].vel.z, v.z,
+				v.x * vFwd.x + v.y * vFwd.y, v.x * -vFwd.y + v.y * vFwd.x, szWhy);
+			std::erase_if(s_vShots, [&](const Shot& t) { return iTick - t.fireTick >= t.arm; });   // armed ones are gone
+		};
+
+		const float flGrav = Gravity();
+		if (s_iJumpTick)
+		{
+			// launch cmd J+1: the server is airborne + ducked now, whatever our prediction shows
+			pCmd->buttons |= IN_DUCK;
+			if (!g[0])
 			{
-				if (!g[0] && g[k])
-					break;   // touched down before k
-				bLanding = false;
 				bool bArmed;
-				const gmb::V v = PushAt(k, bArmed);
-				if (v.z >= kMinPush)
-					flLater = (std::max)(flLater, Score(q[k], v, vFwd));
+				Det(PushAt(0, q[0], true, bArmed), " (launch)");
+				s_iJumpTick = 0, s_iDuckHold = 3;
 			}
-			if (vNow.z >= kMinPush && (flNow >= flLater || bLanding))
+			else if (iTick - s_iJumpTick > 3)
+				s_iJumpTick = 0, DebugLog("POGO: launch jump never left the ground");
+		}
+		else if (g[0])
+		{
+			// ground: jump now (det next cmd, JumpBody(q[1])) unless a later jump scores better
+			bool bAny;
+			const gmb::Body me1 = JumpBody(q[1], flGrav);
+			const gmb::V vNow = PushAt(1, me1, true, bAny);
+			if (bAny)
 			{
-				pCmd->buttons |= IN_ATTACK2;
-				s_tDiag.dets++;
-				s_tDiag.lastChance += bLanding;
-				s_bWaitPush = true, s_iLastDet = iTick, s_flDetVz = q[0].vel.z, s_flKickZ = vNow.z;
-				const gmb::V v = q[0].vel + vNow;   // what we leave with, in the view frame
-				DebugLog("POGO: det push=%.0f/%.0f/%.0f vz %.0f -> %.0f fwd=%.0f side=%.0f%s", vNow.x, vNow.y, vNow.z, q[0].vel.z, v.z,
-					v.x * vFwd.x + v.y * vFwd.y, v.x * -vFwd.y + v.y * vFwd.x, bLanding ? " (landing)" : "");
-				std::erase_if(s_vShots, [&](const Shot& t) { return iTick - t.fireTick >= t.arm; });   // armed ones are gone
+				s_tDiag.armedCmds++;
+				s_tDiag.bestDetPush = (std::max)(s_tDiag.bestDetPush, vNow.z);
+				const float flNow = Score(me1, vNow, vFwd);
+				float flLater = -1e9f;
+				bool  bLast = true;   // walking off next cmd = no later jump
+				for (int k = 1; k <= kLook && k + 1 < kPath; k++)
+				{
+					if (!g[k])
+						break;   // off the ground at k: no jump cmd there
+					bLast = false;
+					bool bArmed;
+					const gmb::Body me = JumpBody(q[k + 1], flGrav);
+					const gmb::V v = PushAt(k + 1, me, true, bArmed);
+					if (v.z >= kMinPush)
+						flLater = (std::max)(flLater, Score(me, v, vFwd));
+				}
+				if (vNow.z >= kMinPush && (flNow >= flLater || bLast))
+				{
+					if (pLocal->IsDucking())
+						pCmd->buttons &= ~IN_DUCK, s_tDiag.standUp++;   // fully ducked can't jump: stand first
+					else if (G::LastUserCmd && (G::LastUserCmd->buttons & IN_JUMP))
+						pCmd->buttons &= ~IN_JUMP;   // jump latch: release one cmd, jump on the next
+					else
+					{
+						pCmd->buttons |= IN_JUMP | IN_DUCK;
+						s_iJumpTick = iTick, s_tDiag.jumps++;
+						DebugLog("POGO: launch jump, push %.0f/%.0f/%.0f next cmd", vNow.x, vNow.y, vNow.z);
+					}
+				}
 			}
 		}
+		else
+		{
+			bool bAny;
+			const gmb::V vNow = PushAt(0, q[0], tBlast.duck, bAny);
+			if (bAny)
+			{
+				s_tDiag.armedCmds++;
+				s_tDiag.bestDetPush = (std::max)(s_tDiag.bestDetPush, vNow.z);
+				const float flNow = Score(q[0], vNow, vFwd);
+				float flLater = -1e9f;
+				bool  bLanding = true;   // no airborne tick ahead = this is the last one
+				for (int k = 1; k <= kLook && k < kPath; k++)
+				{
+					if (g[k])
+						break;   // touched down before k
+					bLanding = false;
+					bool bArmed;
+					const gmb::V v = PushAt(k, q[k], tBlast.duck, bArmed);
+					if (v.z >= kMinPush)
+						flLater = (std::max)(flLater, Score(q[k], v, vFwd));
+				}
+				if (vNow.z >= kMinPush && (flNow >= flLater || bLanding))
+				{
+					s_tDiag.lastChance += bLanding;
+					Det(vNow, bLanding ? " (landing)" : "");
+				}
+			}
+		}
+		if (s_iDuckHold > 0)
+			s_iDuckHold--, pCmd->buttons |= IN_DUCK;   // stay tucked through the launch push
 	}
 
 	// ---- fire: press kHold cmds, release on the next at the re-planned angle ----

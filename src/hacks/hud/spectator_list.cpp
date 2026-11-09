@@ -297,6 +297,8 @@ static std::string UrlImagePath(const std::string& setting)
     const DWORD attr = GetFileAttributesA(local);
     if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) return local;
 
+    // typed live: wait until editing stops, else every partial url got its own download thread
+    if (ImGui::IsAnyItemActive()) return {};
     std::lock_guard<std::mutex> lock(s_urlMutex);
     if (std::find(s_urlStarted.begin(), s_urlStarted.end(), url) == s_urlStarted.end()) {
         s_urlStarted.push_back(url);
@@ -304,7 +306,9 @@ static std::string UrlImagePath(const std::string& setting)
         if (HANDLE h = CreatePinnedThread([url, path = std::string(local)] {
             CreateDirectoryA("C:\\botox-tf2", nullptr);
             CreateDirectoryA("C:\\botox-tf2\\images", nullptr);
-            const HRESULT hr = URLDownloadToFileA(nullptr, url.c_str(), path.c_str(), 0, nullptr);
+            const std::string part = path + ".part";   // never decode a half-written file
+            const HRESULT hr = URLDownloadToFileA(nullptr, url.c_str(), part.c_str(), 0, nullptr);
+            if (!SUCCEEDED(hr) || !MoveFileExA(part.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileA(part.c_str());
             DebugLog("spectator list: download %s -> %s hr=0x%08X", url.c_str(), path.c_str(), (unsigned)hr);
         })) CloseHandle(h);
     }

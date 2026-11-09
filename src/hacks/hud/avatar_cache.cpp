@@ -160,7 +160,7 @@ void Avatar_ReleaseAll()
     s_cache.clear();
 }
 
-void Avatar_OnMapChange() { s_mapChanged = true; }
+void Avatar_OnMapChange() { s_mapChanged = true; s_nextTry.clear(); }   // game thread (level init)
 
 void Render_DeferRelease(IUnknown* p);   // render.cpp: freed once no built list binds it
 

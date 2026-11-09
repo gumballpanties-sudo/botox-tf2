@@ -115,7 +115,65 @@ namespace
 
     // HUD reads the returned pointer right away; one slot per player like fpsoverlay g_nameCache
     char s_shown[65][128] = {};
+
+    // ---- per-player aim / esp mode: 0 normal, 1 ignore, 2 only ----
+    // Humans keyed by account id (saved in cfg), bots by kBotKey|slot (session only).
+    // ponytail: bot key = slot, a new bot in that slot inherits the mode; key by name if that bites.
+    // Same lock as the aliases (menu holds it exclusive for the whole page).
+    enum : uint8_t { kModeNormal, kModeIgnore, kModeOnly };
+    constexpr uint64_t kBotKey = 1ull << 32;   // above any 32-bit account id
+    struct PlMode { uint8_t aim = 0, esp = 0; };
+    std::map<uint64_t, PlMode> s_modes;
+    std::atomic<int> s_modeCount{ 0 }, s_onlyAim{ 0 }, s_onlyEsp{ 0 };
+
+    // under the exclusive lock: drop all-normal rows, recount
+    void RecountModes()
+    {
+        int oa = 0, oe = 0;
+        for (auto it = s_modes.begin(); it != s_modes.end();)
+        {
+            if (!it->second.aim && !it->second.esp) { it = s_modes.erase(it); continue; }
+            oa += it->second.aim == kModeOnly;
+            oe += it->second.esp == kModeOnly;
+            ++it;
+        }
+        s_onlyAim = oa;
+        s_onlyEsp = oe;
+        s_modeCount = (int)s_modes.size();
+    }
+
+    // mode key of a slot; 0 = no player there. Hooked GetPlayerInfo takes the lock: never call it held.
+    __declspec(noinline) uint64_t ModeKeyOf(int index)
+    {
+        if (!g_engine || index < 1 || index > 64) return 0;
+        alignas(8) uint8_t pi[0x100] = {};
+        __try {
+            if (!VCall<bool>(g_engine, 8, index, (void*)pi)) return 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+        uint32_t account = 0;
+        memcpy(&account, pi + kPiFriendsId, sizeof(account));
+        return (pi[0x6C] || !account) ? (kBotKey | (uint64_t)index) : (uint64_t)account;   // fakeplayer
+    }
+
+    bool Skip(int index, bool esp)
+    {
+        if (s_modeCount.load(std::memory_order_relaxed) == 0) return false;
+        const uint64_t key = ModeKeyOf(index);
+        uint8_t m = kModeNormal;
+        if (key)
+        {
+            AcquireSRWLockShared(&s_aliasLock);
+            const auto it = s_modes.find(key);
+            if (it != s_modes.end()) m = esp ? it->second.esp : it->second.aim;
+            ReleaseSRWLockShared(&s_aliasLock);
+        }
+        if (m == kModeIgnore) return true;
+        return m != kModeOnly && (esp ? s_onlyEsp : s_onlyAim).load(std::memory_order_relaxed) > 0;
+    }
 }
+
+bool Names_SkipAim(int index) { return Skip(index, false); }
+bool Names_SkipEsp(int index) { return Skip(index, true); }
 
 const char* __fastcall h_GetPlayerName(void* self, int index)
 {
@@ -226,7 +284,7 @@ namespace
 // 17): only a table cell narrows it -- the menu.cpp cvars page layout, same numbers.
 namespace
 {
-    constexpr float kFrame = 17.f, kInputLift = 10.f, kRemoveW = 16.f;
+    constexpr float kFrame = 17.f, kInputLift = 10.f, kRemoveW = 16.f, kModeW = 40.f;
 
     bool BeginRows(const char* id, int columns)
     {
@@ -285,8 +343,28 @@ void Names_PlayerListMenu()
     uint32_t removeAccount = 0;
     AcquireSRWLockExclusive(&s_aliasLock);
 
-    ImGui::TextDisabled("custom name = shown instead of theirs everywhere");
-    ImGui::TextDisabled("also: right-click a player in the scoreboard > add to alias list");
+    // aim / esp mode buttons, one cell each. Edits a copy, written back on click (no empty rows).
+    bool modesDirty = false;
+    auto modeCells = [&](uint64_t key) {
+        static const char* const kModeText[3] = { "-", "ignore", "only" };
+        PlMode m;
+        if (const auto it = s_modes.find(key); it != s_modes.end()) m = it->second;
+        bool changed = false;
+        auto cell = [&](const char* id, uint8_t& v) {
+            ImGui::TableNextColumn();
+            ButtonCell();
+            const bool on = v != kModeNormal;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Accent));
+            char label[24];
+            snprintf(label, sizeof(label), "%s##%s", kModeText[v < 3 ? v : 0], id);
+            if (ImGui::Button(label, ImVec2(kModeW, kFrame - 4.f))) { v = (uint8_t)((v + 1) % 3); changed = true; }
+            if (on) ImGui::PopStyleColor();
+        };
+        cell("aim", m.aim);
+        cell("esp", m.esp);
+        if (changed) { s_modes[key] = m; modesDirty = true; }
+    };
+    auto rowKey = [](const Row& r) { return r.bot ? (kBotKey | (uint64_t)r.index) : (uint64_t)r.account; };
 
     auto aliasCells = [&](uint32_t account, char* fresh) {
         ImGui::TableNextColumn();
@@ -310,12 +388,24 @@ void Names_PlayerListMenu()
         }
     };
 
-    if (BeginRows("##players", 4))
+    if (BeginRows("##players", 6))
     {
         ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch, 1.f);
         ImGui::TableSetupColumn("##team", ImGuiTableColumnFlags_WidthFixed, 34.f);
+        ImGui::TableSetupColumn("##aim", ImGuiTableColumnFlags_WidthFixed, kModeW + 6.f);
+        ImGui::TableSetupColumn("##esp", ImGuiTableColumnFlags_WidthFixed, kModeW + 6.f);
         ImGui::TableSetupColumn("##alias", ImGuiTableColumnFlags_WidthStretch, 1.f);
         ImGui::TableSetupColumn("##x", ImGuiTableColumnFlags_WidthFixed, kRemoveW + 4.f);
+
+        // column labels
+        ImGui::TableNextRow(ImGuiTableRowFlags_None, kFrame + 4.f);
+        for (const char* label : { "name", "team", "aim", "esp", "custom name" })
+        {
+            ImGui::TableNextColumn();
+            TextCell();
+            ImGui::TextDisabled("%s", label);
+        }
+        ImGui::TableNextColumn();
 
         for (int k = 0; k < n; ++k)
         {
@@ -330,6 +420,7 @@ void Names_PlayerListMenu()
             if (r.team == 2)      ImGui::TextColored(ImVec4(0.72f, 0.24f, 0.22f, 1.f), "RED");
             else if (r.team == 3) ImGui::TextColored(ImVec4(0.35f, 0.48f, 0.66f, 1.f), "BLU");
             else                  ImGui::TextDisabled("-");
+            modeCells(rowKey(r));
             if (r.bot)
             {
                 ImGui::TableNextColumn();
@@ -356,7 +447,29 @@ void Names_PlayerListMenu()
             ImGui::TableNextColumn();
             TextCell();
             ImGui::TextDisabled("saved");
+            modeCells(account);
             aliasCells(account, nullptr);
+            ImGui::PopID();
+        }
+
+        // aim / esp mode set, player not here, no alias row above: still listed so "only" can be cleared
+        for (const auto& [key, m] : s_modes)
+        {
+            bool here = false;
+            for (int k = 0; k < n && !here; ++k) here = rowKey(rows[k]) == key;
+            if (here || (!(key & kBotKey) && s_aliases.count((uint32_t)key))) continue;
+            ImGui::PushID((const void*)(uintptr_t)key);
+            ImGui::TableNextRow(ImGuiTableRowFlags_None, kFrame + 4.f);
+            ImGui::TableNextColumn();
+            TextCell();
+            if (key & kBotKey) ImGui::TextDisabled("bot (slot %u)", (unsigned)(key & 0xFFFFFFFFu));
+            else               ImGui::TextDisabled("[U:1:%u]", (unsigned)key);
+            ImGui::TableNextColumn();
+            TextCell();
+            ImGui::TextDisabled("saved");
+            modeCells(key);   // key exists: write-back never inserts, iteration stays valid
+            ImGui::TableNextColumn();
+            ImGui::TableNextColumn();
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -365,6 +478,7 @@ void Names_PlayerListMenu()
 
     if (removeAccount) s_aliases.erase(removeAccount);
     s_aliasCount = (int)s_aliases.size();
+    if (modesDirty) RecountModes();
     ReleaseSRWLockExclusive(&s_aliasLock);
 }
 
@@ -392,6 +506,9 @@ void Names_SaveCfg(FILE* f)
     AcquireSRWLockShared(&s_aliasLock);
     for (const auto& [account, a] : s_aliases)
         fprintf(f, "alias=%u %s\n", account, a.name);
+    for (const auto& [key, m] : s_modes)   // bots (slot keys) are session only
+        if (!(key & kBotKey) && (m.aim || m.esp))
+            fprintf(f, "plmode=%u %d %d\n", (unsigned)key, m.aim, m.esp);
     ReleaseSRWLockShared(&s_aliasLock);
 }
 
@@ -403,7 +520,24 @@ bool Names_LoadCfg(const char* key, const char* val)
         AcquireSRWLockExclusive(&s_aliasLock);
         s_aliases.clear();
         s_aliasCount = 0;
+        s_modes.clear();
+        RecountModes();
         ReleaseSRWLockExclusive(&s_aliasLock);
+        return true;
+    }
+    if (strcmp(key, "plmode") == 0)
+    {
+        unsigned account = 0;
+        int aim = 0, esp = 0;
+        if (sscanf(val, "%u %d %d", &account, &aim, &esp) == 3 && account)
+        {
+            AcquireSRWLockExclusive(&s_aliasLock);
+            PlMode& m = s_modes[account];
+            m.aim = (uint8_t)(aim >= 0 && aim <= 2 ? aim : 0);
+            m.esp = (uint8_t)(esp >= 0 && esp <= 2 ? esp : 0);
+            RecountModes();
+            ReleaseSRWLockExclusive(&s_aliasLock);
+        }
         return true;
     }
     if (strcmp(key, "alias") == 0)

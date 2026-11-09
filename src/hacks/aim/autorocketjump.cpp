@@ -11,14 +11,19 @@
 // dih side (movement_ex.inl, dllmain.cpp)
 extern bool g_goomba;
 extern int  g_goombaKey, g_goombaMode, g_goombaHow, g_goombaLead;
+extern bool g_autoRJ;
+extern int  g_autoRJKey, g_autoRJMode;
 bool MovementKeyOK(int key, int mode);
 int  Movement_TakeGoombaRocketContact();
 void Movement_GoombaFired();
 void DebugLog(const char* fmt, ...);
 
 static bool s_bOn = false;   // Vars::Misc::Movement::AutoRocketJump
+static bool s_bRJ = false;   // standalone (Unibox) auto rocket jump: g_autoRJ + its bind
 static int  s_iGoombaK = -1; // ticks until the falling player reaches our standing head
 static constexpr int kApplyAbove = 0, kTimingOffset = 0, kChokeCount = 1;
+// Unibox debug vars (NOSAVE), at their defaults
+static constexpr int kRJSkipGround = 0, kRJSkipAir = 1, kRJChokeGrounded = 1, kRJChokeAir = 1, kRJTimingOffset = 0, kRJApplyAbove = 0;
 
 // ---- reject summary: one "GOOMBA R:" line per bind hold, the count of cmds each gate ate.
 // Every gate below used to return silently, so a hold that never fired left no trace ----
@@ -276,7 +281,7 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 bool CAutoRocketJump::SetAngles(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 {
 	m_vAngles = pCmd->viewangles;
-	if (!s_bOn)
+	if (!s_bOn && !s_bRJ)
 		return true;
 
 	ProjectileInfo tProjInfo = {};
@@ -381,6 +386,18 @@ void CAutoRocketJump::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* p
 		Gmb_DiagFlush();   // bind let go: one line for the whole hold
 	else
 		s_tDiag.cmds++;
+
+	// standalone ARJ: its own sequence runs to the end; a new one starts only when the goomba is idle.
+	// Grounded history is sampled every cmd so "grounded last cmd too" never reads a stale hold
+	s_bRJ = g_autoRJ && MovementKeyOK(g_autoRJKey, g_autoRJMode);
+	static bool s_bRJGround = false;
+	const bool bRJLastGround = s_bRJGround;
+	s_bRJGround = pLocal->m_hGroundEntity();
+	if (m_iFrame != -1 ? m_bRJ : !s_bOn && s_bRJ)
+	{
+		RunRJ(pLocal, pWeapon, pCmd, bRJLastGround, s_bRJGround);
+		return;
+	}
 	// Amalgam with both vars off reaches no button write but the particle cannon's own
 	// IN_ATTACK2 echo (a no-op), so idling here is the same behavior minus the sims
 	if (!s_bOn && m_iFrame == -1)
@@ -524,4 +541,136 @@ void CAutoRocketJump::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* p
 	}
 
 	m_bRunning = m_iFrame != -1; // prevent stuff like antiaim messing with timing
+}
+
+// ---- Unibox Features/Aimbot/AutoRocketJump/AutoRocketJump.cpp Run, 1:1 ---------------------
+// AutoRocketJump on, AutoCTap off, debug vars = the k* defaults above. Dropped: the Debug::Info
+// path drawing (no G::PathStorage overlay for it here), SDK::Output -> DebugLog.
+void CAutoRocketJump::RunRJ(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd, bool bLastGrounded, bool bCurrGrounded)
+{
+	if (!pLocal->IsAlive() || pLocal->IsAGhost() || !pWeapon || I::EngineVGui->IsGameUIVisible())
+	{
+		m_iFrame = -1;
+		m_bRJ = m_bRunning = false;
+		return;
+	}
+
+	if (m_iFrame == -1)
+	{
+		bool bDuck = pLocal->IsDucking();
+		if ((bCurrGrounded ? bDuck || I::GlobalVars->curtime < pLocal->m_flDuckTimer() : !bDuck))
+			return;
+	}
+
+	bool bValidWeapon = false, bBeggars = pWeapon->m_iItemDefinitionIndex() == Soldier_m_TheBeggarsBazooka;
+	switch (pWeapon->GetWeaponID())
+	{
+	case TF_WEAPON_ROCKETLAUNCHER:
+	case TF_WEAPON_ROCKETLAUNCHER_DIRECTHIT:
+	case TF_WEAPON_PARTICLE_CANNON: bValidWeapon = true;
+	}
+
+	if (bValidWeapon && m_iFrame == -1 && (bCurrGrounded && bBeggars ? G::Attacking == 1 : G::CanPrimaryAttack || G::Reloading)
+		&& SetAngles(pLocal, pWeapon, pCmd))
+	{
+		bool bWillHit = false;
+		MoveStorage tMoveStorage;
+		ProjectileInfo tProjInfo = {};
+
+		bool bProjSimSetup = F::ProjSim.GetInfo(pLocal, pWeapon, m_vAngles, tProjInfo, ProjSimEnum::Trace | ProjSimEnum::InitCheck | ProjSimEnum::NoRandomAngles) && F::ProjSim.Initialize(tProjInfo);
+		bool bMoveSimSetup = F::MoveSim.Initialize(pLocal, tMoveStorage, false); // do move sim after to not mess with proj sim
+		if (bMoveSimSetup && bProjSimSetup)
+		{
+			int iSkip = bCurrGrounded ? kRJSkipGround : kRJSkipAir;
+
+			CGameTrace trace = {};
+			CTraceFilterCollideable filter = {}; filter.pSkip = pLocal;
+
+			Vec3 vNew = F::ProjSim.GetOrigin();
+			for (int n = 1; n < 10; n++)
+			{
+				F::MoveSim.RunTick(tMoveStorage);
+				if (n <= iSkip || n == 1 && G::Reloading)
+					continue;
+
+				F::ProjSim.RunTick(tProjInfo);
+
+				Vec3 vOld = vNew; vNew = F::ProjSim.GetOrigin();
+				SDK::Trace(vOld, vNew, MASK_SOLID, &filter, &trace);
+				if (trace.DidHit())
+				{
+					if (!pLocal->IsOnGround() || pLocal->IsSwimming())
+						break;
+
+					auto fWillHit = [](CTFPlayer* pLocal, const Vec3& vOrigin, const Vec3& vPoint)
+					{
+						const Vec3 vOriginal = pLocal->GetAbsOrigin();
+						pLocal->SetAbsOrigin(vOrigin);
+						Vec3 vPos; pLocal->m_Collision()->CalcNearestPoint(vPoint, &vPos);
+						pLocal->SetAbsOrigin(vOriginal);
+
+						float flRadiusSqr = powf(110.f * 1.1f, 2); // TF_ROCKET_RADIUS_FOR_RJS, tf_weaponbase_rocket.h:25
+						return vPoint.DistToSqr(vPos) < flRadiusSqr && SDK::VisPosWorld(pLocal, pLocal, vPoint, vOrigin + pLocal->m_vecViewOffset(), MASK_SHOT);
+					};
+
+					bWillHit = fWillHit(pLocal, tMoveStorage.m_MoveData.m_vecAbsOrigin, trace.endpos + trace.plane.normal);
+					if (bWillHit)
+					{
+						m_iDelay = n;
+						if (kRJTimingOffset && n > kRJApplyAbove)
+							m_iDelay = std::max(m_iDelay + kRJTimingOffset, 0);
+
+						if (G::CanPrimaryAttack)
+							DebugLog("ARJ: ticks to hit %d (%d) grounded=%d", m_iDelay, n, int(bCurrGrounded));
+					}
+
+					break;
+				}
+			}
+		}
+		F::MoveSim.Restore(tMoveStorage);
+
+		if (bWillHit)
+		{
+			if (bCurrGrounded && bCurrGrounded == bLastGrounded)
+				m_iFrame = 0;
+			else if (!bCurrGrounded)
+				m_iFrame = m_iDelay = 0;
+
+			if (m_iFrame != -1)
+			{
+				m_bFull = true;
+				m_iChoke = bCurrGrounded ? kRJChokeGrounded : kRJChokeAir;
+			}
+		}
+	}
+
+	if (m_iFrame != -1)
+	{
+		m_iFrame++;
+		pCmd->buttons &= ~IN_JUMP;
+
+		if (m_iFrame == 1)
+		{
+			if (!bBeggars)
+				pCmd->buttons |= IN_ATTACK, pCmd->buttons &= ~IN_ATTACK2;
+
+			if (m_bFull)
+			{
+				G::SilentAngles = bCurrGrounded;
+				pCmd->viewangles = m_vAngles;
+			}
+		}
+
+		if (bCurrGrounded && (m_iFrame - m_iDelay == 0 || !m_iDelay))
+			pCmd->buttons |= IN_DUCK | IN_JUMP;
+
+		if (m_iFrame <= m_iChoke)
+			G::PSilentAngles = true, G::SilentAngles = false;
+
+		if (m_iFrame == m_iDelay + 3)
+			m_iFrame = -1;
+	}
+
+	m_bRunning = m_bRJ = m_iFrame != -1; // prevent stuff like antiaim messing with timing
 }

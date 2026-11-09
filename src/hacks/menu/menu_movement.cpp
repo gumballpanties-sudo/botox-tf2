@@ -49,6 +49,20 @@ void Menu_Movement_Main()
             ImGui::Keybind("auto pogo key", &g_autoPogoKey, &g_autoPogoMode);
         }, ImVec2(220.f, -1));
 
+    ImGui::Checkbox("auto rocket jump", &g_autoRJ);
+    if (g_autoRJ)
+        ImGui::OptionPopup("auto rocket jump settings", [&]() {
+            ImGui::Label("auto rocket jump keybind");
+            ImGui::Keybind("auto rocket jump key", &g_autoRJKey, &g_autoRJMode);
+        }, ImVec2(220.f, -1));
+
+    ImGui::Checkbox("auto fan jump", &g_autoFaN);
+    if (g_autoFaN)
+        ImGui::OptionPopup("auto fan jump settings", [&]() {
+            ImGui::Label("auto fan jump keybind");
+            ImGui::Keybind("auto fan jump key", &g_autoFaNKey, &g_autoFaNMode);
+        }, ImVec2(220.f, -1));
+
     ImGui::Checkbox("auto crouch", &g_autoCrouch);
     if (g_autoCrouch)
         ImGui::OptionPopup("auto crouch settings", [&]() {

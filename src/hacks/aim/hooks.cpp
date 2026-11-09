@@ -495,6 +495,7 @@ MAKE_HOOK(CClientState_ProcessFixAngle, S::CClientState_ProcessFixAngle(), bool,
 struct UserCmd_t;
 void Movement_RunGuarded(UserCmd_t* pCmd);
 void Movement_AirStuckLastWriter(UserCmd_t* pCmd);   // botox air_stuck_final_stamp + shot_proof, after the aimbot
+void AutoFaNJump_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd);   // autofanjump.cpp
 // the movement half's air stuck (airstuck.inl AS_Sync) reads the server's ack to diff its pins
 int Aim_LastCommandAck() { return I::ClientState ? I::ClientState->last_command_ack : -1; }
 
@@ -749,6 +750,7 @@ MAKE_HOOK(CHLClient_CreateMove, U::Memory.GetVirtual(I::Client, 21), void,
 	F::Ticks.End(pLocal, pCmd);
 		F::CritHack.Run(pLocal, pWeapon, pCmd);
 		F::NoSpread.Run(pLocal, pWeapon, pCmd);
+		AutoFaNJump_Run(pLocal, pWeapon, pCmd);   // autofanjump.cpp, Unibox's slot (after Misc.RunPost)
 		F::Ticks.CreateMove(pLocal, pWeapon, pCmd, pSendPacket);
 		F::NoSpreadHitscan.AskForPlayerPerf();
 	F::EnginePrediction.End(pLocal, pCmd);

@@ -989,22 +989,34 @@ void WorldFx3_Tick()
     if (g_wdRagdollGravity > 0) Ragdoll_Hook(true);   // stays in once hooked: passes through at "off"
 }
 
+// level change: every material/beam/impact belongs to the old map
+static void LevelForget()
+{
+    Tex_RestoreAll(true);   // live walk only, then the refs we hold go
+    Decal_UnhideAll();
+    s_localImpacts.clear();
+    s_modSaved.clear(); s_modLastMask = 0;
+    memset(s_dlLit, 0, sizeof(s_dlLit));
+    s_trailValid = false;
+    std::lock_guard<std::mutex> lk(s_drawMx);
+    s_boxes.clear(); s_markers.clear();
+}
+
+// OverrideView only runs while the 3D view draws (= in game), so the edge in WorldFx3_Frame never
+// sees a map change -- s_texSaved/s_decalHidden/s_modSaved + the IncRef'd old-map textures piled
+// up every map. Level shutdown is where the old map ends (materials still alive here).
+void WorldFx3_LevelShutdown()
+{
+    if (g_eject) return;
+    LevelForget();
+}
+
 void WorldFx3_Frame()
 {
     if (g_eject) return;
     static bool s_inGame = false;
     const bool inGame = IsInGame();
-    if (inGame != s_inGame) {   // level change: every material/beam/impact belongs to the old map
-        s_inGame = inGame;
-        Tex_RestoreAll(true);   // live walk only, then the refs we hold go
-        Decal_UnhideAll();
-        s_localImpacts.clear();
-        s_modSaved.clear(); s_modLastMask = 0;
-        memset(s_dlLit, 0, sizeof(s_dlLit));
-        s_trailValid = false;
-        std::lock_guard<std::mutex> lk(s_drawMx);
-        s_boxes.clear(); s_markers.clear();
-    }
+    if (inGame != s_inGame) { s_inGame = inGame; LevelForget(); }
     if (!inGame) return;
     const int localIdx = GetLocalPlayerIndex();
     void* local = localIdx > 0 ? GetClientEntity(localIdx) : nullptr;

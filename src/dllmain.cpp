@@ -592,6 +592,7 @@ bool g_edgeBug = false;     int g_edgeBugKey = 0;     int g_edgeBugMode = 1;
 // botox n_edgebug knobs (variables.h m_edgebug_*), same defaults
 float g_edgeBugPredictTime = 0.35f;   // search window, seconds
 int   g_edgeBugDetectMode = 0;        // 0 normal / 1 enhanced / 2 ebanat
+int   g_edgeBugSearchAmount = 2;      // enhanced only; edge skip depth when it uses eb settings
 bool  g_edgeBugToEdge = true;         // autostrafe to edge (also the autostrafe switch)
 bool  g_edgeBugPlayers = false;       // allow bugs off enemy players (off = map geometry only)
 float g_edgeBugStrafeAngleMax = 180.f; // max path bend off course, 180 = off
@@ -601,6 +602,7 @@ int   g_edgeBugLockType = 1;          // botox: smooth / full (donor: static / f
 float g_edgeBugLockStrength = 100.f;
 // 0 = any (ducked find that eats the next jump only as fallback), 1 = ducked only, 2 = stand only
 int   g_edgeBugStance = 0;
+bool  g_edgeBugCurStance = false;     // only the stance the duck key is in now (overrides stance)
 // donor styles (botox m_edgebug_del_* / m_edgebug_dna_*)
 int   g_edgeBugDelTicks = 64;
 bool  g_edgeBugDelAdvanced = false;
@@ -663,6 +665,8 @@ int  g_delayHopTicks = 6;
 bool g_goomba = false;     int g_goombaKey = 0;     int g_goombaMode = 1;
 int  g_goombaHow = 2;      int g_goombaLead = 0;
 bool g_autoPogo = false;   int g_autoPogoKey = 0;   int g_autoPogoMode = 1;
+bool g_autoRJ = false;     int g_autoRJKey = 0;     int g_autoRJMode = 1;
+bool g_autoFaN = false;    int g_autoFaNKey = 0;    int g_autoFaNMode = 1;
 bool g_autoCrouch = false; int g_autoCrouchKey = 0; int g_autoCrouchMode = 1;
 int  g_autoCrouchTicks = 6;
 bool g_djStrafe = false;   int g_djStrafeKey = 0;   int g_djStrafeMode = 1;
@@ -692,12 +696,15 @@ bool g_psSurfFix = false;
 int  g_edgeBugStyle = 0;
 bool g_edgeBugMouseLock = false;
 bool g_edgeBugSound = false;
-int  g_edgeBugSoundId = 0;   // index into movement_tricks2.inl kEbSounds
+int  g_edgeBugSoundId = 0;   // index into movement_tricks2.inl kEbSounds, last = custom
+char g_edgeBugSoundPath[128] = "";   // custom wav: C:\botox-tf2\sounds\<name> or tf/sound-relative
+float g_edgeBugSoundVol = 1.f;       // custom only, 0..2 (botox m_edge_bug_sound_volume)
 // -- Edge skip port (movement_edge.inl): edge skip + blockbot, defaults OFF ------------------------
 bool g_edgeSkip = false;   int g_edgeSkipKey = 0;   int g_edgeSkipMode = 1;
 int   g_edgeSkipTicks = 23;
 int   g_edgeSkipDepth = 2;
 float g_edgeSkipMaxBend = 180.f;
+bool  g_edgeSkipUseEb = true;   // botox m_edge_skip_use_eb: off = custom window/depth/bend
 bool g_blockBot = false;   int g_blockBotKey = 0;   int g_blockBotMode = 1;
 
 // fake movement (local server only)

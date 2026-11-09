@@ -43,6 +43,13 @@ static int   s_ebFlags = 0;               // m_backup_flags
 static int   s_ebMoveType = 0;            // m_backup_move_type
 static float s_ebUserFwd = 0.f, s_ebUserSide = 0.f;
 static int   s_ebUserButtons = 0;
+// stance filter (eb_stance.h MV_EbStanceOk). "current stance" reads the player's duck KEY, not
+// FL_DUCKING: a plan's own press (release family ducks from tick 0) would flip the flag mid-flight
+static int EbStance()
+{
+    if (g_edgeBugCurStance) return (s_ebUserButtons & IN_DUCK) ? 1 : 2;
+    return std::clamp(g_edgeBugStance, 0, 2);
+}
 static EbCmd_t  s_ebCmds[k_ebMaxTicks] = {};   // m_predicted_cmds
 static EbCmd_t  s_ebRun[k_ebMaxTicks]  = {};   // m_run_cmds
 static EbPlan_t s_ebPlans[k_ebPlanMax];
@@ -691,9 +698,9 @@ static void EbDonorPost(void* pLocal, UserCmd_t* pCmd, int style)
                 if (EbDonorCheck(pLocal, &c, br, grav, shift))
                 {
                     if (EbOffPlayer(pLocal, preO, preV)) break;   // never eb off players
-                    if (!MV_EbStanceOk(g_edgeBugStance, duckedNow)) break;
+                    if (!MV_EbStanceOk(EbStance(), duckedNow)) break;
                     bool blocked = false;
-                    if (MV_EbJumpCheck(g_edgeBugStance, duckedNow)) blocked = EbJumpBlocked(pLocal, c, sims);
+                    if (MV_EbJumpCheck(EbStance(), duckedNow)) blocked = EbJumpBlocked(pLocal, c, sims);
                     EbDonor_t& d = blocked ? fallback : s_ebDonor;
                     if (blocked && fallback.ticksLeft) break;   // keep the first fallback
                     d.ticksLeft = t; d.ebLength = t; d.edgebugTick = tickCount + t; d.detectTick = tickCount;
@@ -869,6 +876,7 @@ static void EbHwPost(void* pLocal, UserCmd_t* pCmd)
     auto loop = [&](bool ducked, bool strafe)
     {
         if (s_ebHw.willEb) return;
+        if (g_edgeBugCurStance && ducked != ((s_ebUserButtons & IN_DUCK) != 0)) return;   // hw: own rounds, not the stance combo
         RestoreEntityToPredicted();
         s_ebHw.startYaw = origView.y;
         int pathN = 0;
@@ -1050,7 +1058,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
     }
 
     const int mode = std::clamp(g_edgeBugDetectMode, 0, 2);
-    const int stance = std::clamp(g_edgeBugStance, 0, 2);
+    const int stance = EbStance();
     const bool steer = g_edgeBugMouseSteer;
     static Vec3 s_prevAngle{};
     Vec3 delta = pCmd->viewangles - s_prevAngle;
