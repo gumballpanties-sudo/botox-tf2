@@ -743,9 +743,6 @@ extern bool  g_abCrouch;      // air duck while armed + crouch jump
 extern bool  g_abAlign;       // landing spot by a wall slides flush along it
 extern bool  g_abViz;         // draw the armed plan's flight + landing ring
 extern float g_abVizColor[4];
-extern bool g_bounceAssist; extern int g_bounceAssistKey; extern int g_bounceAssistMode;
-extern float g_bounceReach;     // wall scan reach, units (def 48, 8-128)
-extern float g_bounceMinSpeed;  // min xy speed to bother redirecting (def 150, 0-600)
 extern bool g_psFinderHeadbounce; // PixelFinder: also probe for ceiling (ascent) pins
 extern bool g_psFinderPixeljump;  // PixelFinder: pixel jump LIPS (botox pf_pixel_jump), yellow
 extern bool g_psFinderJumpSurf;   // PixelFinder: keep jump-only (no-fall) pins, own list, orange

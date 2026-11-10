@@ -69,10 +69,11 @@ void UpdateVisualsCvars()
     // it comes back the moment you are on a community server or in the menu.
     // The bounce is a loading screen thing, so on casual it only stands down until signon is
     // done (IsInGame) -- once in the match the push is back on, off again on the next load.
+    // Safe mode turns the bypass off (menu SafeCheckbox); fog's push is not the bypass, keeps going.
     {
         static CachedCVar sv_cheats;
         static bool       s_wasOn = false;
-        bool wantOn = (g_cheatsBypass || g_fogEnable) && (!MMFix_OnMatchmadeServer() || IsInGame());
+        bool wantOn = ((g_cheatsBypass && !g_safeMode) || g_fogEnable) && (!MMFix_OnMatchmadeServer() || IsInGame());
         if (wantOn)          CVar_ForceInt(sv_cheats.Get("sv_cheats"), 1);
         else if (s_wasOn)    CVar_ForceInt(sv_cheats.Get("sv_cheats"), 0);
         s_wasOn = wantOn;

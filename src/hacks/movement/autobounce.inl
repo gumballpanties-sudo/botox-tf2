@@ -1,6 +1,6 @@
 // AUTO BOUNCE = botox hacks/movement/auto_bounce.cpp 1:1 (+ the n_air flight from air_rollout.h).
 // Textually included by movement.cpp after airstuck.inl (uses AsClock, AsSetOrigin) and before
-// movement_tricks2.inl (bounce assist still lives there). Runs post prediction, in the probe block.
+// movement_tricks2.inl. Runs post prediction, in the probe block.
 //
 // The trick: falling onto a sloped face, ClipVelocity turns the fall speed into slide speed
 // (|out| = vz * nz * sqrt(1 - nz^2) straight down). The planner scans faces under / ahead of the

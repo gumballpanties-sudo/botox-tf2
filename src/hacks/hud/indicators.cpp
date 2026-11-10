@@ -1541,8 +1541,6 @@ static void keybind_indicators(const MvInd_t& s)
         add_hit(LBL_AST, s.astHit, s.astOn);
     if (g_pixelJump && shown(KI_PJ))
         add_hit(LBL_PJ, s.pjHit, s.pjOn);
-    if (g_bounceAssist && shown(KI_PSA))
-        add_hit(LBL_BAST, s.bastHit, s.bastOn);
     if (g_autoCrouch && shown(KI_AC))
         add(LBL_AC, s.acOn);
     if (g_autoBounce && shown(KI_AB))

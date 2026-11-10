@@ -1,4 +1,4 @@
-#include "movement_tricks2_pure.h"   // pure decisions (bounce tangent/tung band/eb style), gate-tested
+#include "movement_tricks2_pure.h"   // pure decisions (tung band/eb style), gate-tested
 
 // small/medium movement tricks from botox csgo-sdk, adapted to TF2's gamemovement.
 // Textually included by movement.cpp (same convention as movement_ex.inl, right after it) --
@@ -14,8 +14,7 @@
 // Ported as OPTIONS of what already works, not as second engines, where the botox source is
 // itself a full sim-planner or a second search algorithm:
 //   (tung surf is no longer here: botox's own engine, ported whole in tungsurf.inl)
-//   bounce / auto bounce -- one real-time wall-tangent redirect below, not botox's sim-searched
-//                  point planner (n_assist::run/programs/budgets) -- no points file this pass
+//   (bounce assist REMOVED: useless in TF2; auto bounce is botox's own, autobounce.inl)
 //   pixel finder headbounce/pixeljump -- two new probe/classify branches added to psassist.inl's
 //                  existing scanner (own result lists, PF_GetExtraPts; render wiring not done
 //                  this pass -- DebugLog confirms detection)
@@ -23,69 +22,6 @@
 //                  separate delusional/dna search algorithms (each its own engine)
 //   pixel surf fix -- a small duck-hold guard below
 // Each is named BLOCKED-as-simplified in the header above, not silently claimed as a full port.
-
-// ============================================================================
-// BOUNCE: auto bounce + bounce assist. Real-time wall-tangent redirect while airborne and
-// falling with speed -- the part of botox's auto_bounce.cpp/bounce_assist.cpp that is actually
-// a per-tick steer (their own trailing loop, same idea: trace outward, if the hit is a steep
-// wall bend the wish to run ALONG it instead of INTO it, so the wall does not just eat the
-// speed). bounceAssist adds one thing on top: a catch-jump the tick contact is close, trading
-// the clip for a hop instead of a dead stop (botox's own "gain over your own xy" idea, simplified
-// to one trace instead of a budgeted sim search over saved points).
-// ============================================================================
-static bool s_bounceAssistHit = false;   // the assist's catch jump went out (indicator, cleared at publish)
-
-// Auto bounce itself is botox auto_bounce.cpp now (autobounce.inl); this is bounce assist only.
-static void BounceAssist(void* pLocal, UserCmd_t* pCmd)
-{
-    const bool bAssist = On(g_bounceAssist, g_bounceAssistKey, g_bounceAssistMode);
-    if (!bAssist) return;
-    if (EntMoveType(pLocal) != MOVETYPE_WALK || EntGround(pLocal)) return;
-    // everyone who already owns the cmd outranks a redirect -- this never fights a live ride
-    if (s_ab.ownsCmd || s_textureBugHit || s_headSurfHit || s_headBounceHit || s_airStuckHit || s_wallClimbHit
-        || s_psAssistHopActive || s_shouldPixelSurf || s_psRidingNow || s_pixelHopHit)
-        return;
-
-    const Vec3 vel = EntV3(pLocal, g_offVelocity);
-    if (vel.z >= 0.f) return;                       // falling only -- a rising hull has nothing to gain
-    if (vel.Length2D() < g_bounceMinSpeed) return;   // too slow to be worth bending
-
-    const Vec3 origin = EntV3(pLocal, g_offOrigin);
-    const Vec3 mins = EntV3(pLocal, g_offMins);
-    const Vec3 maxs = EntV3(pLocal, g_offMaxs);
-    Vec3 dir = vel; dir.z = 0.f;
-    if (dir.Length() < 0.1f) return;
-    dir.Normalize();
-
-    const float flReach = std::clamp(g_bounceReach, 8.f, 128.f);
-    TraceFilterWorldProps filter; filter.Setup(pLocal);
-    GameTrace_t tr{};
-    TraceHull(origin, origin + dir * flReach, mins, maxs, MASK_PLAYERSOLID, &filter, &tr);
-    if (!tr.DidHit() || (tr.dispFlags & DISPSURF_SURFACE)) return;   // no wall, or a displacement (same family TB hands off)
-    if (fabsf(tr.plane.normal.z) > 0.3f) return;     // need a steep wall, not a floor/ramp
-
-    // redirect: keep the view, bend the WISH to run along the wall tangent (the side of the
-    // normal the player is already heading toward, so it never reverses the player's own turn)
-    const Vec3& n = tr.plane.normal;
-    Vec3 tangent(-n.y, n.x, 0.f);
-    if (BounceTangentShouldFlip(n.x, n.y, dir.x, dir.y)) tangent = tangent * -1.f;
-    Vec3 wishAngle = VectorAngles(tangent);
-    ClampAnglesMv(wishAngle);
-    Vec3 wish = pCmd->viewangles; wish.y = wishAngle.y;
-    CorrectMovement(pCmd, wish, pCmd->viewangles);
-    DebugLog("BNC: redirect nz=%.2f spd=%.0f", n.z, vel.Length2D());
-
-    if (bAssist)
-    {
-        const float flDist = tr.fraction * flReach;
-        if (flDist < 24.f)
-        {
-            pCmd->buttons |= IN_JUMP;   // catch the contact as a hop, not a stop
-            s_bounceAssistHit = true;
-            DebugLog("BNC: assist jump dist=%.1f", flDist);
-        }
-    }
-}
 
 // ============================================================================
 // PS FIX: a real pixel-surf ride (s_psRidingNow, movement.cpp) can be clipped by an inadvertent

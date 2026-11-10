@@ -686,9 +686,6 @@ bool  g_abCrouch = false;
 bool  g_abAlign = false;
 bool  g_abViz = false;
 float g_abVizColor[4] = { 120 / 255.f, 200 / 255.f, 1.f, 1.f };
-bool g_bounceAssist = false; int g_bounceAssistKey = 0; int g_bounceAssistMode = 1;
-float g_bounceReach = 48.f;
-float g_bounceMinSpeed = 150.f;
 bool g_psFinderHeadbounce = false;
 bool g_psFinderPixeljump = true;    // botox m_pixel_finder_pixeljumps default
 bool g_psFinderJumpSurf = false;

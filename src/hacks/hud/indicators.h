@@ -33,12 +33,12 @@ inline constexpr const char* kKiToggleNames[KI_COUNT] = {
 
 // botox e_keybind_labels, same subset, botox push order = draw order. { menu name, default label }
 enum KiLabel { LBL_EB = 0, LBL_PS, LBL_EJ, LBL_LJ, LBL_DH, LBL_MJ, LBL_JB, LBL_TB, LBL_AIR, LBL_WC, LBL_AS,
-               LBL_AST, LBL_BAST, LBL_AC, LBL_AB, LBL_TUNG, LBL_ES, LBL_HSW, LBL_GOOMBA, LBL_PJ, LBL_COUNT };
+               LBL_AST, LBL_AC, LBL_AB, LBL_TUNG, LBL_ES, LBL_HSW, LBL_GOOMBA, LBL_PJ, LBL_COUNT };
 inline constexpr const char* kKiLabels[LBL_COUNT][2] = {
     { "edgebug", "eb" },     { "pixelsurf", "ps" },       { "edgejump", "ej" },     { "longjump", "lj" },
     { "delayhop", "dh" },    { "minijump", "mj" },        { "jumpbug", "jb" },      { "texturebug", "tb" },
     { "airstuck", "air" },   { "wallclimb", "wc" },       { "autostrafe", "as" },   { "ps assist", "ast" },
-    { "bounce assist", "bast" }, { "auto crouch", "ac" }, { "auto bounce", "ab" },  { "tung surf", "tung" },
+    { "auto crouch", "ac" }, { "auto bounce", "ab" },  { "tung surf", "tung" },
     { "edge skip", "es" },   { "half sideways", "hsw" },   { "auto goomba", "goomba" },
     { "pixeljump", "pj" },
 };

@@ -2552,7 +2552,7 @@ static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
 #include "movement_ex.inl"
 
 // auto bounce = botox auto_bounce.cpp. After airstuck.inl (AsClock, AsSetOrigin), before
-// movement_tricks2.inl (bounce assist yields to s_ab.ownsCmd)
+// movement_tricks2.inl
 #include "autobounce.inl"
 
 // tung/bounce/pf modes/eb presets/ps fix. After movement_ex.inl (needs
@@ -2676,9 +2676,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
                                       || On(g_textureBug, g_textureBugKey, g_textureBugMode)
                                       || On(g_wallClimb, g_wallClimbKey, g_wallClimbMode)
                                       || On(g_airStuck, g_airStuckKey, g_airStuckMode)
-                                      // auto bounce / bounce assist run in the probe block: no prediction = never called
+                                      // auto bounce runs in the probe block: no prediction = never called
                                       || On(g_autoBounce, g_autoBounceKey, g_autoBounceMode)
-                                      || On(g_bounceAssist, g_bounceAssistKey, g_bounceAssistMode)
                                       || On(g_psAssist, g_psAssistKey, g_psAssistMode)
                                       || On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode))));
     const bool needPred = needPredMove
@@ -2774,7 +2773,6 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             AirStuckTick(pLocal, pCmd);
             WallClimb(pLocal, pCmd);
             AutoBounce(pLocal, pCmd);   // botox auto_bounce: yields to every s_*Hit flag above
-            BounceAssist(pLocal, pCmd); // Bounce wall redirect: yields to auto bounce too
             // botox on_create_move_post:1267 -- pixel_surf is the last mover: it yields to this
             // cmd's AS / TB / WC flags (not last tick's) and its hold re-proves the final move
             PixelSurf(pLocal, pCmd);
@@ -2905,12 +2903,6 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s.abOn     = On(g_autoBounce, g_autoBounceKey, g_autoBounceMode);
         s.tungOn   = On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);
         s.hswOn    = On(g_hsw, g_hswKey, g_hswMode);
-        s.bastOn   = On(g_bounceAssist, g_bounceAssistKey, g_bounceAssistMode);
-        // one-tick catch jump, held 0.2 s like jb (botox HITGODA2 stays up while the assist owns the hop)
-        static unsigned long long s_bastHitMs = 0;
-        if (s_bounceAssistHit) s_bastHitMs = s.ms;
-        s_bounceAssistHit = false;
-        s.bastHit  = s_bastHitMs && s.ms - s_bastHitMs < 200;
         s.esOn     = On(g_edgeSkip, g_edgeSkipKey, g_edgeSkipMode);
         s.esHit    = s_esActive;
         s.gmbOn    = On(g_goomba, g_goombaKey, g_goombaMode);

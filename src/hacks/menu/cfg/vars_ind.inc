@@ -94,7 +94,6 @@
     { "kiLabel_wc",   CfgEntry::STR, g_kiLabels[LBL_WC],   sizeof(g_kiLabels[0]) },
     { "kiLabel_as",   CfgEntry::STR, g_kiLabels[LBL_AS],   sizeof(g_kiLabels[0]) },
     { "kiLabel_ast",  CfgEntry::STR, g_kiLabels[LBL_AST],  sizeof(g_kiLabels[0]) },
-    { "kiLabel_bast", CfgEntry::STR, g_kiLabels[LBL_BAST], sizeof(g_kiLabels[0]) },
     { "kiLabel_ac",   CfgEntry::STR, g_kiLabels[LBL_AC],   sizeof(g_kiLabels[0]) },
     { "kiLabel_ab",   CfgEntry::STR, g_kiLabels[LBL_AB],   sizeof(g_kiLabels[0]) },
     { "kiLabel_tung", CfgEntry::STR, g_kiLabels[LBL_TUNG], sizeof(g_kiLabels[0]) },

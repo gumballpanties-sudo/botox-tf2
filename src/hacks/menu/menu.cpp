@@ -1395,15 +1395,6 @@ static void Page_MovementMain()
                     ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoBorder);
             }, ImVec2(220.f, -1));
 
-        ImGui::Checkbox("bounce assist", &g_bounceAssist);
-        if (g_bounceAssist)
-            ImGui::OptionPopup("bounce assist settings", [&]() {
-                ImGui::Label("bounce assist keybind");
-                ImGui::Keybind("bounce assist key", &g_bounceAssistKey, &g_bounceAssistMode);
-                SliderF("bounce reach##ba", &g_bounceReach, 8.f, 128.f, "%.0f units");
-                SliderF("bounce min speed##ba", &g_bounceMinSpeed, 0.f, 600.f, "%.0f u/s");
-            }, ImVec2(220.f, -1));
-
         ImGui::Checkbox("air stuck", &g_airStuck);
         if (g_airStuck)
             ImGui::OptionPopup("air stuck settings", [&]() {
@@ -2811,7 +2802,7 @@ static void Page_MiscMain()
 
         ImGui::Checkbox("equip region unlock", &g_equipRegionUnlock);
         ImGui::Checkbox("backpack expander", &g_backpackExpander);
-        ImGui::Checkbox("sv_cheats bypass", &g_cheatsBypass);
+        SafeCheckbox("sv_cheats bypass", &g_cheatsBypass);
     }
     menu_group_end();
 
