@@ -224,6 +224,40 @@ namespace rdr
             }
     }
 
+    // CS:GO overview grid (resource/overviews/de_train_radar.dds, de_cbble_radar.dds, measured):
+    // 1.9 px lines every 80 px of the 1024 image, x centred on 53.7 + 80k, y on 66.3 + 80k,
+    // +13/255 white over the background. Baked into the image, so it turns and zooms with the map.
+    inline constexpr float kGridPitch = 80.f, kGridHalf = 0.95f, kGridX = 53.7f, kGridY = 66.3f, kGridAlpha = 13.f / 255.f;
+
+    // fraction of source span [t0, t1) covered by the lines at c0 + kGridPitch * k
+    inline float GridCover(float t0, float t1, float c0)
+    {
+        float cover = 0.f;
+        for (float c = c0 + kGridPitch * std::floor((t0 - kGridHalf - c0) / kGridPitch); c - kGridHalf < t1; c += kGridPitch)
+            cover += std::max(0.f, std::min(t1, c + kGridHalf) - std::max(t0, c - kGridHalf));
+        return std::min(cover / (t1 - t0), 1.f);
+    }
+
+    // grid into the void texels of an n x n Shade output; floors are opaque and cover it like
+    // Valve's art. The outer texel ring stays void: the sampler clamps past the image, so a line
+    // touching the edge would streak to infinity.
+    inline void Grid(std::vector<uint32_t>& px, int n)
+    {
+        const float s = kSourceImage / float(n);
+        for (int v = 1; v < n - 1; ++v)
+        {
+            const float ay = GridCover(v * s, (v + 1) * s, kGridY);
+            for (int u = 1; u < n - 1; ++u)
+            {
+                uint32_t& p = px[size_t(v) * n + u];
+                if (p >> 24) continue;
+                const float ax = GridCover(u * s, (u + 1) * s, kGridX);
+                const float a = (1.f - (1.f - ax) * (1.f - ay)) * kGridAlpha;
+                if (a > 0.f) p = Argb(1.f, 1.f, 1.f, a);
+            }
+        }
+    }
+
     // ---- radar transforms ------------------------------------------------------------------
     struct View
     {

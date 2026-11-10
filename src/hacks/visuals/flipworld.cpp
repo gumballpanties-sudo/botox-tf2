@@ -5,6 +5,7 @@
 #include "visuals.h"    // Chams_LevelInit/LevelUnload -- piggybacked on this file's LevelInit hook
 #include "../hud/avatar_cache.h"   // Avatar_OnMapChange piggybacks the same hook
 #include "world_fx3.h"   // WorldFx3_LevelShutdown
+#include "../web/websurface.h"   // Web_LevelShutdown, Web_BlockFire
 
 // Port of fpsoverlay's flipworld.cpp (itself Aletherium's CFlipWorld + CMisc::FlipWorldInput).
 // Every engine number used here is a flipslot:: constant (flipmath.h); fpsoverlay's
@@ -551,6 +552,7 @@ static void __fastcall h_FlipLevelShutdown(void* rcx)
         FlipRunTick(true);
     }
     if (OnGameThread()) WorldFx3_LevelShutdown();   // old map's world/prop texture refs + saved lists
+    if (!g_eject && OnGameThread()) Web_LevelShutdown();   // the placed screen belongs to the map going away
     Chams_LevelUnload();
     Glow_LevelUnload();
     o_FlipLevelShutdown(rcx);
@@ -627,6 +629,13 @@ static void FlipMirrorCmdAt(void* pCmd)   // SEH leaf (C2712)
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+static void WebStripFireAt(void* pCmd)   // SEH leaf (C2712)
+{
+    __try {
+        *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(pCmd) + cmdButtons) &= ~((1 << 0) | (1 << 11));
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 // BEFORE the original: C_TFPlayer::CreateMove inside it turns sidemove into taunt yaw and kart steering
 // (c_tf_player.cpp:6567/6607) and zeroes it. CInput::CreateMove checksums the command after this, and
 // CHLClient::CreateMove (movement.cpp) runs later still, so every reader sees the mirrored command.
@@ -637,7 +646,11 @@ static bool __fastcall h_FlipCreateMove(void* rcx, float flInputSampleTime, void
         FlipWorld_Tick();
         if (pCmd && FlipWorld_Mirroring()) FlipMirrorCmdAt(pCmd);
     }
-    return o_FlipCreateMove(rcx, flInputSampleTime, pCmd);
+    const bool ret = o_FlipCreateMove(rcx, flInputSampleTime, pCmd);
+    // web on surface "don't shoot at the screen" (botox create_move_proxy): crosshair on the placed
+    // screen = the click key is a page click, drop IN_ATTACK / IN_ATTACK2. Before CInput's checksum.
+    if (!g_eject && pCmd && Web_BlockFire()) WebStripFireAt(pCmd);
+    return ret;
 }
 
 // ---- IVEngineClient::WorldToScreenMatrix --------------------------------

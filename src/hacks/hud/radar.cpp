@@ -70,12 +70,13 @@ namespace
     // ---- overview texture --------------------------------------------------------------------
     IDirect3DTexture9* s_mapTex = nullptr;
     uint32_t s_mapId = 0;
+    bool s_mapGrid = false;   // the uploaded texture carries the grid
     bool s_mapFailLogged = false;
 
     void UploadMap()
     {
         const uint32_t id = g_radarImageId.load();
-        if (!id || (s_mapTex && s_mapId == id) || !g_d3dDev) return;
+        if (!id || (s_mapTex && s_mapId == id && s_mapGrid == g_hudRadarGrid) || !g_d3dDev) return;
 
         std::lock_guard<std::mutex> lock(g_radarImageLock);
         const RadarImage& img = g_radarImage;
@@ -93,12 +94,17 @@ namespace
             if (!s_mapFailLogged) { s_mapFailLogged = true; DebugLog("radar: CreateTexture %dx%d failed", img.n, img.n); }
             return;
         }
+        // grid on a copy: the bake stays clean, so toggling it off is just a re-upload
+        std::vector<uint32_t> grid;
+        if (g_hudRadarGrid) { grid = img.px; rdr::Grid(grid, img.n); }
+        const uint32_t* src = g_hudRadarGrid ? grid.data() : img.px.data();
         D3DLOCKED_RECT lr{};
         if (FAILED(s_mapTex->LockRect(0, &lr, nullptr, D3DLOCK_DISCARD))) return;
         for (int y = 0; y < img.n; ++y)
-            memcpy((uint8_t*)lr.pBits + size_t(y) * lr.Pitch, img.px.data() + size_t(y) * img.n, size_t(img.n) * 4);
+            memcpy((uint8_t*)lr.pBits + size_t(y) * lr.Pitch, src + size_t(y) * img.n, size_t(img.n) * 4);
         s_mapTex->UnlockRect(0);
         s_mapId = id;
+        s_mapGrid = g_hudRadarGrid;
     }
 
     // ---- per player icon package state (CCSGO_HudRadarIconPackage) ---------------------------

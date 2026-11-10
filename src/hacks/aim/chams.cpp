@@ -143,6 +143,10 @@ namespace
 	// LoadFromBuffer(char*) calls the CUtlBuffer overload that references "#include"/"#base".
 	IMaterial* CreateFromVMT(const char* name, const char* vmt)
 	{
+		// KeyValues ctor + LoadFromBuffer are aim-half signatures (defs.cpp), resolved only in
+		// Aim_Init. Aim not loaded (noaim bisect file, or a sig miss) = they are null and the call
+		// jumps to 0 (crash.log 11-10 20:03, read 0x0 on the inject PollThread via Glow_LevelInit).
+		if (!Aim_Active()) return nullptr;
 		auto kv = new KeyValues(name);
 		if (!kv->LoadFromBuffer(name, vmt))
 		{
@@ -1269,7 +1273,7 @@ void Glow_LevelUnload() {}
 // PollThread. Not part of the live glow's lifetime (GlowRelease never drops them).
 void Glow_PreviewInit()
 {
-	if (!g_matSystem) return;
+	if (!Aim_Active() || !g_matSystem) return;   // glow is the aim half's: no aim, no RTs to make
 	// the preview glow draws its silhouettes with the live dev/glow_color: a mid-session inject has none yet
 	// (GlowRelease drops this one ref like its own, the next Glow_LevelInit finds it again)
 	if (!s_glowMatColor)
@@ -1326,7 +1330,7 @@ void Glow_PreviewInit()
 
 void Glow_LevelInit()
 {
-	if (!g_matSystem) return;
+	if (!Aim_Active() || !g_matSystem) return;   // glow is the aim half's (Glow_Render gates the same way)
 	// no Glow_PreviewInit here: this also runs on the inject PollThread, and 3 more RTs + 3 materials made
 	// off the main thread raced the main menu's model panel draw (crash.log 11-09 14:55, materialsystem
 	// +0x4F3B1 reading 0x20 under h_PaintTraverse). flipworld.cpp LevelInit / EspPreview make them instead.

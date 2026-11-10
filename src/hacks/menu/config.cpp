@@ -1021,6 +1021,8 @@ static const CfgEntry kEntries[] = {
 #include "cfg/vars_btchams.inc"
 #include "cfg/vars_points.inc"
 #include "cfg/vars_weaponsel.inc"
+#include "cfg/vars_teamcounter.inc"
+#include "cfg/vars_web.inc"
 };
 
 // botox g_config.folder(visuals): visuals files live one folder down

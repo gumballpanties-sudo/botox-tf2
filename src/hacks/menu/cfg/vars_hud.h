@@ -56,6 +56,7 @@ inline float g_hudRadarScale            = 0.7f;    // cl_radar_scale, 0.25..1
 inline float g_hudRadarIconMin          = 0.6f;    // cl_radar_icon_scale_min, 0.4..1.25
 inline float g_hudRadarHudScale         = 1.f;     // cl_hud_radar_scale, 0.8..1.3
 inline bool  g_hudRadarShowAll          = false;   // enemies always shown, not only while spotted
+inline bool  g_hudRadarGrid             = true;    // the old CS:GO overview grid under the map
 inline float g_hudRadarOffX             = 0.f;     // drag offset, 1080p layout px (menu open: LMB drag, RMB reset)
 inline float g_hudRadarOffY             = 0.f;
 inline float g_hudRadarColorBlu[4]      = { 0x1e / 255.f, 0xd2 / 255.f, 1.f, 1.f };           // PI_Color_CT

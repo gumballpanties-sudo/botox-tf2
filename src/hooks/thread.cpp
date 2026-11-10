@@ -31,6 +31,8 @@
 #include "../hacks/visuals/skinshare.h" // SkinShare_Shutdown: steam networking worker joined at eject
 #include "../hacks/aim/aim.h"
 #include "../hacks/misc/boot_screen.h"   // eject splash: begin before g_eject, end before unhook
+#include "../hacks/web/websurface.h"     // Web_Destroy at eject
+#include "../hacks/web/webview2host.h"   // wv2::AbandonForExit at game quit
 
 // ==== sv_pure bypass ============================================================
 using CL_CheckForPureServerWhitelist_t = void(__fastcall*)(void** pFilesToReload);
@@ -271,7 +273,18 @@ static void PollThread()
             // succeeds it OWNS that hook (CHLClient_CreateMove, aim/hooks.cpp) and calls
             // Movement_Run itself -- MinHook allows one hook per target, and that one needs
             // the send-packet pointer off its own stack frame.
-            Aim_Init();
+            //
+            // Bisect switch (11-10, incoming packet loss that only shows injected, while moving):
+            // menu toggles do not remove hooks, so they cannot isolate a hook. A file named
+            // C:\botox-tf2\noaim skips the whole aim half (its ~28 hooks: CreateMove ownership,
+            // the extra Prediction::Update, RunSimulation, RecvProxy, ProcessPacketEntities).
+            // Same state as an aim sig failing to resolve: Aim_Active() stays false, dih's own
+            // CreateMove below takes the slot, movement still runs, Aim_Unload is a no-op.
+            // Delete the file to get the aim half back.
+            if (GetFileAttributesA((std::string(CONFIG_DIR) + "\\noaim").c_str()) != INVALID_FILE_ATTRIBUTES)
+                DebugLog("aim: SKIPPED (C:\\botox-tf2\\noaim present) -- aim half not loaded, bisect mode");
+            else
+                Aim_Init();
 
             // CHLClient::CreateMove (VClient slot 21) -- bhop. Skipped when the aim half is
             // live (it installs the same hook and calls Movement_Run from it), but the rest
@@ -544,6 +557,7 @@ static void MainThread()
     Perf_Shutdown();
     GameExtras_Shutdown();   // knobs/pings back if no frame did it, http aborted, workers joined
     SkinShare_Shutdown();    // skin sharing: the steam networking worker stopped + joined
+    Web_Destroy();           // web on surface: WebView2 engine thread joined, steam callbacks off, textures
     ScreenFx_RestoreQueueMode();   // hand mat_queue_mode back before the hooks come off
 
     // Fallback only: no frame came during the wait above (e.g. alt-tabbed, FSN not running).
@@ -633,7 +647,10 @@ static void MainThread()
 }
 
 // ==== DllMain ====================================================================================
-BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID reserved) {
+    // botox main.cpp: reserved != null = game quit, not eject. Every other thread is already dead and
+    // the CRT runs our static dtors next: skip the browser's COM releases (RPC with no thread pool).
+    if (reason == DLL_PROCESS_DETACH && reserved) wv2::AbandonForExit();
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hMod);
         // Before the thread, before a single hook: a crash during startup is still a crash, and

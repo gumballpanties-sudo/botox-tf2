@@ -3,6 +3,7 @@
 #include "../hooks/crashlog.h"   // CrashSpan: stutter probe
 #include "../hacks/visuals/visuals.h"
 #include "../hacks/hud/watermark.h"
+#include "../hacks/web/websurface.h"   // web on surface: panel + paint upload, wheel input, Reset
 #include "../hacks/misc/boot_screen.h"
 #include "../hacks/misc/minesweeper.h"
 #include "../dependencies/fonts/icon_font.h"   // botox icon_font_compressed_data (cog glyph)
@@ -2120,6 +2121,8 @@ static void BuildImGuiFrame()
         RenderLuaQueue();            // lua render.* (botox: paint_traverse lua last, under the menu)
         RenderPsPointWindow();
     }
+    // botox end_scene: Web_Present right before the menu -- paint upload, browser window, on-top draw
+    { CrashSpan _s("ov/web"); Web_Present(g_d3dDev); }
     { CrashSpan _s("ov/menu"); RenderMenu(); }   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
 
     CrashSpan _s("ov/render");
@@ -2397,6 +2400,7 @@ static void Render_ReleaseDeviceObjects()
     SpectatorList_ReleaseTextures();   // spectator list: eyes style row textures, DEFAULT-pool
     Radar_ReleaseTextures();           // csgo radar overview, DEFAULT-pool; the baked pixels rebuild it
     BlurRect_Destroy();                // blur scratch targets + shader
+    Web_InvalidateTexture();           // web on surface page textures, DEFAULT pool on a d3d9ex device
     Render_FlushDeferred();            // swapped-out DEFAULT-pool textures: a live one fails the Reset
 }
 
@@ -2768,6 +2772,9 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // recorder: ENTER on a route start opens its clip editor, ESC/ENTER close it (botox)
         if (s_psPointWin < 0 && !typing && Recorder_EditorKey((unsigned)wParam)) return 0;
     }
+
+    // Web on surface (botox wndproc): wheel / Up / Down scroll the page while aimed at it, menu closed.
+    if (!g_showMenu && s_psPointWin < 0 && Web_OnInput(msg, (uintptr_t)wParam)) return 0;
 
     // Menu up, or the point window open: imgui gets the input and the game is starved.
     // One context, one window, so routing is a straight handoff to the win32 backend.

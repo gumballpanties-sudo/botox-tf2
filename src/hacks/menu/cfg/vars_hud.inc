@@ -45,6 +45,7 @@
     { "hudRadarIconMin",           CfgEntry::FLOAT,  &g_hudRadarIconMin, 0 },
     { "hudRadarHudScale",          CfgEntry::FLOAT,  &g_hudRadarHudScale, 0 },
     { "hudRadarShowAll",           CfgEntry::BOOL,   &g_hudRadarShowAll, 0 },
+    { "hudRadarGrid",              CfgEntry::BOOL,   &g_hudRadarGrid, 0 },
     { "hudRadarOffX",              CfgEntry::FLOAT,  &g_hudRadarOffX, 0 },
     { "hudRadarOffY",              CfgEntry::FLOAT,  &g_hudRadarOffY, 0 },
     { "hudRadarColorBlu",          CfgEntry::FLOAT4, g_hudRadarColorBlu, 0 },

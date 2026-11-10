@@ -13,3 +13,5 @@
 #include "vars_btchams.h"
 #include "vars_points.h"
 #include "vars_weaponsel.h"
+#include "vars_teamcounter.h"
+#include "vars_web.h"

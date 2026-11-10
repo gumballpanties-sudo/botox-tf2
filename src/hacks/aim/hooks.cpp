@@ -1188,6 +1188,7 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 		{
 			void KillfeedCsgo_Paint(); KillfeedCsgo_Paint();
 			void WeaponSel_Paint(); WeaponSel_Paint();
+			void TeamCounter_Paint(); TeamCounter_Paint();
 		}
 		H::Draw.End();
 	}
@@ -1206,6 +1207,7 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 		H::Draw.Start();
 		void KillfeedCsgo_Paint(); KillfeedCsgo_Paint();
 		void WeaponSel_Paint(); WeaponSel_Paint();
+		void TeamCounter_Paint(); TeamCounter_Paint();   // csgo team counter (teamcounter.cpp)
 		H::Draw.End();
 	}
 }

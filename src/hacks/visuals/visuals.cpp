@@ -237,6 +237,31 @@ void UpdateNetStats() {
         g_ping.store(rawPing > k_pingSubtract ? rawPing - k_pingSubtract : 0);
         g_loss.store((int)(loss * 100.f));
         g_conn.store(true);
+
+        // 1 Hz netchannel trace. "loss when I start moving" (11-10): both flows + what the
+        // player was doing, so the log says which direction drops and what it tracks.
+        // INetChannelInfo slots per aim/defs.h: 11 loss, 12 choke, 13 data, 14 packets.
+        static DWORD s_netLogMs = 0;
+        const DWORD nowMs = GetTickCount();
+        if (nowMs - s_netLogMs >= 1000) {
+            s_netLogMs = nowMs;
+            const float lossOut = VCall<float>(nci, 11, FLOW_OUTGOING);
+            const float chokeIn = VCall<float>(nci, 12, FLOW_INCOMING), chokeOut = VCall<float>(nci, 12, FLOW_OUTGOING);
+            const float dataIn  = VCall<float>(nci, 13, FLOW_INCOMING), dataOut  = VCall<float>(nci, 13, FLOW_OUTGOING);
+            const float pkIn    = VCall<float>(nci, 14, FLOW_INCOMING), pkOut    = VCall<float>(nci, 14, FLOW_OUTGOING);
+            float speed = -1.f;
+            const int idx = GetLocalPlayerIndex();
+            void* pLocal = idx > 0 ? GetClientEntity(idx) : nullptr;
+            if (pLocal && g_offVelocity > 0) {
+                const float* v = reinterpret_cast<const float*>(reinterpret_cast<uintptr_t>(pLocal) + g_offVelocity);
+                speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
+            }
+            int Aim_ChokedCommands();
+            DebugLog("NET: loss in=%.0f%% out=%.0f%% choke in=%.0f%% out=%.0f%% pk/s in=%.0f out=%.0f "
+                     "B/s in=%.0f out=%.0f ping=%d fps=%.0f speed=%.0f choked=%d",
+                     loss * 100.f, lossOut * 100.f, chokeIn * 100.f, chokeOut * 100.f, pkIn, pkOut,
+                     dataIn, dataOut, g_ping.load(), g_fps.load(), speed, Aim_ChokedCommands());
+        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         g_netInfoIndex = -1;

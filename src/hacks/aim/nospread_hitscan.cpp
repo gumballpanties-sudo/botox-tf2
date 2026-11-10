@@ -1,6 +1,7 @@
 #include "nospread_hitscan.h"
 
 #include "ticks.h"
+#include "playerperf_pure.h"
 #include <regex>
 #include <numeric>
 
@@ -75,7 +76,8 @@ void CNoSpreadHitscan::AskForPlayerPerf()
 	static Timer tTimer = {};
 	if (!m_bWaitingForPlayerPerf ? tTimer.Run(Vars::Aimbot::General::NoSpreadInterval.Value) : tTimer.Run(Vars::Aimbot::General::NoSpreadBackupInterval.Value))
 	{
-		I::ClientState->SendStringCmd("playerperf");
+		// one record, not the whole 60-record history -- see playerperf_pure.h (packet loss 11-10)
+		I::ClientState->SendStringCmd(PlayerPerfCmd(I::EngineClient->GetLocalPlayer()).c_str());
 		m_bWaitingForPlayerPerf = true;
 		m_dRequestTime = SDK::PlatFloatTime();
 	}

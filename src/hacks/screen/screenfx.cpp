@@ -3,6 +3,7 @@
 #include "../visuals/visuals.h"      // CachedCVar -- mat_queue_mode
 #include "../movement/movement.h"     // Vec3 -- the focus trace's origin and angles come off the view setup
 #include "../visuals/flipworld.h"    // FlipWorld_Render -- mirrored at the end of the post slot
+#include "../web/websurface.h"       // Web_OnPostScreenSpaceEffects -- the world screen's post slot half
 #include "../visuals/chams_api.h"    // Glow_Render -- Amalgam glow pass, before the original post slot
 #include "../../hooks/crashlog.h"    // CrashSpan: stutter probe on the two view slots we own
 #include "shaders/fx_probe.h"     // k_fxProbeBytes    -- compiled from fx_probe.hlsl by fxc
@@ -1898,6 +1899,10 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
             }
         }
     }
+
+    // Web on surface (web/websurface.cpp): view, placement, crosshair pointer, world draw. After the
+    // passes: same z buffer, and both queue onto the render thread in this order.
+    if (!g_eject) Web_OnPostScreenSpaceEffects(setup);
 
     // Flip world: the world is finished and DrawViewModels is next (viewrender.cpp:2160), so the gun
     // draws unmirrored over it. After the passes above so they still read a z buffer that matches the colour.

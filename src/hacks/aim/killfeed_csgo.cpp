@@ -473,9 +473,15 @@ void KillfeedCsgo_Paint()
     }
 }
 
+bool Aim_Active();   // aim.cpp: false = I:: never initialised (noaim bisect / sig miss)
+
 void KillfeedCsgo_OnEvent(void* pEvent)
 {
-    if (!g_killfeedCsgo || g_eject || !pEvent)
+    // Called from dih's own FireEvent hook, which runs with the aim half off too. BuildNotice
+    // reads I::EngineClient; its __try would catch the null read, but every kill would still be
+    // a first-chance access violation. No aim half = the csgo killfeed never draws anyway (its
+    // paint is the aim IEngineVGui_Paint hook).
+    if (!g_killfeedCsgo || g_eject || !pEvent || !Aim_Active())
         return;
     Notice n;
     if (!BuildNoticeSafe(pEvent, n))

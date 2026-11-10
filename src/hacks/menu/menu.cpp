@@ -36,6 +36,10 @@
 #include "menu_misc.h"
 #include "menu_aimbot.h"
 #include "menu_lua.h"        // settings > lua
+#include "../web/websurface.h"    // visuals > hud "web on surface"
+#include "../web/websurf_math.h"  // k_wsAspects (shape combo)
+#include <initializer_list>
+#include <utility>
 
 static void MenuClientCmd(const char* cmd);   // below the fonts tab; the hud group's radar button uses it
 
@@ -925,7 +929,7 @@ static void Page_VisualsScreen()
         // skipped rows: force crosshair (CS:GO weapon_debug_spread_show; TF2 already draws its
         // crosshair on an unscoped sniper rifle), classic crosshair (outline) color (CS:GO's vgui
         // bar crosshair), default crosshair color, chud hud (removed), hud color / keep
-        // killfeed / scaleform / web on surface / force hud update
+        // killfeed / scaleform / force hud update
         // (panorama + scaleform only), minecraft + call of duty 4 hud (cancelled). square radar
         // lives in the csgo radar popup below.
         ImGui::Checkbox("sniper crosshair", &g_hudSniperCh);
@@ -973,6 +977,7 @@ static void Page_VisualsScreen()
             ImGui::OptionPopup("csgo radar settings", [&]() {
                 ImGui::Checkbox("square##csgo radar", &g_hudRadarSquare);
                 ImGui::Checkbox("rotate##csgo radar", &g_hudRadarRotate);
+                ImGui::Checkbox("grid##csgo radar", &g_hudRadarGrid);
                 SliderF("scale##csgo radar", &g_hudRadarScale, 0.25f, 1.f, "%.2f");
                 SliderF("icon scale min##csgo radar", &g_hudRadarIconMin, 0.4f, 1.25f, "%.2f");
                 SliderF("hud scale##csgo radar", &g_hudRadarHudScale, 0.8f, 1.3f, "%.2f");
@@ -1154,9 +1159,101 @@ static void Page_VisualsScreen()
         if (g_wselEnable)
             ImGui::OptionPopup("csgo weapon hud settings", []() {
                 ImGui::Checkbox("never fade##wsel", &g_wselNeverFade);   // cl_showloadout 1
+                ImGui::Checkbox("name tags (inventory)##wsel", &g_wselNameTags);
                 ImGui::SliderFloat("scale##wsel", &g_wselScale, 0.5f, 2.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SliderFloat("x offset##wsel", &g_wselOffX, -1000.f, 200.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SliderFloat("y offset##wsel", &g_wselOffY, -800.f, 200.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+            }, ImVec2(220.f, -1.f));
+        ImGui::Checkbox("csgo team hud", &g_tcEnable);   // aim/teamcounter.cpp, replaces tf2's match + team hud
+        if (g_tcEnable)
+            ImGui::OptionPopup("csgo team hud settings", []() {
+                ImGui::SliderFloat("scale##tc", &g_tcScale, 0.5f, 2.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SliderFloat("y offset##tc", &g_tcOffY, -10.f, 800.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+            }, ImVec2(220.f, -1.f));
+
+        // botox menu_tab_visuals.cpp:2423 "web on surface", same rows (web/websurface.cpp)
+        ImGui::Checkbox("web on surface", &g_webEnable);
+        if (g_webEnable)
+            ImGui::OptionPopup("web settings", []() {
+                // botox bool_combo = MultiCombo over a list of bools
+                auto boolCombo = [](const char* label, std::initializer_list<std::pair<const char*, bool*>> rows) {
+                    const char* items[8];
+                    int n = 0, mask = 0;
+                    for (const auto& r : rows) { if (*r.second) mask |= 1 << n; items[n++] = r.first; }
+                    if (ImGui::MultiCombo(label, &mask, items, n)) {
+                        n = 0;
+                        for (const auto& r : rows) *r.second = (mask >> n++) & 1;
+                    }
+                };
+
+                ImGui::TextWrapped("%s", Web_Status());
+
+                static char url_buffer[512] = {};
+                static std::string url_seen;
+                if (url_seen != g_webUrl) {
+                    strncpy_s(url_buffer, g_webUrl, _TRUNCATE);
+                    url_seen = g_webUrl;
+                }
+                const bool url_enter = ImGui::InputTextWithHint("address##web url", "address or search", url_buffer, sizeof(url_buffer),
+                                                                ImGuiInputTextFlags_EnterReturnsTrue);
+                if (ImGui::Button("go##web url", ImVec2(-1.f, 15.f)) || url_enter) {
+                    strncpy_s(g_webUrl, url_buffer, _TRUNCATE);
+                    url_seen = g_webUrl;
+                    Web_Navigate(g_webUrl);
+                }
+
+                int resolution_index = g_webResH >= 1080 ? 2 : (g_webResH >= 720 ? 1 : 0);
+                if (ImGui::Combo("resolution##web", &resolution_index, "480p\0" "720p\0" "1080p\0")) {
+                    constexpr int heights[3] = { 480, 720, 1080 };
+                    g_webResH = heights[resolution_index];
+                }
+
+                if (g_webAspect < 0 || g_webAspect >= k_wsAspectCount) g_webAspect = 0;
+                static const char* aspect_names[k_wsAspectCount] = {};
+                if (!aspect_names[0])
+                    for (int i = 0; i < k_wsAspectCount; ++i) aspect_names[i] = k_wsAspects[i].name;
+                ImGui::Combo("shape##web", &g_webAspect, aspect_names, k_wsAspectCount);
+
+                if (ImGui::Button("place at crosshair##web", ImVec2(-1.f, 15.f))) Web_PlaceAtCrosshair();
+                if (ImGui::Button("remove##web", ImVec2(-1.f, 15.f))) Web_Unplace();
+
+                SliderF("size##web", &g_webScale, 0.1f, 8.f, "%.2fx");
+                SliderF("corner rounding##web", &g_webRound, 0.f, 128.f, "%.0f");
+                SliderF("opacity##web world", &g_webWorldOpacity, 0.f, 1.f, "%.2f");
+                ImGui::Combo("draw##web", &g_webDepthMode, "decal\0under hud\0on top\0");
+                ImGui::Combo("back side##web", &g_webBackMode, "mirror\0hidden\0readable\0");
+
+                SliderF("volume##web", &g_webVolume, 0.f, 1.f, "%.2f");
+                ImGui::Checkbox("fade with distance##web", &g_webVolDistance);
+                if (g_webVolDistance) {
+                    SliderF("full volume within##web", &g_webVolNear, 0.f, 2048.f, "%.0f");
+                    SliderF("silent past##web", &g_webVolFar, 16.f, 4096.f, "%.0f");
+                }
+
+                boolCombo("playback##web", { { "play when placed", &g_webAutoPlay },
+                                             { "from the beginning", &g_webPlayFromStart },
+                                             { "remove when video ends", &g_webAutoRemove } });
+                boolCombo("controls##web", { { "crosshair is the mouse", &g_webCrosshairPointer },
+                                             { "hover only on click", &g_webClickOnly },
+                                             { "don't shoot at the screen", &g_webBlockFire },
+                                             { "wheel / arrows scroll page", &g_webScrollInput } });
+
+                ImGui::Label("place key");
+                BindKeyNoMode("place key##web", &g_webPlaceKey);
+                ImGui::Label("remove key");
+                BindKeyNoMode("remove key##web", &g_webRemoveKey);
+                ImGui::Label("click key");
+                BindKeyNoMode("click key##web", &g_webClickKey);
+                ImGui::Label("right click key");
+                BindKeyNoMode("right click key##web", &g_webRClickKey);
+
+                boolCombo("browser window##web", { { "show", &g_webPanel },
+                                                   { "keep with menu closed", &g_webPanelAlways } });
+                if (g_webPanel)
+                    SliderF("window opacity##web", &g_webPanelOpacity, 0.05f, 1.f, "%.2f");
+
+                if (ImGui::Button("clear cache##web", ImVec2(-1.f, 15.f))) Web_ClearCache();
+                if (ImGui::Button("clear memory##web", ImVec2(-1.f, 15.f))) Web_ClearMemory();
             }, ImVec2(220.f, -1.f));
     }
     menu_group_end();
@@ -2555,10 +2652,10 @@ static void Page_MiscMain()
         if (g_dpEnable)
             ImGui::OptionPopup("death particles settings", []() {
                 ImGui::Combo("effect##deathparticles", &g_dpStyle,
-                    "blood burst\0sparks\0confetti\0smoke puff\0explosion\0soul\0bouncy balls\0melt\0minecraft\0");
+                    "blood burst\0sparks\0confetti\0smoke puff\0explosion\0soul\0bouncy balls\0melt\0minecraft\0hl2 dissolve\0");
 
                 const int type = g_dpStyle;
-                if ((type < 5 && type != 3) || type == 7) return;
+                if ((type < 5 && type != 3) || type == 7 || type == 9) return;
 
                 if (type == 8)
                     ImGui::Combo("drops##deathparticles", &g_dpMcMode, "only x\0both x and xp\0only xp\0");

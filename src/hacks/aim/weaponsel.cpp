@@ -1,7 +1,7 @@
 #include "sdk.h"
 #include "../menu/cfg/vars_weaponsel.h"
 #include "../hud/weaponsel_table.h"
-#include "../../dependencies/fonts/stratum2_bold.h"   // inline: one copy, shared with killfeed_csgo.cpp
+#include "../../dependencies/fonts/stratum2_bold_otf.h"   // inline: one copy, shared with teamcounter.cpp
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -46,9 +46,11 @@
 //   round_start      CS:GO skips the pickup blink for the round's fresh loadout; TF2 keeps the
 //                    weapon entities across a respawn, so nothing blinks there anyway
 //   steam glyphs     controller only
-//   font weight      css asks Stratum2 medium; only the bold face is embedded (killfeed's)
+//   font weight      css asks Stratum2 medium; drawn in the embedded Stratum2 Bold .otf (the
+//                    team counter's face too)
 //   quality name     CS:GO's GetItemName carries "StatTrak(TM)"; the TF2 base name is shown
-//                    ("Strange" / name tags left out), the quality shows in the glow colour
+//                    ("Strange" left out), the quality shows in the glow colour. Name tags ARE
+//                    shown, for items in the local inventory (see NameTag)
 // ============================================================================================
 
 extern std::atomic<bool> g_eject;        // dllmain.cpp
@@ -338,6 +340,51 @@ namespace
         out[63] = 0;
     }
 
+    // ---- name tags: CEconItemView::GetItemName (econ_item_view.cpp:1132) ---------------------
+    // The name line of the item's description. TF2 builds it from the GC item in the LOCAL
+    // inventory (GetSOCData looks the networked item id up there), so a name tag -- wrapped in
+    // '' by Generate_ItemName (econ_item_description.cpp:1044) -- only comes back for items you
+    // own; anyone else's item reads its full quality name and keeps the base name here.
+    // Sig = Amalgam ESP.cpp, unique in client.dll on disk (11-10, +0x3A0CD0). m_Item = the
+    // CEconItemView inside m_AttributeManager (netvar sum).
+    using GetItemName_t = const wchar_t* (*)(void*);
+    GetItemName_t s_getItemName = nullptr;
+    int s_offItem = 0;
+
+    bool ResolveItemName()
+    {
+        static int s_state = 0;   // 0 untried, 1 ok, -1 off
+        if (s_state) return s_state > 0;
+        s_state = -1;
+        s_offItem = U::NetVars.GetNetVar("CEconEntity", "m_Item");
+        const int offDef = U::NetVars.GetNetVar("CEconEntity", "m_iItemDefinitionIndex");
+        s_getItemName = (GetItemName_t)U::Memory.FindSignature("client.dll",
+            "40 53 48 83 EC ? 48 8B D9 C6 81 ? ? ? ? ? E8 ? ? ? ? 48 8B 8B");
+        // m_iItemDefinitionIndex = the view's first own field, after CDefaultClientRenderable +
+        // CMaterialOverrideContainer (vptrs, CMaterialReference[4], bool[4]): +0x48 in game (11-10 log)
+        const bool ok = s_getItemName && s_offItem > 0 && offDef > s_offItem && offDef - s_offItem <= 0x80;
+        DebugLog("weaponsel: name tags %s (fn %p, m_Item 0x%X, def 0x%X)", ok ? "on" : "OFF",
+                 (void*)s_getItemName, s_offItem, offDef);
+        if (ok) s_state = 1;
+        return ok;
+    }
+
+    __declspec(noinline) const wchar_t* ItemNameRaw(void* view)
+    {
+        __try { return s_getItemName(view); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    }
+
+    // true + out = the name tag (quotes kept, as TF2 shows it)
+    bool NameTag(CBaseEntity* e, wchar_t (&out)[64])
+    {
+        if (!g_wselNameTags || !ResolveItemName()) return false;
+        const wchar_t* w = ItemNameRaw(reinterpret_cast<uint8_t*>(e) + s_offItem);
+        if (!w || wcsncmp(w, L"''", 2) != 0) return false;
+        wcsncpy_s(out, w, _TRUNCATE);
+        return true;
+    }
+
     const wsel::Def* FindDef(int def)
     {
         const wsel::Def* b = std::begin(wsel::kDefs);
@@ -346,28 +393,25 @@ namespace
         return (it != e && it->def == def) ? it : nullptr;
     }
 
-    // ---- fonts: Stratum2 (the killfeed's embedded face), css px -> vgui tall at scale s -----
+    // ---- fonts: embedded Stratum2 Bold .otf, css px -> vgui tall at scale s ------------------
     // One HFont per tall: vgui's glyph texture cache is keyed by font handle, so re-running
     // SetFontGlyphSet on the same handle at a new size keeps drawing the old-size glyphs. The scale
     // slider walks talls, each gets its own handle once (vgui fonts can't be freed; bounded by the
     // distinct talls a 0.5x..2x slider reaches)
     struct Face
     {
-        char name[32] = "Stratum2 Bold";
-        Font_t f = { name, 0, 0, 500, 0 };
+        Font_t f = { kStratum2Family, 0, 0, kStratum2Weight, 0 };   // the embedded face, renamed
         std::vector<std::pair<int, unsigned long>> byTall;
     };
     Face s_nameFont, s_numFont;
 
     bool EnsureFont(Face& fc, int px, float s)
     {
-        static bool s_registered = false;
-        if (!s_registered)
+        static bool s_logged = false;
+        if (!s_logged)
         {
-            DWORD n = 0;
-            s_registered = true;
-            if (!AddFontMemResourceEx((void*)stratum2_bold, sizeof(stratum2_bold), nullptr, &n))
-                DebugLog("weaponsel: Stratum2 register failed, GDI falls back");
+            s_logged = true;
+            if (!Stratum2Otf_Register()) DebugLog("weaponsel: Stratum2 otf register failed, GDI falls back");
         }
         const int tall = (std::max)(1, (int)lroundf(px * 1.2f * s));   // Stratum2 ascent + descent = 1.2 em
         int w = 0, h = 0;
@@ -391,7 +435,7 @@ namespace
         if (!fresh) I::MatSystemSurface->GetTextSize(fc.f.m_dwFont, L"A", w2, h2);
         if (fresh || !h2)   // new handle, or a video mode change dropped this one's glyphs
         {
-            I::MatSystemSurface->SetFontGlyphSet(fc.f.m_dwFont, fc.name, tall, fc.f.m_nWeight, 0, 0, fc.f.m_nFlags);
+            I::MatSystemSurface->SetFontGlyphSet(fc.f.m_dwFont, fc.f.m_szName, tall, fc.f.m_nWeight, 0, 0, fc.f.m_nFlags);
             DebugLog("weaponsel: font %lu tall %d", fc.f.m_dwFont, tall);
         }
         return true;
@@ -420,6 +464,8 @@ namespace
         bool  deleted = false;
         float deletedAt = 0.f;
         float activeAt;          // --active went on: slide in + blink; < -100 = animations skipped
+        const char* token;       // base name token (wsel::Def::name)
+        float nameAt;            // realtime of the next name tag check
         wchar_t name[64];
         Trans x, opacity;        // translateX in item widths (125% -> 0), opacity
     };
@@ -484,8 +530,23 @@ namespace
     }
 
     // UpdateWeapons. anim = false while the hud player just changed (AddAnimationDisable)
+    // name tag if the item has one (inventory loads late, tags get renamed: re-checked each
+    // second; the description is cached by the game, so a re-check is a lookup), else base name
+    void RefreshName(Item& it, CBaseEntity* e, float real)
+    {
+        if (real < it.nameAt) return;
+        it.nameAt = real + 1.f;
+        wchar_t was[64];
+        wcsncpy_s(was, it.name, _TRUNCATE);
+        const bool tag = NameTag(e, it.name);
+        if (!tag) ItemName(it.token, it.name);
+        if (wcscmp(was, it.name))
+            DebugLog("weaponsel: name %s \"%ls\"", tag ? "tag" : "base", it.name);
+    }
+
     void UpdateWeapons(CTFPlayer* pPlayer, float now, bool anim)
     {
+        const float real = I::GlobalVars->realtime;
         static const int nQuality = U::NetVars.GetNetVar("CEconEntity", "m_iEntityQuality");
         bool anyChanges = false;
 
@@ -535,7 +596,8 @@ namespace
         {
             CBaseEntity* e = have[i].e;
             bool known = false;
-            for (const Item& it : s_items) known |= !it.deleted && it.handle == have[i].handle;
+            for (Item& it : s_items)
+                if (!it.deleted && it.handle == have[i].handle) { known = true; RefreshName(it, e, real); }
             if (!known)
             {
                 const wsel::Def* d = FindDef(e->As<CEconEntity>()->m_iItemDefinitionIndex());
@@ -558,7 +620,9 @@ namespace
                 it.slot    = slot;
                 it.icon    = d->icon;
                 it.quality = nQuality > 0 ? *reinterpret_cast<int*>(uintptr_t(e) + nQuality) : 0;
-                ItemName(d->name, it.name);
+                it.token   = d->name;
+                it.nameAt  = -1.f;
+                RefreshName(it, e, real);
                 it.activeAt = anim ? now : -1000.f;
                 it.x.Snap(anim ? 1.25f : 0.f);   // .weapon-selection-item translateX(125%)
                 it.x.Set(0.f, now, kDropTime, anim);   // --active: translateX(0px)

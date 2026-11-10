@@ -1,6 +1,7 @@
 #include "colorcorrect.h"
 #include "shaders/fx_grade.h"   // k_fxGradeBytes -- compiled from fx_grade.hlsl by fxc
 #include "screenfx.h"           // shared vs_3_0 quad (ps_3_0 cannot pair with FF)
+#include "../web/websurface.h"  // Web_RestoreOverColorCorr -- the world web screen skips the grade
 #include <algorithm>
 #include <cmath>
 
@@ -543,6 +544,9 @@ bool ColorCorr_Frame(IDirect3DDevice9* dev)
         CcDraw(dev, bb, f);
         s_done = true;
         graded = true;
+        // botox end_scene: the world web screen stays out of the grade -- its stencil-marked pixels
+        // get the pre-grade scene copy back (web/websurface.cpp)
+        Web_RestoreOverColorCorr(dev, s_sceneTex, s_texW, s_texH);
     }
 
     if (rt) rt->Release();

@@ -27,6 +27,20 @@ if(NOT EXISTS "${FREETYPE_STATIC_DIR}/lib/freetype.lib")
     message(FATAL_ERROR "freetype.lib missing from vcpkg_local/x64-windows-static/lib -- see BUILDING.md step 4")
 endif()
 
+# Edge WebView2 SDK (NuGet Microsoft.Web.WebView2 1.0.4191.47, src/dependencies/webview2/VERSION.txt),
+# web on surface's browser engine. Static loader: LoadLibrary injection sets up TLS, so nothing ships
+# next to the dll (botox csgo embeds an x86 loader dll only because its manual map has no TLS).
+set(WEBVIEW2_DIR ${CMAKE_SOURCE_DIR}/src/dependencies/webview2)
+if(NOT EXISTS "${WEBVIEW2_DIR}/lib/x64/WebView2LoaderStatic.lib")
+    message(FATAL_ERROR "WebView2LoaderStatic.lib missing from src/dependencies/webview2/lib/x64 -- NuGet Microsoft.Web.WebView2 build/native/x64")
+endif()
+# Own target: C++/WinRT window capture + the WebView2 COM headers, kept out of the dll's /O1 /GL TUs.
+add_library(wv2host STATIC src/hacks/web/webview2host.cpp)
+target_compile_definitions(wv2host PRIVATE _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(wv2host PRIVATE /bigobj)
+target_link_libraries(wv2host PUBLIC ${WEBVIEW2_DIR}/lib/x64/WebView2LoaderStatic.lib windowsapp ole32 user32)
+set_target_properties(wv2host PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 add_library(botox SHARED
     src/dllmain.cpp
     src/hooks/netvars.cpp
@@ -104,6 +118,7 @@ add_library(botox SHARED
     src/hacks/visuals/lsd_chams.cpp
     src/hacks/visuals/player_stencil.cpp
     src/hacks/visuals/esp_preview_tex.cpp
+    src/hacks/web/websurface.cpp   # web on surface (botox hacks/web), engine in wv2host
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
@@ -138,6 +153,7 @@ target_link_libraries(botox PRIVATE
     dwmapi
     psapi
     ws2_32   # netbuf.cpp: getsockopt/setsockopt on the engine's udp socket
+    wv2host  # web on surface: Edge WebView2 engine (src/hacks/web/webview2host.cpp)
     optimized freetype debug freetyped
 )
 
@@ -572,6 +588,23 @@ add_executable(netcvar_test tests/netcvar_test.cpp)
 # grow/leave-alone rule and the lock-free seen-list the recvfrom hot path scans.
 # Build + run: cmake --build build --config Release --target netbuf_test && build\Release\netbuf_test.exe
 add_executable(netbuf_test tests/netbuf_test.cpp)
+
+# Gate test for the no spread playerperf request (src/hacks/aim/playerperf_pure.h): a bare
+# "playerperf" dumped the whole 60-record history ~10x a second = ~30 KB/s of reliable incoming
+# data = incoming choke + packet loss with the aim half loaded (11-10). Asks for one record now.
+# Build + run: cmake --build build --config Release --target playerperf_test && build\Release\playerperf_test.exe
+add_executable(playerperf_test tests/playerperf_test.cpp)
+
+# Gate test for the csgo team counter layout (src/hacks/hud/teamcounter_layout.h, drawn by
+# src/hacks/aim/teamcounter.cpp): comp / casual pick, avatar boxes vs the panorama css, health bar,
+# timer text, borders, skulls.
+# Build + run: cmake --build build --config Release --target teamcounter_test && build\Release\teamcounter_test.exe
+add_executable(teamcounter_test tests/teamcounter_test.cpp)
+
+# Gate test for web on surface's engine-free math (src/hacks/web/websurf_math.h): quad basis,
+# crosshair hit -> page uv, rounded outline, aspect presets, address bar -> url, matrix transpose.
+# Build + run: cmake --build build --config Release --target websurf_test && build\Release\websurf_test.exe
+add_executable(websurf_test tests/websurf_test.cpp)
 
 # Gate test for the killstreak carry-over across demos (src/hacks/hud/demostreak.h): demo load
 # events keep the streak, a rewind does not count the replayed kills twice, a death still ends it,

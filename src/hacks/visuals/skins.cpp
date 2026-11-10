@@ -4,6 +4,7 @@
 #include "skins_pure.h"
 #include "hats.h"
 #include "../lua/lua.h"   // lua tick / frame_stage / eject shutdown (h_FrameStageNotify)
+#include "../web/websurface.h"   // Web_MainTick (FRAME_START)
 #include "skinshare.h"   // peers' loadouts: applied to THEIR weapons below, same passes as ours
 #include "../../hooks/crashlog.h"   // CrashSpan: stutter probe per FSN module
 #include "visuals.h"
@@ -11,6 +12,7 @@
 #include "../hud/demostreak.h"
 #include "../movement/recorder.h"   // Recorder_FrameStart
 #include "../misc/game_extras.h"     // GameExtras_Frame -- game-thread tick
+#include "../misc/killeffects.h"     // KillEffects_FrameStart -- hl2 dissolve
 #include "../../dependencies/data/skindata.h"
 #include <cstdlib>
 
@@ -1883,6 +1885,10 @@ static void __fastcall h_FrameStageNotify(int stage)
     // Flip world's hold/release also has to run out of a match, where CreateMove does not.
     if (stage == 5) { FlipWorld_Tick(); FlipWorld_RenderStart(); }   // RenderView follows: W2S stays true for the 3D pass
 
+    // Web on surface (botox frame_stage_notify FRAME_START): main thread every frame, main menu
+    // included -- the browser's engine side needs exactly that (the post slot needs a world).
+    if (stage == 0) { CrashSpan _s("fsn/web"); Web_MainTick(); }
+
     if (!g_engine || !g_entityList) return;
 
     // Fake movement: demo playback gets its jump anim/sound off the recorded velocity.
@@ -1895,6 +1901,8 @@ static void __fastcall h_FrameStageNotify(int stage)
 
     // No hats reads this back in DrawModelExecute; entities live on this thread.
     if (stage == 5 && IsInGame()) NoHats_BodyTick();
+    // hl2 dissolve death particles: DissolveEffect makes a client entity, game thread only.
+    if (stage == 5 && IsInGame()) KillEffects_FrameStart();
 
     // stage 2: the snapshot has arrived and nothing has been unpacked yet.
     if (stage == 2) {

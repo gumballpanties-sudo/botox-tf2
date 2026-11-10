@@ -153,6 +153,32 @@ void Avatar_Pump()
     }
 }
 
+bool Avatar_FetchRGBA(uint64_t steamid64, std::vector<uint8_t>& rgba, int& w, int& h)
+{
+    void* friends = GetSteamFriends();
+    void* utils   = GetSteamUtils();
+    static GetAvatar_t    pfnMedium  = ResolveExport<GetAvatar_t>("SteamAPI_ISteamFriends_GetMediumFriendAvatar");
+    static RequestInfo_t  pfnReqInfo = ResolveExport<RequestInfo_t>("SteamAPI_ISteamFriends_RequestUserInformation");
+    static GetImageSize_t pfnImgSize = ResolveExport<GetImageSize_t>("SteamAPI_ISteamUtils_GetImageSize");
+    static GetImageRGBA_t pfnImgRGBA = ResolveExport<GetImageRGBA_t>("SteamAPI_ISteamUtils_GetImageRGBA");
+    if (!steamid64 || !friends || !utils || !pfnMedium || !pfnReqInfo || !pfnImgSize || !pfnImgRGBA) return false;
+
+    const int handle = pfnMedium(friends, steamid64);
+    if (handle <= 0)
+    {
+        pfnReqInfo(friends, steamid64, false);
+        return false;
+    }
+    uint32_t width = 0, height = 0;
+    if (!pfnImgSize(utils, handle, &width, &height) || !width || !height || width > 256 || height > 256)
+        return false;
+    rgba.resize((size_t)width * height * 4);
+    if (!pfnImgRGBA(utils, handle, rgba.data(), (int)rgba.size()))
+        return false;
+    w = (int)width; h = (int)height;
+    return true;
+}
+
 void Avatar_ReleaseAll()
 {
     for (auto& kv : s_cache)

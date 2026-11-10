@@ -1,0 +1,29 @@
+#pragma once
+// web on surface (web/websurface.cpp), botox variables.h m_web_* defaults
+inline bool  g_webEnable           = false;
+inline char  g_webUrl[512]         = "https://www.youtube.com/";
+inline int   g_webResH             = 720;     // short side px: 480 / 720 / 1080
+inline int   g_webAspect           = 0;       // k_wsAspects index
+inline bool  g_webPanel            = false;   // browser window
+inline bool  g_webPanelAlways      = false;   // keep with menu closed
+inline float g_webPanelOpacity     = 1.f;
+inline float g_webScale            = 1.f;
+inline float g_webRound            = 4.f;
+inline float g_webWorldOpacity     = 1.f;
+inline int   g_webDepthMode        = 0;       // decal / under hud / on top
+inline int   g_webBackMode         = 0;       // mirror / hidden / readable
+inline bool  g_webAutoPlay         = false;
+inline bool  g_webPlayFromStart    = false;
+inline bool  g_webAutoRemove       = false;
+inline float g_webVolume           = 0.5f;
+inline bool  g_webVolDistance      = false;
+inline float g_webVolNear          = 128.f;
+inline float g_webVolFar           = 900.f;
+inline bool  g_webCrosshairPointer = true;
+inline bool  g_webClickOnly        = false;
+inline bool  g_webBlockFire        = true;
+inline bool  g_webScrollInput      = true;
+inline int   g_webPlaceKey         = 0;
+inline int   g_webRemoveKey        = 0;
+inline int   g_webClickKey         = 0;
+inline int   g_webRClickKey        = 0x02;    // VK_RBUTTON

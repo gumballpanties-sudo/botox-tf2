@@ -5,6 +5,7 @@
 #include "../movement/prediction.h"    // g_globalVars
 #include "../../render/render.h"       // W2S_Project
 #include "../../hooks/crashlog.h"      // CrashSpan
+#include "../misc/misc_util.h"         // n_util::DecodeEHandleIndex
 #include <mutex>
 #include <deque>
 #include <unordered_map>
@@ -879,7 +880,9 @@ static void __cdecl RagdollForceProxy(const void* data, void* structure, void* o
     if (mode > 0 && data && structure && s_offRagPlayer > 0 && !g_eject) {
         __try {
             const unsigned handle = *reinterpret_cast<unsigned*>(reinterpret_cast<uintptr_t>(structure) + s_offRagPlayer);
-            void* player = g_entityList ? VCall<void*>(g_entityList, 4, handle) : nullptr;   // GetClientEntityFromHandle
+            // index -> GetClientEntity: the raw handle into slot 4 returns null (killeffects DSV 11-10, skins.cpp:126)
+            const int playerIdx = n_util::DecodeEHandleIndex(handle);
+            void* player = playerIdx > 0 ? GetClientEntity(playerIdx) : nullptr;
             const int localIdx = GetLocalPlayerIndex();
             void* local = localIdx > 0 ? GetClientEntity(localIdx) : nullptr;
             if (player && local && player != local && ReadInt(player, g_offTeamNum) != ReadInt(local, g_offTeamNum))
@@ -918,7 +921,7 @@ extern bool g_killfeedCsgo;   // dllmain.cpp, csgo killfeed (aim/killfeed_csgo.c
 
 bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel)
 {
-    if ((!g_wdNoHud && !g_killfeedCsgo && !g_wselEnable) || g_eject || !panels) return false;
+    if ((!g_wdNoHud && !g_killfeedCsgo && !g_wselEnable && !g_tcEnable) || g_eject || !panels) return false;
     using GetName_t = const char* (*)(void*, uintptr_t);   // IPanel::GetName, slot 36 (render.h)
     const char* nm = nullptr;
     __try { nm = ((GetName_t)(*(void***)panels)[36])(panels, vpanel); }
@@ -927,6 +930,11 @@ bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel)
     if (g_killfeedCsgo && nm && strcmp(nm, "HudDeathNotice") == 0) return true;
     // csgo weapon selection (aim/weaponsel.cpp) replaces this one; paint only, switching still works
     if (g_wselEnable && nm && strcmp(nm, "HudWeaponSelection") == 0) return true;
+    // csgo team counter (aim/teamcounter.cpp) replaces the match hud (timer, scores, TeamStatus
+    // player panels: all children of HudMatchStatus), the tournament hud's timer and the koth timers
+    if (g_tcEnable && nm && (strcmp(nm, "HudMatchStatus") == 0 || strcmp(nm, "TeamStatus") == 0 ||
+                             strcmp(nm, "ObjectiveStatusTimePanel") == 0 || strcmp(nm, "HudKothTimeStatus") == 0))
+        return true;
     if (!g_wdNoHud) return false;
     const int i = wfx3::HudElemFor(nm);
     return i >= 0 && i < k_wdHudCount && g_wdNoHudElems[i];
