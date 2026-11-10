@@ -729,6 +729,7 @@ static void Page_VisualsScreen()
     {
         // MENU_SLOT visuals_screen (third person, aspect ratio)
         Menu_Visuals_Camera();
+        Menu_Visuals_ScopeOverlay();   // menu_aimbot.cpp (Vars side)
 
         // botox menu_tab_visuals.cpp 1181-1237, 1:1 (one shader pass with the screen filters,
         // colorcorrect.cpp / fx_grade.hlsl)

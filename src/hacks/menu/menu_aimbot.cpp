@@ -58,10 +58,6 @@ void Menu_Aimbot_Config()
 				VarSliderFloat(ScopeFOV::Scale, "scale##scopefov");
 			}, ImVec2(200.f, -1));
 
-		// Amalgam Removals::Scope: CTFPlayerShared_InCond hook (aim/hooks.cpp) says "not zoomed"
-		// to CHudScope::ShouldDraw only, so the black overlay goes, zoom stays.
-		VarCheckbox(Vars::Visuals::Removals::Scope, "remove scope overlay");
-
 		VarCheckbox(WeaponTuning::Enabled, "per-weapon tuning");
 		if (WeaponTuning::Enabled.Value)
 			ImGui::OptionPopup("weapon tuning settings", [&]()
@@ -72,4 +68,12 @@ void Menu_Aimbot_Config()
 			}, ImVec2(220.f, -1));
 	}
 	menu_group_end();
+}
+
+// Amalgam Removals::Scope: CTFPlayerShared_InCond hook (aim/hooks.cpp) says "not zoomed"
+// to CHudScope::ShouldDraw only, so the black overlay goes, zoom stays.
+// Drawn in visuals > screen; lives here because menu.cpp can't see Vars (SDK clash).
+void Menu_Visuals_ScopeOverlay()
+{
+	VarCheckbox(Vars::Visuals::Removals::Scope, "remove scope overlay");
 }

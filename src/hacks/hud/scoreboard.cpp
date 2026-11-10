@@ -220,6 +220,7 @@ static void RevealArm(bool on)
 static void __fastcall h_VGuiRunFrame(void* thisptr)
 {
     MiscHookGuard _g;
+    CrashSpan _s("vgui/runframe");   // our part + the engine's RunFrame: a HITCH here = vgui itself
 
     // This is the MAIN thread and it ticks in the menu as well as in game, which is exactly
     // what the matchmaker unstick needs: its GC calls must not run on the render thread the

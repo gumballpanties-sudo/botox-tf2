@@ -259,6 +259,7 @@ static bool WorldFov_Wanted()
 
 static void __fastcall h_OverrideView(void* rcx, void* pView)
 {
+    // no CrashSpan here: __try below + a destructor object = C2712
     // the eye, before ClientModeShared::OverrideView lays a third person camera back from it
     float eye[3] = { 0.f, 0.f, 0.f }, eyeAng[3] = { 0.f, 0.f, 0.f };
     if (pView)

@@ -4,6 +4,7 @@
 #include "../movement/movement.h"     // Vec3 -- the focus trace's origin and angles come off the view setup
 #include "../visuals/flipworld.h"    // FlipWorld_Render -- mirrored at the end of the post slot
 #include "../visuals/chams_api.h"    // Glow_Render -- Amalgam glow pass, before the original post slot
+#include "../../hooks/crashlog.h"    // CrashSpan: stutter probe on the two view slots we own
 #include "shaders/fx_probe.h"     // k_fxProbeBytes    -- compiled from fx_probe.hlsl by fxc
 #include "shaders/fx_quad_vs.h"   // k_fxQuadVsBytes   -- compiled from fx_quad_vs.hlsl by fxc
 #include "../visuals/reflections.h"  // Reflections_Draw -- same depth source, same draw point
@@ -1583,6 +1584,7 @@ static void FxViewmodelPassDispatch()
 static void __fastcall h_ViewDrawFade(void* thisptr, unsigned char* color, void* material)
 {
     MiscHookGuard _g;
+    CrashSpan _s("view/fade");   // gun frame blend + dof viewmodel pass, after the engine's fade
 
     o_ViewDrawFade(thisptr, color, material);
 
@@ -1833,6 +1835,7 @@ static void FxReadViewSetup(const void* setup)
 static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* setup)
 {
     MiscHookGuard _g;
+    CrashSpan _s("view/post");   // flip world, glow, ssao/dof/bloom/frame blend world passes + the engine's slot
 
     const DWORD tid = GetCurrentThreadId();
 

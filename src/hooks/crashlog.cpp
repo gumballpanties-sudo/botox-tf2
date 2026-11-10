@@ -327,7 +327,7 @@ static LONG CALLBACK Veh(EXCEPTION_POINTERS* ep)
 // Per-tag max / sum / count since the last summary. Written from the game thread and the render
 // thread without a lock: a torn number costs one odd figure in a diagnostic line.
 struct Span { const char* tag; double maxMs, sumMs; long n; };
-static constexpr int k_spans = 32;
+static constexpr int k_spans = 48;   // was 32: every main-thread hook carries one now
 static Span s_span[k_spans];
 static int  s_spanCount = 0;
 static LARGE_INTEGER s_spanFreq{};

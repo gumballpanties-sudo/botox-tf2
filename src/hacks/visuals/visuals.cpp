@@ -1622,6 +1622,7 @@ void* __fastcall h_FindMaterial(
     void* rcx, const char* pName, const char* pTextureGroup, bool bComplain, const char* pComplainPrefix)
 {
     MiscHookGuard _g;
+    CrashSpan _s("mat/find");   // includes the engine's own load: a long one = a material coming off disk
     // Snow mode: swap rain streak sprite for round soft flake
     if (!g_eject && g_weatherEnable && g_weatherMode == 2 && pName)
     {
@@ -1673,6 +1674,7 @@ static void __fastcall h_EmitSound_impl(void* rcx, void* filter, int entindex, c
 void __fastcall h_EmitSound(void* rcx, void* filter, int entindex, const void* epRaw)
 {
     MiscHookGuard _g;
+    CrashSpan _s("snd/emit");   // includes the engine's sound load on first play
     h_EmitSound_impl(rcx, filter, entindex, epRaw);
 }
 
@@ -1789,6 +1791,7 @@ CreateTFRagdoll_t o_CreateTFRagdoll = nullptr;
 void __fastcall h_CreateTFRagdoll(void* rcx)
 {
     MiscHookGuard _g;
+    CrashSpan _s("rag/create");
     // set_turn_to_gold is a server attribute, so the client is never told a corpse should be
     // gold. Everything the flag drives IS client side and all of it runs inside this call, so
     // the skinchanger sets m_bGoldRagdoll here, before it.
@@ -1839,6 +1842,7 @@ DispatchUserMessage_t o_DispatchUserMessage = nullptr;
 bool __fastcall h_DispatchUserMessage(void* rcx, int type, void* msgData)
 {
     MiscHookGuard _g;
+    CrashSpan _s("um/dispatch");
     ChatTranslator_OnUserMessage(type, msgData);   // reads SayText/SayText2 before the original does
     if (g_removeScreenEffects && !g_eject && (type == 10 || type == 11 || type == 13))
         return true; // swallow -> effect never plays
@@ -1993,6 +1997,7 @@ static bool LrRunOriginal(void* rcx, void* pOut, int nMaxBones, int boneMask, fl
 bool __fastcall h_SetupBones(void* rcx, void* pBoneToWorldOut, int nMaxBones, int boneMask, float currentTime)
 {
     MiscHookGuard _g;   // hottest hook in the DLL and it was never drained on eject
+    CrashSpan _s("bones/setup");   // includes the engine's bone setup; two QPC reads per call
     if (g_lagResolver && !g_eject && g_netvarsReady && g_offClass > 0)
         BonesOpt_NewFrame(currentTime);   // resolver needs the local index too
     if (g_fpsBoost && !g_eject && g_netvarsReady && g_offClass > 0 && g_offCachedBones > 0)

@@ -9,6 +9,7 @@
 #include "../hacks/hud/crosshair.h"
 #include "../hacks/network/netregion.h"
 #include "../hacks/network/mmfix.h"
+#include "../hacks/network/netbuf.h"    // udp receive buffer bump: stalls stop reading as packet loss
 #include "../hacks/hud/scoreboard.h"
 #include "crashlog.h"
 #include "../globals/pinned_thread.h"
@@ -430,6 +431,11 @@ static void MainThread()
     // particle has drawn yet -- where the pre-translucent frame copy is taken.
     ScreenFx_InstallRenderStateHook(vt[57]);
     ScreenFx_InstallDepthStencilHooks(vt[39], vt[40]);   // "universal depth" z swap (d3d9.h slots 39/40)
+
+    // ws2_32!recvfrom -- grow every udp socket's receive buffer on first read, raise
+    // steamclient's SDR receive limits. Here and not PollThread: the client socket is read
+    // from the first frame, and MH_EnableHook(MH_ALL_HOOKS) below arms it with the rest.
+    NetBuf_Install();
 
     // PaintTraverse moved to PollThread (vgui2.dll may not be loaded yet here).
 

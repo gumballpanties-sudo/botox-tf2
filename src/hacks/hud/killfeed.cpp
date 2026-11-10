@@ -4,6 +4,7 @@
 #include "../misc/game_events.h"   // hit marker/sound, death particles, score popup -- piggyback, no new hook
 #include "../misc/names.h"          // custom names: on-kill cycle trigger
 #include "../lua/lua.h"             // lua game events
+#include "../../hooks/crashlog.h"   // CrashSpan: stutter probe on the game-event fan-out
 
 // Server events (player_death etc.) reach CHudBaseDeathNotice through slot 8, which in TF2 x64
 // engine.dll is FireEventClientSide (CGameEventManager vtable: 6 CreateEvent, 7 FireEvent,
@@ -72,6 +73,7 @@ static bool __fastcall h_FireEvent_impl(void* thisptr, void* pEvent, bool bDontB
 bool __fastcall h_FireEvent(void* thisptr, void* pEvent, bool bDontBroadcast)
 {
     MiscHookGuard _g;
+    CrashSpan _s("ev/fire");   // skins/hats/names/killfeed/lua handlers + the engine's listeners
     // Skinchanger's player_death work: exorcism ghosts + the reskin's killfeed icon. Runs
     // before the filter below and regardless of it -- neither has anything to do with
     // whether the notice is shown.

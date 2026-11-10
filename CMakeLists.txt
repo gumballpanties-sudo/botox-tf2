@@ -68,6 +68,7 @@ add_library(botox SHARED
     src/hacks/network/netregion.cpp
     src/hacks/network/equipregion.cpp
     src/hacks/network/mmfix.cpp
+    src/hacks/network/netbuf.cpp
     src/hacks/hud/scoreboard.cpp
     src/hooks/crashlog.cpp
     src/hacks/visuals/skins.cpp
@@ -136,6 +137,7 @@ target_link_libraries(botox PRIVATE
     gdi32
     dwmapi
     psapi
+    ws2_32   # netbuf.cpp: getsockopt/setsockopt on the engine's udp socket
     optimized freetype debug freetyped
 )
 
@@ -564,6 +566,12 @@ add_executable(rcedge_test tests/rcedge_test.cpp)
 # sized off a TICK cannot exceed its share of wall clock.
 # Build + run: cmake --build build --config Release --target netcvar_test && build\Release\netcvar_test.exe
 add_executable(netcvar_test tests/netcvar_test.cpp)
+
+# Gate test for the receive-buffer bump (src/hacks/network/netbuf_pure.h): main-thread stalls
+# overflowed the udp socket's 64 KB receive buffer and read as net_graph loss. Covers the
+# grow/leave-alone rule and the lock-free seen-list the recvfrom hot path scans.
+# Build + run: cmake --build build --config Release --target netbuf_test && build\Release\netbuf_test.exe
+add_executable(netbuf_test tests/netbuf_test.cpp)
 
 # Gate test for the killstreak carry-over across demos (src/hacks/hud/demostreak.h): demo load
 # events keep the streak, a rewind does not count the replayed kills twice, a death still ends it,

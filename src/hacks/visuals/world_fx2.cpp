@@ -1,5 +1,6 @@
 #include "world_fx2.h"
 #include "world_fx3.h"
+#include "../../hooks/crashlog.h"   // CrashSpan: stutter probe on CalcView
 
 // ==== remove visual recoil: CBasePlayer::CalcView ===================================
 // Pattern verified against Aletherium/Amalgam's Hooks/CBasePlayer_CalcView.cpp on this
@@ -51,6 +52,7 @@ __declspec(noinline) static void h_CalcView_impl(void* rcx, void* eyeOrigin, voi
 void __fastcall h_CalcView(void* rcx, void* eyeOrigin, void* eyeAngles, float& zNear, float& zFar, float& fov)
 {
     MiscHookGuard _g;
+    CrashSpan _s("view/calc");
     h_CalcView_impl(rcx, eyeOrigin, eyeAngles, zNear, zFar, fov);
 }
 
