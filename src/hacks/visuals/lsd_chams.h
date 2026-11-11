@@ -18,5 +18,12 @@ void LsdChams_End();
 // pass is its own draw. Render thread, once a frame: installs the hook the first frame it is on.
 void SheenNormal_Tick();
 
+// Shader chams (Atlas-TF2 model.hlsl): every material slot but original / lsd / two tone. The layer draws a
+// plain white VertexLitGeneric carrier (it exists at every graphics setting and brings normals); while armed
+// the DIP detour swaps in fx_cham_vs + fx_cham_ps[mode], so the look never depends on mat_phong /
+// mat_specular / shader detail. mode = ChamsLayers index, colour 0..1 display, alpha pre-scaled.
+void ShaderChams_Begin(int mode, const float color[4], float realTime, bool ignorez);
+void ShaderChams_End();
+
 void TwoToneChams_Begin(const float light[4], const float dark[4], float threshold, float edge, bool ignorez);
 void TwoToneChams_End();

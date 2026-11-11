@@ -1899,6 +1899,11 @@ static void __fastcall h_FrameStageNotify(int stage)
     // view eases at fps instead of stepping at tick rate.
     if (stage == 0) { Recorder_FrameStart(); EdgeBug_FrameStart(); }   // + hotwheels eb view
 
+    // Glow RTs + materials once for a mid-map inject (map loads get flipworld.cpp LevelInit). Main
+    // thread, before the frame renders: off-thread they raced stdshader draws (thread.cpp note).
+    static bool s_glowInjectInit = false;
+    if (stage == 0 && !s_glowInjectInit && IsInGame()) { s_glowInjectInit = true; Glow_LevelInit(); }
+
     // No hats reads this back in DrawModelExecute; entities live on this thread.
     if (stage == 5 && IsInGame()) NoHats_BodyTick();
     // hl2 dissolve death particles: DissolveEffect makes a client entity, game thread only.

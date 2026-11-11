@@ -51,10 +51,10 @@ namespace EspMath
 	// players() :723-724: green at full health, red at none
 	inline float HealthHue(float factor) { return (factor * 120.f) / 360.f; }
 
-	// players() :717-721: the shown health drains at 100/s, jumps straight up on a heal
+	// players() :717-721: shown health drains at 400/s (botox 100/s, too slow for tf2 hp), snaps up on heal
 	inline float AnimateHealth(float shown, float health, float frameTime)
 	{
-		return shown > health ? shown - 100.f * frameTime : health;
+		return shown > health ? std::fmax(shown - 400.f * frameTime, health) : health;
 	}
 
 	// players() :796-798: thickness capped at a quarter of the box's short side

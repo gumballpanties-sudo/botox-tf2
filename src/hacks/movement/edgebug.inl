@@ -421,7 +421,7 @@ static bool EbFindEdgeTarget(void* pLocal, int reachTick, int windowTicks, float
     p.z = origin.z + vel.z * t - 0.5f * grav * t * t;
     const Vec3 right(vel.y / speed, -vel.x / speed, 0.f);
     constexpr int k_lanes = 33;
-    constexpr float k_lane = 4.f, k_stepUp = k_mvEbLipDrop;
+    constexpr float k_lane = k_mvEbLaneGap, k_stepUp = k_mvEbLipDrop;
     // start one tick of fall above p: reach is a chord estimate, p can already sit under the lip top
     const float top = p.z + 16.f + std::max(0.f, -(vel.z - grav * t)) * ipt;
     const Vec3 mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);

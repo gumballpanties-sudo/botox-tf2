@@ -124,7 +124,11 @@ inline bool MV_EbCheck(int mode, float vz0, float vz, float g, float s, bool was
 // nearest the centre lane that `ok(lane)` accepts, -1 = none.
 enum { kMvLaneVoid = 0, kMvLaneFloor = 1, kMvLaneWall = 2 };
 struct MvEbLane { int kind; float z, nz; };
+inline constexpr float k_mvEbLaneGap = 4.f;   // lane spacing (edgebug.inl EbFindEdgeTarget)
 
+// floor-floor pair = one floor while the drop fits stepUp plus what the steeper lane's slope drops
+// over one lane gap (gap * tan, nz clamped to standable: <= 4.1u at 0.7). Flat floor = stepUp alone,
+// so a 3u curb is a lip and a 45 deg ramp is not.
 template <class OkFn>
 inline int MV_EbPickLip(const MvEbLane* l, int n, float stepUp, float standable, OkFn ok)
 {
@@ -137,8 +141,13 @@ inline int MV_EbPickLip(const MvEbLane* l, int n, float stepUp, float standable,
         if (a.kind == kMvLaneVoid && b.kind == kMvLaneVoid) continue;
         int lip;
         if (a.kind != b.kind) lip = a.kind == kMvLaneFloor ? i : i + 1;
-        else if (fabsf(a.z - b.z) <= stepUp) continue;
-        else lip = a.z > b.z ? i : i + 1;
+        else
+        {
+            const float nz = std::fmin(1.f, std::fmax(std::fmin(a.nz, b.nz), standable));
+            const float slope = nz > 0.f ? k_mvEbLaneGap * sqrtf(1.f - nz * nz) / nz : 0.f;
+            if (fabsf(a.z - b.z) <= stepUp + slope) continue;
+            lip = a.z > b.z ? i : i + 1;
+        }
         if (l[lip].nz < standable || !ok(lip)) continue;
         const int d = lip > n / 2 ? lip - n / 2 : n / 2 - lip;
         if (d < bestDist) { bestDist = d; best = lip; }
@@ -146,11 +155,12 @@ inline int MV_EbPickLip(const MvEbLane* l, int n, float stepUp, float standable,
     return best;
 }
 
-// smallest drop that is a lip. Not sv_stepsize 18: nothing steps in air, so a 10u curb under a
-// lip is a real bug (vz reset, then a short fall). Floor: off the lip CategorizePosition grounds
-// anything within 2u, so under ~3u it's a landing. Ceiling: a 45 deg (0.7 nz) slope drops 4u over
-// the 4u lane gap and must stay one floor. 6u sits between.
-inline constexpr float k_mvEbLipDrop = 6.f;
+// smallest drop that is a lip. Not sv_stepsize 18: nothing steps in air, so a 3u curb under a
+// lip is a real bug (vz reset, then a short fall). Physics floor: off the lip CTFGameMovement::
+// CategorizePosition grounds anything within 2u (tf_gamemovement.cpp:2373), and the confirm tick
+// falls 2g*dt more (0.18u at 66t) before the bug counts: 2 + 0.18 + epsilon. Was 6u, which skipped
+// every 2-6u ledge; slopes are now told apart by MV_EbPickLip's slope allowance, not by this.
+inline constexpr float k_mvEbLipDrop = 2.25f;
 
 // near-edge gate: ground ahead dropped more than a step below the feet (or nothing in reach).
 // botox wanted > 52u of a 66u ray, which every crate / low ledge under 50u failed.
