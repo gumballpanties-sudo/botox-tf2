@@ -2117,10 +2117,15 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
 
     // how far a candidate is flown; a full hold this long ends the search
     const int k_stickHorizon = as::TicksScaled(8, TickInterval());
-    // the stick's own share of the cmd's sims: a dying ride runs every candidate to its break
-    // tick, and TB / AS / WC / PS still need theirs after us
-    constexpr int k_stickSimCap = 96;
-    int simsUsed = 0;
+    // the press search's own share of the cmd's sims: a dying ride runs every candidate to its break
+    // tick, and TB / AS / WC / PS still need theirs after us (SimsLeft guards the pool).
+    // OWN counter, not simsUsed: the drift hold spends 3 x (horizon + 2) = 54 before the search, and a
+    // shared 96 cap left ~5 of the 18 candidates -- 100 / 200 / 450 / 0 and the whole no-tangent pass
+    // were never flown on exactly the ride that needed them. No-tangent is the slow-ride save: under ~30
+    // u/s along the face your strafe keys really accelerate the hull and bend the across velocity, at
+    // ride speed they add nothing (addspeed <= 0). 144 = both passes, every press, 8 ticks
+    constexpr int k_stickPressCap = 144;
+    int simsUsed = 0, pressSims = 0;
 
     // ticks the move keeps the pin, 0..horizon (same cmd every tick)
     const auto proof = [&](const Vec3& mv) -> int
@@ -2182,10 +2187,12 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
             continue;
         for (const float m : k_press)
         {
-            if (SimsLeft() < k_stickHorizon || simsUsed + k_stickHorizon > k_stickSimCap)
+            if (SimsLeft() < k_stickHorizon || pressSims + k_stickHorizon > k_stickPressCap)
                 break;
             const Vec3 mv = vInto * m + vTan * t;
+            const int s0 = simsUsed;
             const int h = proof(mv);
+            pressSims += simsUsed - s0;
             if (h > best) { best = h; bestMove = mv; bestPress = m; }
             if (best >= k_stickHorizon) break;
         }
@@ -2360,7 +2367,13 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
         {
             s_aaPropRej++;
         }
-        else if (MV_IsHullFlatWall(trace.plane.normal)
+        // DIAGONAL BRUSH FACES COUNT AS A WALL. s_aaWallDetected is PixelSurf's hunt gate, and with
+        // auto align off PsWallDetectFallback takes ANY upright face -- so turning auto align ON used
+        // to switch the hunt off on every diagonal wall. The press below stays square-only on
+        // sv_wallbug 1 (MV_IsHullFlatWall, corner contact); on sv_wallbug 0 a brush plane clips the
+        // hull box exactly (no prop hull to dig a corner into, those are refused above), and the
+        // DIST_EPSILON drift needs the press there as much as on a square face
+        else if (fabsf(trace.plane.normal.z) <= 0.001f
             && !(trace.surface.flags & SURF_TRIGGER_MV) && !(trace.dispFlags & DISPSURF_SURFACE))
         {
             s_aaWallDetected = true;
@@ -2373,6 +2386,10 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
         s_startCircle = 0.f;
         return;
     }
+    // cvar not on the client = Valve's default, 0 (same read as the stick)
+    const bool bWb0 = CvarFloat("sv_wallbug", 0.f) < 0.5f;
+    if (!MV_IsHullFlatWall(trace.plane.normal) && !bWb0)
+        return;   // diagonal on sv_wallbug 1: hunt gate only, keys untouched
 
     // seamless leave: actively steering off the wall hands control back this tick
     if (TB_SteeringAwayFromWall(pCmd, trace.plane.normal, pCmd->forwardmove, pCmd->sidemove))
@@ -2410,7 +2427,96 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
     const float flTangentInput = std::clamp(vWishWorld.Dot(vTangentDir), -450.f, 450.f);
 
     bool bDetect = false;
-    for (int iPass = 0; iPass < 2 && !bDetect; iPass++)
+    // ---- sv_wallbug 0: THE CATCH PICKS THE RIDE LENGTH -----------------------------------------
+    // 11-11 log, 9 of 10 stick rides: every press drifted the hull off the face at the same 0.00047u a
+    // tick (Valve's DIST_EPSILON clip, MV_DriftHold) and the pin broke after ~0.0044u of it, ~10 ticks,
+    // whatever the stick pressed -- the ride's life is set on the CATCH tick (how deep the hull got onto
+    // the lip), the stick can only spend it. (The 10th held 32: x = -8316, where one float ulp of
+    // origin is 0.00098 > the drift, so it rounds back. Map luck, not a technique.)
+    // botox's loop below takes the FIRST press that pins one tick = the shallowest catch on offer, and
+    // PixelSurf's hold then swapped it for its own 2-tick-proof gain strafe anyway. Here every candidate
+    // flies up to k_catchHorizon ticks and the one that HOLDS LONGEST wins; s_aaStickOwns makes PS
+    // keep it. Ties: list order -- PS's own gain strafe first when PS would have used it (same pick as
+    // before when nothing is deeper), then least press, steer kept. 200 / 450 are in because 90 only
+    // reaches 13.5 of the 30 u/s air accel cap. sv_wallbug 1 keeps botox's loop: no drift, every ride
+    // holds, nothing to choose. CATCH TICKS ONLY: a cmd that starts pinned is a live ride -- the stick's
+    // (with the TB bind on this scan still runs on ride ticks, the stick only after TB), and 160 sims a
+    // ride tick on top of the stick's would starve TB / AS / PS
+    const bool bCatch = bWb0 && fabsf(s_prePredVel.z - TargetPredictZVel()) >= as::k_pinTol;
+    if (bCatch)
+    {
+        const int k_catchHorizon = as::TicksScaled(32, TickInterval());
+        constexpr int k_catchSimCap = 160;   // a candidate that misses costs 1; only pins fly long
+        const float pin = TargetPredictZVel();
+        int sims = 0, cands = 0, bestHold = 0;
+        float bestFwd = flUserFwd, bestSide = flUserSide, bestPress = 0.f;
+        char bestKind = '-';
+        const auto fly = [&]() -> int {
+            RestoreOriginal();
+            const int base = EntI(pLocal, g_offTickBase);
+            int held = 0;
+            for (int z = 0; z < k_catchHorizon && SimsLeft() > 0 && sims < k_catchSimCap; z++)
+            {
+                EntSetI(pLocal, g_offTickBase, base + z);
+                Pred_Simulate(pLocal, pCmd);
+                ++sims;
+                if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || fabsf(EntV3(pLocal, g_offVelocity).z - pin) >= as::k_pinTol)
+                    break;
+                held++;
+            }
+            RestoreOriginal();
+            return held;
+        };
+        // true = a full hold, stop looking
+        const auto consider = [&](char kind, float press) -> bool {
+            if (SimsLeft() < 1 || sims >= k_catchSimCap) return true;
+            ++cands;
+            const int h = fly();
+            if (h > bestHold)
+            {
+                bestHold = h; bestFwd = pCmd->forwardmove; bestSide = pCmd->sidemove;
+                bestPress = press; bestKind = kind;
+            }
+            return bestHold >= k_catchHorizon;
+        };
+        bool done = false;
+        // PS hold's gain strafe, under PS hold's own rule (g_psWallStrafe 2 = always, 1 = keys into the face)
+        {
+            const float wl = vWishWorld.Length2D();
+            const bool keysIn = wl > 0.01f && vWishWorld.Dot(vInto) / wl > 0.25f;
+            float gy = 0.f;
+            if (On(g_pixelSurf, g_pixelSurfKey, g_pixelSurfMode) && (g_psWallStrafe == 2 || (g_psWallStrafe == 1 && keysIn))
+                && as::WallStrafeYaw(trace.plane.normal.x, trace.plane.normal.y, vVel.x, vVel.y,
+                                     CvarFloat("sv_air_max_wishspeed", 30.f), gy))
+            {
+                as::MoveTowardYaw(pCmd->viewangles.y, gy, 450.f, pCmd->forwardmove, pCmd->sidemove);
+                done = consider('g', 450.f);
+            }
+        }
+        static constexpr float k_catchPress[] = { 0.f, 10.f, 20.f, 30.f, 40.f, 50.f, 60.f, 70.f, 80.f, 90.f, 200.f, 450.f };
+        for (int iPass = 0; iPass < 2 && !done; iPass++)
+        {
+            const float flTangent = iPass == 0 ? flTangentInput : 0.f;
+            if (iPass == 0 && fabsf(flTangent) < 10.f)
+                continue;
+            for (const float m : k_catchPress)
+            {
+                const Vec3 vMove = vInto * m + vTangentDir * flTangent;
+                MV_WriteWishWorld(pCmd, vMove, vMove.Length2D());
+                if ((done = consider(iPass == 0 ? 't' : 'p', m))) break;
+            }
+        }
+        pCmd->forwardmove = bestFwd;
+        pCmd->sidemove    = bestSide;
+        bDetect = bestHold > 0;
+        s_aaStickOwns = bDetect;
+        // hold = ticks the pick keeps the pin of the horizon: the catch depth, read straight off the sim.
+        // kind g = PS gain strafe, t = press + your steer, p = bare press
+        if (bDetect && g_debugLogEnable)
+            DebugLog("AA: catch pick=%c press=%.0f hold=%d/%d cands=%d sims=%d xy=%.1f vz=%.2f", bestKind, bestPress,
+                     bestHold, k_catchHorizon, cands, sims, vVel.Length2D(), vVel.z);
+    }
+    for (int iPass = 0; iPass < 2 && !bDetect && !bCatch; iPass++)
     {
         const float flTangent = iPass == 0 ? flTangentInput : 0.f;
         if (iPass == 0 && fabsf(flTangent) < 10.f)

@@ -280,20 +280,69 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         s_psLastBy = by;
     };
 
+    /* sv_wallbug 0: ticks a catch on `buttons` rides, 0 = no catch in n ticks. 11-11 log, every ride: the lip's
+       top-plane clip ( Valve's DIST_EPSILON ) lifts the hull 0.03125 * dt a tick and the pin ends when the feet
+       reach 0.03125 over the plane -- z 288.027 -> 288.031 ( 9 ticks ), 416.021 ( 22 ), -23.983 ( 30 ). The ride's
+       life is set by how low the catch lands, and no press moves that ( all 25 AA catch candidates tied at 11 ).
+       Stance does: an air duck moves the feet 20u ( gamemovement.cpp FinishDuck ), so the other stance meets the
+       same lip on another tick of the fall at another height */
+    const auto catch_life = [&](const int buttons, const int n, const int len) -> int {
+        const int live = cmd->buttons;
+        RestoreToFrame(frame);
+        const int base = EntI(pLocal, g_offTickBase);
+        int run = 0;   // pinned ticks in a row; >= 2 = hunt's own "found"
+        cmd->buttons = buttons;
+        for (int z = 0; z <= n + len; z++) {
+            if (run == 0 && z > n)
+                break;   // no pin started inside the hunt window
+            EntSetI(pLocal, g_offTickBase, base + z);
+            Pred_Simulate(pLocal, cmd);
+            if (EntI(pLocal, g_offFlags) & FL_ONGROUND)
+                break;
+            if (pinned(EntV3(pLocal, g_offVelocity))) {
+                if (++run >= len) break;
+            } else {
+                if (run >= 2) break;
+                run = 0;
+            }
+        }
+        cmd->buttons = live;
+        RestoreToFrame(frame);
+        return run >= 2 ? run : 0;
+    };
+
     if (!latched) {
         const bool holds_duck = (cmd->buttons & IN_DUCK) != 0;
+        const int flip_buttons = holds_duck ? cmd->buttons & ~IN_DUCK : cmd->buttons | IN_DUCK;
         const int held        = hold();
         log_hold(held);
         if (held)
             return;
-        if (hunt(cmd->buttons, as::TicksScaled(8, ipt)) >= 0)
-            return;
-        const int flip_buttons = holds_duck ? cmd->buttons & ~IN_DUCK : cmd->buttons | IN_DUCK;
+        bool deeper = false;
+        if (hunt(cmd->buttons, as::TicksScaled(8, ipt)) >= 0) {
+            /* your stance catches: botox keeps it. wallbug 0 only, both stances catch, the flip rides strictly
+               longer = take the flip NOW ( no wait-for-the-last-tick on an unduck: waiting can run into your
+               stance's shallower catch first ). wallbug 1 never drifts, every catch rides, botox's pick stands */
+            const int n8  = as::TicksScaled(8, ipt);
+            const int len = as::TicksScaled(32, ipt);
+            if (CvarFloat("sv_wallbug", 0.f) < 0.5f && SimsLeft() > 2 * (n8 + len + 2)) {
+                const int stay = catch_life(cmd->buttons, n8, len);
+                if (stay > 0 && stay < len) {
+                    const int other = catch_life(flip_buttons, n8, len);
+                    deeper = other > stay;
+                    if (deeper)
+                        DebugLog("PSU: deeper %s stay=%d flip=%d of %d z=%.3f vz=%.2f", holds_duck ? "stand" : "duck", stay,
+                                 other, len, s_prePredOrigin.z, s_prePredVel.z);
+                }
+            }
+            if (!deeper)
+                return;
+        }
         const int live_buttons = cmd->buttons;
         int flip               = hunt(flip_buttons, as::TicksScaled(8, ipt));
         /* your crouch is dropped only on the last tick that still catches: one more crouched tick still pins = wait,
            so a guess 8 ticks out never uncrouches you ( path / keys change before the lip = nothing lost ) */
-        if (holds_duck && flip >= 0 && hunt(flip_buttons, as::TicksScaled(8, ipt), 1) >= 0)
+        if (!deeper && holds_duck && flip >= 0 && hunt(flip_buttons, as::TicksScaled(8, ipt), 1) >= 0)
             return;
         if (flip < 0) {
             cmd->buttons = flip_buttons;

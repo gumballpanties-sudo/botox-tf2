@@ -277,7 +277,7 @@ static void BuildingRows(const char* label, const char* id, bool* on, float* col
         return;
     snprintf(buf, sizeof(buf), "##%s color", id);
     ImGui::SameLine();
-    ImGui::ColorRow(buf, col, kPickerAlpha);
+    ImGui::ColorRow(buf, col, kPickerAlpha, 1);   // slot 1: the cog owns the right edge
     snprintf(buf, sizeof(buf), "%s settings##%s", label, id);
     ImGui::OptionPopup(buf, [&]() {
         char l[64];
