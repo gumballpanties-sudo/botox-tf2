@@ -49,14 +49,24 @@ static void PsSurfFixTick(void* pLocal, UserCmd_t* pCmd)
 // Only counts when the EB assist plan was flying (s_ebDetected) in the last few cmds: the raw
 // vz test alone also trips on corrections / slopes / unassisted hits.
 // Mouse lock lives in edgebug.inl (EdgeBug_MouseInput).
-static const char* const kEbSounds[] = { "TFPlayer.CritHit", "TFPlayer.CritHitMini",
-    "TFPlayer.DoubleDonk", "Achievement.Earned", "MVM.PlayerUpgraded" };
+// first wave + script volume of TFPlayer.CritHit / CritHitMini / DoubleDonk / Achievement.Earned /
+// MVM.PlayerUpgraded (tf2_misc vpk). Raw wav through playvol so the volume slider works on stock too
+// (playgamesound has no volume). ponytail: crit rndwave variants dropped, first wave only.
+static const char* const kEbSounds[] = { "player/crit_hit.wav", "player/crit_hit_mini.wav",
+    "player/doubledonk.wav", "misc/achievement_earned.wav", "mvm/mvm_bought_upgrade.wav" };
+static constexpr float kEbSoundBaseVol[] = { 1.f, 1.f, 1.f, 1.f, 0.25f };
 static constexpr int kEbSoundCustom = 5;   // menu combo index after kEbSounds
+
+// playvol precaches + plays at 0..1; volume > 1 stacks emits like botox.
+static void EbPlayVol(const char* rel, float vol)
+{
+    for (float left = vol; left > 0.f; left -= 1.f)
+        PrCmd("playvol \"%s\" %.2f", rel, std::min(left, 1.f));
+}
 
 // botox play_trick_sound custom branch. A file in C:\botox-tf2\sounds wins: the engine only opens
 // sounds under its GAME search path, so copy it into tf\sound\botox\ (instead of botox's ".."
 // climb) and play that. Else the path is taken as tf/sound-relative (tf/custom/*/sound works too).
-// playvol precaches + plays at 0..1; volume > 1 stacks emits like botox.
 static void EbPlayCustom()
 {
     const char* name = g_edgeBugSoundPath;
@@ -86,8 +96,7 @@ static void EbPlayCustom()
         }
         snprintf(rel, sizeof(rel), "botox/%s", base);
     }
-    for (float left = g_edgeBugSoundVol; left > 0.f; left -= 1.f)
-        PrCmd("playvol \"%s\" %.2f", rel, std::min(left, 1.f));
+    EbPlayVol(rel, g_edgeBugSoundVol);
 }
 
 static void EdgeBugSoundPre(void* pLocal)
@@ -110,5 +119,5 @@ static void EdgeBugSoundPre(void* pLocal)
     s_assistGrace = 0;   // one sound per assisted EB
     if (g_edgeBugSoundId == kEbSoundCustom) { EbPlayCustom(); return; }
     const int i = std::clamp(g_edgeBugSoundId, 0, (int)(sizeof(kEbSounds) / sizeof(*kEbSounds)) - 1);
-    PrCmd("playgamesound %s", kEbSounds[i]);   // client EmitSound on local player, no cheat flag
+    EbPlayVol(kEbSounds[i], kEbSoundBaseVol[i] * g_edgeBugSoundVol);
 }

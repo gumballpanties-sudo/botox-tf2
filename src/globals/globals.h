@@ -752,7 +752,7 @@ extern bool g_edgeBugMouseLock; // scale mouse x in OverrideMouseInput while a p
 extern bool g_edgeBugSound;     // TF2 game sound the tick after a real edgebug
 extern int  g_edgeBugSoundId;   // which TF2 game sound plays on a real EB
 extern char g_edgeBugSoundPath[128]; // custom EB wav (sound id = custom)
-extern float g_edgeBugSoundVol;      // custom EB wav volume 0..2
+extern float g_edgeBugSoundVol;      // EB sound volume 0..2 (stock + custom)
 void EdgeBug_MouseInput(float* x, float* y);   // IClientMode::OverrideMouseInput hook body
 void EdgeBug_FrameStart();                     // FSN FRAME_START: hotwheels (style 3) view turn
 void EdgeBug_InstallMouseHook();

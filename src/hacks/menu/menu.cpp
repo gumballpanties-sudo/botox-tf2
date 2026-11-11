@@ -39,6 +39,7 @@
 #include "../web/websurface.h"    // visuals > hud "web on surface"
 #include "../web/websurf_math.h"  // k_wsAspects (shape combo)
 #include <initializer_list>
+#include <shellapi.h>   // ShellExecuteA -- SoundFileCombo "open folder"
 #include <utility>
 
 static void MenuClientCmd(const char* cmd);   // below the fonts tab; the hud group's radar button uses it
@@ -292,6 +293,28 @@ static bool SliderF(const char* label, float* v, float lo, float hi, const char*
         if (*v > dhi) dhi = *v;
     }
     return ImGui::SliderFloat(label, v, dlo, dhi, fmt);
+}
+
+// custom sound pick: lists *.wav in C:\botox-tf2\sounds (EbPlayCustom looks there first), rescanned while open
+static void SoundFileCombo(const char* label, char* buf, size_t sz)
+{
+    static constexpr const char* kDir = "C:\\botox-tf2\\sounds";
+    if (!ImGui::BeginCombo(label, buf[0] ? buf : "drop .wav in C:\\botox-tf2\\sounds")) return;
+    CreateDirectoryA("C:\\botox-tf2", nullptr);
+    CreateDirectoryA(kDir, nullptr);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA("C:\\botox-tf2\\sounds\\*.wav", &fd);
+    if (h == INVALID_HANDLE_VALUE) ImGui::TextDisabled("no .wav files");
+    else
+    {
+        do
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && ImGui::Selectable(fd.cFileName, !strcmp(buf, fd.cFileName)))
+                strncpy_s(buf, sz, fd.cFileName, _TRUNCATE);
+        while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    if (ImGui::Selectable("open folder")) ShellExecuteA(nullptr, "open", kDir, nullptr, nullptr, SW_SHOWNORMAL);
+    ImGui::EndCombo();
 }
 
 static bool SliderI(const char* label, int* v, int lo, int hi, const char* fmt = "%d")
@@ -1411,12 +1434,9 @@ static void Page_MovementMain()
                 if (g_edgeBugSound)
                 {
                     ImGui::Combo("sound##ebsoundid", &g_edgeBugSoundId, "crit hit\0mini crit\0double donk\0achievement\0upgrade\0custom\0");
-                    if (g_edgeBugSoundId == 5)   // botox: custom path + volume
-                    {
-                        ImGui::InputTextWithHint("sound path##ebsndpath", "name.wav (C:\\botox-tf2\\sounds)",
-                                                 g_edgeBugSoundPath, sizeof(g_edgeBugSoundPath));
-                        SliderF("sound volume##ebsndvol", &g_edgeBugSoundVol, 0.f, 2.f, "%.2f");
-                    }
+                    if (g_edgeBugSoundId == 5)   // botox: custom file
+                        SoundFileCombo("sound file##ebsndpath", g_edgeBugSoundPath, sizeof(g_edgeBugSoundPath));
+                    SliderF("sound volume##ebsndvol", &g_edgeBugSoundVol, 0.f, 2.f, "%.2f");
                 }
                 if (style == 0)
                 {

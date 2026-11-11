@@ -695,7 +695,7 @@ bool g_edgeBugMouseLock = false;
 bool g_edgeBugSound = false;
 int  g_edgeBugSoundId = 0;   // index into movement_tricks2.inl kEbSounds, last = custom
 char g_edgeBugSoundPath[128] = "";   // custom wav: C:\botox-tf2\sounds\<name> or tf/sound-relative
-float g_edgeBugSoundVol = 1.f;       // custom only, 0..2 (botox m_edge_bug_sound_volume)
+float g_edgeBugSoundVol = 1.f;       // all EB sounds, 0..2 (botox m_edge_bug_sound_volume)
 // -- Edge skip port (movement_edge.inl): edge skip + blockbot, defaults OFF ------------------------
 bool g_edgeSkip = false;   int g_edgeSkipKey = 0;   int g_edgeSkipMode = 1;
 int   g_edgeSkipTicks = 23;
