@@ -387,10 +387,6 @@ add_executable(movementex_test tests/movementex_test.cpp)
 # Build + run: cmake --build build --config Release --target goomba_test && build\Release\goomba_test.exe
 add_executable(goomba_test tests/goomba_test.cpp)
 
-# Gate test for Movement tricks 2's pure decisions (src/hacks/movement/movement_tricks2_pure.h): tung surf's
-# snap plane grid rank.
-# Build + run: cmake --build build --config Release --target movementtricks2_test && build\Release\movementtricks2_test.exe
-add_executable(movementtricks2_test tests/movementtricks2_test.cpp)
 # Gate test for auto bounce pure math (src/hacks/movement/autobounce_pure.h): clip/bhop crop/ttc/air step.
 # Build + run: cmake --build build --config Release --target autobounce_test && build\Release\autobounce_test.exe
 add_executable(autobounce_test tests/autobounce_test.cpp)

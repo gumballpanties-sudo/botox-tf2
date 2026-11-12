@@ -16,7 +16,10 @@ constexpr int kHatSlots = 64;
 // eqMask/eqPos: where TF2's loadout screen equipped the backpack copy (hats_inv.cpp hook). Bit 0 set
 // = "loadout-managed": the hat is worn only on classes with their bit (1 scout .. 9 engineer) set,
 // in loadout position eqPos[class]. Bit 0 clear = worn on every class that can (menu default).
-struct HatSlot { int def; int style; int unusual; int paint; uint16_t eqMask; uint8_t eqPos[10]; };
+// useHead/zOff: TF2's own loadout item options ("use head origin" + effect height slider, attrs
+// 520/519, -8..8 u). Set only from TF2's loadout screen (hats_inv.cpp GC hook), saved in the cfg.
+struct HatSlot { int def; int style; int unusual; int paint; uint16_t eqMask; uint8_t eqPos[10];
+                 int useHead; float zOff; };
 
 extern bool    g_hatsEnable;
 extern bool    g_hatsBackpack;   // also put each worn hat in TF2's own backpack (hats_inv.cpp)
@@ -39,7 +42,8 @@ void Hats_OnGameEvent(void* pEvent);
 // hats_inv.cpp: fake CEconItems in the local SO cache, one per used slot. `want` false = remove ours.
 void HatsInv_Tick(bool want);
 bool HatsInv_AnyLive();
-void HatsInv_Install();   // loadout equip hook; from Skins_Install
+void HatsInv_Install();   // loadout equip hook + GC effect-offset hook; from Skins_Install
+void Hats_HudInstall();   // hud class model panel (cl_hud_playerclass_use_playermodel) wears ours too
 // DrawModelExecute (visuals.cpp): the local player's base model body with the worn hats'
 // bodygroups hidden -- written into ModelRenderInfo_t::body per draw, never into m_nBody.
 bool Hats_WantBody();

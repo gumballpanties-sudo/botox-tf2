@@ -206,7 +206,7 @@ struct MvInd_t
     bool  jbOn = false, jbHit = false;   // jumpbug: hit = the unduck+jump fired in the last 0.2 s (botox m_can_jb hold)
     bool  ebPred = false;                // eb plan latched, its landing tick still ahead (botox m_edge_bug_tick > tick)
     // botox keybind indicator rows with no landing state (plain labels), and the two that have one
-    bool  dhOn = false, acOn = false, abOn = false, tungOn = false, hswOn = false;
+    bool  dhOn = false, acOn = false, abOn = false, hswOn = false;
     bool  esOn = false, esHit = false;       // edge skip: hit = a plan is flying (botox g_edge_skip.active())
     bool  gmbOn = false, gmbHit = false;     // auto goomba: hit = it fired in the last 0.2 s
     bool  onGround = false;

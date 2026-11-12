@@ -2774,6 +2774,7 @@ void Skins_Install()
                        (void*)h_TF_IsHolidayActive, (void**)&o_TF_IsHolidayActive);
 
     HatsInv_Install();   // hat changer: loadout screen equip for the backpack copies
+    Hats_HudInstall();   // hat changer: hud class model panel wears ours
 }
 
 // ==== config ====================================================================================

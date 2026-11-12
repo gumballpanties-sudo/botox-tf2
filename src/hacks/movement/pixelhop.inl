@@ -301,6 +301,6 @@ static void PixelHop(void* pLocal, UserCmd_t* cmd)
     // 3. nothing lands: webz falls back to its texture bug -- the face hug it writes is what walks the hull
     // onto the ledge corner (css log 11-08: tb= > 0 every working hop). AA stick (css s_aaHolding) keeps a live surf instead
     if (s_aaStickOwns) return;
-    TextureBugBotox(pLocal, cmd, true, false);
+    TextureBugBotox(pLocal, cmd, true);
     if (s_textureBugHit || s_tbOwnsCmd) { s_pixelHopHit = true; ++s_ph.tb; }
 }

@@ -4,7 +4,7 @@
 // Ported: nulls, hsw, delay hop, auto crouch, smooth demo
 // view (reuses engIsPlayingDemo=76, same confirmed vtable slot as fakemove.inl).
 // jumpstats: detections.cpp Jumpstats_Tick (chat print, botox jump_stats).
-// edge skip + blockbot: movement_edge.inl. tung/bounce/pf modes/eb presets/ps fix:
+// edge skip + blockbot: movement_edge.inl. bounce/pf modes/eb presets/ps fix:
 // movement_tricks2.inl. No ladder tricks: TF2 has no ladders.
 
 // (movement_ex_pure.h included near the top of movement.cpp -- LongJump's adaptive-cancel

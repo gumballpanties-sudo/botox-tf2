@@ -1683,17 +1683,6 @@ static void Page_MovementMain()
             }, ImVec2(240.f, -1));
 
         ImGui::EndDisabled();
-
-        // not gated by "enabled" -- runs on its own toggle
-        ImGui::Checkbox("tung surf (local)", &g_tungSurf);
-        if (g_tungSurf)
-            ImGui::OptionPopup("tung surf settings", [&]() {
-                ImGui::Label("tung surf keybind");
-                ImGui::Keybind("tung surf key", &g_tungSurfKey, &g_tungSurfMode);
-                SliderF("snap to pixelsurfs##tungsnap", &g_tungSnap, 0.f, 32.f, "%.0f u");
-                // a catch / ride needs a move INTO the wall: presses when your keys don't, never when they point away
-                ImGui::Checkbox("press into wall##tungpress", &g_tungPress);
-            }, ImVec2(220.f, -1));
     }
     menu_group_end();
 

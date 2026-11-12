@@ -683,9 +683,7 @@ bool g_djStrafe = false;   int g_djStrafeKey = 0;   int g_djStrafeMode = 1;
 bool g_silentView = false;
 bool g_jumpstats = false;
 
-// -- Movement tricks 2 port (movement_tricks2.inl): tung/bounce/pf modes/eb presets/ps fix ---------
-bool g_tungSurf = false;   int g_tungSurfKey = 0;   int g_tungSurfMode = 1;
-float g_tungSnap = 0.f;   bool g_tungPress = false;
+// -- Movement tricks 2 port (movement_tricks2.inl): bounce/pf modes/eb presets/ps fix ---------
 bool g_autoBounce = false; int g_autoBounceKey = 0; int g_autoBounceMode = 1;
 // auto bounce = botox auto_bounce.cpp (autobounce.inl), defaults = botox variables.h:1250-1257
 int   g_abMode = 0;           // 0 drop in / 1 keep speed / 2 stop

@@ -5,7 +5,7 @@
 // Movement widgets: flat botox-style rows, continuing the "movement" group menu.cpp
 // already opened (Page_MovementMain). Items with their own cog (edge bug style/mouse
 // lock/sound, long jump adaptive cancel, auto strafe avoid walls,
-// tung surf, auto bounce, bounce assist, edge skip, blockbot) were merged into their
+// auto bounce, bounce assist, edge skip, blockbot) were merged into their
 // feature's cog in menu.cpp; pixel finder modes moved into the ps finder cog on the
 // calculator page. Nothing dropped -- see report.
 void Menu_Movement_Main()

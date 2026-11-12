@@ -89,3 +89,55 @@ inline bool Hat_NameMatch(const char* hay, const char* needle)
     }
     return false;
 }
+
+// TF2 loadout screen effect messages, as they leave for the GC (hats_inv.cpp GC hook):
+// [u32 emsg | 0x80000000][u32 header len][CMsgProtoBufHeader][body], body = { uint64 item_id = 1;
+// float offset = 2 } (1087 k_EMsgGCSetItemEffectVerticalOffset) or { uint64 item_id = 1;
+// bool use_head = 2 } (1088 k_EMsgGCSetHatEffectUseHeadOrigin). false = not one of those / malformed.
+struct HatGcMsg { uint32_t type; uint64_t id; bool useHead; float offset; };
+
+inline bool Hat_Varint(const uint8_t*& p, const uint8_t* end, uint64_t& v)
+{
+    v = 0;
+    for (int sh = 0; p < end && sh < 64; sh += 7) {
+        const uint8_t b = *p++;
+        v |= uint64_t(b & 0x7F) << sh;
+        if (!(b & 0x80)) return true;
+    }
+    return false;
+}
+
+inline bool Hat_ParseGcEffect(uint32_t type, const void* data, uint32_t size, HatGcMsg& m)
+{
+    const uint32_t t = type & 0x7FFFFFFFu;
+    if ((t != 1087 && t != 1088) || !data || size < 8) return false;
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    uint32_t emsg, hl;
+    memcpy(&emsg, p, 4); memcpy(&hl, p + 4, 4);
+    if ((emsg & 0x7FFFFFFFu) != t || hl > size - 8) return false;
+    const uint8_t* q = p + 8 + hl, *end = p + size;
+    m = { t, 0, false, 0.f };
+    bool have = false;
+    while (q < end) {
+        uint64_t tag, v;
+        if (!Hat_Varint(q, end, tag)) return false;
+        const int field = (int)(tag >> 3), wt = (int)(tag & 7);
+        if (wt == 0) {
+            if (!Hat_Varint(q, end, v)) return false;
+            if (field == 1) m.id = v;
+            else if (field == 2 && t == 1088) { m.useHead = v != 0; have = true; }
+        } else if (wt == 5) {
+            if (end - q < 4) return false;
+            if (field == 2 && t == 1087) { memcpy(&m.offset, q, 4); have = true; }
+            q += 4;
+        } else if (wt == 1) {
+            if (end - q < 8) return false;
+            if (field == 1) memcpy(&m.id, q, 8);
+            q += 8;
+        } else if (wt == 2) {
+            if (!Hat_Varint(q, end, v) || v > uint64_t(end - q)) return false;
+            q += v;
+        } else return false;
+    }
+    return have && m.id != 0;
+}

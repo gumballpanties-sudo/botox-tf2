@@ -161,9 +161,9 @@ static constexpr int kEqCap = 10;
 // grow it. All three blocks come from Plat_Alloc = g_pMemAlloc, which is what the game frees
 // them with. Every attribute we write is a float or int-bits type, whose unload (the dtor's
 // walk) touches nothing.
-__declspec(noinline) static void* MakeCustomData(const SkinAttr* attrs, int na, const uint16_t* want, int ne)
+__declspec(noinline) static void* MakeCustomData(const SkinAttr* attrs, int na, const uint16_t* want, int ne, int minCap = 0)
 {
-    const int cap = na > 0 ? na : 1;
+    const int cap = (std::max)((std::max)(na, minCap), 1);
     if (ne > kEqCap) ne = kEqCap;
     uint8_t* cd = static_cast<uint8_t*>(s_alloc(0x58));
     void* eq    = s_alloc(kEqCap * 4);
@@ -187,14 +187,56 @@ __declspec(noinline) static void* MakeCustomData(const SkinAttr* attrs, int na, 
     return cd;
 }
 
-static void* MakeHatCustomData(const HatSlot& s, const HatDef* d)
+// Every attribute a hat item can carry. The row block is made this big up front, so a menu or
+// loadout-screen change rewrites the rows in place (SetRows) instead of rebuilding the item.
+static constexpr int kHatAttrCap = 5;
+
+static float IntBits(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
+
+static int HatAttrs(const HatSlot& s, const HatDef* d, SkinAttr* a /* [kHatAttrCap] */)
 {
-    SkinAttr a[3]; int na = 0;
-    if (s.unusual >= 0) a[na++] = { 134, (float)s.unusual };   // attach particle effect
+    int na = 0;
+    if (s.unusual >= 0) {
+        a[na++] = { 134, (float)s.unusual };   // attach particle effect
+        // TF2's loadout "use head origin" + effect height (class_loadout_panel.cpp). 520 is
+        // stored_as_integer: the row holds the int's bits. Absent, not 0, when off: a present 0
+        // makes the preview skip the system's own attachment points (tf_playermodelpanel.cpp:1655).
+        if (s.useHead) { a[na++] = { 520, IntBits(1) }; a[na++] = { 519, s.zOff }; }
+    }
     if (d->paintable)
         if (const HatPaint* p = Hats_Paint(s.paint)) { a[na++] = { 142, (float)p->rgb }; a[na++] = { 261, (float)p->rgb2 }; }
+    return na;
+}
+
+static void* MakeHatCustomData(const HatSlot& s, const HatDef* d)
+{
+    SkinAttr a[kHatAttrCap]; const int na = HatAttrs(s, d, a);
     uint16_t want[18]; const int ne = WantEquips(s, want);
-    return MakeCustomData(a, na, want, ne);
+    return MakeCustomData(a, na, want, ne, kHatAttrCap);
+}
+
+// Rewrite an item's attribute rows + header in place. false = no room (caller rebuilds the item).
+// Old rows are float / int bits, whose unload is nothing: overwriting them leaks nothing.
+__declspec(noinline) static bool SetRows(void* it, const SkinAttr* a, int na, uint8_t quality, uint8_t style)
+{
+    __try {
+        uint8_t* b  = static_cast<uint8_t*>(it);
+        uint8_t* cd = *reinterpret_cast<uint8_t**>(b + 0x78);
+        if (!cd) return false;
+        uint8_t* rows = *reinterpret_cast<uint8_t**>(cd + 0x00);
+        if (!rows || *reinterpret_cast<int*>(cd + 0x08) < na) return false;
+        int* count = reinterpret_cast<int*>(cd + 0x10);
+        *count = 0;
+        memset(rows, 0, (size_t)na * 16);
+        for (int i = 0; i < na; ++i) {
+            *reinterpret_cast<uint16_t*>(rows + i * 16) = a[i].def;
+            memcpy(rows + i * 16 + 8, &a[i].value, 4);
+        }
+        *count = na;
+        b[0x5B] = quality;
+        b[0x5E] = style;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 // Make the item's equipped list `want` (n pairs). True = it changed (caller sends SOUpdated).
@@ -337,15 +379,26 @@ void HatsInv_Tick(bool want)
         const HatDef* d = (want && s.def > 0) ? Hats_Find(s.def) : nullptr;
         void* it = FindOurs(c, i);
         if (it) {
-            const HatSlot& b = s_built[i];
-            if (d && ItemDef(it) == d->def && b.def == s.def && b.style == s.style && b.unusual == s.unusual
-                  && b.paint == s.paint) {
-                if (SyncEquips(it, s)) {
-                    VCall<void>(c.inv, 2, c.owner, it, 4);   // SOUpdated -> loadout re-derived
-                    DebugLog("hats inv: slot %d equips -> mask 0x%X", i, s.eqMask);
+            HatSlot& b = s_built[i];
+            if (d && ItemDef(it) == d->def && b.def == s.def) {
+                bool upd = SyncEquips(it, s);
+                if (upd) DebugLog("hats inv: slot %d equips -> mask 0x%X", i, s.eqMask);
+                if (b.style != s.style || b.unusual != s.unusual || b.paint != s.paint
+                    || b.useHead != s.useHead || b.zOff != s.zOff) {
+                    // Same item, new look: rows rewritten in place, so the loadout screen keeps
+                    // the item (its options panel, equip state, preview) and just re-reads it.
+                    SkinAttr a[kHatAttrCap]; const int na = HatAttrs(s, d, a);
+                    const uint8_t st = (uint8_t)((s.style >= 0 && s.style < d->nStyles) ? s.style : 0);
+                    if (!SetRows(it, a, na, s.unusual >= 0 ? 5 : 6, st)) goto rebuild;   // AE_UNUSUAL : AE_UNIQUE
+                    DebugLog("hats inv: slot %d look -> style %d unu %d paint %d head %d z %.2f",
+                             i, s.style, s.unusual, s.paint, s.useHead, s.zOff);
+                    b = s;
+                    upd = true;
                 }
+                if (upd) VCall<void>(c.inv, 2, c.owner, it, 4);   // SOUpdated -> loadout + preview re-read
                 ++n; continue;
             }
+        rebuild:
             Remove(c, it);
             DebugLog("hats inv: removed slot %d", i);
             if (!GetCtx(c)) return;                    // the vector may have moved
@@ -842,10 +895,77 @@ static void __fastcall h_UpdateEquipped(void* mgr, void* inv, uint64_t id, uint1
     o_UpdateEquipped(mgr, inv, id, cls, pos);
 }
 
+// ---- loadout screen: unusual effect position ----------------------------------------------------
+// TF2's item options panel (class_loadout_panel.cpp) has a "use head origin" box and an effect
+// height slider for an item with an unusual. Both only message the GC (k_EMsgGCSetHatEffect-
+// UseHeadOrigin 1088 / k_EMsgGCSetItemEffectVerticalOffset 1087) and wait for it to rewrite the
+// item; the GC never issued our ids, so nothing came back and the controls did nothing. Every GC
+// message leaves through ISteamGameCoordinator::SendMessage (slot 0): ours are taken off there and
+// done locally -- the slot changes and the tick rewrites the item in place (SetRows + SOUpdated),
+// which is the GC's reply as far as the screen can tell.
+// Wire: [u32 emsg | 0x80000000][u32 header len][CMsgProtoBufHeader][body] (gcsdk/gcmsg.h
+// ProtoBufMsgHeader_t), body = { uint64 item_id = 1; float offset = 2 | bool use_head = 2 }
+// (base_gcmessages.proto:867/876).
+using GcSend_t = int(__fastcall*)(void*, uint32_t, const void*, uint32_t);
+static GcSend_t o_GcSend = nullptr;
+
+__declspec(noinline) static bool ParseGcSEH(uint32_t type, const void* data, uint32_t size, HatGcMsg& m)
+{
+    __try { return Hat_ParseGcEffect(type, data, size, m); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// true = one of ours, handled: never sent.
+static bool GcEffectMsg(uint32_t type, const void* data, uint32_t size)
+{
+    HatGcMsg m;
+    if (!ParseGcSEH(type, data, size, m) || (m.id >> 32) != kIdHigh) return false;
+    const int slot = (int)(m.id & 0xFFFF) - 0x1000;
+    if (slot < 0 || slot >= kHatSlots || g_hatSlots[slot].def <= 0) return true;   // ours, gone: drop it
+    HatSlot& s = g_hatSlots[slot];
+    if (m.type == 1088) s.useHead = m.useHead ? 1 : 0;
+    else s.zOff = (m.offset != m.offset) ? 0.f : (std::min)((std::max)(m.offset, -8.f), 8.f);   // TF2's slider range
+    s_dirty = true;
+    DebugLog("hats inv: loadout screen slot %d %s -> head %d z %.2f", slot,
+             m.type == 1088 ? "use head" : "offset", s.useHead, s.zOff);
+    return true;
+}
+
+static int __fastcall h_GcSend(void* gc, uint32_t type, const void* data, uint32_t size)
+{
+    MiscHookGuard _g;
+    if (!g_eject && GcEffectMsg(type, data, size)) return 0;   // k_EGCResultOK
+    return o_GcSend(gc, type, data, size);
+}
+
+// ISteamGameCoordinator the way TF2 gets it: SteamClient()->GetISteamGenericInterface(user, pipe,
+// "SteamGameCoordinator001") (the string is in client.dll); flat exports, no vtable guess there.
+static void InstallGcHook()
+{
+    HMODULE h = GetModuleHandleA("steam_api64.dll");
+    if (!h) { DebugLog("hats inv: no steam_api64 -- loadout effect offset off"); return; }
+    using Client_t  = void*(__cdecl*)();
+    using Handle_t  = int(__cdecl*)();
+    using Generic_t = void*(__cdecl*)(void*, int, int, const char*);
+    auto client  = reinterpret_cast<Client_t>(GetProcAddress(h, "SteamClient"));
+    auto user    = reinterpret_cast<Handle_t>(GetProcAddress(h, "SteamAPI_GetHSteamUser"));
+    auto pipe    = reinterpret_cast<Handle_t>(GetProcAddress(h, "SteamAPI_GetHSteamPipe"));
+    auto generic = reinterpret_cast<Generic_t>(GetProcAddress(h, "SteamAPI_ISteamClient_GetISteamGenericInterface"));
+    void* gc = nullptr; void* fn = nullptr;
+    __try {
+        void* sc = (client && user && pipe && generic) ? client() : nullptr;
+        gc = sc ? generic(sc, user(), pipe(), "SteamGameCoordinator001") : nullptr;
+        if (gc) fn = (*reinterpret_cast<void***>(gc))[0];   // SendMessage
+    } __except(EXCEPTION_EXECUTE_HANDLER) { gc = nullptr; fn = nullptr; }
+    if (!fn) { DebugLog("hats inv: ISteamGameCoordinator not found -- loadout effect offset off"); return; }
+    InstallHookAt(fn, "hats: ISteamGameCoordinator::SendMessage", (void*)h_GcSend, (void**)&o_GcSend);
+}
+
 void HatsInv_Install()
 {
     Resolve();
     if (!s_ready) return;
+    InstallGcHook();
     void** vt = nullptr;
     __try { vt = *reinterpret_cast<void***>(s_invMgr); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     if (!vt) { DebugLog("hats inv: no CTFInventoryManager vtable -- loadout equip off"); return; }

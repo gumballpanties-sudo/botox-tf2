@@ -85,7 +85,7 @@
     { "kiGlowStrength",   CfgEntry::INT,    &g_kiGlowStrength, 0 },
     { "kiGlowLife",       CfgEntry::FLOAT,  &g_kiGlowLife, 0 },
     { "kiPosition",       CfgEntry::INT,    &g_kiPosition, 0 },
-    { "kiShow",           CfgEntry::INT,    &g_kiShow, 0 },
+    { "kiShowMask",       CfgEntry::INT,    &g_kiShow, 0 },   // "kiShow" = old layout, Ind_LoadLegacy
     // custom labels keyed by the stock label, so a row added later never shifts a saved one
     { "kiLabel_eb",   CfgEntry::STR, g_kiLabels[LBL_EB],   sizeof(g_kiLabels[0]) },
     { "kiLabel_ps",   CfgEntry::STR, g_kiLabels[LBL_PS],   sizeof(g_kiLabels[0]) },
@@ -101,7 +101,6 @@
     { "kiLabel_ast",  CfgEntry::STR, g_kiLabels[LBL_AST],  sizeof(g_kiLabels[0]) },
     { "kiLabel_ac",   CfgEntry::STR, g_kiLabels[LBL_AC],   sizeof(g_kiLabels[0]) },
     { "kiLabel_ab",   CfgEntry::STR, g_kiLabels[LBL_AB],   sizeof(g_kiLabels[0]) },
-    { "kiLabel_tung", CfgEntry::STR, g_kiLabels[LBL_TUNG], sizeof(g_kiLabels[0]) },
     { "kiLabel_es",   CfgEntry::STR, g_kiLabels[LBL_ES],   sizeof(g_kiLabels[0]) },
     { "kiLabel_hsw",  CfgEntry::STR, g_kiLabels[LBL_HSW],  sizeof(g_kiLabels[0]) },
     { "kiLabel_gmb",  CfgEntry::STR, g_kiLabels[LBL_GOOMBA], sizeof(g_kiLabels[0]) },

@@ -841,7 +841,7 @@ static bool HeadWallReachable(void* pLocal, const Vec3& origin, const Vec3& end,
 
 /* texture bug = box-brush pin ( IntersectRayWithBoxBrush ): the head crosses a wall brush's bottom ( or feet a flush lower brush's top )
    as the move crosses the wall plane by dx: engine picks the +z face, vz clipped to -g*dt/2. needs gap ~1 ulp, a hard hit parks at 0.03125 */
-static void TextureBugImpl(void* pLocal, UserCmd_t* cmd, const bool tb_on, const bool tung_on)
+static void TextureBugImpl(void* pLocal, UserCmd_t* cmd, const bool tb_on)
 {
     constexpr float k_eps        = 0.03125f;
     constexpr float k_touch      = k_eps * 1.3f;
@@ -874,7 +874,7 @@ static void TextureBugImpl(void* pLocal, UserCmd_t* cmd, const bool tb_on, const
     };
     s_tb.hit = s_tb.hs_hit = s_tb.owns_cmd = false;
 
-    const bool armed = (tb_on || tung_on) && EntAlive(pLocal);
+    const bool armed = tb_on && EntAlive(pLocal);
     /* START must be the server's END: the shift ( dn ) is START - our sim of the sent cmd, blind under opt 2 */
     s_tbSyncWant = armed;
     if (!armed) { drop(); return; }
@@ -2158,7 +2158,7 @@ static void AutoAlignImpl(void* pLocal, UserCmd_t* cmd, const bool tb_on)
 }
 
 // texturebug.cpp on_create_move
-static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on, const bool tung_on)
+static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on)
 {
     // last cmd's wall climb catch is still up here (WC runs after tb): botox m_act_tick
     // (landed || jump fix). Not s_wallClimbActive: that is every air wall tick
@@ -2219,14 +2219,14 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on, const b
     const float align_forward = cmd->forwardmove;
     const float align_side    = cmd->sidemove;
     const int   align_buttons = cmd->buttons;
-    TextureBugImpl(pLocal, cmd, tb_on, tung_on);
+    TextureBugImpl(pLocal, cmd, tb_on);
     HeadBounceImpl(pLocal, cmd, tb_on);
     const bool caught = s_tb.hit || s_tb.hb_hit;
 
     const long long used_us = TbBudgetUsedUs();
     const bool was_time_bound = SimsLeft() <= 0;
     s_budget_live = false;
-    if (g_debugLogEnable && (tb_on || tung_on)) {
+    if (g_debugLogEnable && tb_on) {
         static long long worst_us = 0ll, sum_us = 0ll;
         static int rolls = 0, worst_sims = 0, worst_tr = 0, capped = 0, last_sec = -1, res_sum = 0;
         res_sum += s_restores;
@@ -2291,17 +2291,16 @@ static void TB_PreserveMove(void* pLocal, UserCmd_t* pCmd)
 }
 
 // ============================================================================
-// THE ENTRY. TB bind: cumidere style (0) or botox style (1). Tung surf = the botox texture_bug
-// with tung's widened vertical gate (no cumidere tung). Publishes the movement.cpp yield flags
+// THE ENTRY. TB bind: cumidere style (0) or botox style (1). Publishes the movement.cpp yield flags
 // every other feature reads.
 // ============================================================================
 // the botox tbx tick + the movement.cpp yield flags. Also pixel hop's landing fallback (pixelhop.inl calls it
 // forced on, no TB key: webz runs its TB when nothing lands)
-static void TextureBugBotox(void* pLocal, UserCmd_t* pCmd, const bool bTbOn, const bool bTungOn)
+static void TextureBugBotox(void* pLocal, UserCmd_t* pCmd, const bool bTbOn)
 {
     s_textureBugHit = false;
     s_tbOwnsCmd     = false;
-    tbx::OnCreateMove(pLocal, pCmd, bTbOn, bTungOn);
+    tbx::OnCreateMove(pLocal, pCmd, bTbOn);
     const auto& t = tbx::s_tb;
     s_textureBugHit = t.hit;
     s_tbOwnsCmd     = t.owns_cmd || (t.acted && !t.assist && !t.hit);
@@ -2311,7 +2310,7 @@ static void TextureBugBotox(void* pLocal, UserCmd_t* pCmd, const bool bTbOn, con
     s_tbIndD = s_tbIndVin = s_tbIndAim = 0.f;
     s_tbRideLen = t.hit ? (std::max)(t.run, 1) : 0;
     s_tbPhase   = t.hit ? (s_tbRideLen >= 2 ? TBP_RIDE : TBP_PIN) : t.owns_cmd ? TBP_HUG
-                : (bTbOn || bTungOn) ? TBP_SCAN : TBP_OFF;
+                : bTbOn ? TBP_SCAN : TBP_OFF;
 }
 
 static void TextureBug(void* pLocal, UserCmd_t* pCmd)
@@ -2323,8 +2322,7 @@ static void TextureBug(void* pLocal, UserCmd_t* pCmd)
         TextureBugCumidere(pLocal, pCmd);
         return;
     }
-    // tung surf is its own engine now (tungsurf.inl), botox tung_surf: it never arms texture_bug
-    TextureBugBotox(pLocal, pCmd, bTbOn, false);
+    TextureBugBotox(pLocal, pCmd, bTbOn);
 }
 
 // ============================================================================

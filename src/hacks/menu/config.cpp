@@ -581,12 +581,7 @@ static const CfgEntry kEntries[] = {
     { "jumpstats",         CfgEntry::BOOL,  &g_jumpstats, 0 },
     { "jumpstatsShowFails", CfgEntry::BOOL, &g_jumpstatsShowFails, 0 },
 
-    // -- tung/bounce/pf modes/eb presets/ps fix --
-    { "tungSurf",          CfgEntry::BOOL,  &g_tungSurf, 0 },
-    { "tungSurfKey",       CfgEntry::INT,   &g_tungSurfKey, 0 },
-    { "tungSurfMode",      CfgEntry::INT,   &g_tungSurfMode, 0 },
-    { "tungSnap",          CfgEntry::FLOAT, &g_tungSnap, 0 },
-    { "tungPress",         CfgEntry::BOOL,  &g_tungPress, 0 },
+    // -- bounce/pf modes/eb presets/ps fix --
     { "autoBounce",        CfgEntry::BOOL,  &g_autoBounce, 0 },
     { "autoBounceKey",     CfgEntry::INT,   &g_autoBounceKey, 0 },
     { "autoBounceMode",    CfgEntry::INT,   &g_autoBounceMode, 0 },
@@ -1114,6 +1109,13 @@ static bool Ind_LoadLegacy(const char* key, const char* val)
     if (strcmp(key, "miIdleColor") == 0)   { f4(g_kiColor); return true; }
     if (strcmp(key, "miActiveColor") == 0) { f4(g_kiColorSuccess); return true; }
     if (strcmp(key, "viOffsetY") == 0) { g_viPadding = (int)atof(val); return true; }
+    // "kiShow" = layout with tung surf at bit 14 (removed 11-12): drop it, shift the rows above down
+    if (strcmp(key, "kiShow") == 0)
+    {
+        const int old = atoi(val);
+        g_kiShow = (old & 0x3FFF) | ((old >> 15) << 14);
+        return true;
+    }
     if (strcmp(key, "miShowMask") == 0)
     {
         const int old = atoi(val);

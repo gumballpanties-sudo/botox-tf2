@@ -1,5 +1,3 @@
-#include "movement_tricks2_pure.h"   // pure decisions (tung band/eb style), gate-tested
-
 // small/medium movement tricks from botox csgo-sdk, adapted to TF2's gamemovement.
 // Textually included by movement.cpp (same convention as movement_ex.inl, right after it) --
 // shares every helper/static already defined above it in the same TU: On/EntV3/EntGround/
@@ -13,7 +11,6 @@
 //
 // Ported as OPTIONS of what already works, not as second engines, where the botox source is
 // itself a full sim-planner or a second search algorithm:
-//   (tung surf is no longer here: botox's own engine, ported whole in tungsurf.inl)
 //   (bounce assist REMOVED: useless in TF2; auto bounce is botox's own, autobounce.inl)
 //   pixel finder headbounce/pixeljump -- two new probe/classify branches added to psassist.inl's
 //                  existing scanner (own result lists, PF_GetExtraPts; render wiring not done

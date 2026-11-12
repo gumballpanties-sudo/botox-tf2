@@ -67,6 +67,7 @@ static struct {
 } s_off;
 static ClientClass* s_wearableClass = nullptr;
 static bool         s_ready         = false;
+static int          s_itemOff       = 0;   // CEconItemView m_Item inside a wearable (hud panel), 0 = unknown
 
 static void ResolveOnce()
 {
@@ -95,6 +96,11 @@ static void ResolveOnce()
         if (*e.p <= 0) { all = false; DebugLog("hats: netvar %s NOT FOUND", e.n); }
     }
     s_ready = all;
+    // The wearable's CEconItemView (DT_AttributeContainer m_Item), for the hud model panel. Its
+    // m_bInitialized must land inside it (CEconItemView is 0x158 bytes, AddCarriedItem's new).
+    const int item = FindPropOffset(t, "m_Item");
+    if (all && item > 0 && s_off.initialized > item && s_off.initialized - item < 0x158) s_itemOff = item;
+    DebugLog("hats: m_Item 0x%X (init +0x%X) -> hud panel %s", item, s_off.initialized - item, s_itemOff ? "on" : "off");
     DebugLog("hats: %s (class %p, model 0x%X owner 0x%X parent 0x%X itemdef 0x%X idlow 0x%X attrs 0x%X)",
              all ? "ready" : "netvars missing, feature off", (void*)s_wearableClass, s_off.modelIndex,
              s_off.owner, s_off.moveParent, s_off.itemDef, s_off.idLow, s_off.attrList);
@@ -215,7 +221,8 @@ static void Release(int i, const char* why)
 
 static bool SameCfg(const HatSlot& a, const HatSlot& b)
 {
-    return a.def == b.def && a.style == b.style && a.unusual == b.unusual && a.paint == b.paint;
+    return a.def == b.def && a.style == b.style && a.unusual == b.unusual && a.paint == b.paint
+        && a.useHead == b.useHead && a.zOff == b.zOff;
 }
 
 static int ClampStyle(const HatDef* d, int s) { return (s >= 0 && s < d->nStyles) ? s : 0; }
@@ -248,6 +255,13 @@ static void Spawn(int i, const HatSlot& c, const HatDef* d, int cls, int team, u
     const int style = ClampStyle(d, c.style);
     Skins_SetAttribute(attrs, 542, (float)style);                  // item style override
     if (c.unusual >= 0) Skins_SetAttribute(attrs, 134, (float)c.unusual);   // attach particle effect
+    if (c.unusual >= 0 && c.useHead) {
+        // CParticleProperty reads these off the wearable (particle_property.cpp:566/588): the
+        // effect sits on bip_head + zOff instead of the system's own attachment points.
+        const uint32_t one = 1; float bits; memcpy(&bits, &one, 4);       // 520 is stored_as_integer
+        Skins_SetAttribute(attrs, 520, bits);                            // particle effect use head origin
+        Skins_SetAttribute(attrs, 519, c.zOff);                          // particle effect vertical offset
+    }
     if (d->paintable)
         if (const HatPaint* p = Hats_Paint(c.paint)) {
             Skins_SetAttribute(attrs, 142, (float)p->rgb);              // set item tint RGB
@@ -446,6 +460,106 @@ static void UpdateHide(int localIdx, int cls)
     s_hideCount = n;
 }
 
+// ---- hud class model panel ----------------------------------------------------------------------
+// cl_hud_playerclass_use_playermodel 1: CTFHudPlayerClass::UpdateModelPanel (tf_hud_playerstatus.cpp:
+// 412) rebuilds its CTFPlayerModelPanel from the player's m_hMyWearables -- ClearCarriedItems,
+// AddCarriedItem per wearable's CEconItemView, then HoldItemInSlot, which re-equips every carried
+// wearable (EquipAllWearables). Ours are not in m_hMyWearables, so it never saw them. Hooked:
+//   UpdateModelPanel  remembers the hud element, marks "inside" for the two below
+//   AddCarriedItem    drops the real hat one of ours displaced (Hats_SkipDraw's, same as the world)
+//   HoldItemInSlot    adds each live hat of ours first, so the re-equip puts them on
+// and the panel is rebuilt when our live set changes (hats spawn a frame after the spawn event the
+// game rebuilds it on). x64 client.dll 11-12, read off UpdateModelPanel: +0x2C8 m_bUsePlayerModel,
+// +0x278 m_pPlayerModelPanel; AddCarriedItem = the call after `mov rcx,[rdi+278h]; mov rdx,rbx`,
+// HoldItemInSlot = the one after `mov rcx,[rdi+278h]; mov edx,r13d`, which tests the panel's
+// m_iCurrentClassIndex first (`cmp dword [rcx+0ECCh],0`).
+using HudUpdate_t  = void(__fastcall*)(void*);
+using AddCarried_t = int(__fastcall*)(void*, void*);
+using HoldSlot_t   = bool(__fastcall*)(void*, int);
+static HudUpdate_t  o_HudUpdate  = nullptr;
+static AddCarried_t o_AddCarried = nullptr;
+static HoldSlot_t   o_HoldSlot   = nullptr;
+static void*        s_hud        = nullptr;   // CTFHudPlayerClass, lives as long as the hud
+static bool         s_inHud      = false;     // inside the hud's UpdateModelPanel (main thread)
+static int          s_panelClassOff = 0;      // CTFPlayerModelPanel::m_iCurrentClassIndex
+
+__declspec(noinline) static bool PanelClassIs(void* panel, int cls)
+{
+    __try { return *reinterpret_cast<int*>(static_cast<uint8_t*>(panel) + s_panelClassOff) == cls; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static int __fastcall h_AddCarried(void* panel, void* item)
+{
+    MiscHookGuard _g;
+    if (s_inHud && s_itemOff > 0 && item) {
+        const int n = s_hideCount;
+        for (int k = 0; k < n && k < kHatSlots; ++k)
+            if (void* e = GetClientEntity(s_hideIdx[k]))
+                if (static_cast<uint8_t*>(e) + s_itemOff == item) return 0;   // displaced by ours
+    }
+    return o_AddCarried(panel, item);
+}
+
+static bool __fastcall h_HoldSlot(void* panel, int slot)
+{
+    MiscHookGuard _g;
+    if (s_inHud && s_itemOff > 0 && !g_eject) {
+        s_inHud = false;   // once per rebuild
+        const int localIdx = GetLocalPlayerIndex();
+        // A disguised spy's panel shows the disguise class: ours are built for our own class.
+        if (localIdx > 0 && PanelClassIs(panel, GetPlayerClass(localIdx))) {
+            int added = 0;
+            for (int i = 0; i < kHatSlots; ++i)
+                if (StillOurs(i)) { o_AddCarried(panel, static_cast<uint8_t*>(s_live[i].ent) + s_itemOff); ++added; }
+            static int s_lastAdded = -1;
+            if (added != s_lastAdded) { s_lastAdded = added; DebugLog("hats: hud model panel wears %d of ours", added); }
+        }
+    }
+    return o_HoldSlot(panel, slot);
+}
+
+static void __fastcall h_HudUpdate(void* hud)
+{
+    MiscHookGuard _g;
+    s_hud = hud;
+    s_inHud = !g_eject && g_hatsEnable;
+    o_HudUpdate(hud);
+    s_inHud = false;
+}
+
+__declspec(noinline) static void HudRefresh()
+{
+    if (!s_hud || !o_HudUpdate) return;
+    __try { h_HudUpdate(s_hud); } __except(EXCEPTION_EXECUTE_HANDLER) { s_hud = nullptr; }
+}
+
+static const uint8_t* CallTarget(const uint8_t* e8)
+{
+    return e8 && e8[0] == 0xE8 ? e8 + 5 + *reinterpret_cast<const int32_t*>(e8 + 1) : nullptr;
+}
+
+void Hats_HudInstall()
+{
+    HMODULE client = GetModuleHandleA("client.dll");
+    if (!client) return;
+    uint8_t* fn   = PatternScan(client, "40 57 48 83 EC 60 80 B9 C8 02 00 00 00 48 8B F9 0F 84");
+    uint8_t* add  = PatternScan(client, "48 8B 8F 78 02 00 00 48 8B D3 E8 ? ? ? ? 41 8B 86");
+    uint8_t* hold = PatternScan(client, "48 8B 8F 78 02 00 00 41 8B D5 E8");
+    // Both call sites must sit inside UpdateModelPanel (~0x370 bytes), or it is not that function.
+    auto inside = [&](uint8_t* p) { return fn && p && p > fn && p < fn + 0x400; };
+    const uint8_t* addFn  = inside(add)  ? CallTarget(add + 10)  : nullptr;
+    const uint8_t* holdFn = inside(hold) ? CallTarget(hold + 10) : nullptr;
+    // HoldItemInSlot: `cmp dword ptr [rcx+disp32], 0` -- the disp is m_iCurrentClassIndex.
+    if (holdFn && holdFn[0] == 0x83 && holdFn[1] == 0xB9 && holdFn[6] == 0x00)
+        s_panelClassOff = *reinterpret_cast<const int32_t*>(holdFn + 2);
+    DebugLog("hats: hud model panel fn %p add %p hold %p classOff 0x%X", (void*)fn, (void*)addFn, (void*)holdFn, s_panelClassOff);
+    if (!fn || !addFn || !holdFn || s_panelClassOff <= 0) { DebugLog("hats: hud model panel sigs missing -- off"); return; }
+    if (!InstallHookAt((void*)addFn, "hats: CTFPlayerModelPanel::AddCarriedItem", (void*)h_AddCarried, (void**)&o_AddCarried)) return;
+    if (!InstallHookAt((void*)holdFn, "hats: CTFPlayerModelPanel::HoldItemInSlot", (void*)h_HoldSlot, (void**)&o_HoldSlot)) return;
+    InstallHookAt((void*)fn, "hats: CTFHudPlayerClass::UpdateModelPanel", (void*)h_HudUpdate, (void**)&o_HudUpdate);
+}
+
 // ---- per frame ----------------------------------------------------------------------------------
 int Hats_LocalClass()
 {
@@ -562,6 +676,20 @@ static void TickPeers()
     }
 }
 
+// The hud model panel is rebuilt by the game on spawn / resupply / disguise, before our hats exist
+// (they spawn on the next FSN), so it is rebuilt again the frame after our live set changes -- one
+// frame later, once the new hats' OnDataChanged has run.
+static void HudTick()
+{
+    uint64_t sig = 1469598103934665603ull;
+    for (int i = 0; i < kHatSlots; ++i) sig = (sig ^ (uint64_t)(uintptr_t)s_live[i].ent) * 1099511628211ull;
+    sig = (sig ^ (uint64_t)s_hideCount) * 1099511628211ull;
+    static uint64_t s_sig = 0;
+    static uint32_t s_due = 0;
+    if (sig != s_sig) { s_sig = sig; s_due = s_frame + 1; }
+    if (s_due && s_frame >= s_due) { s_due = 0; if (IsInGame()) HudRefresh(); }
+}
+
 void Hats_FrameStage(int stage)
 {
     if (stage != 5) return;
@@ -590,6 +718,7 @@ void Hats_FrameStage(int stage)
         if (s_bodyOpCount) s_bodyOpCount = 0;
         s_hideCount = 0;
         s_appliedOnce = false;
+        HudTick();   // hats off: the panel drops ours too
         return;
     }
 
@@ -623,6 +752,7 @@ void Hats_FrameStage(int stage)
     UpdateBody(localIdx, pLocal);
     for (int i = 0; i < kTotalSlots; ++i) SyncVisibility(i);
     if (s_frame % 30 == 0) UpdateHide(localIdx, cls);
+    HudTick();
 
     // diag: 1 s, 3 s, then every 10 s after a spawn, 8 lines max per spawn
     static uint32_t s_diagLines[kTotalSlots];
@@ -647,7 +777,7 @@ void Hats_SaveCfg(FILE* f)
         if (c.def <= 0) continue;
         fprintf(f, "hat_%d=%d %d %d %d %u", i, c.def, c.style, c.unusual, c.paint, (unsigned)c.eqMask);
         for (int k = 1; k <= 9; ++k) fprintf(f, " %u", (unsigned)c.eqPos[k]);
-        fprintf(f, "\n");
+        fprintf(f, " %d %.3f\n", c.useHead ? 1 : 0, c.zOff);
     }
 }
 
@@ -666,10 +796,13 @@ bool Hats_LoadCfg(const char* key, const char* val)
     if (i < 0 || i >= kHatSlots) return true;
     HatSlot c = { 0, 0, -1, -1 };
     unsigned m = 0, p[10] = {};
-    if (sscanf(val, "%d %d %d %d %u %u %u %u %u %u %u %u %u %u", &c.def, &c.style, &c.unusual, &c.paint, &m,
-               &p[1], &p[2], &p[3], &p[4], &p[5], &p[6], &p[7], &p[8], &p[9]) >= 1 && Hats_Find(c.def)) {
+    int head = 0; float z = 0.f;   // absent in configs from before the loadout effect offset
+    if (sscanf(val, "%d %d %d %d %u %u %u %u %u %u %u %u %u %u %d %f", &c.def, &c.style, &c.unusual, &c.paint, &m,
+               &p[1], &p[2], &p[3], &p[4], &p[5], &p[6], &p[7], &p[8], &p[9], &head, &z) >= 1 && Hats_Find(c.def)) {
         c.eqMask = (uint16_t)(m & 0x3FF);
         for (int k = 1; k <= 9; ++k) c.eqPos[k] = (uint8_t)p[k];
+        c.useHead = head ? 1 : 0;
+        c.zOff = (z == z && z >= -8.f && z <= 8.f) ? z : 0.f;
         g_hatSlots[i] = c;
     }
     return true;

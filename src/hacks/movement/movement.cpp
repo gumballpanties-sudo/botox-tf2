@@ -13,7 +13,6 @@
 #include "ps_map.h"       // whole-map scan candidates: a brush wall face's top edge (gate-tested)
 #include "mv_scanbound.h" // MV_DetectWallLines broadphase box (pure, gate-tested)
 #include "movement_ex_pure.h" // pure decisions (hsw/delay hop/lj adaptive cancel), gate-tested
-#include "movement_tricks2_pure.h" // pure decisions (bounce tangent/tung band/eb style), gate-tested
 #include "movement_edge_pure.h" // pure decisions (edge skip duck gate, blockbot wish/sign), gate-tested
 #include "detections.h"   // botox chat detections, fed the cmd start state at the publish point
 #include "../hud/points.h" // g_esFired: edge skip's lip landing, the keybind indicator particle count
@@ -2668,15 +2667,12 @@ static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
 // movement_tricks2.inl
 #include "autobounce.inl"
 
-// tung/bounce/pf modes/eb presets/ps fix. After movement_ex.inl (needs
+// bounce/pf modes/eb presets/ps fix. After movement_ex.inl (needs
 // edgebug.inl's s_eb* statics and this file's own s_*Hit flags, all already defined above).
 #include "movement_tricks2.inl"
 // edge skip + blockbot. After movement_ex.inl -- reuses its AutoCrouch-shaped
 // trace helpers conceptually but shares nothing directly, just the file's own statics.
 #include "movement_edge.inl"
-// tung surf = botox tung_surf (local server snap-to-pixelsurf). Last: it reads every other
-// feature's owns flags (s_ab, s_esActive, s_asHolding) and fakemove.inl's hooks call into it
-#include "tungsurf.inl"
 
 // ==== per-cmd pipeline (Aletherium RunPre -> prediction -> RunPost -> restore) ====
 static void Movement_RunImpl(UserCmd_t* pCmd)
@@ -2774,10 +2770,6 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     PsCmdStart(pLocal);   // botox ps_cmd_start: a duck key flipped on a live ride bails pixel surf
     const bool probesOK = g_frameReady && g_offVelocity > 0 && g_offOrigin > 0
                        && g_offMins > 0 && g_offMaxs > 0 && g_offFlags > 0;
-    // botox create_move_proxy:408 -- tung surf before every sim: its snap (ProcessMovement hook)
-    // has to be in all of them, Pred_Start's own tick included
-    if (!bMoveBlocked && probesOK && g_predReady && (g_tungSurf || s_tungStance >= 0))
-        TungSurf(pLocal, pCmd);
     // the movement half is asked for only on a cmd the movement features may act on --
     // a blocked cmd runs none of them, so starting prediction for them would buy one wasted sim
     const bool needPredMove = !bMoveBlocked
@@ -3016,7 +3008,6 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s.dhOn     = On(g_delayHop, g_delayHopKey, g_delayHopMode);
         s.acOn     = On(g_autoCrouch, g_autoCrouchKey, g_autoCrouchMode);
         s.abOn     = On(g_autoBounce, g_autoBounceKey, g_autoBounceMode);
-        s.tungOn   = On(g_tungSurf, g_tungSurfKey, g_tungSurfMode);
         s.hswOn    = On(g_hsw, g_hswKey, g_hswMode);
         s.esOn     = On(g_edgeSkip, g_edgeSkipKey, g_edgeSkipMode);
         s.esHit    = s_esActive;

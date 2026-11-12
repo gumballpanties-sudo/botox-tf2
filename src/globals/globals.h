@@ -732,12 +732,9 @@ extern bool g_djStrafe;    extern int g_djStrafeKey;    extern int g_djStrafeMod
 extern bool g_silentView;       // smooth demo view: lock recorded viewangles during demo playback
 extern bool g_jumpstats;        // botox jump stats: clean landing -> chat line (detections.cpp)
 
-// -- Movement tricks 2 port (movement_tricks2.inl + small hooks): tung/bounce/pf modes/eb presets/
+// -- Movement tricks 2 port (movement_tricks2.inl + small hooks): bounce/pf modes/eb presets/
 // ps fix, from botox csgo-sdk. Simplified where the botox source is a full sim-planner or a
 // second search engine (see movement_tricks2.inl's header comment) -- defaults OFF.
-extern bool g_tungSurf;    extern int g_tungSurfKey;    extern int g_tungSurfMode;
-extern float g_tungSnap;        // tungsurf.inl: snap planes this far past the natural z (botox m_tung_surf_snap, 0-32 u)
-extern bool  g_tungPress;       // tungsurf.inl: press into the wall when it keeps / makes the pin (m_tung_surf_press)
 extern bool g_autoBounce;  extern int g_autoBounceKey;  extern int g_autoBounceMode;
 extern int   g_abMode;        // auto bounce plan: 0 drop in / 1 keep speed / 2 stop
 extern float g_abMinGain;     // speed it must add over your own xy (def 0, 0-500)
