@@ -19,7 +19,16 @@ inline float g_wdPropModBright  = 100.f;                           // m_prop_mod
 inline bool  g_wdSkyMod = false;                                   // m_skybox_modulation
 inline float g_wdSkyModColor[4] = { 1.f, 1.f, 1.f, 1.f };
 inline float g_wdSkyModBright = 100.f;
-inline bool  g_wdParticleMod = false;                              // Aletherium Colors::ParticleModulation
+inline bool  g_wdLightMod = false;                                 // lighting modulation (UC dlight post + glow tint)
+inline float g_wdLightModColor[4] = { 1.f, 150 / 255.f, 60 / 255.f, 1.f };
+inline bool  g_wdLightModLamps = true;                             // dlights on lamp static props
+inline int   g_wdLightModIntensity = 3;                            // dlight exponent
+inline float g_wdLightModRadius = 250.f;
+inline int   g_wdLightModMax = 8;                                  // lamps lit at once (engine has 32 dlights total)
+inline float g_wdLightModDist = 2500.f;                            // lamps further from the eye stay dark
+inline bool  g_wdLightModGlows = true;                             // ColorModulate light glow / bloom materials
+inline float g_wdLightModGlowBright = 100.f;                       // %
+inline bool  g_wdParticleMod = false;                             // Aletherium Colors::ParticleModulation
 inline float g_wdParticleModColor[4] = { 1.f, 1.f, 1.f, 1.f };     // alpha < 1 also overrides particle alpha
 
 inline bool  g_wdWorldTex = false;                                 // m_world_texture
@@ -29,6 +38,7 @@ inline bool  g_wdWorldTexDecals = false;                           // m_world_te
 inline bool  g_wdPropTex = false;                                  // m_prop_texture
 inline int   g_wdPropTexPreset = 0;
 inline char  g_wdPropTexCustom[128] = {};
+inline bool  g_wdFlatTex = false;                                  // flat textures: world base = 1x1 of its own colour
 
 inline bool  g_wdTracers = false;                                 // m_bullet_tracers
 inline bool  g_wdTracersLocal = true;

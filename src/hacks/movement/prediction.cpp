@@ -83,6 +83,11 @@ long long TbBudgetUsedUs()
     LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
     return ((now.QuadPart - s_budgetStart) * 1000000ll) / s_qpcFreq;
 }
+long long TbBudgetLimitUs()
+{
+    if (!s_qpcFreq || s_budgetLimit <= 0) return 1ll << 30;
+    return (s_budgetLimit * 1000000ll) / s_qpcFreq;
+}
 long long TbBudgetLeftUs()
 {
     // ~18 minutes: "no clock", and still safe for a caller that multiplies by the QPC frequency

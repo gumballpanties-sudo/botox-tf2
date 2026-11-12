@@ -627,6 +627,9 @@ add_executable(jumpstats_test tests/jumpstats_test.cpp)
 # + distance fade. No SDK deps, so no AIM_DIR flags needed.
 # Build + run: cmake --build build --config Release --target esp_math_test && build\Release\esp_math_test.exe
 add_executable(esp_math_test tests/esp_math_test.cpp)
+# Gate test for esp label declutter (src/hacks/esp/esp_declutter.h): stacks shoved apart, nearest holds.
+# Build + run: cmake --build build --config Release --target esp_declutter_test && build\Release\esp_declutter_test.exe
+add_executable(esp_declutter_test tests/esp_declutter_test.cpp)
 # Gate test for World fx's aspect ratio letterbox/pillarbox math (src/hacks/visuals/world_fx.h).
 # Build + run: cmake --build build --config Release && build\Release\worldfx_test.exe
 add_executable(worldfx_test tests/worldfx_test.cpp)

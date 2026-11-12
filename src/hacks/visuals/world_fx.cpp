@@ -272,7 +272,7 @@ static void __fastcall h_OverrideView(void* rcx, void* pView)
     o_OverrideView(rcx, pView);
 
     // main thread, once a frame, before any model draw
-    WorldFx3_Frame();   // movement trail, dlights, world/prop/skybox modulation walk
+    WorldFx3_Frame(eye);   // movement trail, dlights + lamp lights, world/prop/skybox/light modulation walk
     const bool fovOn = WorldFov_Wanted();
 
     const bool tpOn = ThirdPersonSet(g_thirdPersonEnable && !g_eject && ThirdPersonKey() && IsLocalPlayerAlive());

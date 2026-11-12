@@ -413,6 +413,7 @@ bool g_killfeedCsgo     = false;   // csgo killfeed with tf2 icons (aim/killfeed
 
 // -- Scoreboard (Aletherium "reveal scoreboard") --------------------------------------------------
 bool g_revealScoreboard = false;
+bool g_revealTeamHud    = false;   // enemy health bars in the match hud player panels
 bool g_steamHistory     = false;   // right-click a player -> "Steam History" (steamhistory.net)
 
 // -- Crosshair ----------------------------------------------------------------------------------------

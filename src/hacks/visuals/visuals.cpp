@@ -1521,11 +1521,44 @@ __declspec(noinline) static void Weather_UpdateChain(void* pNet, void* pEnt,
 // player +512, dies on entering solid, so ~512u+ / r_rainspeed). Default snow (1500u, 80u/s)
 // is ~16k flakes -- 3x over, the crash. Rain at 600u/s is ~2k. 768u = 512 + slack for slopes
 // and displacements GetPointContents falls through; 5000 keeps headroom under 5461.
-// ponytail: estimate, not a count -- a deep pit under the player can still outlive it.
+// That is an ESTIMATE only: snow dies on entering solid and never by age, so flakes emitted over a
+// cliff, pit or open sky, or left behind while running, live far past 768u. "too many indices for
+// index buffer (46122>32768)" = 7687 live flakes. Precip_LiveBudget below is the real bound.
 static float Precip_RadiusCap(float radius, float speed)
 {
     constexpr float kMaxLive = 5000.f, kFall = 768.f, kDensity = 0.001f;
     return std::min(radius, sqrtf(kMaxLive * std::max(speed, 1.f) / (kDensity * kFall)));
+}
+
+// m_Particles.Count() of the live entity, -1 = unknown. Offset off r_RainProfile's
+// Con_NPrintf("Rain simulation: %du (%d tracers)") in CClient_Precipitation::Simulate:
+// movzx r10d, word [this+disp32] (0x80E on the 10-30 build, m_nPrecipType is 0x7EC).
+static int Precip_LiveCount(void* pEnt)
+{
+    static int s_off = 0;   // 0 = unresolved, -1 = sig miss
+    if (!s_off) {
+        uint8_t* at = PatternScan(GetModuleHandleA("client.dll"),
+            "45 0F B7 96 ? ? ? ? 48 C1 E2 20 48 0B C2 44 89 54 24 20");
+        s_off = at ? *reinterpret_cast<int*>(at + 4) : -1;
+        if (s_off <= 0 || s_off > 0x4000) s_off = -1;
+        DebugLog("weather: particle count offset %s 0x%X (precipType 0x%X)",
+                 s_off > 0 ? "OK" : "MISSING (radius estimate only)", s_off, s_offPrecipType);
+    }
+    if (s_off < 0 || !pEnt) return -1;
+    __try { return *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pEnt) + s_off); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+// Hard cap on r_RainRadius from the live count. Runs before Simulate each frame (FSN stage 5
+// pre-original), and one EmitParticles makes at most radius^2 * 0.001 (m_flDensity ceiling,
+// alpha 255) * 0.075 (its dt clamp) + 1 (m_Remainder) flakes, so the count at Render can not
+// pass kMaxLive whatever the frame time. Emission fades out as the count nears it.
+static float Precip_LiveBudget(float radius)
+{
+    constexpr float kMaxLive = 5400.f, kPerArea = 0.001f * 0.075f;   // 5400*6 = 32400 < 32768
+    const int live = Precip_LiveCount(s_precipEntity);
+    if (live < 0) return radius;
+    return std::min(radius, sqrtf(std::max(0.f, kMaxLive - 1.f - (float)live) / kPerArea));
 }
 
 static void Precip_ApplyConvars()
@@ -1547,7 +1580,7 @@ static void Precip_ApplyConvars()
         if (cv_speed)   cv_speed->ForceFloat(g_rainSpeed);
         if (cv_width)   cv_width->ForceFloat(g_rainWidth);
         if (cv_length)  cv_length->ForceFloat(g_rainLength);
-        if (cv_radius)  cv_radius->ForceFloat(Precip_RadiusCap(g_rainRadius, g_rainSpeed));
+        if (cv_radius)  cv_radius->ForceFloat(Precip_LiveBudget(Precip_RadiusCap(g_rainRadius, g_rainSpeed)));
         if (cv_sidevel) cv_sidevel->ForceFloat(g_rainSideVel);
     } else if (g_weatherMode == 2) {
         if (cv_alpha)   cv_alpha->ForceFloat(g_snowAlpha);
@@ -1559,7 +1592,7 @@ static void Precip_ApplyConvars()
         // Tracer_ComputeVerts bails on sqLength < 1e-3, and EVERY flake is dropped before the
         // mesh -- snow simulated fine and drew nothing at any slider setting. Short, not zero.
         if (cv_length)  cv_length->ForceFloat(g_snowLength);
-        if (cv_radius)  cv_radius->ForceFloat(Precip_RadiusCap(g_snowRadius * std::max(0.1f, g_snowDensity), g_snowSpeed));
+        if (cv_radius)  cv_radius->ForceFloat(Precip_LiveBudget(Precip_RadiusCap(g_snowRadius * std::max(0.1f, g_snowDensity), g_snowSpeed)));
         if (cv_sidevel) cv_sidevel->ForceFloat(g_snowSideVel);
     }
 }

@@ -2860,6 +2860,7 @@ static void Page_MiscMain()
         // ---- TF2-only rows
         ImGui::Checkbox("f2p chat bypass", &g_f2pChatBypass);
         ImGui::Checkbox("reveal scoreboard", &g_revealScoreboard);
+        ImGui::Checkbox("reveal team hud", &g_revealTeamHud);
         ImGui::Checkbox("steam history menu item", &g_steamHistory);
 
         ImGui::Checkbox("region selector", &g_regionEnable);
@@ -3801,6 +3802,7 @@ struct MenuStyleRow
     float windowRounding, frameRounding, popupRounding;
     ImFont* (*regFont)();    // nullptr = leave the chrome font alone (default style)
     ImFont* (*boldFont)();
+    bool gamesense = false;  // skeet frame + gradient bar over the window (GamesenseFrame), layout untouched
 };
 
 static const MenuStyleRow k_menuStyles[] = {
@@ -3830,7 +3832,35 @@ static const MenuStyleRow k_menuStyles[] = {
     { "heroin", IM_COL32(37, 39, 48, 255), IM_COL32(42, 44, 56, 255), IM_COL32(42, 44, 56, 255), IM_COL32(37, 39, 48, 255),
       IM_COL32(82, 161, 148, 64), IM_COL32(82, 161, 148, 255), IM_COL32(37, 39, 48, 255), IM_COL32(255, 255, 255, 255),
       IM_COL32(120, 120, 120, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontHeroinProggy13; }, []() -> ImFont* { return g_fontHeroinProggy13; } },
+    // csgo menu.cpp "gamesense" row; null fonts = verdana pair
+    { "gamesense", IM_COL32(20, 20, 20, 255), IM_COL32(12, 12, 12, 255), IM_COL32(23, 23, 23, 255), IM_COL32(35, 35, 35, 255),
+      IM_COL32(10, 10, 10, 255), IM_COL32(10, 10, 10, 255), IM_COL32(23, 23, 23, 255), IM_COL32(205, 205, 205, 255),
+      IM_COL32(120, 120, 120, 255), 0.f, 0.f, 0.f, nullptr, nullptr, true },
 };
+
+// csgo menu.cpp gamesense_frame: 6 px frame outside the window (12 / 60 / 40 x3 / 60), 2 px bar over the band's
+// top edge = majorkahook g_color1..3 (37b1da -> cc46cd -> cce335), second row same rgb at half alpha
+static void GamesenseFrame(ImDrawList* dl, const ImVec2& pos, const ImVec2& size)
+{
+    static constexpr int kLayers[6] = { 12, 60, 40, 40, 40, 60 };
+    const ImVec2 max(pos.x + size.x, pos.y + size.y);
+    dl->PushClipRect(ImVec2(pos.x - 6.f, pos.y - 6.f), ImVec2(max.x + 6.f, max.y + 6.f), false);
+    for (int i = 0; i < 6; i++)
+    {
+        const float o = 6.f - (float)i;
+        dl->AddRect(ImVec2(pos.x - o, pos.y - o), ImVec2(max.x + o, max.y + o), IM_COL32(kLayers[i], kLayers[i], kLayers[i], 255));
+    }
+    const float mid = ImFloor(pos.x + size.x / 2.f);
+    for (int row = 0; row < 2; row++)
+    {
+        const int a = row ? 128 : 255;
+        const float y = pos.y + 1.f + (float)row;
+        const ImU32 c1 = IM_COL32(55, 177, 218, a), c2 = IM_COL32(204, 70, 205, a), c3 = IM_COL32(204, 227, 53, a);
+        dl->AddRectFilledMultiColor(ImVec2(pos.x + 1.f, y), ImVec2(mid, y + 1.f), c1, c2, c2, c1);
+        dl->AddRectFilledMultiColor(ImVec2(mid, y), ImVec2(max.x - 1.f, y + 1.f), c2, c3, c3, c2);
+    }
+    dl->PopClipRect();
+}
 static const int k_menuStyleCount = (int)(sizeof(k_menuStyles) / sizeof(k_menuStyles[0]));
 
 static void MenuStyleApply(const MenuStyleRow& s)
@@ -4368,6 +4398,7 @@ void RenderMenu()
     dl->AddRect(wp, ImVec2(wp.x + wz.x, wp.y + wz.y), kWindowBorder(), rnd);
     dl->PopClipRect();
     RenderFadedGradientLine(dl, ImVec2(wp.x, botY), ImVec2(wz.x, 1.f), ImColor(Accent()));
+    if (k_menuStyles[g_menuStyle].gamesense) GamesenseFrame(dl, wp, wz);
 
     // ---- title: "botox" bold white, then " | <date>" regular accent, same baseline,
     // centred as one unit in the top band.

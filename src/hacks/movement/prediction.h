@@ -203,6 +203,7 @@ void      TbBudgetStart();
 bool      TbBudgetExpired();
 long long TbBudgetUsedUs();
 long long TbBudgetLeftUs();   // what is left of this cmd's clock (botox cmd_clock_left); huge when no clock
+long long TbBudgetLimitUs();  // this cmd's whole clock (frame-paced, CmdBudgetSeconds); huge when no clock
 int       SimsLeft();
 
 // ---- SIM AS A WALKING PLAYER ----

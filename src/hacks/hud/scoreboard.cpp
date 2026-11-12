@@ -65,7 +65,8 @@ static DWORD  s_dirtyUntil  = 0;         // poison the panels' health cache unti
 static void* s_addrGetTeam   = nullptr;
 static void* s_addrDominated = nullptr;
 static void* s_addrSetInt    = nullptr;
-static bool  s_revealArmed   = false;
+static bool  s_revealArmed   = false;    // icon hooks (Dominated + SetInt)
+static bool  s_healthArmed   = false;    // GetTeam
 static bool  s_armStatic     = false;    // no RunFrame hook -> nothing can arm them, stay on
 
 // -- panel field offsets, all three read straight out of Update above ----------------
@@ -104,16 +105,33 @@ static int LocalPlayerTeam()
 }
 
 static bool RevealOn() { return g_revealScoreboard && !g_eject; }
+static bool HealthOn() { return g_revealTeamHud && !g_eject; }
 
 // ---- CTFPlayerPanel::GetTeam -------------------------------------------------------
 // Answer "local team" only for the one call site inside CTFTeamStatusPlayerPanel::Update.
 // Every other caller of GetTeam gets the truth, so nothing else in the hud is touched.
 // __try body is split out: the guard object below cannot share a frame with SEH (C2712).
-static void PanelForceRefresh(void* panel)
+//
+// The panel skips its whole health-bar block while the cached health (+270) matches, so the
+// cache is poisoned (a) on every call while the bar is still hidden -- an enemy bar starts
+// hidden and would stay so until that player next took damage -- and (b) for 500ms after
+// either toggle edge, so turning it OFF re-runs the block with the true team and hides them.
+// Bar vtable +0x110 = IsVisible: Update itself calls it on [rdi+2b0] and tests al, then
+// calls +0x108 (SetVisible) with dl=1 when it was false.
+static constexpr uintptr_t kVtIsVisible = 0x110;
+
+static void PanelForceRefresh(void* panel, bool onlyIfHidden)
 {
     __try {
-        if (*reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(panel) + kPanelHealthBar))
-            *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(panel) + kPanelHealthCache) = -1;
+        void* bar = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(panel) + kPanelHealthBar);
+        if (!bar) return;
+        if (onlyIfHidden)
+        {
+            auto isVisible = *reinterpret_cast<bool(__fastcall**)(void*)>(
+                *reinterpret_cast<uintptr_t*>(bar) + kVtIsVisible);
+            if (isVisible(bar)) return;
+        }
+        *reinterpret_cast<int*>(reinterpret_cast<uintptr_t>(panel) + kPanelHealthCache) = -1;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
@@ -122,17 +140,20 @@ static int __fastcall h_PanelGetTeam(void* thisptr)
     MiscHookGuard _g;
     int ret = o_PanelGetTeam(thisptr);
 
-    if (!thisptr || !RevealOn() || reinterpret_cast<uintptr_t>(_ReturnAddress()) != s_retPanelGetTeam)
+    if (!thisptr || reinterpret_cast<uintptr_t>(_ReturnAddress()) != s_retPanelGetTeam)
         return ret;
+
+    const bool dirty = GetTickCount() < s_dirtyUntil;
+    if (!HealthOn())
+    {
+        if (dirty) PanelForceRefresh(thisptr, false);   // off edge: let Update hide the bar
+        return ret;
+    }
 
     const int localTeam = LocalPlayerTeam();
     if (localTeam == 0) return ret;
 
-    // toggle edge: the panel skips its whole health-bar block while the cached health
-    // matches, so flipping the toggle would otherwise change nothing until the player
-    // next took damage
-    if (GetTickCount() < s_dirtyUntil) PanelForceRefresh(thisptr);
-
+    PanelForceRefresh(thisptr, !dirty);
     return localTeam;
 }
 
@@ -196,15 +217,27 @@ static bool __fastcall h_SbNeedsUpdate(void* thisptr)
 // Main thread (CVGui::RunFrame), on the toggle edge only. MinHook freezes the OTHER threads to
 // patch, never the caller, and a thread already inside a detour body returns through its
 // trampoline, which MH_DisableHook does not free (see thread.cpp's MH_Uninitialize note).
-static void RevealArm(bool on)
+// Icons (Dominated + SetInt) and health bars (GetTeam) arm separately: GetTeam stays armed
+// through the 500ms off-edge window so it can hide the bars it revealed.
+static void RevealArm(bool icons, bool health)
 {
-    if (s_armStatic || on == s_revealArmed) return;
-    s_revealArmed = on;
-    CrashLog_Mark(on ? "sb/arm" : "sb/disarm");
-    void* const kAddrs[] = { s_addrGetTeam, s_addrDominated, s_addrSetInt };
-    for (void* a : kAddrs)
-        if (a) { if (on) MH_EnableHook(a); else MH_DisableHook(a); }
-    DebugLog("scoreboard: reveal hooks %s", on ? "armed" : "disarmed");
+    if (s_armStatic) return;
+    if (icons != s_revealArmed)
+    {
+        s_revealArmed = icons;
+        CrashLog_Mark(icons ? "sb/arm" : "sb/disarm");
+        void* const kAddrs[] = { s_addrDominated, s_addrSetInt };
+        for (void* a : kAddrs)
+            if (a) { if (icons) MH_EnableHook(a); else MH_DisableHook(a); }
+        DebugLog("scoreboard: icon hooks %s", icons ? "armed" : "disarmed");
+    }
+    if (health != s_healthArmed)
+    {
+        s_healthArmed = health;
+        CrashLog_Mark(health ? "sb/arm-health" : "sb/disarm-health");
+        if (s_addrGetTeam) { if (health) MH_EnableHook(s_addrGetTeam); else MH_DisableHook(s_addrGetTeam); }
+        DebugLog("scoreboard: health hook %s", health ? "armed" : "disarmed");
+    }
 }
 
 // ---- CVGui::RunFrame (vgui2.dll) ---------------------------------------------------
@@ -228,13 +261,13 @@ static void __fastcall h_VGuiRunFrame(void* thisptr)
     if (!g_eject) MMFix_Pump();
     CrashLog_Frame();   // main-thread frame gap -> a HITCH line in C:otox-tf2\crash.log
 
-    const bool now = RevealOn();
-    if (now != s_lastReveal)
+    const bool health = HealthOn();
+    if (health != s_lastReveal)
     {
-        s_lastReveal = now;
+        s_lastReveal = health;
         s_dirtyUntil = GetTickCount() + 500;
-        RevealArm(now);
     }
+    RevealArm(RevealOn(), health || GetTickCount() < s_dirtyUntil);
 
     o_VGuiRunFrame(thisptr);
 }

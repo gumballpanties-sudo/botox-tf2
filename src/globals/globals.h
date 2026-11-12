@@ -489,7 +489,8 @@ extern bool g_selfKillfeedOnly;
 extern bool g_killfeedCsgo;
 
 // -- Scoreboard ------------------------------------------------------------------------------
-extern bool g_revealScoreboard;   // enemy class icons + enemy health in the match hud panels
+extern bool g_revealScoreboard;   // enemy class icons in the scoreboard
+extern bool g_revealTeamHud;      // enemy health bars in the match hud player panels
 extern bool g_steamHistory;       // "Steam History" item in the scoreboard right-click menu
 
 // -- Crosshair (simplified) --------------------------------------------------------------------

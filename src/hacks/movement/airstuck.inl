@@ -206,9 +206,12 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         if (s_as.latched) DebugLog("AS: unstuck why=%s held=%d z=%.3f", why, s_as.len, s_prePredOrigin.z);
         s_as.latched = false; s_as.len = 0; s_as.hold = false;
     };
-    if (!on || (s_prePredFlags & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK || s_pixelHopHit)
+    // ps assist arc in flight / pending: sim-proven, AS move+duck stomp = off the arc (log: "AS: lumi" on
+    // the launch tick, outcome liveA != promA, hop cut before the seam). Ride hold is NOT the arc: AS keeps it
+    if (!on || (s_prePredFlags & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK || s_pixelHopHit
+        || s_psAssistArcOwns)
     {
-        end(!on ? "key" : s_pixelHopHit ? "ph" : "ground");
+        end(!on ? "key" : s_pixelHopHit ? "ph" : s_psAssistArcOwns ? "ps" : "ground");
         return;
     }
 

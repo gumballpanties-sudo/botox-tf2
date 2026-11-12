@@ -28,6 +28,7 @@ struct EspPlayer
 	float m_healthFactor = 0.f;            // animated health / max, clamped 0..1
 	bool m_visible = false;                // visibility trace result (lazy: only run if a vis-colour feature asked)
 	float m_distance = 0.f;
+	int m_index = 0;                       // entindex: label declutter stack key (esp_declutter.h); 0 = labels fixed
 
 	uint64_t m_steamId = 0;                // 0 = no avatar (bot / lookup failed)
 	int m_weaponId = 0;                    // ETFWeaponType; 0 = no active weapon -> WeaponName() returns null

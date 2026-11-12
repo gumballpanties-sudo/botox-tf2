@@ -152,10 +152,13 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
     // s_pixelHopOn: webz skips wall stuck while the PH key is held. A PS catch latches duck / presses the
     // face 8 ticks out and steers you off the ledge PH lands on (css log 11-08: PS on = floor lands only)
     const bool ph_owns = s_pixelHopHit || s_pixelHopOn;
-    if (as_owns || tb_owns || s_wallClimbHit || s_wallClimbActive || ph_owns) {
+    // s_psAssistArcOwns: ps assist hop / pending launch -- its duck + move are the sim's, a PSU latch here
+    // re-ducks the arc next cmd (AS used to block PSU on these ticks by stomping the arc itself)
+    if (as_owns || tb_owns || s_wallClimbHit || s_wallClimbActive || ph_owns || s_psAssistArcOwns) {
         ++s_psDiagYield[as_owns ? 0 : tb_owns ? 1 : 2];
         if (latched)
-            DebugLog("PSU: yield by=%s", as_owns ? "as" : tb_owns ? "tb" : ph_owns ? "ph" : "wc");
+            DebugLog("PSU: yield by=%s", as_owns ? "as" : tb_owns ? "tb" : ph_owns ? "ph"
+                                       : s_psAssistArcOwns ? "ps" : "wc");
         s_psShouldSurf = s_psShouldUnduck = false;
         return;
     }

@@ -1018,6 +1018,9 @@ static bool s_prevSurfVel = false;
 static int  s_pixelSurfTicks = 0;
 static bool s_psAssistHopActive = false; // assist hop fired/pending -- arc is sim-validated, AirStuck must yield
 static bool s_psAssistHopPj = false;     // ...and pixeljump planned it (indicator split)
+// the ARC part only (hop in flight / launch pending, not the ride hold): every tick of it is the sim's
+// proven cmd, so AirStuck + PixelSurf (both run after PS_AssistTick) stay off its move and duck
+static bool s_psAssistArcOwns = false;
 // botox `wall_detected`: AutoAlign's flat-wall find, or pixel surf's own 16-ray probe when
 // AutoAlign is off (pixelsurf.inl PsWallDetectFallback). Pixel surf's hunt gate reads it
 static bool s_aaWallDetected = false;
@@ -2853,6 +2856,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
                 DebugLog("PSU: ground drop %s", s_psShouldSurf ? "duck" : "stand");
                 s_psShouldSurf = s_psShouldUnduck = false;
             }
+            // a ps assist arc owns IN_DUCK (PsHopInputs): last cmd's PSU latch flipping it = off the proven arc
+            if (s_psAssistArcOwns)     s_psShouldSurf = s_psShouldUnduck = false;
             if (s_psShouldSurf)        pCmd->buttons |= IN_DUCK;
             else if (s_psShouldUnduck) pCmd->buttons &= ~IN_DUCK;
             PsSurfFixTick(pLocal, pCmd);   // hold duck a couple ticks into a fresh ride

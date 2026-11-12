@@ -1569,16 +1569,23 @@ struct PsHop_t
     float gap       = 1e9f;   // closest the descent came to the seam's height (diag only)
     float gapVz     = 0.f;
     int   sims      = 0;
+    // THE PLAN: end-of-tick origin per hop tick (index = ticks since launch). The live tail checks the
+    // real hull against it every cmd -- a promise only holds while the hull is where it was proved
+    Vec3  path[k_psMaxHopTicks] = {};
+    int   pathN     = 0;
 };
 
 // bAnySeam = heroin pixeljump with no point (FUN_18007f710 local_2c8): vTarget.z means nothing,
 // ANY pin on the pressed wall is the catch -- vz on the pin this tick and last, moved >= 0.005
 // unless unsafe. No seam z, no unsafe shortcut, no fell-past-the-seam cut
+// iSinceStart >= 0 = RE-VERIFY a hop already in the air: no launch, this cmd IS hop tick iSinceStart,
+// the same choreography from there on. Used when the live hull left the plan (off-plan, below)
 static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vTarget,
                         float flHullReachXY, const Vec3* pWallN = nullptr,
-                        bool bUnsafe = false, bool bAnySeam = false)
+                        bool bUnsafe = false, bool bAnySeam = false, int iSinceStart = -1)
 {
     PsHop_t r;
+    const int iSinceBase = iSinceStart >= 0 ? iSinceStart : 0;
 
     const float flGravity  = CvarFloat("sv_gravity", 800.f);
     const float flTick     = TickInterval();
@@ -1592,9 +1599,9 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
     const int nBase = PredCommandsPredicted();
     RestoreToFrame(nBase - 1);
 
-    int   iLaunch = -1;
+    int   iLaunch = iSinceStart >= 0 ? 0 : -1;   // re-verify: already launched, t 0 = tick iSinceStart
     Vec3  vLaunch = EntV3(pLocal, g_offOrigin);
-    float flPeakZ = -1e9f;
+    float flPeakZ = iSinceStart >= 0 ? vLaunch.z : -1e9f;
 
     // THE LAUNCH IS CONFIRMED, NOT ASSUMED. TF2 refuses the press outright on
     // FL_DUCKING and on the m_nOldButtons IN_JUMP latch (tf_gamemovement.cpp:1160), and only
@@ -1646,7 +1653,7 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
                 break;      // no ground in the window, or this stance simply cannot jump
         }
 
-        const int iSince = iLaunch >= 0 ? t - iLaunch : (bPressNow ? 0 : -1);
+        const int iSince = iLaunch >= 0 ? t - iLaunch + iSinceBase : (bPressNow ? 0 : -1);
         const PsInputs_t in = PsHopInputs(iType, iSince, vNowPre, vVelPre, vTarget, flHullReachXY,
                                           flGravity, pWallN);
         if (in.jump) pCmd->buttons |= IN_JUMP;
@@ -1690,6 +1697,11 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
         const bool  bAir    = (EntI(pLocal, g_offFlags) & FL_ONGROUND) == 0;
         if (flZ > flPeakZ)
             flPeakZ = flZ;
+        if (iSince >= 0 && iSince < k_psMaxHopTicks)
+        {
+            r.path[iSince] = vNow;
+            r.pathN = iSince + 1;
+        }
 
         const float flFlatNow = Vec3(vTarget.x - vNow.x, vTarget.y - vNow.y, 0.f).Length2D();
         const float flStepXY  = Vec3(vVelNow.x, vVelNow.y, 0.f).Length2D() * flTick;
@@ -1808,6 +1820,28 @@ static bool  s_asUnsafeHop = false;   // hop/pending was planned by pixeljump wi
 static int   s_asPromCatch = -1;
 static float s_asPromApex = 0.f, s_asPromNeed = 0.f;
 
+// ---- ON PLAN OR NOT ------------------------------------------------------------
+// The hop owns the cmd (AS / PSU / AA all yield) because the sim proved the arc. Every outcome line so
+// far read liveA 1.4-3.9u over promA, and the 11-12 one has `AS: sync miss dv=0,0,12 dtb=-1` on the
+// launch: the server took the jump a tick off, +12 vz = +4u apex, and the hull flew an arc the sim never
+// proved while everything that could still catch it stood aside. So each cmd the real hull is checked
+// against the plan. Off it: re-sim from where it really is (same choreography). Still catches = new
+// plan. A clean "no" = the hop lets go of the cmd and the reactive catchers get the rest of the arc
+static Vec3  s_asPlanPath[k_psMaxHopTicks] = {};
+static int   s_asPlanPathN = 0;
+static int   s_asReplans = 0;
+static bool  s_asHopAnySeam = false;          // pixeljump no-point hop: PsSimHop bAnySeam
+static const char* s_asHopEnd = "";           // why the hop ended (outcome line)
+static constexpr float k_psPlanTolZ  = 0.01f;  // a catch window is ~0.03u: more than this is another arc
+static constexpr float k_psPlanTolXY = 0.25f;  // silent-aim CorrectMovement float noise stays far under it
+static constexpr int   k_psMaxReplans = 3;     // then fly the last plan as before (never worse than old)
+
+static void PsPlanStore(const PsHop_t& h)
+{
+    memcpy(s_asPlanPath, h.path, sizeof(s_asPlanPath));
+    s_asPlanPathN = h.pathN;
+}
+
 // the pending launch: a pick armed mid-air fires on the REAL ground contact
 static int   s_asPendingType = JT_NONE;
 static int   s_asPendingTicks = 0;      // countdown, not a tickcount deadline (see s_asHopTick)
@@ -1849,6 +1883,8 @@ static bool  s_asOutRode = false;
 static bool  s_asOutSeam = false;      // a descending live tick sat in heroin's seam window
 static int   s_asOutRideTick = -1;     // the tick the ride actually started on
 static int   s_asOutTicks = 0, s_asOutPressed = 0;
+static int   s_asOutEndTick = -1;              // outcome tick the hop + hold ended on (-1 = still flying)
+static constexpr int k_psOutTail = 20;         // ticks the outcome keeps watching for someone else's catch
 
 static void PsOutcomeBegin(float flLaunchZ, const Vec3& vTarget, int iType,
                            float flPromApex, float flPromNeed, int iPromCatch)
@@ -1862,6 +1898,7 @@ static void PsOutcomeBegin(float flLaunchZ, const Vec3& vTarget, int iType,
     s_asOutPerp = -1.f; s_asOutLat = -1.f;
     s_asOutRode = false; s_asOutSeam = false; s_asOutRideTick = -1;
     s_asOutTicks = 0; s_asOutPressed = 0;
+    s_asOutEndTick = -1; s_asHopEnd = ""; s_asReplans = 0;
     s_asPromApex = flPromApex; s_asPromNeed = flPromNeed; s_asPromCatch = iPromCatch;
 }
 
@@ -1993,16 +2030,69 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             s_asRideTicks = 0;
             s_asRideMiss = 0;
             s_asJumpType = JT_NONE;
+            s_asHopEnd = "ride";
         }
-        else if ((bOnGround && s_asHopTick > 0) || !bAssistOn || !bAlive
-                 || s_asHopTick > k_psMaxHopTicks + 40
-                 // fell past the seam: PsSimHop stopped flying this arc right here (k_psPastZ),
-                 // so the hop is over the same tick for the live hull. Holding it to the floor
-                 // kept the picker shut for the whole fall -- a scout's recovery dash back up to
-                 // the seam was never even simmed
-                 || (s_asHopTick > 0 && s_prePredVel.z < 0.f
-                     && s_prePredOrigin.z < s_asHopTarget.z - k_psPastZ))
-            s_asJumpType = JT_NONE;
+        else
+        {
+            const char* szEnd = (bOnGround && s_asHopTick > 0) ? "ground"
+                              : !bAssistOn ? "key" : !bAlive ? "dead"
+                              : s_asHopTick > k_psMaxHopTicks + 40 ? "long"
+                              // fell past the seam: PsSimHop stopped flying this arc right here (k_psPastZ),
+                              // so the hop is over the same tick for the live hull. Holding it to the floor
+                              // kept the picker shut for the whole fall -- a scout's recovery dash back up to
+                              // the seam was never even simmed
+                              : (s_asHopTick > 0 && s_prePredVel.z < 0.f
+                                 && s_prePredOrigin.z < s_asHopTarget.z - k_psPastZ) ? "past" : nullptr;
+            if (szEnd)
+            {
+                s_asJumpType = JT_NONE;
+                s_asHopEnd = szEnd;
+            }
+        }
+
+        // ---- still on the plan? (see s_asPlanPath) -- hop tick k starts where sim tick k-1 ended ----
+        if (s_asJumpType != JT_NONE && s_asHopTick > 0 && s_asHopTick - 1 < s_asPlanPathN)
+        {
+            const Vec3& p = s_asPlanPath[s_asHopTick - 1];
+            const Vec3& v = s_prePredOrigin;
+            const float dz  = v.z - p.z;
+            const float dxy = Vec3(v.x - p.x, v.y - p.y, 0.f).Length2D();
+            if (fabsf(dz) > k_psPlanTolZ || dxy > k_psPlanTolXY)
+            {
+                const char* szVerdict = "kept (no replan left)";
+                bool bStopChecking = true;   // no replan possible: fly the old plan out, unchecked
+                if (bPredicted && s_asReplans < k_psMaxReplans)
+                {
+                    s_asReplans++;
+                    bStopChecking = false;
+                    const PsHop_t re = PsSimHop(pLocal, pCmd, s_asJumpType, s_asHopTarget, flHullReachXY,
+                                                s_asHopHasN ? &s_asHopN : nullptr, s_asUnsafeHop,
+                                                s_asHopAnySeam, s_asHopTick);
+                    if (re.caught)
+                    {
+                        PsPlanStore(re);
+                        s_asPromCatch = re.catchSince;
+                        szVerdict = "replanned, still catches";
+                    }
+                    else if (re.truncated)
+                        szVerdict = "kept (replan cut by clock)";
+                    else
+                    {
+                        // the sim, from the real hull, says this arc cannot catch: stop owning the cmd
+                        s_asJumpType = JT_NONE;
+                        s_asHopEnd = "offplan";
+                        s_psAssistDuckHeld = false;
+                        szVerdict = "released";
+                    }
+                }
+                else if (!bPredicted)
+                    szVerdict = "kept (no prediction)";
+                if (bStopChecking)
+                    s_asPlanPathN = 0;
+                DebugLog("PS: off-plan t=%d dz=%+.4f dxy=%.3f vz=%.2f replan=%d -> %s catch=t%d",
+                         s_asHopTick, dz, dxy, s_prePredVel.z, s_asReplans, szVerdict, s_asPromCatch);
+            }
+        }
     }
     if (s_asRideHold)
     {
@@ -2042,8 +2132,11 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     // ---- the outcome sampler --------------------------------------------------------------
     if (s_asOutOn)
     {
+        // the REAL hull: s_prePredOrigin is what the sent cmds did. vOrigin is this cmd's prediction run
+        // on the cmd as it came in, before the hop wrote its bits -- a different arc on every hop tick
+        const Vec3& vOutAt = s_prePredOrigin;
         s_asOutTicks++;
-        if (vOrigin.z > s_asOutPeakZ) s_asOutPeakZ = vOrigin.z;
+        if (vOutAt.z > s_asOutPeakZ) s_asOutPeakZ = vOutAt.z;
         if (s_psRidingNow && !s_asOutRode)
         {
             s_asOutRode = true;
@@ -2051,23 +2144,23 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         }
         if (s_prePredVel.z < 0.f)
         {
-            if (pjs::SeamHit(vOrigin.z, s_asOutTarget.z))
+            if (pjs::SeamHit(vOutAt.z, s_asOutTarget.z))
                 s_asOutSeam = true;
-            const float flGap = fabsf(vOrigin.z - s_asOutTarget.z);
+            const float flGap = fabsf(vOutAt.z - s_asOutTarget.z);
             if (flGap < s_asOutGap)
             {
                 s_asOutGap = flGap;
                 s_asOutGapVz = s_prePredVel.z;
                 // perp / lat: the 2D miss split along the face normal. perp is the axis a pin
                 // lives or dies on; lat is slide along the seam, which is a strip and free
-                Vec3 vTo = Vec3(s_asOutTarget.x - vOrigin.x, s_asOutTarget.y - vOrigin.y, 0.f);
+                Vec3 vTo = Vec3(s_asOutTarget.x - vOutAt.x, s_asOutTarget.y - vOutAt.y, 0.f);
                 const float flTo = vTo.Length2D();
                 if (flTo > 0.1f)
                 {
                     Vec3 vDir = vTo; vDir.Normalize();
                     TraceFilterWorldProps f; f.Setup(pLocal);
                     GameTrace_t tr{};
-                    TraceHull(vOrigin, vOrigin + vDir * 48.f,
+                    TraceHull(vOutAt, vOutAt + vDir * 48.f,
                               EntV3(pLocal, g_offMins), EntV3(pLocal, g_offMaxs),
                               MASK_PLAYERSOLID, &f, &tr);
                     if (tr.fraction < 1.f && fabsf(tr.plane.normal.z) < 0.7f)
@@ -2085,7 +2178,15 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             }
         }
         // print when the hop AND the hold are both done -- the ride is part of the result
-        if ((s_asJumpType == JT_NONE && !s_asRideHold) || s_asOutTicks > 240)
+        // ...and a short tail after it: a hop released off-plan (or ended a tick early) still gets its
+        // surf from AA / AS / PSU, and rode= has to say so (11-12: hop out at t25, AA stick caught t26)
+        const bool bHopDone = s_asJumpType == JT_NONE && !s_asRideHold;
+        if (!bHopDone)
+            s_asOutEndTick = -1;
+        else if (s_asOutEndTick < 0)
+            s_asOutEndTick = s_asOutTicks;
+        if ((bHopDone && (s_asOutRode || bOnGround || s_asOutTicks - s_asOutEndTick >= k_psOutTail))
+            || s_asOutTicks > 240)
         {
             // promCatch is the tick the SIM said the pin would land on; rideAt is the tick the
             // engine actually latched one. They should agree to a tick or two. If rode=0 with
@@ -2094,14 +2195,15 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             // which is the only way this build can misfire
             DebugLog("PS: outcome %s promA=%.1f promNeed=%.1f promCatch=%d | liveA=%.1f "
                      "gap=%.3f step=%.2f zf=%.3f perp=%.3f lat=%.2f press=%d seam=%d rode=%d rideAt=%d "
-                     "ticks=%d",
+                     "ticks=%d end=%s@%d replans=%d",
                      PsTypeName(s_asOutType), s_asPromApex, s_asPromNeed, s_asPromCatch,
                      s_asOutPeakZ - s_asOutLaunchZ,
                      s_asOutGap > 1e8f ? -1.f : s_asOutGap,
                      fabsf(s_asOutGapVz) * TickInterval(),
                      s_asOutTarget.z - truncf(s_asOutTarget.z),
                      s_asOutPerp, s_asOutLat, s_asOutPressed, (int)s_asOutSeam,
-                     (int)s_asOutRode, s_asOutRideTick, s_asOutTicks);
+                     (int)s_asOutRode, s_asOutRideTick, s_asOutTicks, s_asHopEnd, s_asOutEndTick,
+                     s_asReplans);
             s_asOutOn = false;
         }
     }
@@ -2441,8 +2543,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             // no arc owns the cmd: the walk-up is ours to help with (see PsGroundHelp)
             PsGroundHelp(pCmd, vAt, aTargets[0].pos);
         }
-        s_psAssistHopActive = s_asJumpType != JT_NONE || s_asPendingType != JT_NONE
-                            || s_asRideHold;
+        s_psAssistArcOwns   = s_asJumpType != JT_NONE || s_asPendingType != JT_NONE;
+        s_psAssistHopActive = s_psAssistArcOwns || s_asRideHold;
     };
 
     if (!bAssistOn || nTargets == 0)
@@ -2488,7 +2590,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         s_asHopTarget = s_asPendingTarget;
         s_asHopN = s_asPendingN;
         s_asHopHasN = s_asPendingHasN;
-        PsOutcomeBegin(vOrigin.z, s_asPendingTarget, iPick, s_asPromApex, s_asPromNeed,
+        PsOutcomeBegin(s_prePredOrigin.z, s_asPendingTarget, iPick, s_asPromApex, s_asPromNeed,
                        s_asPromCatch);
         DebugLog("PS: pending fired=%s z=%.3f", PsTypeName(iPick), s_asPendingTarget.z);
         FlyLiveTail();      // tick 0 of the hop is THIS cmd
@@ -2499,8 +2601,15 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     // The clock is shared with every other movement feature. Each target gets an even cut of
     // what is LEFT (SimsLeft() returns 0 the instant TbBudgetExpired(), so one target
     // used to drain the whole share and slot 1 was never planned at all)
-    const long long usClockTotal = (long long)(TickInterval() * k_cmdTimeShare * 1000000.f);
-    int nPlanned = 0, nSimmedCands = 0, nCaught = 0;
+    // ...and the clock is the REAL one. TbBudgetStart paces it off the frame gap (cmdbudget.h), so it is
+    // often well under the tick share this used to assume: 11-12 log, `cands=1 sims=384 us=1346/6000` --
+    // the sweep planned for 6.0ms, started arcs at 1.3ms that the clock then cut (`T`), and threw them away
+    const long long usClockTotal = (std::min)((long long)(TickInterval() * k_cmdTimeShare * 1000000.f),
+                                              TbBudgetLimitUs());
+    int nPlanned = 0, nSimmedCands = 0, nCaught = 0, nSkipped = 0;
+    // what one arc of each type cost the last time it was flown (us). An arc the clock cannot finish is
+    // refused anyway (truncated), so one that will not fit is SKIPPED and a cheaper type gets the time
+    static long long s_arcUs[JT_COUNT] = {};
 
     // apex memory, per type. The sim is the authority and nothing is PRUNED by this -- it only
     // decides the ORDER the candidates are simmed in, so the arc whose reach matches the seam
@@ -2539,7 +2648,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
         if (bWorthSimming)
             nPlanned++;
 
-        struct Cand_t { int type; bool allowed; PsHop_t res; };
+        struct Cand_t { int type; bool allowed; PsHop_t res; bool skipped = false; };
         static constexpr int k_nCands = 10;
         Cand_t aCands[k_nCands] =
         {
@@ -2604,11 +2713,23 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                     continue;
                 // do not START an arc there is no clock to FINISH: a cut arc is refused
                 // outright (PsHop_t::truncated), so half an arc is worse than none
-                if (SimsLeft() < 24 || TbBudgetUsedUs() + 600 > usTargetEnd)
+                const long long usNow = TbBudgetUsedUs();
+                if (SimsLeft() < 24 || usNow + 600 > usTargetEnd)
                     break;
+                // its last arc will not fit what is left: skip it, a shorter type still may. The estimate
+                // decays on every skip so a type last flown from far away is retried as you close in
+                long long& usCost = s_arcUs[aCands[k].type];
+                if (usCost > 0 && usNow + usCost > usTargetEnd)
+                {
+                    aCands[k].skipped = true;
+                    nSkipped++;
+                    usCost = usCost * 3 / 4;
+                    continue;
+                }
                 aCands[k].res = PsSimHop(pLocal, pCmd, aCands[k].type, vTarget, flHullReachXY,
                                          aTargets[iT].hasN ? &aTargets[iT].n : nullptr,
                                          bPjOn && g_pjUnsafe, bPjOn && iTargetIdx < 0);
+                usCost = TbBudgetUsedUs() - usNow;
                 nSimmedCands++;
                 if (aCands[k].res.launchDelay >= 0 && aCands[k].res.apexGain > 0.f)
                     s_apexSeen[aCands[k].type] = aCands[k].res.apexGain;
@@ -2642,10 +2763,10 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             for (int k = 0; k < k_nCands && nC < (int)sizeof(szCands) - 110; k++)
             {
                 const PsHop_t& c = aCands[k].res;
-                if (!aCands[k].allowed)
+                if (!aCands[k].allowed || aCands[k].skipped)
                 {
-                    nC += snprintf(szCands + nC, sizeof(szCands) - nC, "%s%s:off",
-                                   nC ? " " : "", kShort[k]);
+                    nC += snprintf(szCands + nC, sizeof(szCands) - nC, "%s%s:%s",
+                                   nC ? " " : "", kShort[k], aCands[k].allowed ? "skip" : "off");
                     continue;
                 }
                 // d = launch delay, r = presses the engine REFUSED ("d-1 r2" = this stance
@@ -2680,12 +2801,12 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
 
             if (iPick != JT_NONE && pPick)
                 DebugLog("%s: pick=%s pt=%d/%d i%d dist=%.0f used=%d need=%.2f apex=%.1f "
-                         "catch=t%d z%+.3f flat=%.1f zf=%.3f gnd=%d rad=%.0f mask=%d%s "
+                         "catch=t%d z%+.3f flat=%.1f zf=%.3f gnd=%d spd=%.0f rad=%.0f mask=%d%s "
                          "worth=%d [%s] sims=%d",
                          bPjOn ? "PJ" : "PS", PsTypeName(iPick), iT, nTargets, iTargetIdx,
                          aTargets[iT].dist, s_psUsedIdx, vTarget.z - pPick->launchZ, pPick->apexGain,
                          pPick->catchSince, pPick->catchZ - vTarget.z, pPick->catchFlat,
-                         vTarget.z - truncf(vTarget.z), (int)bOnGround, flEngage,
+                         vTarget.z - truncf(vTarget.z), (int)bOnGround, s_prePredVel.Length2D(), flEngage,
                          iTargetMask, szOff, (int)bWorthSimming, szCands,
                          k_cmdSimCap - SimsLeft());
             else
@@ -2695,10 +2816,10 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                 static int s_psDiagTick[k_psMaxTargets] = {};
                 if (DiagOk(s_psDiagTick[iT], false))
                     DebugLog("%s: none pt=%d/%d i%d dist=%.0f used=%d need=%.2f flat=%.1f "
-                             "zf=%.3f gnd=%d rad=%.0f mask=%d%s worth=%d [%s] sims=%d",
+                             "zf=%.3f gnd=%d spd=%.0f rad=%.0f mask=%d%s worth=%d [%s] sims=%d",
                              bPjOn ? "PJ" : "PS", iT, nTargets, iTargetIdx, aTargets[iT].dist,
                              s_psUsedIdx, vDelta.z, flFlat, vTarget.z - truncf(vTarget.z),
-                             (int)bOnGround, flEngage, iTargetMask, szOff,
+                             (int)bOnGround, s_prePredVel.Length2D(), flEngage, iTargetMask, szOff,
                              (int)bWorthSimming, szCands, k_cmdSimCap - SimsLeft());
             }
         }
@@ -2733,6 +2854,9 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             pCmd->buttons &= ~IN_JUMP;
             break;          // this cmd is spent clearing the latch; no second target may press
         }
+        // the plan the live hull is checked against, now or on the pending launch (indexed from launch)
+        PsPlanStore(*pPick);
+        s_asHopAnySeam = bPjOn && iTargetIdx < 0;
         if (bFireNow)
         {
             // a duck latched by the PREVIOUS hop is not part of this arc's schedule, and the sim
@@ -2743,7 +2867,7 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
             s_asHopTarget = vHopTarget;
             s_asHopN = aTargets[iT].n;
             s_asHopHasN = aTargets[iT].hasN;
-            PsOutcomeBegin(vOrigin.z, vHopTarget, iPick, s_asPromApex, s_asPromNeed, s_asPromCatch);
+            PsOutcomeBegin(s_prePredOrigin.z, vHopTarget, iPick, s_asPromApex, s_asPromNeed, s_asPromCatch);
         }
         else
         {
@@ -2769,9 +2893,9 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
     {
         static int s_psSweepDiagTick = 0;
         if (DiagOk(s_psSweepDiagTick, false))
-            DebugLog("PS: sweep n=%d planned=%d cands=%d caught=%d sims=%d us=%lld/%lld",
-                     nTargets, nPlanned, nSimmedCands, nCaught, k_cmdSimCap - SimsLeft(),
-                     TbBudgetUsedUs(), usClockTotal);
+            DebugLog("PS: sweep n=%d planned=%d cands=%d skip=%d caught=%d sims=%d us=%lld/%lld lim=%lld",
+                     nTargets, nPlanned, nSimmedCands, nSkipped, nCaught, k_cmdSimCap - SimsLeft(),
+                     TbBudgetUsedUs(), usClockTotal, TbBudgetLimitUs());
     }
 
     FlyLiveTail();

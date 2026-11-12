@@ -379,6 +379,7 @@ static const CfgEntry kEntries[] = {
     { "selfKillfeedOnly", CfgEntry::BOOL,   &g_selfKillfeedOnly, 0 },
     { "killfeedCsgo",     CfgEntry::BOOL,   &g_killfeedCsgo, 0 },
     { "revealScoreboard", CfgEntry::BOOL,   &g_revealScoreboard, 0 },
+    { "revealTeamHud",    CfgEntry::BOOL,   &g_revealTeamHud, 0 },
     { "steamHistory",     CfgEntry::BOOL,   &g_steamHistory, 0 },
     { "removeRagdolls",   CfgEntry::BOOL,   &g_removeRagdolls, 0 },
     { "removePropFade",   CfgEntry::BOOL,   &g_removePropFade, 0 },

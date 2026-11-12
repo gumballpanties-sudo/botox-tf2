@@ -2,7 +2,7 @@
 #include "../../globals/globals.h"
 
 // ==== reveal scoreboard (Aletherium Visuals::UI::RevealScoreboard) ==================
-// Two independent reveals behind one toggle, g_revealScoreboard:
+// Two independent reveals, two toggles: g_revealScoreboard = 1, g_revealTeamHud = 2:
 //
 //   1. scoreboard class icons. CTFClientScoreBoardDialog::UpdatePlayerList branches on
 //      "is this player on my team": teammates get the class-icon block, enemies get the
