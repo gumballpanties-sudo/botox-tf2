@@ -1369,7 +1369,7 @@ static void Page_MovementMain()
             ImGui::OptionPopup("edgebug advanced settings", [&]() {
                 ImGui::Label("edgebug keybind");
                 ImGui::Keybind("edge bug key", &g_edgeBugKey, &g_edgeBugMode);
-                ImGui::Combo("style##ebstyle", &g_edgeBugStyle, "botox\0delusional\0dna\0hotwheels\0");
+                ImGui::Combo("style##ebstyle", &g_edgeBugStyle, "botox\0delusional\0dna\0hotwheels\0heroin\0");
                 const int style = g_edgeBugStyle;
                 if (style == 1)
                 {
@@ -1404,6 +1404,22 @@ static void Page_MovementMain()
                     ImGui::Checkbox("advanced detection##ebhwadv", &g_edgeBugHwAdvanced);
                     if (g_edgeBugHwAdvanced)
                         SliderF("max strafe delta##ebhwdelta", &g_edgeBugHwStrafeDeltaMax, 0.1f, 100.f, "%.1f%%");
+                }
+                else if (style == 4)   // heroin-new menu order + labels
+                {
+                    ImGui::Checkbox("crouch##ebher", &g_edgeBugHerCrouch);
+                    ImGui::Checkbox("unsafe##ebher", &g_edgeBugHerUnsafe);
+                    ImGui::Combo("mode##ebher", &g_edgeBugHerMode, "static\0continuous\0");
+                    ImGui::Checkbox("strafe##ebher", &g_edgeBugHerStrafe);
+                    if (g_edgeBugHerStrafe)
+                    {
+                        ImGui::Checkbox("advanced strafe##ebher", &g_edgeBugHerAdvanced);
+                        if (g_edgeBugHerAdvanced)
+                            SliderI("advanced search limit##ebher", &g_edgeBugHerIters, 1, 10);
+                        SliderF("strafe limit##ebher", &g_edgeBugHerStrafeLimit, 0.f, 45.f, "%.1f");
+                    }
+                    SliderF("time##ebher", &g_edgeBugHerTime, 0.05f, 1.f, "%.3fs");
+                    SliderI("mouse lock##ebher", &g_edgeBugHerLock, 0, 100);
                 }
                 ImGui::Checkbox("bug off players##ebplayers", &g_edgeBugPlayers);
                 // standing -> standing ebs only, holding duck -> ducked ebs only

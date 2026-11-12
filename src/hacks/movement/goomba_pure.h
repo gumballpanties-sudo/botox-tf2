@@ -86,13 +86,46 @@ inline int PathContact(const PathPt* p, int n, float meX, float meY, float meZ, 
     return -1;
 }
 
+// ticks to run a target's snapshot forward to the server frame our cmd runs in, in SERVER ticks.
+// rtt = netchannel out + in latency: out = send -> ack (wire up + the server's frame wait + wire
+// down), in = how long we held the snapshot before acking. stale = server ticks since their
+// simtime last moved (choke / loss: the snapshot holds an older them). Not tickbase - simtime:
+// each client's tickbase floats +-sv_clockcorrection_msecs (4 ticks) around the server clock
+// (player.cpp:3152) with no correction inside the band, so that mixes two drifting clocks.
+// cap 0.5 s: past that it is a lag spike, not physics
+inline int AheadTicks(float rtt, int stale, float dt, float cap = 0.5f)
+{
+    if (dt <= 0.f) return 0;
+    const int n = (int)(rtt / dt + 0.5f) + (stale > 0 ? stale : 0);
+    const int m = (int)(cap / dt + 0.5f);
+    return n < 0 ? 0 : (n > m ? m : n);
+}
+
 // fire this cmd: contact lands within 1 + lead ticks. lead = launch delay (rocket travel)
 // plus ping, the in-game tuning knob.
 inline bool ShouldFire(int contactTick, int lead) { return contactTick >= 1 && contactTick <= 1 + lead; }
 
-// the cmd before the fire one: release jump so the fire cmd's IN_JUMP is a fresh press
-// (CheckJumpButton refuses held jump, tf_gamemovement.cpp:1235).
-inline bool ShouldPrime(int contactTick, int lead) { return contactTick == 2 + lead; }
+// regular jump adds this to lead. A tick-1 contact only lands when the server moves us before
+// them that tick: players run in sim-list order (physics_main.cpp:2066), not ours to pick. Them
+// first = they drop onto our still-standing head (vz 0, no boost). A tick-2 contact is still
+// above our head after their tick-1 drop, either order. Cost: one tick of gravity (~12 u/s).
+// Sticky too: its blast lands in the det cmd's PostThink, so a tick-1 contact never carries the
+// kick (a plain-jump bounce at best); tick 2 is the first one moving at jump + kick.
+// Upper edge (why not later): TF leaves the ground only over 250 vz (tf_gamemovement.cpp:2358),
+// so the double bounce needs our vz * 1.0075 > 250 at their landing: 277/265/253 = jump ticks
+// 1-3, 241 on tick 4 = they just ride us (vz zeroed, :2677)
+inline constexpr int kJumpMargin = 1;
+
+// rocket plan: latest landing tick after the blast that still counts as a goomba. After the
+// blast we climb ~15u a tick: they land on us only if they move into us, not us into them, so
+// every extra tick of meeting is another server-order coin flip on a longer strafe guess.
+// Log 11-12: contact 5-10 -> 1 boost in 6
+inline constexpr int kRocketMeet = 2;
+
+// the 2 cmds before the fire one: release jump so the fire cmd's IN_JUMP is a fresh press
+// (CheckJumpButton refuses held jump, tf_gamemovement.cpp:1235). 2 not 1: a held bhop key
+// would launch us early, and a k that skips a value still gets its release.
+inline bool ShouldPrime(int contactTick, int lead) { return contactTick >= 2 + lead && contactTick <= 3 + lead; }
 
 // ---- blast model: the rocket aim search scores every candidate impact with this ----------
 struct V

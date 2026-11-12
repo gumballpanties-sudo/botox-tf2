@@ -15,7 +15,8 @@ extern bool g_autoRJ;
 extern int  g_autoRJKey, g_autoRJMode;
 bool MovementKeyOK(int key, int mode);
 int  Movement_TakeGoombaRocketContact();
-void Movement_GoombaFired();
+void Movement_GoombaFired(float flScore);
+static float s_flPlanScore = 0.f;   // last GoombaPlan fire's predicted vz for them (the tracker's boost)
 void DebugLog(const char* fmt, ...);
 
 static bool s_bOn = false;   // Vars::Misc::Movement::AutoRocketJump
@@ -31,14 +32,14 @@ static struct GmbDiag
 {
 	int cmds = 0, nowpn = 0, noK = 0, duck = 0, noAtk = 0, ang = 0, plans = 0;
 	int cand = 0, noInfo = 0, noHit = 0, onUs = 0, low = 0, rising = 0, fire = 0;
-	float bestNow = -1e9f, bestNext = -1e9f;
+	float bestNow = -1e9f, bestNext = -1e9f, dmg = 0.f;
 } s_tDiag;
 static void Gmb_DiagFlush()
 {
 	GmbDiag& d = s_tDiag;
 	if (d.cmds)
-		DebugLog("GOOMBA R: cmds=%d nowpn=%d noK=%d duck=%d noAtk=%d ang=%d plans=%d cand=%d noInfo=%d noHit=%d onUs=%d low=%d rising=%d fire=%d bestNow=%.0f bestNext=%.0f",
-			d.cmds, d.nowpn, d.noK, d.duck, d.noAtk, d.ang, d.plans, d.cand, d.noInfo, d.noHit, d.onUs, d.low, d.rising, d.fire, d.bestNow, d.bestNext);
+		DebugLog("GOOMBA R: cmds=%d nowpn=%d noK=%d duck=%d noAtk=%d ang=%d plans=%d cand=%d noInfo=%d noHit=%d onUs=%d low=%d rising=%d fire=%d bestNow=%.0f bestNext=%.0f dmg=%.0f",
+			d.cmds, d.nowpn, d.noK, d.duck, d.noAtk, d.ang, d.plans, d.cand, d.noInfo, d.noHit, d.onUs, d.low, d.rising, d.fire, d.bestNow, d.bestNext, d.dmg);
 	d = {};
 }
 
@@ -53,6 +54,7 @@ static void Gmb_DiagFlush()
 #include "../movement/goomba_pure.h"
 int Movement_GoombaTarget();
 int Movement_GoombaPath(const gmb::PathPt** ppPath);
+int Movement_GoombaAhead();
 
 static gmb::V GV(const Vec3& v) { return { v.x, v.y, v.z }; }
 
@@ -64,7 +66,27 @@ static gmb::V GV(const Vec3& v) { return { v.x, v.y, v.z }; }
 // ProcessMovement on it for the latency in ticks and tests the z window every tick. Same here
 // through Amalgam's MoveSim: snapshot -> tCmd (the server time our cmd runs at), then n ticks
 // recorded. 0 = no sim (aim interfaces down / init failed): the caller keeps the parabola.
-int Aim_GoombaPath(int iIndex, float flCmdTime, int n, gmb::PathPt& tNow, gmb::PathPt* pOut)
+// blast damage for the push model. GetDamage() is the mult_dmg-hooked value and comes back 0
+// when the hook fails (autopogo.cpp:421 hit it too): 0 damage = 0 push on both bodies, every plan
+// scores the bare ctap (265) and never fires. Unhooked script value next, stock last
+// (tf_weapon_rocketlauncher / pipebomblauncher scripts: 90 / 120)
+static float Gmb_BlastDamage(CTFWeaponBase* pWeapon, float flStock)
+{
+	float f = pWeapon ? pWeapon->GetDamage() : 0.f;
+	if (f <= 0.f && pWeapon) f = pWeapon->GetDamage(false);
+	return f > 0.f ? f : flStock;
+}
+
+// server clock for the scan's AheadTicks (goomba_pure.h): netchannel rtt (out + in) and the
+// newest snapshot's server tick (0 = no client state: the scan counts no choke)
+float Aim_GoombaRtt()
+{
+	auto pNetChan = I::EngineClient->GetNetChannelInfo();
+	return pNetChan ? pNetChan->GetLatency(FLOW_OUTGOING) + pNetChan->GetLatency(FLOW_INCOMING) : 0.f;
+}
+int Aim_ServerTick() { return I::ClientState ? I::ClientState->m_ClockDriftMgr.m_nServerTick : 0; }
+
+int Aim_GoombaPath(int iIndex, int iAhead, int n, gmb::PathPt& tNow, gmb::PathPt* pOut)
 {
 	if (n <= 0 || !I::GameMovement || !I::MoveHelper || !I::Prediction || !H::Entities.GetLocal())
 		return 0;
@@ -81,8 +103,8 @@ int Aim_GoombaPath(int iIndex, float flCmdTime, int n, gmb::PathPt& tNow, gmb::P
 	MoveStorage tStorage;
 	if (F::MoveSim.Initialize(pEnt, tStorage, false, true))
 	{
-		// a stale snapshot is a lag spike, not physics: same 0.5 s clamp as the parabola
-		const int iPre = std::clamp(TIME_TO_TICKS(flCmdTime - tStorage.m_flSimTime), 0, TIME_TO_TICKS(0.5f));
+		// iAhead = gmb::AheadTicks (already 0.5 s capped), same shift the parabola uses
+		const int iPre = std::clamp(iAhead, 0, TIME_TO_TICKS(0.5f));
 		for (int i = 0; i < iPre; i++)
 			F::MoveSim.RunTick(tStorage, false);
 		tNow = Pt(tStorage.m_MoveData);
@@ -103,13 +125,36 @@ int Aim_GoombaPath(int iIndex, float flCmdTime, int n, gmb::PathPt& tNow, gmb::P
 // autodetonate GetRadius. -1 = nothing armed reaches us (a det would only be a crouch jump).
 // ponytail: no blast LOS trace (stickies under our own feet are never blocked); add the
 // ApplyToEntity trace (tf_gamerules.cpp:5771) if a wall between us ever fakes a boost.
+// last Aim_GoombaStickyKick call: stickies seen, armed, nearest armed one to our feet (the
+// movement scan's "GOOMBA S" line prints the hold's best, so a noSticky hold says why)
+// pipes / mine / type: every pipebomb in the world, the ones we threw, the last one's m_iType
+// (LocalStickies = ours + TF_GL_MODE_REMOTE_DETONATE, helpers.cpp:699) -> stk=0 with mine>0 = filter
+static struct { int n = 0, armed = 0, pipes = 0, mine = 0, type = -1; float nearest = 1e9f; } s_tStk;
+void Aim_GoombaStickyDiag(int& n, int& armed, float& nearest, int& pipes, int& mine, int& type)
+{
+	n = s_tStk.n; armed = s_tStk.armed; nearest = s_tStk.nearest; pipes = s_tStk.pipes; mine = s_tStk.mine; type = s_tStk.type;
+}
+
 float Aim_GoombaStickyKick(const gmb::Body& tMe, bool bDucked)
 {
 	static auto tf_grenadelauncher_livetime = H::ConVars.FindVar("tf_grenadelauncher_livetime");
 	static auto tf_sticky_radius_ramp_time = H::ConVars.FindVar("tf_sticky_radius_ramp_time");
 	static auto tf_sticky_airdet_radius = H::ConVars.FindVar("tf_sticky_airdet_radius");
+	s_tStk = {};
 	if (!H::Entities.GetLocal())
 		return -1.f;
+	for (auto pEnt : H::Entities.GetGroup(EntityEnum::WorldProjectile))
+	{
+		if (pEnt->GetClassID() != ETFClassID::CTFGrenadePipebombProjectile)
+			continue;
+		s_tStk.pipes++;
+		auto pPipe = pEnt->As<CTFGrenadePipebombProjectile>();
+		if (pPipe->m_hThrower().Get() == H::Entities.GetLocal())
+		{
+			s_tStk.mine++;
+			s_tStk.type = pPipe->m_iType();
+		}
+	}
 
 	float flKick = 0.f;
 	bool bAny = false;
@@ -119,9 +164,12 @@ float Aim_GoombaStickyKick(const gmb::Body& tMe, bool bDucked)
 		auto pWeapon = pBomb->m_hOriginalLauncher()->As<CTFWeaponBase>();
 		if (!pWeapon)
 			pWeapon = H::Entities.GetWeapon();
+		s_tStk.n++;
 		if (!pWeapon || !pBomb->m_flCreationTime()
 			|| I::GlobalVars->curtime < pBomb->m_flCreationTime() + SDK::AttribHookValue(0.8f, "sticky_arm_time", pWeapon))
 			continue;
+		s_tStk.armed++;
+		s_tStk.nearest = (std::min)(s_tStk.nearest, (GV(pBomb->GetAbsOrigin()) - tMe.org).Len());
 
 		float flRadius = 146.f;
 		if (!pBomb->m_bTouched() && tf_grenadelauncher_livetime && tf_sticky_radius_ramp_time && tf_sticky_airdet_radius)
@@ -130,7 +178,7 @@ float Aim_GoombaStickyKick(const gmb::Body& tMe, bool bDucked)
 			flRadius *= Math::RemapVal(I::GlobalVars->curtime - pBomb->m_flCreationTime(), flLive, flLive + flRamp, tf_sticky_airdet_radius->GetFloat(), 1.f);
 		}
 		flRadius = SDK::AttribHookValue(flRadius, "mult_explosion_radius", pWeapon);
-		const float flDmg = pBomb->m_flDamage() > 0.f ? pBomb->m_flDamage() : pWeapon->GetDamage();
+		const float flDmg = pBomb->m_flDamage() > 0.f ? pBomb->m_flDamage() : Gmb_BlastDamage(pWeapon, 120.f);
 
 		const gmb::V v = gmb::SelfStickyPush(GV(pBomb->GetAbsOrigin()), tMe, flDmg, flRadius, bDucked);
 		if (v.x != 0.f || v.y != 0.f || v.z != 0.f)
@@ -155,8 +203,8 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 	static auto sv_gravity = H::ConVars.FindVar("sv_gravity");
 	const float g = sv_gravity ? sv_gravity->GetFloat() : 800.f;
 	const int   iLead = (std::max)(g_goombaLead, 0);
-	// their snapshot -> the server time our fire cmd runs at, same shift as movement_ex.inl
-	const float t0 = std::clamp(TICKS_TO_TIME(pLocal->m_nTickBase()) - pThem->m_flSimulationTime(), 0.f, 0.5f) + TICKS_TO_TIME(iLead);
+	// their snapshot -> the server time our fire cmd runs at: movement_ex.inl's AheadTicks for them
+	const float t0 = TICKS_TO_TIME(Movement_GoombaAhead() + iLead);
 
 	const Vec3  vThemOrg = pThem->m_vecOrigin(), vThemVel = pThem->m_vecVelocity();
 	const float flThemHull = pThem->m_vecMaxs().z - pThem->m_vecMins().z, flThemHalf = pThem->m_vecMaxs().x;
@@ -209,13 +257,16 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 		return b;
 	};
 
-	const float flDmg = pWeapon->GetDamage();
+	const float flDmg = Gmb_BlastDamage(pWeapon, 90.f);
 	const float flRadius = 146.f * SDK::AttribHookValue(1.f, "mult_explosion_radius", pWeapon);
 
 	// candidates: Amalgam's own spot + a ring of pitches x yaws around our view
 	std::vector<Vec3> vCands = { vAngles };
 	const float flYaw = G::OriginalCmd.viewangles.y;
-	for (float flPitch : { 35.f, 50.f, 62.f, 72.f, 80.f, 86.f, 89.f })
+	// steep only: a goomba is a rocket jump off our own feet (~980 push, 3-4 ticks of flight).
+	// With 35-62 in the ring the first workable cmd was always the longest flight (35 deg, 6-8
+	// ticks, ~100u out): fired early and the blast never reached us (log 11-12: myMaxVz 277 = jump only)
+	for (float flPitch : { 72.f, 80.f, 86.f, 89.f })
 		for (int i = 0; i < 8; i++)
 			vCands.push_back({ flPitch, Math::NormalizeAngle(flYaw + 45.f * i), 0.f });
 
@@ -223,6 +274,7 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 	Pick tNow, tNext;
 	GmbDiag& d = s_tDiag;
 	d.plans++;
+	d.dmg = flDmg;
 	for (auto& vAng : vCands)
 	{
 		d.cand++;
@@ -259,7 +311,11 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 			const gmb::V vMePush = gmb::BlastImpulse(vBlast, tMe, flDmg, flRadius, 0.5f, 10.f /* in air at the blast: ctap or already flying */, bMeDuck ? 55.f : 82.f);
 			const gmb::V vThemPush = gmb::BlastImpulse(vBlast, tThem, flDmg, flRadius, 0.5f, 6.f, flThemForceZ);
 			tMe.vel = tMe.vel + vMePush; tThem.vel = tThem.vel + vThemPush;
-			const gmb::Outcome o = gmb::Fly(tMe, tThem, g, dt, 30);
+			gmb::Outcome o = gmb::Fly(tMe, tThem, g, dt, 30);
+			// a meeting high up (we climb ~15u a tick into a faller) is a coin flip on which of us
+			// the server moves first, on a long strafe guess: score it as push only, so the
+			// fire waits until they land on us right after the blast (gmb::kRocketMeet)
+			if (o.contact > gmb::kRocketMeet) { o.vz = o.theirVz; o.contact = -1; }
 			Pick& tBest = f ? tNext : tNow;
 			if (o.vz > tBest.flScore)
 				tBest = { o.vz, vAng, n, o, vMePush.z, vThemPush.z };
@@ -269,8 +325,11 @@ static bool GoombaPlan(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, bool bGrounded
 	d.bestNow = (std::max)(d.bestNow, tNow.flScore); d.bestNext = (std::max)(d.bestNext, tNext.flScore);
 	// beat a plain jump (289) or it is not a boost, and do not fire on a rising curve
 	if (tNow.flScore < 289.f) { d.low++; return false; }
-	if (tNow.flScore < tNext.flScore) { d.rising++; return false; }
+	// a landing plan fires on the first cmd it shows up: waiting for "next" walks the meeting to
+	// tick 1, where a one-tick ping slip puts them on our standing head (the jump margin's reason)
+	if (tNow.o.contact < 1 && tNow.flScore < tNext.flScore) { d.rising++; return false; }
 	d.fire++;
+	s_flPlanScore = tNow.flScore;
 	vAngles = tNow.vAng;
 	iDelay = tNow.n;
 	DebugLog("GOOMBA: rocket plan score=%.0f next=%.0f ticks=%d ang=%.0f/%.0f contact=%d myVz=%.0f pushMe=%.0f pushThem=%.0f",
@@ -482,7 +541,7 @@ void CAutoRocketJump::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* p
 				{
 					G::SilentAngles = true;
 					pCmd->viewangles = m_vAngles;
-					Movement_GoombaFired();
+					Movement_GoombaFired(s_flPlanScore);
 				}
 			}
 
@@ -513,22 +572,21 @@ void CAutoRocketJump::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* p
 				G::SilentAngles = bCurrGrounded;
 				pCmd->viewangles = m_vAngles;
 			}
-			Movement_GoombaFired();
+			Movement_GoombaFired(s_flPlanScore);
 		}
 
 		if (m_iFrame <= kChokeCount)
 			G::PSilentAngles = true, G::SilentAngles = false; // only con to this is that you may not be able to choke depending on the ticks charged
 
+		// goomba: duck from the ctap press to the end, not one cmd. Amalgam's ctap released it on
+		// the jump, so the blast met a standing hull (82, not 55: tf_player.cpp:10248) -- log
+		// 11-12: every hit ~919 = 976 * 55/82 + 265. Held in the air, the duck finishes at once
+		// (tf_gamemovement.cpp:3267) and the blast gets the crouched size the plan scores
 		if (m_iDelay > 1)
 		{
-			switch (m_iFrame - m_iDelay + 1)
-			{
-			case 0:
-				pCmd->buttons |= IN_DUCK;
-				break;
-			case 1:
-				pCmd->buttons |= IN_JUMP;
-			}
+			const int f = m_iFrame - m_iDelay + 1;
+			if (f >= 0) pCmd->buttons |= IN_DUCK;
+			if (f == 1) pCmd->buttons |= IN_JUMP;
 		}
 		else // won't ctap in time
 			pCmd->buttons |= IN_DUCK | IN_JUMP;

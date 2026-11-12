@@ -2,6 +2,7 @@
 #include "aim_global.h"
 #include "projsim.h"
 #include "../movement/goomba_pure.h"
+#include <chrono>
 
 // Auto air pogo (demoman). Bind held + sticky launcher out. On the ground it puts one sticky by
 // your feet for the launch; in the air it shoots stickies out in front of you and blows them
@@ -73,15 +74,17 @@ namespace
 	float s_flDetVz = 0.f, s_flKickZ = 0.f;
 	int   s_iJumpTick = 0;              // launch: tick of the cmd that sent IN_JUMP|IN_DUCK, det on the next
 	int   s_iDuckHold = 0;              // cmds to keep IN_DUCK after the launch det
+	float s_flLastYaw = 0.f;            // your view yaw last cmd (turn rate for OurPath)
+	int   s_iNextPlan = 0;              // failed plan: no new one before this tick (kRetry)
 
 	// one "POGO R:" line per bind hold: what every cmd was refused for
-	struct Diag { int cmds = 0, waiting = 0, noAtk = 0, plans = 0, cand = 0, noInfo = 0, noReach = 0, fired = 0, dets = 0, lastChance = 0, armedCmds = 0, jumps = 0, standUp = 0; float bestPush = 0.f, bestDetPush = 0.f; } s_tDiag;
+	struct Diag { int cmds = 0, waiting = 0, noAtk = 0, plans = 0, cand = 0, noInfo = 0, noReach = 0, fired = 0, dets = 0, lastChance = 0, armedCmds = 0, jumps = 0, standUp = 0; float bestPush = 0.f, bestDetPush = 0.f, planMs = 0.f, planMaxMs = 0.f; } s_tDiag;
 	void DiagFlush()
 	{
 		const Diag& d = s_tDiag;
 		if (d.cmds)
-			DebugLog("POGO R: cmds=%d waiting=%d noAtk=%d plans=%d cand=%d noInfo=%d noReach=%d fired=%d dets=%d lastChance=%d armedCmds=%d jumps=%d standUp=%d bestPush=%.0f bestDetPush=%.0f",
-				d.cmds, d.waiting, d.noAtk, d.plans, d.cand, d.noInfo, d.noReach, d.fired, d.dets, d.lastChance, d.armedCmds, d.jumps, d.standUp, d.bestPush, d.bestDetPush);
+			DebugLog("POGO R: cmds=%d waiting=%d noAtk=%d plans=%d cand=%d noInfo=%d noReach=%d fired=%d dets=%d lastChance=%d armedCmds=%d jumps=%d standUp=%d bestPush=%.0f bestDetPush=%.0f planMs=%.1f planMax=%.2f",
+				d.cmds, d.waiting, d.noAtk, d.plans, d.cand, d.noInfo, d.noReach, d.fired, d.dets, d.lastChance, d.armedCmds, d.jumps, d.standUp, d.bestPush, d.bestDetPush, d.planMs, d.planMaxMs);
 		s_tDiag = {};
 	}
 
@@ -112,6 +115,21 @@ namespace
 		const gmb::V v = me.vel + push;
 		const float flFwd = v.x * vFwd.x + v.y * vFwd.y, flSide = v.x * -vFwd.y + v.y * vFwd.x;
 		return v.z + flFwd - kSideCost * fabsf(flSide);
+	}
+
+	// launch sticky sits behind your feet at the jump-det: blast throws you up AND along the view,
+	// then the air chain takes over. Bomb's along-view offset from us must be in
+	// [-kBehindMax, -kBehindMin]. At the det our center is ~69u over blast src (JumpBody + the
+	// -10z), so 48..110 behind = push 35..58 deg off vertical (log at 4..56: fwd 921 vz 1029 = "up").
+	// Plan only: the det runs on score with your CURRENT view, a hard gate there refused every
+	// launch you turned after (log: 10x "gave up, planned det 54" vs 3 jumps).
+	constexpr float kBehindMin = 48.f, kBehindMax = 110.f;
+	constexpr int   kLaunchWin = 33;    // launch det at most 0.5 s after arm, not stand around for a better tick
+	constexpr int   kRetry = 4;         // a failed plan retries this many cmds later (full plan ~155 sticky sims)
+	bool Behind(const gmb::V& bomb, const gmb::Body& me, const Vec3& vFwd)
+	{
+		const float d = (bomb.x - me.org.x) * vFwd.x + (bomb.y - me.org.y) * vFwd.y;
+		return d <= -kBehindMin && d >= -kBehindMax;
 	}
 
 	struct Blast { float dmg, radius; bool duck; };
@@ -149,7 +167,12 @@ namespace
 	// det waited for a "better later tick" forever (log: armedCmds=38 bestDetPush=927 dets=0).
 	// ponytail: no low-wishspeed accel boost / back-speed clamp / surface friction (1) -- add if
 	// slow-walk or slide surfaces miss.
-	void OurPath(CTFPlayer* pLocal, const CUserCmd* pCmd, gmb::Body* q, bool* pGround)
+	// Turning: flYawRate = your yaw change last cmd (deg/cmd). The wish yaw keeps turning at it,
+	// decaying 5% a cmd (~20 cmds of it in total) -- an air strafe curves the path instead of the
+	// sim flying straight on where you no longer go.
+	// ponytail: decay is a guess at how long a mouse turn lasts -- tune kTurnDecay if curves over/undershoot.
+	constexpr float kTurnDecay = 0.95f;
+	void OurPath(CTFPlayer* pLocal, const CUserCmd* pCmd, float flYawRate, gmb::Body* q, bool* pGround)
 	{
 		static auto sv_gravity = H::ConVars.FindVar("sv_gravity");
 		static auto sv_airaccelerate = H::ConVars.FindVar("sv_airaccelerate");
@@ -167,17 +190,26 @@ namespace
 		bool bGround = pLocal->m_hGroundEntity();
 		if (bGround) v.z = 0.f;
 
-		Vec3 vF, vR, vU; Math::AngleVectors({ 0.f, pCmd->viewangles.y, 0.f }, &vF, &vR, &vU);
-		Vec3 vWishDir = { vF.x * pCmd->forwardmove + vR.x * pCmd->sidemove, vF.y * pCmd->forwardmove + vR.y * pCmd->sidemove, 0.f };
-		const float flWishRaw = vWishDir.Length();
-		if (flWishRaw > 0.f)
-			vWishDir = vWishDir * (1.f / flWishRaw);
+		float flYaw = pCmd->viewangles.y;
+		Vec3 vWishDir;
+		float flWishRaw = 0.f;
+		auto Wish = [&]()
+		{
+			Vec3 vF, vR, vU; Math::AngleVectors({ 0.f, flYaw, 0.f }, &vF, &vR, &vU);
+			vWishDir = { vF.x * pCmd->forwardmove + vR.x * pCmd->sidemove, vF.y * pCmd->forwardmove + vR.y * pCmd->sidemove, 0.f };
+			flWishRaw = vWishDir.Length();
+			if (flWishRaw > 0.f)
+				vWishDir = vWishDir * (1.f / flWishRaw);
+		};
+		Wish();
 		const float flWishSpeed = (std::min)(flWishRaw, flMax);
 		const float flWishGround = (std::min)(flWishRaw * (pLocal->IsDucking() ? 0.33333333f : 1.f), flMax);
 
 		CTraceFilterWorldAndPropsOnly tFilter = {}; tFilter.pSkip = pLocal;
 		for (int k = 0; k < kPath; k++)
 		{
+			if (k && fabsf(flYawRate) > 0.05f)
+				flYaw += flYawRate, flYawRate *= kTurnDecay, Wish();
 			q[k] = { GV(o), GV(v), vMaxs.x, vMaxs.z - vMins.z };
 			pGround[k] = bGround;
 
@@ -234,6 +266,15 @@ namespace
 	{
 		Diag& d = s_tDiag;
 		d.plans++;
+		struct Timer   // planMs = total plan time this hold, planMax = worst single plan (lag check)
+		{
+			std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+			~Timer()
+			{
+				const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+				s_tDiag.planMs += ms, s_tDiag.planMaxMs = (std::max)(s_tDiag.planMaxMs, ms);
+			}
+		} tTimer;
 		static auto tf_grenadelauncher_livetime = H::ConVars.FindVar("tf_grenadelauncher_livetime");
 		const float flLive = SDK::AttribHookValue(tf_grenadelauncher_livetime ? tf_grenadelauncher_livetime->GetFloat() : 0.8f, "sticky_arm_time", pWeapon);
 		const int   iArm = int(ceilf(flLive / TICK_INTERVAL - 0.01f));
@@ -242,6 +283,15 @@ namespace
 		const Blast tBlast = { b.dmg, b.radius, b.duck || bLaunch };
 		const float flGrav = Gravity();
 		const int   iFlags = ProjSimEnum::Trace | ProjSimEnum::InitCheck | ProjSimEnum::PredictCmdNum | (f ? ProjSimEnum::NoRandomAngles : 0);
+		// last det step worth simulating to: launch = kLaunchWin past arm, air = until we touch down.
+		// Every step is a hull trace -- an up shot flew the full 132 for nothing (lag).
+		int iMaxM = bLaunch ? iArm + kLaunchWin : kPath - 1 - f;
+		if (!bLaunch)
+			for (int k = f + 1; k < kPath; k++)
+				if (pGround[k]) { iMaxM = k - f; break; }
+		const int iSteps = (std::min)(kFlight, iMaxM);
+		if (iSteps < iArm)
+			return false;   // we land before any sticky could arm
 
 		// one aim -> its best det tick + score (-1e9 = no det tick pushes us >= kMinPush)
 		Shot tSim;
@@ -268,7 +318,7 @@ namespace
 			F::ProjSim.SetupTrace(tFilter, nMask, pWeapon);
 			tSim.vPath.clear();
 			tSim.land = -1;
-			for (int k = 1; k <= kFlight; k++)
+			for (int k = 1; k <= iSteps; k++)
 			{
 				const Vec3 vOld = F::ProjSim.GetOrigin();
 				F::ProjSim.RunTick(tInfo, false);
@@ -290,11 +340,13 @@ namespace
 
 			float flRes = -1e9f;
 			const int iLast = tSim.land >= 0 ? kPath : int(tSim.vPath.size());   // gone after its last sim step
-			for (int m = iArm; f + m < kPath && m <= iLast; m++)
+			for (int m = iArm; f + m < kPath && m <= iLast && m <= iMaxM; m++)
 			{
 				if (bLaunch ? !pGround[f + m - 1] : pGround[f + m])
 					break;   // air: we touched down first, the pogo is over. ground: walked off, no jump cmd
 				const gmb::Body me = bLaunch ? JumpBody(q[f + m], flGrav) : q[f + m];
+				if (bLaunch && !Behind(GV(ShotPos(tSim, m)), me, vFwd))
+					continue;   // launch = behind you only
 				const gmb::V vPush = ShotPush(tSim, tBlast, m, me);
 				d.bestPush = (std::max)(d.bestPush, vPush.z);
 				if (vPush.z < kMinPush)
@@ -354,6 +406,7 @@ void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 		if (s_iHold)
 			pCmd->buttons &= ~IN_ATTACK;   // bind let go mid-press: the launch fires with your view, as a normal tap would
 		s_iHold = 0, s_iJumpTick = 0, s_iDuckHold = 0;
+		s_flLastYaw = G::OriginalCmd.viewangles.y;
 		if (!pLocal->IsAlive() || pWeapon && pWeapon->GetWeaponID() != TF_WEAPON_PIPEBOMBLAUNCHER)
 			s_vShots.clear();   // dead / swapped: those stickies are not ours to time any more
 		DiagFlush();
@@ -369,10 +422,12 @@ void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 		146.f * SDK::AttribHookValue(1.f, "mult_explosion_radius", pWeapon), pLocal->IsDucking() };
 	const Vec3 vView = G::OriginalCmd.viewangles;   // where you look (before any silent aim)
 	Vec3 vFwd; Math::AngleVectors({ 0.f, vView.y, 0.f }, &vFwd);
+	const float flYawRate = std::clamp(Math::NormalizeAngle(vView.y - s_flLastYaw), -15.f, 15.f);   // a flick isn't a turn
+	s_flLastYaw = vView.y;
 
 	static gmb::Body q[kPath];
 	static bool g[kPath];
-	OurPath(pLocal, pCmd, q, g);
+	OurPath(pLocal, pCmd, flYawRate, q, g);
 
 	// ---- det: every armed sticky we fired vs where you really are ----
 	// The plan only picked the aim; you steer after the shot, so the det never waits for the
@@ -393,16 +448,20 @@ void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 			Shot& t = s_vShots[i];
 			if (t.land < 0 || iTick - t.fireTick < t.land)
 				continue;
+			// NEAREST stuck bomb within 48: first-within-96 grabbed an old given-up sticky lying next
+			// to the new one (log: "stuck off=92" x3 then "gave up" x3) and timed the det off it
+			float flNear = 48.f;
 			for (auto pEnt : vBombs)
 			{
 				auto pBomb = pEnt->As<CTFGrenadePipebombProjectile>();
-				if (!pBomb->m_bTouched() || pBomb->GetAbsOrigin().DistTo(t.vPath.back()) > 96.f)
+				const float flOff = pBomb->GetAbsOrigin().DistTo(t.vPath.back());
+				if (!pBomb->m_bTouched() || flOff > flNear)
 					continue;
-				if (!t.seen)   // aim check: how far the real sticky stuck from the plan
-					t.seen = true, DebugLog("POGO: stuck m=%d off=%.0f", iTick - t.fireTick, pBomb->GetAbsOrigin().DistTo(t.vPath.back()));
+				flNear = flOff;
 				vRealPos[i] = pBomb->GetAbsOrigin(), vReal[i] = &vRealPos[i];
-				break;
 			}
+			if (vReal[i] && !t.seen)   // aim check: how far the real sticky stuck from the plan
+				t.seen = true, DebugLog("POGO: stuck m=%d off=%.0f", iTick - t.fireTick, flNear);
 		}
 		// summed push on me of every shot armed by the det at k cmds from now (only those blow)
 		auto PushAt = [&](int k, const gmb::Body& me, bool bDuck, bool& bArmed) -> gmb::V
@@ -565,9 +624,13 @@ void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 		s_tDiag.waiting++;
 	else if (pWeapon->m_iClip1() <= 0 || !(G::CanPrimaryAttack || G::Reloading) || pWeapon->As<CTFPipebombLauncher>()->m_flChargeBeginTime() > 0.f)
 		s_tDiag.noAtk++;
+	else if (iTick < s_iNextPlan && iTick >= s_iNextPlan - kRetry)   // 2nd check: tickbase jumped back (map change)
+		s_tDiag.waiting++;
 	else if (Plan(pLocal, pWeapon, q, g, kHold, tBlast, vFwd, vView, s_tPressPlan, s_vPressAng))   // launches kHold cmds from now
 	{
 		pCmd->buttons |= IN_ATTACK;
 		s_iHold = kHold;
 	}
+	else
+		s_iNextPlan = iTick + kRetry;
 }

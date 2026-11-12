@@ -696,7 +696,9 @@ void CEntities::Store()
 			if (nClassID == ETFClassID::CTFGrenadePipebombProjectile)
 			{
 				auto pPipebomb = pEntity->As<CTFGrenadePipebombProjectile>();
-				if (pPipebomb->m_hThrower().Get() == pLocal && pPipebomb->m_iType() == TF_GL_MODE_REMOTE_DETONATE /*pPipebomb->HasStickyEffects()*/)
+				// HasStickyEffects (tf_weapon_grenade_pipebomb.h:53): REMOTE_DETONATE + _PRACTICE (Sticky Jumper)
+				const int iType = pPipebomb->m_iType();
+				if (pPipebomb->m_hThrower().Get() == pLocal && (iType == TF_GL_MODE_REMOTE_DETONATE || iType == TF_GL_MODE_REMOTE_DETONATE_PRACTICE))
 					m_mGroups[EntityEnum::LocalStickies].push_back(pEntity);
 			}
 

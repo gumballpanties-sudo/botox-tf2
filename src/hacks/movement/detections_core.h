@@ -13,7 +13,7 @@ struct DetEb
 {
     bool  prevAir = false;
     float prevVz = 0.f, prevSpeed = 0.f;
-    int   prevTick = 0, candTick = 0, lastBugTick = 0;
+    int   prevTick = 0, candTick = 0, lastBugTick = 0, tbTick = 0;
     float candVz = 0.f;
 };
 
@@ -23,6 +23,11 @@ inline int DetEbStep(DetEb& s, const DetStart& st, float g, bool tb, bool ps)
 {
     const bool prevOk = s.prevAir && s.prevTick == st.tick - 1;
     int bug = 0;
+
+    // tb hit on cmd N pins the START of N+1 at ~-g with tb already off (log 11-12: act=P then
+    // act=F printed "edgebugged"). Veto 2 ticks after the last tb hit, not just this one
+    if (tb) s.tbTick = st.tick;
+    tb = s.tbTick && st.tick - s.tbTick <= 2;
 
     if (s.candTick && st.tick == s.candTick + 1 && !tb
         && (st.landedWalk || (st.air && st.vz < s.candVz - g * 1.5f)))

@@ -620,6 +620,15 @@ int   g_edgeBugHwTicks = 32;            // botox m_edgebug_hw_* defaults
 float g_edgeBugHwLockAmt = 0.3f;
 bool  g_edgeBugHwAdvanced = false;
 float g_edgeBugHwStrafeDeltaMax = 10.f;
+bool  g_edgeBugHerCrouch = true;        // heroin-new edgebug_* defaults (.data)
+bool  g_edgeBugHerUnsafe = false;
+bool  g_edgeBugHerStrafe = false;
+bool  g_edgeBugHerAdvanced = false;
+int   g_edgeBugHerMode = 0;             // 0 static / 1 continuous
+int   g_edgeBugHerIters = 4;
+float g_edgeBugHerTime = 0.5f;
+float g_edgeBugHerStrafeLimit = 15.f;
+int   g_edgeBugHerLock = 85;
 bool  g_edgeBugViz = false;         // draw the latched plan (path + landing pad)
 float g_edgeBugVizSize = 16.f;      // pad half-width; 16 = the player hull's own footprint
 float g_edgeBugVizColor[4] = { 1.f, 1.f, 1.f, 1.f };     // path + pad outline (botox m_edgebug_visualize_color)

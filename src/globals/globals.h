@@ -673,6 +673,9 @@ extern float g_edgeBugDnaScan;      extern bool g_edgeBugDnaAdvanced; extern int
 extern bool  g_edgeBugDnaCustomAngle; extern float g_edgeBugDnaAngleLimit;
 extern int   g_edgeBugHwTicks;      extern float g_edgeBugHwLockAmt;  extern bool  g_edgeBugHwAdvanced;
 extern float g_edgeBugHwStrafeDeltaMax;
+extern bool  g_edgeBugHerCrouch;    extern bool g_edgeBugHerUnsafe;   extern bool  g_edgeBugHerStrafe;
+extern bool  g_edgeBugHerAdvanced;  extern int  g_edgeBugHerMode;     extern int   g_edgeBugHerIters;
+extern float g_edgeBugHerTime;      extern float g_edgeBugHerStrafeLimit; extern int g_edgeBugHerLock;
 extern bool  g_edgeBugViz;        // draw the latched plan: its flight path + a pad on the bug tick
 extern float g_edgeBugVizSize;     // half-width of that pad, world units (def 16 = the hull)
 extern float g_edgeBugVizColor[4]; // botox edgebug visualize popup: line color / thickness,

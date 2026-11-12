@@ -1992,7 +1992,7 @@ static MvDrift MV_DriftHold(void* pLocal, UserCmd_t* cmd, int frame, const Vec3&
 // THE PROOF IS LONG, NOT 2 TICKS. 11-08 log: a 2-tick proof passed 3 ticks running (press 30 ->
 // 50) and the ride still fell on the 4th -- greedy "pins the next 2" picks presses that walk the
 // hull into a state no press can hold. Each candidate now flies k_stickHorizon ticks and the one
-// that holds LONGEST wins (ties: list order = least press, steer kept); a full hold exits early,
+// that holds LONGEST wins (ties: harder press, then list order = steer kept); a full hold exits early,
 // so a healthy ride costs one candidate.
 // STANCE IS NOT OURS. The crouch is PixelSurf's (its flip hunt picks the tick to duck / stand, which
 // a held-from-now flip cannot: 11-08 log, a "flip now" pass won 0 ticks out of every ride). The
@@ -2196,7 +2196,7 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
             const int s0 = simsUsed;
             const int h = proof(mv);
             pressSims += simsUsed - s0;
-            if (h > best) { best = h; bestMove = mv; bestPress = m; }
+            if (h > best || (h > 0 && h == best && m > bestPress)) { best = h; bestMove = mv; bestPress = m; }   // tie = harder press
             if (best >= k_stickHorizon) break;
         }
     }
@@ -2439,8 +2439,7 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
     // botox's loop below takes the FIRST press that pins one tick = the shallowest catch on offer, and
     // PixelSurf's hold then swapped it for its own 2-tick-proof gain strafe anyway. Here every candidate
     // flies up to k_catchHorizon ticks and the one that HOLDS LONGEST wins; s_aaStickOwns makes PS
-    // keep it. Ties: list order -- PS's own gain strafe first when PS would have used it (same pick as
-    // before when nothing is deeper), then least press, steer kept. 200 / 450 are in because 90 only
+    // keep it. Ties: hardest press, then list order -- PS's own gain strafe (450) first, steer kept. 200 / 450 are in because 90 only
     // reaches 13.5 of the 30 u/s air accel cap. sv_wallbug 1 keeps botox's loop: no drift, every ride
     // holds, nothing to choose. CATCH TICKS ONLY: a cmd that starts pinned is a live ride -- the stick's
     // (with the TB bind on this scan still runs on ride ticks, the stick only after TB), and 160 sims a
@@ -2475,7 +2474,9 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
             if (SimsLeft() < 1 || sims >= k_catchSimCap) return true;
             ++cands;
             const int h = fly();
-            if (h > bestHold)
+            // tie = HARDEST press wins (user: push harder once caught). 11-12 log: every catch tied
+            // hold=1/33 over all 24-25 candidates and list order handed it to press=0, the softest
+            if (h > bestHold || (h > 0 && h == bestHold && press > bestPress))
             {
                 bestHold = h; bestFwd = pCmd->forwardmove; bestSide = pCmd->sidemove;
                 bestPress = press; bestKind = kind;
@@ -2525,7 +2526,10 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
         if (iPass == 0 && fabsf(flTangent) < 10.f)
             continue;
 
-        for (float flMultiplier = 0.f; flMultiplier < 100.f; flMultiplier += 10.f)
+        // ride ticks: hardest first, first pin wins (botox went 0 -> 90 = softest pin, and 90 is only
+        // 13.5 of the 30 u/s air accel cap; 200 / 450 reach it)
+        static constexpr float k_ridePress[] = { 450.f, 200.f, 90.f, 80.f, 70.f, 60.f, 50.f, 40.f, 30.f, 20.f, 10.f, 0.f };
+        for (const float flMultiplier : k_ridePress)
         {
             RestoreOriginal();
 

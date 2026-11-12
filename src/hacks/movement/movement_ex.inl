@@ -108,8 +108,11 @@ static void DelayHop(void* pLocal, UserCmd_t* pCmd)
 #include "goomba_pure.h"
 
 // aim tree (autorocketjump.cpp): MoveSim target path + our sticky launch
-int   Aim_GoombaPath(int iIndex, float flCmdTime, int n, gmb::PathPt& tNow, gmb::PathPt* pOut);
+int   Aim_GoombaPath(int iIndex, int iAhead, int n, gmb::PathPt& tNow, gmb::PathPt* pOut);
+float Aim_GoombaRtt();
+int   Aim_ServerTick();
 float Aim_GoombaStickyKick(const gmb::Body& tMe, bool bDucked);
+void  Aim_GoombaStickyDiag(int& n, int& armed, float& nearest, int& pipes, int& mine, int& type);
 
 // IClientNetworkable::IsDormant = slot 8 (same read as world_fx3.cpp Dormant)
 static bool Gmb_Dormant(int idx)
@@ -148,11 +151,19 @@ static float Gmb_SimTime(void* p) { const int o = Gmb_SimOff(); return o > 0 ? *
 
 // ---- outcome tracker: after every fire, watch the target 40 cmds and log what it did. The fire
 // is a guess, this is the measurement: maxVz = the boost they actually got, land = server ticks
-// from our fire cmd to the snapshot that shows them standing (on us) ----
-// boost = the vz we predicted they inherit (our launch vz), maxVz = what they really got
-struct GmbTrack { int idx = 0, left = 0, type = 0, pred = 0, lead = 0, fireTick = 0, landTick = -1; float vzFire = 0.f, boost = 0.f, maxVz = -1e9f, myMaxVz = -1e9f; bool sim = false; };
+// from the server frame our fire cmd ran in (fire snapshot tick + ahead) to the first snapshot
+// showing them standing -- pred is on the same clock, so land - pred = our timing error.
+// boost = the vz we predicted they inherit (our launch vz / the rocket plan's score).
+// hit = they got >= half of it. (No own-vz readout: the local m_vecVelocity never showed a blast,
+// it read the 277 jump on hits of 1792) ----
+struct GmbTrack { int idx = 0, left = 0, type = 0, pred = 0, lead = 0, fireSrv = 0, landSrv = -1; float vzFire = 0.f, boost = 0.f, maxVz = -1e9f; bool sim = false; };
+// running totals per type since inject (a result lands up to 40 cmds after its hold ended)
+static struct { int fires = 0, hits = 0; float ratio = 0.f; } s_gmbWin[3];
 static GmbTrack s_gmbTrk;
-static int   s_gmbBestIdx = 0, s_gmbBestK = -1, s_gmbMyTick = 0;   // this cmd's scan
+static int   s_gmbBestIdx = 0, s_gmbBestK = -1, s_gmbMyTick = 0, s_gmbBestAhead = 0;   // this cmd's scan
+// per player: last simtime seen + the server tick it was seen to move at (choke age = now - that)
+static float s_gmbSim[102];
+static int   s_gmbSimTick[102];
 static float s_gmbBestVz = 0.f, s_gmbBoost = 0.f;
 static bool  s_gmbBestSim = false;
 // best target's ProcessMovement path (0 = parabola): the rocket plan reads it this same cmd
@@ -162,32 +173,35 @@ static int s_gmbPathN = 0;
 
 static void Gmb_TrackLog(const GmbTrack& t, const char* tail)
 {
-    DebugLog("GOOMBA: result type=%d pred=%d lead=%d sim=%d land=%d vzFire=%.0f boost=%.0f maxVz=%.0f myMaxVz=%.0f%s",
-             t.type, t.pred, t.lead, t.sim, t.landTick >= 0 ? t.landTick - t.fireTick : -99,
-             t.vzFire, t.boost, t.maxVz, t.myMaxVz, tail);
+    const bool hit = t.boost > 0.f && t.maxVz >= 0.5f * t.boost;
+    const float ratio = t.boost > 0.f ? t.maxVz / t.boost : 0.f;
+    auto& w = s_gmbWin[std::clamp(t.type, 0, 2)];
+    w.fires++; w.hits += hit; w.ratio += ratio;
+    DebugLog("GOOMBA: result type=%d hit=%d pred=%d land=%d lead=%d sim=%d vzFire=%.0f boost=%.0f maxVz=%.0f ratio=%.2f total=%d/%d avg=%.2f%s",
+             t.type, hit, t.pred, t.landSrv >= 0 ? t.landSrv - t.fireSrv : -99, t.lead, t.sim,
+             t.vzFire, t.boost, t.maxVz, ratio, w.hits, w.fires, w.ratio / (float)w.fires, tail);
 }
 
 static void Gmb_TrackStart(int type)
 {
     if (s_gmbBestIdx <= 0) return;
     if (s_gmbTrk.left > 0) Gmb_TrackLog(s_gmbTrk, " (cut short)");   // a fire before the last one finished
-    s_gmbTrk = { s_gmbBestIdx, 40, type, s_gmbBestK, (std::max)(g_goombaLead, 0), s_gmbMyTick, -1,
-                 s_gmbBestVz, s_gmbBoost, -1e9f, -1e9f, s_gmbBestSim };
+    s_gmbTrk = { s_gmbBestIdx, 40, type, s_gmbBestK, (std::max)(g_goombaLead, 0),
+                 Aim_ServerTick() + s_gmbBestAhead, -1, s_gmbBestVz, s_gmbBoost, -1e9f, s_gmbBestSim };
 }
 
 static void Gmb_TrackTick(void* pLocal, float dt)
 {
+    (void)pLocal; (void)dt;
     GmbTrack& t = s_gmbTrk;
     if (t.left <= 0) return;
-    // ours: what the landing could hand them (their gain ~= this when the transfer lands clean)
-    t.myMaxVz = (std::max)(t.myMaxVz, EntV3(pLocal, g_offVelocity).z);
     void* p = GetClientEntity(t.idx);
     const bool ok = p && EntAlive(p) && !Gmb_Dormant(t.idx);
     if (ok)
     {
         t.maxVz = (std::max)(t.maxVz, EntV3(p, g_offVelocity).z);
-        if (t.landTick < 0 && (EntI(p, g_offFlags) & FL_ONGROUND))
-            t.landTick = (int)(Gmb_SimTime(p) / dt + 0.5f);
+        if (t.landSrv < 0 && (EntI(p, g_offFlags) & FL_ONGROUND))
+            t.landSrv = Aim_ServerTick();
     }
     if (!ok || --t.left == 0)
     {
@@ -196,21 +210,29 @@ static void Gmb_TrackTick(void* pLocal, float dt)
     }
 }
 
-void Movement_GoombaFired() { s_goombaFired = true; Gmb_TrackStart(1); }
+// rocket fire (autorocketjump.cpp): score = the plan's predicted vz for them = the tracker's boost
+void Movement_GoombaFired(float flScore) { s_goombaFired = true; s_gmbBoost = flScore; Gmb_TrackStart(1); }
 int  Movement_GoombaTarget() { return s_gmbBestIdx; }   // this cmd's best target (0 = none), for the rocket plan
 int  Movement_GoombaPath(const gmb::PathPt** pp) { *pp = s_gmbPath; return s_gmbBestIdx > 0 ? s_gmbPathN : 0; }
+int  Movement_GoombaAhead() { return s_gmbBestAhead; }   // best target's snapshot -> our cmd shift, ticks
 
 // ---- scan summary: one "GOOMBA S:" line per bind hold. Each count = cmds where at least one
 // player got past that filter, in filter order, so the first big drop names the filter.
 // noSticky = sticky type with nothing armed in reach (no fire); sim = cmds the path came from
 // ProcessMovement, not the parabola ----
-static struct GmbScan { int cmds = 0, noSticky = 0, air = 0, fall = 0, gap = 0, contact = 0, over = 0, sim = 0; } s_gmbScan;
+// k1..k4 = cmds whose best contact was that tick (k4 = 4+): a gate that never sees its fire tick
+// shows up here. onUs = target already inside our head's 2u probe at our cmd (nothing to time)
+// stk = over the hold's sticky gates: most stickies seen / armed, nearest armed one (u, 146 = stock radius)
+static struct GmbScan { int cmds = 0, noSticky = 0, air = 0, fall = 0, gap = 0, contact = 0, over = 0, sim = 0, onUs = 0, k[4] = {};
+                        int stkN = 0, stkArmed = 0, pipes = 0, mine = 0, type = -1; float stkNear = 1e9f; } s_gmbScan;
 static void Gmb_ScanFlush()
 {
     const GmbScan& s = s_gmbScan;
     if (s.cmds)
-        DebugLog("GOOMBA S: type=%d cmds=%d noSticky=%d air=%d fall=%d gap=%d contact=%d over=%d sim=%d",
-                 g_goombaHow, s.cmds, s.noSticky, s.air, s.fall, s.gap, s.contact, s.over, s.sim);
+        DebugLog("GOOMBA S: type=%d cmds=%d noSticky=%d air=%d fall=%d gap=%d contact=%d over=%d sim=%d onUs=%d k1=%d k2=%d k3=%d k4+=%d stk=%d armed=%d near=%.0f pipes=%d mine=%d ptype=%d",
+                 g_goombaHow, s.cmds, s.noSticky, s.air, s.fall, s.gap, s.contact, s.over, s.sim, s.onUs,
+                 s.k[0], s.k[1], s.k[2], s.k[3], s.stkN, s.stkArmed, s.stkNear < 1e8f ? s.stkNear : -1.f,
+                 s.pipes, s.mine, s.type);
     s_gmbScan = {};
 }
 
@@ -218,7 +240,7 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
 {
     static float s_latchUntil = 0.f;   // one fire per drop: back-to-back cmds see the same contact
     s_goombaRocketK = -1;
-    s_gmbBestIdx = 0; s_gmbBestK = -1; s_gmbPathN = 0; s_gmbBestSim = false; s_gmbBoost = 0.f;
+    s_gmbBestIdx = 0; s_gmbBestK = -1; s_gmbPathN = 0; s_gmbBestSim = false; s_gmbBoost = 0.f; s_gmbBestAhead = 0;
     if (!g_goomba || !g_globalVars || !g_entityList) { Gmb_ScanFlush(); return; }
     if (g_offOrigin <= 0 || g_offMins <= 0 || g_offMaxs <= 0 || g_offVelocity <= 0
         || g_offTeamNum <= 0 || g_offFlags <= 0) return;
@@ -230,13 +252,25 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
     const float rt = g_globalVars->realtime;
     const float dt = g_globalVars->interval_per_tick > 0.f ? g_globalVars->interval_per_tick : 0.015f;
     const int   n  = (std::min)(g_globalVars->maxClients > 0 ? g_globalVars->maxClients : 101, 101);
-    const int   lead = (std::max)(g_goombaLead, 0);
+
+    // ping: their snapshot runs forward by rtt + their choke age, all in server ticks
+    // (gmb::AheadTicks). Choke age = server ticks since their simtime last moved; tracked every
+    // held cmd, before the latch/ground returns, so a skipped cmd never hides a choke
+    const float rtt = Aim_GoombaRtt();
+    const int   srvTick = Gmb_SimOff() > 0 ? Aim_ServerTick() : 0;   // 0 = no choke counted
+    if (srvTick > 0)
+        for (int i = 1; i <= n; ++i)
+            if (void* p = GetClientEntity(i))
+            {
+                const float st = Gmb_SimTime(p);
+                if (st != s_gmbSim[i] || s_gmbSimTick[i] > srvTick) { s_gmbSim[i] = st; s_gmbSimTick[i] = srvTick; }
+            }
+    // fire gate lead; jump + sticky aim contact one tick later (gmb::kJumpMargin). Rocket keeps the raw slider
+    const int   lead = (std::max)(g_goombaLead, 0) + (g_goombaHow != 1 ? gmb::kJumpMargin : 0);
     const bool  rocket = g_goombaHow == 1;
     const bool  onGround = EntGround(pLocal);
     if (!rocket && rt < s_latchUntil) return;
     if (g_goombaHow == 2 && !onGround) return;   // a regular jump only leaves the floor
-
-    const float myTime = (float)s_gmbMyTick * dt;
 
     const float g = CvarFloat("sv_gravity", 800.f);
     const bool  teamSolid = CvarFloat("tf_avoidteammates", 1.f) == 0.f;   // 1 = teammates pass through
@@ -252,7 +286,7 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
     const float myVz0 = (onGround && !rocket) ? 289.f : (onGround ? 0.f : myVel.z);
     // rocket: the ARJ decides against its own rocket flight time (up to 12 ticks for a shallow
     // pitch) plus one, and a -1500 drop covers ~22u a tick, so look well past that
-    const int   maxK = rocket ? 24 + lead : 2 + lead;
+    const int   maxK = rocket ? 24 + lead : 3 + lead;   // non-rocket: fire window + both prime cmds
     const int   nPath = (std::min)(maxK, kGmbPathMax);
 
     s_gmbScan.cmds++;
@@ -266,6 +300,12 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
         b.org = { me.x + myVel.x * dt, me.y + myVel.y * dt, me.z + gmb::Rise(myVz0, g, dt) };
         b.half = myMaxs.x; b.hullZ = myMaxs.z - myMins.z;
         kick = Aim_GoombaStickyKick(b, (EntI(pLocal, g_offFlags) & FL_DUCKING) != 0);
+        int sn = 0, sa = 0, sp = 0, sm = 0, st = -1; float snear = 1e9f;
+        Aim_GoombaStickyDiag(sn, sa, snear, sp, sm, st);
+        s_gmbScan.stkN = (std::max)(s_gmbScan.stkN, sn); s_gmbScan.stkArmed = (std::max)(s_gmbScan.stkArmed, sa);
+        s_gmbScan.stkNear = (std::min)(s_gmbScan.stkNear, snear);
+        s_gmbScan.pipes = (std::max)(s_gmbScan.pipes, sp); s_gmbScan.mine = (std::max)(s_gmbScan.mine, sm);
+        if (st >= 0) s_gmbScan.type = st;
         if (kick <= 0.f) { s_gmbScan.noSticky++; return; }
     }
     const float boost = gmb::LaunchVz(myVz0, myFalls, kick, g, dt);   // what a landing on us inherits
@@ -281,10 +321,9 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
         if (EntI(p, g_offFlags) & FL_ONGROUND) continue;   // standing on us / anything: not falling
         sAir = true;
 
-        // snapshot -> the server time our cmd lands at. Clamp: a stale simtime is a lag spike, not physics
-        float t0 = 0.f;
-        if (Gmb_SimOff() > 0 && myTime > 0.f)
-            t0 = std::clamp(myTime - Gmb_SimTime(p), 0.f, 0.5f);
+        // snapshot -> the server frame our cmd runs in (whole ticks: the server moves them per tick)
+        const int   ahead = gmb::AheadTicks(rtt, srvTick > 0 ? srvTick - s_gmbSimTick[i] : 0, dt);
+        const float t0 = dt * (float)ahead;
 
         const Vec3  org = EntV3(p, g_offOrigin);
         const Vec3  v = EntV3(p, g_offVelocity);
@@ -301,14 +340,17 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
         // is not worth a ProcessMovement sim -- walls and ledges only delay or stop a landing
         if (gmb::ContactTick(gap, vz, myVz0, myFalls, g, dt, maxK + 8, kick) < 0) continue;
 
-        const float reach = myMaxs.x + EntV3(p, g_offMaxs).x - 1.f;
+        // rocket: z only. Its plan (autorocketjump.cpp GoombaPlan) flies both bodies with the blast
+        // push, which moves us sideways under them too, and checks xy there. The scan's own xy
+        // over a 24-tick strafe guess only came true 1-4 ticks out, past any rocket flight time
+        const float reach = rocket ? 1e9f : myMaxs.x + EntV3(p, g_offMaxs).x - 1.f;
         int k = -1;
-        const int got = Aim_GoombaPath(i, myTime, nPath, now, path);
+        const int got = Aim_GoombaPath(i, ahead, nPath, now, path);
         if (got > 0)
         {
             sSim = true;
             // already within their 2u ground probe at our cmd: they stand on us, nothing to time
-            if (now.z - myHead <= gmb::kTouch) continue;
+            if (now.z - myHead <= gmb::kTouch) { s_gmbScan.onUs++; continue; }
             k = gmb::PathContact(path, got, me.x, me.y, me.z, myVel.x, myVel.y, myMaxs.z,
                                  myVz0, myFalls, kick, reach, g, dt);
         }
@@ -325,6 +367,7 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
         if (best < 0 || k < best)
         {
             best = k; s_gmbBestIdx = i; s_gmbBestVz = got > 0 ? now.vz : vz; s_gmbBestSim = got > 0;
+            s_gmbBestAhead = ahead;
             s_gmbPathN = got;
             for (int j = 0; j < got; ++j) s_gmbPath[j] = path[j];
         }
@@ -333,6 +376,7 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
     s_gmbScan.over += best >= 0; s_gmbScan.sim += sSim;
     s_gmbBestK = best;
     if (best < 0) return;
+    s_gmbScan.k[(std::min)(best, 4) - 1]++;
     if (rocket) { s_goombaRocketK = best; return; }
     s_gmbBoost = boost;
 
@@ -346,8 +390,9 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
     s_goombaFired = true;
     s_latchUntil = rt + 0.3f;
     Gmb_TrackStart(g_goombaHow);
-    DebugLog("GOOMBA: fire type=%d contact=%d lead=%d tick=%d sim=%d kick=%.0f boost=%.0f",
-             g_goombaHow, best, lead, s_gmbMyTick, s_gmbBestSim, kick, boost);
+    DebugLog("GOOMBA: fire type=%d contact=%d lead=%d tick=%d sim=%d kick=%.0f boost=%.0f ahead=%d rtt=%.0fms choke=%d",
+             g_goombaHow, best, lead, s_gmbMyTick, s_gmbBestSim, kick, boost, s_gmbBestAhead, rtt * 1000.f,
+             srvTick > 0 ? srvTick - s_gmbSimTick[s_gmbBestIdx] : 0);
 }
 
 // ==== double jump strafe: scout AirDash writes velocity = wish vector (tf_gamemovement.cpp:1043,

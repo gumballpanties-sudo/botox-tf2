@@ -261,7 +261,7 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         if (keeps_pin())
             return 1;
         const float yaws[2]    = { RAD2DEGF(atan2f(wish.y, wish.x)), RAD2DEGF(atan2f(-n.y, -n.x)) };
-        const float presses[2] = { 45.f, 450.f };
+        const float presses[2] = { 450.f, 45.f };   // hardest first: push harder once caught
         for (int i = 0; i < 2; i++) {
             if (i == 0 && len <= 0.01f)
                 continue;

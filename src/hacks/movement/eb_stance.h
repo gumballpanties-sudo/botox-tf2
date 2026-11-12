@@ -350,3 +350,32 @@ inline bool MV_EbKeepPlan(bool curBlocked, float curErr, bool selBlocked, float 
     if (curBlocked != selBlocked) return !curBlocked;
     return selErr > curErr - 4.f;
 }
+
+// ================= heroin detect (heroin-new FUN_180077f40, style 4) =========================
+// TF2's real signature, no bands: the lip clip zeroes vz inside TryPlayerMove, the hull misses
+// the floor in CategorizePosition, FinishGravity takes half a tick (tf_gamemovement.cpp:2692)
+// -> vz after the tick == -hg exactly, not grounded. Second door: last tick slowed the fall
+// (prev < cur) and this one is plain gravity again; heroin flies one more tick to prove it.
+// prev = vz at the start of the previous sim tick (0 on tick 1), cur = start of this one,
+// now = after it, hg = half gravity per tick. Heroin compares floats exact: 1e-3 here, same
+// arithmetic on both sides, tolerance only for the float order of g * dt * 0.5.
+enum MvEbHer { kEbHerNo = 0, kEbHerHit = 1, kEbHerProbe = 2, kEbHerFail = 3 };
+inline constexpr float k_mvEbHerEps = 1e-3f;
+inline MvEbHer MV_EbHeroinTick(float prev, float cur, float now, float hg, bool ground)
+{
+    if (ground) return kEbHerFail;
+    const bool rose = prev < 0.f && prev < cur;
+    const bool half = cur < -hg && fabsf(now + hg) < k_mvEbHerEps;
+    const bool grav = rose && fabsf(now - (cur - 2.f * hg)) < k_mvEbHerEps;
+    if (!half && !grav) return kEbHerNo;
+    return rose ? kEbHerProbe : kEbHerHit;
+}
+// the probe tick (vz2 = vz after it): the slow tick cut the fall to <= 65% and the next one is
+// free fall again (d = a full gravity tick) or another catch (d <= 0); a partial d = still
+// sliding a ramp. Heroin's 12 = 2 * hg at 66.67 tick / 800 gravity. unsafe = skip the proof.
+inline bool MV_EbHeroinProbe(float prev, float cur, float vz2, float hg, bool unsafe)
+{
+    if (unsafe) return true;
+    const float d = (cur - 2.f * hg) - vz2;
+    return prev < 0.f && cur / prev <= 0.65f && (d <= 0.f || d >= 2.f * hg - k_mvEbHerEps);
+}

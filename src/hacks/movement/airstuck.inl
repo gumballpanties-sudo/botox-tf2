@@ -314,7 +314,17 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
             const int horizon = as::TicksScaled(16, dt);
             UserCmd_t c = cmdFor(viewYaw, 0.f);   // AS's own cmd shape: movement keys / jump stripped
             int sims = 0;
-            const MvDrift dh = MV_DriftHold(pLocal, &c, nBase - 1, Vec3(cn.x / cl, cn.y / cl, 0.f), true, horizon, sims);
+            const Vec3 cdir(cn.x / cl, cn.y / cl, 0.f);
+            MvDrift dh = MV_DriftHold(pLocal, &c, nBase - 1, cdir, true, horizon, sims);
+            // short = CREEP INTO THE FACE: close half the gap to the trace shell every tick. The hull never
+            // reaches the shell, so no clip fires and Valve's +DIST_EPSILON push never happens (MV_DriftHold
+            // has the SDK why). Pressing harder than that only re-clips. The longer hold wins
+            char dmode = 'd';
+            if (dh.held < horizon)
+            {
+                const MvDrift dc = MV_DriftHold(pLocal, &c, nBase - 1, cdir, true, horizon, sims, nullptr, true);
+                if (dc.held > dh.held) { dh = dc; dmode = 'c'; }
+            }
             s_as.sims += sims;
             if (dh.held >= horizon)
             {
@@ -329,8 +339,8 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
                 if (g_debugLogEnable && cmd->command_number - s_dLog > 16)
                 {
                     s_dLog = cmd->command_number;
-                    DebugLog("AS: drift n=%.3f,%.3f wish=%.4f k=%.4f va=%.5f doff=%.5f xy=%.2f z=%.3f vz=%.3f",
-                             cn.x / cl, cn.y / cl, dh.wish.Length2D(), dh.k, dh.vaNone, dh.doff, vel.Length2D(),
+                    DebugLog("AS: drift %c n=%.3f,%.3f wish=%.4f k=%.4f va=%.5f doff=%.5f xy=%.2f z=%.3f vz=%.3f",
+                             dmode, cn.x / cl, cn.y / cl, dh.wish.Length2D(), dh.k, dh.vaNone, dh.doff, vel.Length2D(),
                              origin.z, vel.z);
                 }
                 return;
@@ -443,7 +453,8 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
     // gap ray = support + 8 / + 40: botox's fixed 32 / 64 on an axis wall (support 24), but a 45 deg face
     // sits 33.9u from the box centre (corner contact), so the old 32u ray never reached it (log gap=-1.941
     // = a miss read as "inside") and the tiebreak was blind there
-    for (const float move : { 1.f, 5.f, 30.f })
+    // 250 / 450: hard presses every tick, not only when the wide cursor comes round (sims judge, a miss = 1 sim)
+    for (const float move : { 1.f, 5.f, 30.f, 250.f, 450.f })
         for (float rel = 85.999f; rel < 90.f && !outOfTime(); rel += 1.f) tryMove(rel, move, support + 8.f);
 
     // ---- wide sweep: every heading, every press size -------------------------------------------------------
@@ -469,7 +480,7 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         scoringWide = false;
     }
     if (bestTicks < k_chain)
-        for (const float move : { 1.f, 5.f, 30.f, 60.f, 90.f, 120.f })
+        for (const float move : { 1.f, 5.f, 30.f, 60.f, 90.f, 120.f, 250.f, 450.f })
             for (float rel = 78.f; rel < 90.f && !outOfTime(); rel += 0.5f) tryMove(rel, move, support + 40.f);
     RestoreToFrame(nBase - 1);
 
