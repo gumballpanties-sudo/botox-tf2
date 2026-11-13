@@ -651,6 +651,11 @@ add_executable(fonts_test tests/fonts_test.cpp)
 # Build + run: cmake --build build --config Release --target chams_layers_test && build\Release\chams_layers_test.exe
 add_executable(chams_layers_test tests/chams_layers_test.cpp)
 
+# Gate test for the chams vs tables (fx_cham_build.sh output): rigid row reads no bone streams, skinned row
+# reads both, tangent only in two tone layout 1, all vs_3_0, every ps mode present.
+# Build + run: cmake --build build --config Release --target chamvs_test && build\Release\chamvs_test.exe
+add_executable(chamvs_test tests/chamvs_test.cpp)
+
 # Gate test for the spectator list's pure helpers (src/hacks/hud/spec_pure.h): utf8 cut, imgur link
 # resolve, url cache hash, eyes row layout.
 # Build + run: cmake --build build --config Release --target specpure_test && build\Release\specpure_test.exe

@@ -974,6 +974,10 @@ float g_glowVisColor[4]        = { 224 / 255.f, 175 / 255.f, 86 / 255.f, 153 / 2
 float g_glowInvisColor[4]      = { 114 / 255.f, 155 / 255.f, 221 / 255.f, 153 / 255.f };
 int   g_glowStyle = 0;     // 0 soft, 1 outline
 float g_glowSize = 3.f;    // 1..10 soft blur / 1..6 outline px
+bool  g_glowWave = false;
+float g_glowWaveColor[4] = { 1.f, 1.f, 1.f, 1.f };
+float g_glowWaveSpeed = 0.5f;
+float g_glowWaveStrength = 0.8f;
 
 // -- Skybox --------------------------------------------------------------------------------
 // Only the ConVar handle is shared (thread.cpp resolves it). The sky-name and fog-colour

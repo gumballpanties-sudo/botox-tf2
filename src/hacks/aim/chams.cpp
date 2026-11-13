@@ -60,6 +60,10 @@ extern bool  g_glowEnable;               // botox "player glow"
 extern float g_glowVisColor[4];
 extern float g_glowInvisColor[4];
 extern int   g_glowStyle;                // 0 soft glow, 1 outline
+extern bool  g_glowWave;                 // botox "accent wave" on the halo: timed sweep per player
+extern float g_glowWaveColor[4];
+extern float g_glowWaveSpeed;
+extern float g_glowWaveStrength;
 extern float g_glowSize;                 // 1..10 soft blur / 1..6 outline px
 
 namespace
@@ -833,7 +837,7 @@ void Chams_RenderCloaked()
 // on a resolution change, so a resize no longer kills the glow until the next map.
 namespace
 {
-	constexpr int kRcSetRT = 6, kRcGetRT = 7, kRcClearBuffers = 12, kRcClearColor4ub = 73, kRcDrawSSRect = 103;
+	constexpr int kRcSetRT = 6, kRcGetRT = 7, kRcClearBuffers = 12, kRcClearColor4ub = 73, kRcOverrideDepthEnable = 74, kRcDrawSSRect = 103;
 	constexpr int kRcStencilEnable = 117, kRcStencilFail = 118, kRcStencilZFail = 119, kRcStencilPass = 120,
 	              kRcStencilCmp = 121, kRcStencilRef = 122, kRcStencilTestMask = 123, kRcStencilWriteMask = 124;
 	constexpr int kMatSysBackBufferDims = 31, kMatSysGetBackBufferFormat = 32, kMatSysBeginRTAlloc = 82,
@@ -918,12 +922,12 @@ namespace
 	}
 
 	// no C++ unwinding inside: __try (C2712)
-	// bHalo = the material system glow (pass 2 + blur + halo); pVisMat = also mark the pixels the
+	// bHalo = the material system glow (pass 2 + blur + halo); bVisMark = also mark the pixels the
 	// player is visible on with stencil 2 (z-tested, invisible draw) for player_stencil.cpp's mask.
 	// pRB1/pRB2 + the halo/blur materials are parameters (not the module statics) so Glow_RenderPreview
 	// can run the exact same passes against the preview target's own RTs/materials.
 	// false = faulted: the CALLER decides what goes off (a preview fault used to drop the live s_glowReady).
-	__declspec(noinline) bool GlowPasses_SEH(void* rc, int w, int h, int iStencil, float flBlur, bool bHalo, IMaterial* pVisMat,
+	__declspec(noinline) bool GlowPasses_SEH(void* rc, int w, int h, int iStencil, float flBlur, bool bHalo, bool bVisMark,
 	                                          void* pRB1, void* pRB2, IMaterial* pMatHalo, IMaterial* pMatBlurX, IMaterial* pMatBlurY)
 	{
 		__try
@@ -941,14 +945,19 @@ namespace
 			I::RenderView->SetColorModulation(aWhite);
 			GlowStencil(rc, true, kStencilAlways, 1, 0x0, 0xFF, kOpKeep, kOpReplace, kOpReplace);
 			GlowDrawAll(false);
-			if (pVisMat)
+			if (bVisMark)
 			{
 				// botox mask: red = stencil 2..127 (visible), green = 1 (occluded). Depth-tested: only
-				// the pixels nothing covers pass, and those become 2
-				ForceMaterial(pVisMat);
+				// the pixels nothing covers pass, and those become 2. Same dev/glow_color + blend 0 as pass 1
+				// (the one draw proven invisible here, dx8 included) with the depth test forced on and the
+				// write off: sdk2013 glow_outline_effect.cpp:170 OverrideDepthEnable(true, false), its own
+				// z-tested ref-2 pass. Was the Flat chams carrier: since the 11-11 shader-carrier rework that
+				// is an opaque VertexLitGeneric for the DIP swap, blend 0 did nothing there and every glow
+				// model painted flat white (dx8).
+				VCallAt<void>(rc, kRcOverrideDepthEnable, true, false);
 				GlowStencil(rc, true, kStencilAlways, 2, 0x0, 0xFF, kOpKeep, kOpKeep, kOpReplace);
 				GlowDrawAll(false);
-				ForceMaterial(s_glowMatColor);
+				VCallAt<void>(rc, kRcOverrideDepthEnable, false, false);
 			}
 			if (!bHalo)
 			{
@@ -1030,6 +1039,76 @@ namespace
 {
 	void Rgba(float out[4], const float* c) { for (int k = 0; k < 4; k++) out[k] = c[k]; }
 
+	// stencil outline accent wave (botox m_players_stencil_wave): c12 / c13. real time keeps moving in
+	// pause; phase kept in 0..1 so float precision never runs out
+	void OutlineWaveParams(PlayerStencilSettings& st)
+	{
+		st.outlineWave[0] = st.outlineWave[1] = st.outlineWave[2] = st.outlineWave[3] = 0.f;
+		if (!g_esxStencilWave) return;
+		const float now = I::GlobalVars ? I::GlobalVars->realtime : 0.f;
+		const float phase = fmodf(now * g_esxStencilWaveSpeed, 1.f);
+		st.outlineWave[0] = 1.f;
+		st.outlineWave[1] = phase < 0.f ? phase + 1.f : phase;
+		st.outlineWave[2] = 1.f / std::clamp(g_esxStencilWaveSize, 0.05f, 4.f);
+		st.outlineWave[3] = std::clamp(g_esxStencilWaveStrength, 0.f, 1.f);
+		Rgba(st.outlineWaveColor, g_esxStencilWaveColor);
+	}
+
+	// wave anchor boxes (botox player_stencil run()): ndc hull bounds of every glow player, wave phase
+	// offset by entindex so they don't flash together. A corner behind the camera = no box for that player
+	void StencilBoxes(PlayerStencilSettings& st, bool bGlowAnchor, bool bOutlineAnchor)
+	{
+		st.waveAnchor[0] = st.waveAnchor[1] = st.waveAnchor[2] = 0.f;
+		if (!bGlowAnchor && !bOutlineAnchor) return;
+		const VMatrix& m = I::EngineClient->WorldToScreenMatrix();
+		int n = 0;
+		for (auto& it : s_glowItems)
+		{
+			if (n >= PlayerStencilSettings::kMaxBoxes) break;
+			if (!it.pEnt->IsPlayer()) continue;
+			const Vec3 o = it.pEnt->GetAbsOrigin(), mn = it.pEnt->m_vecMins(), mx = it.pEnt->m_vecMaxs();
+			float lo[2] = { 1e9f, 1e9f }, hi[2] = { -1e9f, -1e9f };
+			bool ok = true;
+			for (int i = 0; i < 8 && ok; i++)
+			{
+				const Vec3 p = { o.x + ((i & 1) ? mx.x : mn.x), o.y + ((i & 2) ? mx.y : mn.y), o.z + ((i & 4) ? mx.z : mn.z) };
+				const float w = m[3][0] * p.x + m[3][1] * p.y + m[3][2] * p.z + m[3][3];
+				if (w < 1.f) { ok = false; break; }
+				const float x = (m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3]) / w;
+				const float y = (m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3]) / w;
+				lo[0] = std::min(lo[0], x); lo[1] = std::min(lo[1], y);
+				hi[0] = std::max(hi[0], x); hi[1] = std::max(hi[1], y);
+			}
+			if (!ok) continue;
+			float* b = st.boxes[n];
+			b[0] = lo[0]; b[1] = lo[1]; b[2] = hi[0]; b[3] = hi[1];
+			st.boxPhase[n][0] = (float)it.pEnt->entindex() * 0.17f;
+			n++;
+		}
+		st.waveAnchor[0] = bGlowAnchor ? 1.f : 0.f;
+		st.waveAnchor[1] = (float)n;
+		st.waveAnchor[2] = bOutlineAnchor ? 1.f : 0.f;
+	}
+
+	// preview twin: one box over the given capsules' ends (already ndc), phase 0
+	void PreviewBox(PlayerStencilSettings& st, bool bGlowAnchor, bool bOutlineAnchor)
+	{
+		st.waveAnchor[0] = st.waveAnchor[1] = st.waveAnchor[2] = 0.f;
+		if ((!bGlowAnchor && !bOutlineAnchor) || st.nCapsules <= 0) return;
+		float* b = st.boxes[0];
+		b[0] = b[1] = 1e9f; b[2] = b[3] = -1e9f;
+		for (int i = 0; i < st.nCapsules; i++)
+			for (const float* p : { st.capsules[i].a, st.capsules[i].b })
+			{
+				b[0] = std::min(b[0], p[0]); b[1] = std::min(b[1], p[1]);
+				b[2] = std::max(b[2], p[0]); b[3] = std::max(b[3], p[1]);
+			}
+		st.boxPhase[0][0] = 0.f;
+		st.waveAnchor[0] = bGlowAnchor ? 1.f : 0.f;
+		st.waveAnchor[1] = 1.f;
+		st.waveAnchor[2] = bOutlineAnchor ? 1.f : 0.f;
+	}
+
 	// botox player_stencil after_glow(): settings off the menu vars, capsules off the hitboxes
 	void StencilSubmit(bool bOutline, bool bInner)
 	{
@@ -1092,6 +1171,8 @@ namespace
 		Rgba(st.visible, g_esxStencilVisColor);
 		Rgba(st.invisible, g_esxStencilInvisColor);
 		st.thickness = std::clamp(g_esxStencilThickness, 0.5f, 8.f);
+		OutlineWaveParams(st);
+		StencilBoxes(st, false /*glow = halo, per player already*/, g_esxStencilWave && g_esxStencilWavePlayer);
 		PlayerStencil_Submit(st);
 	}
 
@@ -1161,6 +1242,8 @@ namespace
 		// c0.z in ps_rows/ps_columns: a texel-space constant against the MASK texture's own
 		// resolution (not NDC), so it needs the same x2 + 31 cap as innerReach above.
 		st.thickness = std::min(std::clamp(g_esxStencilThickness, 0.5f, 8.f) * 2.f, 31.f);
+		OutlineWaveParams(st);
+		PreviewBox(st, false, g_esxStencilWave && g_esxStencilWavePlayer);
 		PlayerStencil_Submit(st, true /*preview instance*/);
 	}
 }
@@ -1340,6 +1423,13 @@ void Glow_Render()
 		const float* c = bVisible ? g_glowVisColor : g_glowInvisColor;
 		for (int k = 0; k < 4; ++k) it.c[k] = c[k];
 		const int idx = pPlayer->entindex();
+		if (g_glowWave)   // halo = one colour per player: timed sweep, offset per player (botox glow_effect_spectator)
+		{
+			const float now = I::GlobalVars ? I::GlobalVars->realtime : 0.f;
+			const float w = 0.5f + 0.5f * cosf(6.2831853f * (now * g_glowWaveSpeed - (float)idx * 0.17f));
+			const float k = w * w * w * std::clamp(g_glowWaveStrength, 0.f, 1.f);
+			for (int j = 0; j < 3; ++j) it.c[j] += (g_glowWaveColor[j] - it.c[j]) * k;
+		}
 		if (idx > 0 && idx < 128) aItemOfPlayer[idx] = (int)s_glowItems.size();
 		s_glowItems.push_back(it);
 	}
@@ -1372,7 +1462,7 @@ void Glow_Render()
 	const float flBlur = bOutlineStyle ? 0.f : std::clamp(g_glowSize, 1.f, 10.f) / 3.f;
 
 	const bool bMask = bOutline || bInner;
-	if (!GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr,
+	if (!GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask,
 	                     s_glowRB1, s_glowRB2, s_glowMatHalo, s_glowMatBlurX, s_glowMatBlurY))
 	{
 		DebugLog("glow: exception in the glow pass, glow off until the next map");
@@ -1436,7 +1526,7 @@ void Glow_RenderPreview(void* pEnt, void* pGun, const float (*worldToProjection)
 	const float flBlur = bOutlineStyle ? 0.f : std::clamp(g_glowSize, 1.f, 10.f) / 3.f;
 
 	const bool bMask = bOutline || bInner;
-	const bool ok = GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask ? GetMat(ChamsLayers::Flat, false) : nullptr,
+	const bool ok = GlowPasses_SEH(rc, w, h, iStencil, flBlur, bGlow, bMask,
 	                                s_previewRB1, s_previewRB2, s_previewMatHalo, s_previewMatBlurX, s_previewMatBlurY);
 
 	s_glowItems.swap(saved);

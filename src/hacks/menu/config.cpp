@@ -894,6 +894,10 @@ static const CfgEntry kEntries[] = {
     { "glowInvisColor",         CfgEntry::FLOAT4, g_glowInvisColor, 0 },
     { "glowStyle",              CfgEntry::INT,    &g_glowStyle, 0 },
     { "glowSize",               CfgEntry::FLOAT,  &g_glowSize, 0 },
+    { "glowWave",               CfgEntry::BOOL,   &g_glowWave, 0 },
+    { "glowWaveColor",          CfgEntry::FLOAT4, g_glowWaveColor, 0 },
+    { "glowWaveSpeed",          CfgEntry::FLOAT,  &g_glowWaveSpeed, 0 },
+    { "glowWaveStrength",       CfgEntry::FLOAT,  &g_glowWaveStrength, 0 },
 
     { "chEnable",         CfgEntry::BOOL,   &g_chEnable, 0 },
     { "chAntialias",      CfgEntry::BOOL,   &g_chAntialias, 0 },

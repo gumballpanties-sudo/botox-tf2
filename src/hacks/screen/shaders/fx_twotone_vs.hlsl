@@ -3,18 +3,24 @@
 // sdk2013 common_vs_fxc.h:75 cEyePosWaterZ c2 (ishadersystem_declarations.h:13 VERTEX_SHADER_CAMERA_POS),
 // :83 cViewProj c8, :169 cModel[53] c58.
 //
-// Rebuild after ANY edit here (three variants, one header each):
-//   fxc /nologo /T vs_3_0 /E main /D COMPRESSED_VERTS=0 /D HAS_TANGENT=0 /Fh src/hacks/screen/shaders/fx_twotone_vs0.h /Vn k_fxTwoToneVs0Bytes src/hacks/screen/shaders/fx_twotone_vs.hlsl
-//   fxc /nologo /T vs_3_0 /E main /D COMPRESSED_VERTS=0 /D HAS_TANGENT=1 /Fh src/hacks/screen/shaders/fx_twotone_vs1.h /Vn k_fxTwoToneVs1Bytes src/hacks/screen/shaders/fx_twotone_vs.hlsl
-//   fxc /nologo /T vs_3_0 /E main /D COMPRESSED_VERTS=1 /D HAS_TANGENT=0 /Fh src/hacks/screen/shaders/fx_twotone_vs2.h /Vn k_fxTwoToneVs2Bytes src/hacks/screen/shaders/fx_twotone_vs.hlsl
+// SKINNED 0 = rigid mesh, no bone streams in the decl, cModel[0] (fx_cham_vs.hlsl has the why).
+// Rebuild after ANY edit here: bash src/hacks/screen/shaders/fx_cham_build.sh
+//   -> fx_twotone_vs.h k_fxTwoToneVs[DX8][SKINNED][layout], layout 0 float verts, 1 float + TANGENT stream, 2 compressed
+// DX8 1 = dxlevel 80/81 vs_1_1 layout, cModel[16] at c48 (fx_cham_vs.hlsl).
 float4 cEyePos : register( c2 );
 float4x4 cViewProj : register( c8 );
+#if DX8
+float4x3 cModel[ 16 ] : register( c48 );
+#else
 float4x3 cModel[ 53 ] : register( c58 );
+#endif
 
 struct VS_INPUT {
 	float4 vPos : POSITION;
+#if SKINNED
 	float4 vBoneWeights : BLENDWEIGHT;
 	float4 vBoneIndices : BLENDINDICES;
+#endif
 	float4 vNormal : NORMAL;
 	float4 vTexCoord0 : TEXCOORD0;
 #if HAS_TANGENT
@@ -57,6 +63,7 @@ void decompress( float4 inputNormal, out float3 outputNormal, out float4 outputT
 
 VS_OUTPUT main( const VS_INPUT i )
 {
+#if SKINNED
 	float4 vWeights = i.vBoneWeights;
 #if COMPRESSED_VERTS
 	vWeights = ( vWeights + 1 ) / 32768;
@@ -65,6 +72,9 @@ VS_OUTPUT main( const VS_INPUT i )
 	float3 weights   = vWeights.xyz;
 	weights[ 2 ]     = 1 - ( weights[ 0 ] + weights[ 1 ] );
 	float4x3 blendMatrix = cModel[ boneIndices[ 0 ] ] * weights[ 0 ] + cModel[ boneIndices[ 1 ] ] * weights[ 1 ] + cModel[ boneIndices[ 2 ] ] * weights[ 2 ];
+#else
+	float4x3 blendMatrix = cModel[ 0 ];
+#endif
 
 	float3 normal;
 	float4 tangent;

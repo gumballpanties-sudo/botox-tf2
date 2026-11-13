@@ -17,18 +17,22 @@
 #include "chams_layers.h"
 #include "../../globals/globals.h"
 #include "../screen/screenfx.h"              // ScreenFx_QueueFunctor
-#include "../screen/shaders/fx_lsd_vs0.h"    // k_fxLsdVs0Bytes (float verts)
-#include "../screen/shaders/fx_lsd_vs1.h"    // k_fxLsdVs1Bytes (COMPRESSED_VERTS)
+// vs tables (fx_cham_build.sh): [dx8][skinned][layout].
+//   dx8      1 = the engine vs bound for this draw keeps its bones at c48 (dxlevel 80/81 vs_1_1 layout; TF2 x64
+//            still runs it) instead of c58 -- read off that vs's bytecode (shader_tokens.h BoneBase), per shader
+//   skinned  0 = rigid mesh (no bone streams in the decl: 1-bone hats, weapons, sw-skinned), 1 = skinned. A vs
+//            that reads a stream the decl lacks is undefined in d3d9 -- zeros on nvidia (right by luck), garbage
+//            on other gpus -- so the row is picked off the bound decl, per draw
+#include "shader_tokens.h"
+#include "../screen/shaders/fx_lsd_vs.h"     // k_fxLsdVs[2][2][2]: float / compressed verts
 #include "../screen/shaders/fx_lsd_ps.h"     // k_fxLsdPsBytes
-#include "../screen/shaders/fx_twotone_vs0.h" // k_fxTwoToneVs0Bytes (float verts)
-#include "../screen/shaders/fx_twotone_vs1.h" // k_fxTwoToneVs1Bytes (float verts + tangent stream)
-#include "../screen/shaders/fx_twotone_vs2.h" // k_fxTwoToneVs2Bytes (COMPRESSED_VERTS)
+#include "../screen/shaders/fx_twotone_vs.h" // k_fxTwoToneVs[2][2][3]: float / float + tangent stream / compressed
 #include "../screen/shaders/fx_twotone_ps0.h" // k_fxTwoTonePs0Bytes (no normal map)
 #include "../screen/shaders/fx_twotone_ps1.h" // k_fxTwoTonePs1Bytes (normal map s1)
 #include "../screen/shaders/fx_twotone_ps2.h" // k_fxTwoTonePs2Bytes (normal map s3)
 #include "../screen/shaders/fx_sheen_ps2.h"   // k_fxSheenPs2Bytes (engine sheen pass ps_2_b)
 #include "../screen/shaders/fx_sheen_ps3.h"   // k_fxSheenPs3Bytes (engine sheen pass ps_3_0)
-#include "../screen/shaders/fx_cham_vs.h"     // k_fxChamVs0 / 1 (float / compressed verts)
+#include "../screen/shaders/fx_cham_vs.h"     // k_fxChamVs[2][2][2]: float / compressed verts
 #include "../screen/shaders/fx_cham_ps.h"     // k_fxChamPs[mode]
 #include <algorithm>
 #include <cmath>
@@ -48,7 +52,7 @@ namespace
 	std::atomic<bool> s_armed{ false };
 	float s_params[2] = {};                 // render thread only: time, alpha
 
-	IDirect3DVertexShader9* s_vs[2] = {};
+	IDirect3DVertexShader9* s_vs[2][2][2] = {};
 	IDirect3DPixelShader9*  s_ps = nullptr;
 	bool s_gpuFailed = false;
 
@@ -69,32 +73,96 @@ namespace
 		}
 	}
 
-	// -1 = not a studio decl we can read, 0 = float normals, 1 = UBYTE4 compressed normals
-	int VertexCompression(IDirect3DDevice9* dev)
+	// What the bound vertex decl carries. Read per draw while armed (cheap: one GetDeclaration copy), never
+	// cached by decl pointer: a decl freed and remade at the same address (device reset, material reload)
+	// would hand back a stale answer and decode normals / bones wrong.
+	//   compressed  0 float normal, 1 UBYTE4 (compressed verts: SHORT2 weights too), -1 no usable normal
+	//   skinned     BLENDWEIGHT + BLENDINDICES both present (Atlas model_render.cpp:1308); otherwise the engine
+	//               drew it on the !bSkinning path (common_vs_fxc.h:644, cModel[0]) and so must our vs
+	struct DeclInfo { bool ok, skinned, tangent; int compressed; };
+	DeclInfo ReadDecl(IDirect3DDevice9* dev)
 	{
-		static IDirect3DVertexDeclaration9* last = nullptr;
-		static int result = -1;
+		DeclInfo d{};
+		d.compressed = -1;
 		IDirect3DVertexDeclaration9* decl = nullptr;
 		if (FAILED(dev->GetVertexDeclaration(&decl)) || !decl)
-			return -1;
-		if (decl != last)
+			return d;
+		D3DVERTEXELEMENT9 el[MAXD3DDECLLENGTH + 1] = {};
+		UINT n = 0;
+		bool weights = false, indices = false;
+		if (SUCCEEDED(decl->GetDeclaration(nullptr, &n)) && n <= MAXD3DDECLLENGTH + 1 && SUCCEEDED(decl->GetDeclaration(el, &n)))
 		{
-			D3DVERTEXELEMENT9 el[MAXD3DDECLLENGTH + 1] = {};
-			UINT n = 0;
-			result = -1;
-			if (SUCCEEDED(decl->GetDeclaration(nullptr, &n)) && n <= MAXD3DDECLLENGTH + 1 && SUCCEEDED(decl->GetDeclaration(el, &n)))
-				for (UINT i = 0; i < n && el[i].Stream != 0xFF; i++)
-					if (el[i].Usage == D3DDECLUSAGE_NORMAL && el[i].UsageIndex == 0)
-						result = el[i].Type == D3DDECLTYPE_UBYTE4 ? 1 : el[i].Type == D3DDECLTYPE_FLOAT3 ? 0 : -1;
-			last = decl;
+			d.ok = true;
+			for (UINT i = 0; i < n && el[i].Stream != 0xFF; i++)
+			{
+				if (el[i].UsageIndex) continue;
+				switch (el[i].Usage)
+				{
+				case D3DDECLUSAGE_NORMAL:       d.compressed = el[i].Type == D3DDECLTYPE_UBYTE4 ? 1 : el[i].Type == D3DDECLTYPE_FLOAT3 ? 0 : -1; break;
+				case D3DDECLUSAGE_BLENDWEIGHT:  weights = true; break;
+				case D3DDECLUSAGE_BLENDINDICES: indices = true; break;
+				case D3DDECLUSAGE_TANGENT:      d.tangent = true; break;
+				default: break;
+				}
+			}
 		}
 		decl->Release();
-		return result;
+		d.skinned = weights && indices;
+		return d;
+	}
+
+	// vs table [dx8][skinned][layout] -> shaders + the union of their def literals. False = one create failed (caller releases)
+	template <size_t D, size_t R, size_t C>
+	bool CreateVsTable(IDirect3DDevice9* dev, const FxVs (&src)[D][R][C], IDirect3DVertexShader9* (&dst)[D][R][C], Defs& defs)
+	{
+		for (size_t d = 0; d < D; d++)
+			for (size_t r = 0; r < R; r++)
+				for (size_t c = 0; c < C; c++)
+				{
+					std::vector<DWORD> code((src[d][r][c].size + 3) / 4);
+					memcpy(code.data(), src[d][r][c].bytes, src[d][r][c].size);
+					if (FAILED(dev->CreateVertexShader(code.data(), &dst[d][r][c]))) return false;
+					CollectDefs(code.data(), defs);
+				}
+		return true;
+	}
+	template <size_t D, size_t R, size_t C>
+	void ReleaseVsTable(IDirect3DVertexShader9* (&t)[D][R][C])
+	{
+		for (auto& plane : t) for (auto& row : plane) for (auto*& v : row) if (v) { v->Release(); v = nullptr; }
+	}
+
+	// 1 = the engine vs bound for this draw keeps its bone matrices at c48 (dxlevel 80/81 vs_1_1 layout), 0 = c58.
+	// Read off the bytecode once per shader (shader_tokens.h BoneBase). No vs (fixed function) = dx9 layout.
+	// ponytail: same never-cleared shader pointer cache as s_bumpSamplers
+	std::unordered_map<IDirect3DVertexShader9*, int> s_vsDx8;
+	int s_dx8Logged = 0;
+	int Dx8(IDirect3DVertexShader9* vs)
+	{
+		if (!vs) return 0;
+		if (const auto found = s_vsDx8.find(vs); found != s_vsDx8.end())
+			return found->second;
+		int base = 58;
+		UINT size = 0;
+		if (SUCCEEDED(vs->GetFunction(nullptr, &size)) && size)
+		{
+			std::vector<DWORD> code((size + 3) / 4);
+			if (SUCCEEDED(vs->GetFunction(code.data(), &size)))
+				base = ShaderTokens::BoneBase(code.data(), code.size());
+		}
+		const int dx8 = base == 48;
+		if (s_dx8Logged < 16)
+		{
+			s_dx8Logged++;
+			DebugLog("CHAM: engine vs %p bones at c%d -> %s layout", (void*)vs, base, dx8 ? "dx8" : "dx9");
+		}
+		s_vsDx8.emplace(vs, dx8);
+		return dx8;
 	}
 
 	// diag: one line per new vertex decl seen while lsd / two tone is armed. viewport maxz 0.1 = the
 	// viewmodel pass (viewrender.cpp:1109 DepthRange hack), so local vs enemy draws read apart
-	void DeclDiag(IDirect3DDevice9* dev, const char* tag, int compressed)
+	void DeclDiag(IDirect3DDevice9* dev, const char* tag, const DeclInfo& info)
 	{
 		static IDirect3DVertexDeclaration9* seen[48] = {};
 		static int nSeen = 0;
@@ -117,8 +185,8 @@ namespace
 		decl->Release();
 		D3DVIEWPORT9 vp = {};
 		dev->GetViewport(&vp);
-		DebugLog("%s: decl %p compressed %d (normal type %d weight %d index %d, -1 absent) maxz %.2f %s",
-			tag, (void*)decl, compressed, normal, weight, index, vp.MaxZ, vp.MaxZ < 0.5f ? "VIEWMODEL" : "world");
+		DebugLog("%s: decl %p compressed %d skinned %d tangent %d (normal type %d weight %d index %d, -1 absent) maxz %.2f %s",
+			tag, (void*)decl, info.compressed, (int)info.skinned, (int)info.tangent, normal, weight, index, vp.MaxZ, vp.MaxZ < 0.5f ? "VIEWMODEL" : "world");
 	}
 
 	struct Saved { int kind, reg; float v[4]; };
@@ -155,18 +223,17 @@ namespace
 	{
 		if (s_ps) return true;
 		if (s_gpuFailed) return false;
-		const auto vs0 = Code(k_fxLsdVs0Bytes), vs1 = Code(k_fxLsdVs1Bytes), ps = Code(k_fxLsdPsBytes);
-		bool ok = SUCCEEDED(dev->CreateVertexShader(vs0.data(), &s_vs[0])) && SUCCEEDED(dev->CreateVertexShader(vs1.data(), &s_vs[1]))
-			&& SUCCEEDED(dev->CreatePixelShader(ps.data(), &s_ps));
+		const auto ps = Code(k_fxLsdPsBytes);
+		bool ok = CreateVsTable(dev, k_fxLsdVs, s_vs, s_vsDefs) && SUCCEEDED(dev->CreatePixelShader(ps.data(), &s_ps));
 		if (ok)
 		{
-			CollectDefs(vs0.data(), s_vsDefs);   // both vs variants share the one def (c0)
 			CollectDefs(ps.data(), s_psDefs);
 			DebugLog("LSD: shaders ready (%d vs defs, %d ps defs)", int(s_vsDefs.size()), int(s_psDefs.size()));
 			return true;
 		}
 		DebugLog("LSD: gpu FAILED -- lsd layers draw as flat white");
-		for (auto*& v : s_vs) if (v) { v->Release(); v = nullptr; }
+		ReleaseVsTable(s_vs);
+		s_vsDefs.clear();
 		if (s_ps) { s_ps->Release(); s_ps = nullptr; }
 		s_gpuFailed = true;
 		return false;
@@ -174,10 +241,11 @@ namespace
 
 	HRESULT DrawLsd(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT minV, UINT nV, UINT start, UINT prims)
 	{
-		// no shader / unreadable decl = the carrier draws as plain flat chams
-		const int compressed = GpuReady(dev) ? VertexCompression(dev) : -1;
-		DeclDiag(dev, "LSD", compressed);
-		if (compressed < 0)
+		// no shader / unreadable decl = the carrier draws as plain flat chams. Position only: a decl without a
+		// normal is still fine, and its weights are float unless the normal says compressed
+		const DeclInfo decl = GpuReady(dev) ? ReadDecl(dev) : DeclInfo{};
+		DeclDiag(dev, "LSD", decl);
+		if (!decl.ok)
 			return o_DIP(dev, type, base, minV, nV, start, prims);
 
 		D3DVIEWPORT9 vp = {};
@@ -195,13 +263,14 @@ namespace
 		dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &oldSrgb);
 		dev->GetVertexShader(&oldVs);
 		dev->GetPixelShader(&oldPs);
+		IDirect3DVertexShader9* vs = s_vs[Dx8(oldVs)][decl.skinned][decl.compressed == 1];
 		dev->GetPixelShaderConstantF(20, oldPsK[0], 2);
 		SaveConsts(dev, true, s_vsDefs, savedVs);
 		SaveConsts(dev, false, s_psDefs, savedPs);
 
 		// shadertoy colours are display values: no linear -> srgb on write
 		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
-		dev->SetVertexShader(s_vs[compressed]);
+		dev->SetVertexShader(vs);
 		dev->SetPixelShader(s_ps);
 		dev->SetPixelShaderConstantF(20, k[0], 2);
 
@@ -224,8 +293,8 @@ namespace
 	float s_ttLight[4] = {}, s_ttDark[4] = {}, s_ttParams[2] = {};   // render thread only
 	bool  s_ttIgnorez = false, s_ttTranslucent = false;
 
-	// vs: plain, plain + tangent stream, compressed. ps: no normal map, normal map in s1, s3
-	IDirect3DVertexShader9* s_ttVs[3] = {};
+	// vs: [dx8][skinned][plain, plain + tangent stream, compressed]. ps: no normal map, normal map in s1, s3
+	IDirect3DVertexShader9* s_ttVs[2][2][3] = {};
 	IDirect3DPixelShader9*  s_ttPs[3] = {};
 	Defs s_ttVsDefs, s_ttPsDefs;
 	bool s_ttGpuFailed = false;
@@ -238,40 +307,22 @@ namespace
 	{
 		if (s_ttPs[0]) return true;
 		if (s_ttGpuFailed) return false;
-		const std::vector<DWORD> vs[3] = { Code(k_fxTwoToneVs0Bytes), Code(k_fxTwoToneVs1Bytes), Code(k_fxTwoToneVs2Bytes) };
 		const std::vector<DWORD> ps[3] = { Code(k_fxTwoTonePs0Bytes), Code(k_fxTwoTonePs1Bytes), Code(k_fxTwoTonePs2Bytes) };
-		bool ok = true;
+		bool ok = CreateVsTable(dev, k_fxTwoToneVs, s_ttVs, s_ttVsDefs);
 		for (int i = 0; i < 3 && ok; i++)
-		{
-			ok = SUCCEEDED(dev->CreateVertexShader(vs[i].data(), &s_ttVs[i])) && SUCCEEDED(dev->CreatePixelShader(ps[i].data(), &s_ttPs[i]));
-			if (ok) { CollectDefs(vs[i].data(), s_ttVsDefs); CollectDefs(ps[i].data(), s_ttPsDefs); }   // defs differ per variant: union
-		}
+			if ((ok = SUCCEEDED(dev->CreatePixelShader(ps[i].data(), &s_ttPs[i]))))
+				CollectDefs(ps[i].data(), s_ttPsDefs);   // defs differ per variant: union
 		if (ok)
 		{
 			DebugLog("TWO: shaders ready (%d vs defs, %d ps defs)", int(s_ttVsDefs.size()), int(s_ttPsDefs.size()));
 			return true;
 		}
 		DebugLog("TWO: gpu FAILED -- two tone layers draw as the model's own materials");
-		for (auto*& v : s_ttVs) if (v) { v->Release(); v = nullptr; }
+		ReleaseVsTable(s_ttVs);
 		for (auto*& p : s_ttPs) if (p) { p->Release(); p = nullptr; }
 		s_ttVsDefs.clear(); s_ttPsDefs.clear();
 		s_ttGpuFailed = true;
 		return false;
-	}
-
-	bool HasTangentStream(IDirect3DDevice9* dev)
-	{
-		IDirect3DVertexDeclaration9* decl = nullptr;
-		if (FAILED(dev->GetVertexDeclaration(&decl)) || !decl)
-			return false;
-		D3DVERTEXELEMENT9 el[MAXD3DDECLLENGTH + 1] = {};
-		UINT n = 0;
-		bool result = false;
-		if (SUCCEEDED(decl->GetDeclaration(nullptr, &n)) && n <= MAXD3DDECLLENGTH + 1 && SUCCEEDED(decl->GetDeclaration(el, &n)))
-			for (UINT i = 0; i < n && el[i].Stream != 0xFF; i++)
-				result |= el[i].Usage == D3DDECLUSAGE_TANGENT && el[i].UsageIndex == 0;
-		decl->Release();
-		return result;
 	}
 
 	// botox reads the sampler with D3DXGetShaderConstantTable; no d3dx9 here, so the CTAB comment block
@@ -336,10 +387,10 @@ namespace
 
 	HRESULT DrawTwoTone(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT minV, UINT nV, UINT start, UINT prims)
 	{
-		// no shader / not a studio mesh = the model's own material draws as is
-		const int compressed = TwoToneGpuReady(dev) ? VertexCompression(dev) : -1;
-		DeclDiag(dev, "TWO", compressed);
-		if (compressed < 0)
+		// no shader / not a studio mesh (no normal to light) = the model's own material draws as is
+		const DeclInfo decl = TwoToneGpuReady(dev) ? ReadDecl(dev) : DeclInfo{ false, false, false, -1 };
+		DeclDiag(dev, "TWO", decl);
+		if (!decl.ok || decl.compressed < 0)
 			return o_DIP(dev, type, base, minV, nV, start, prims);
 
 		IDirect3DVertexShader9* oldVs = nullptr;
@@ -348,7 +399,7 @@ namespace
 		dev->GetPixelShader(&oldPs);
 
 		const int bump = BumpSampler(oldPs);
-		const int vsIndex = compressed ? 2 : HasTangentStream(dev) ? 1 : 0;
+		IDirect3DVertexShader9* vs = s_ttVs[Dx8(oldVs)][decl.skinned][decl.compressed ? 2 : decl.tangent ? 1 : 0];
 		const int psIndex = bump == 1 ? 1 : bump == 3 ? 2 : 0;
 
 		DWORD oldSrgb = 0, oldZFunc = 0, oldZWrite = 0, oldAlphaTest = 0, oldAlphaRef = 0, oldBlend = 0, oldSrc = 0, oldDest = 0, oldColorWrite = 0;
@@ -384,7 +435,7 @@ namespace
 		else if (s_ttTranslucent && (oldZFunc == D3DCMP_LESS || oldZFunc == D3DCMP_GREATER))
 			dev->SetRenderState(D3DRS_ZFUNC, oldZFunc == D3DCMP_LESS ? D3DCMP_LESSEQUAL : D3DCMP_GREATEREQUAL);
 
-		dev->SetVertexShader(s_ttVs[vsIndex]);
+		dev->SetVertexShader(vs);
 		dev->SetPixelShader(s_ttPs[psIndex]);
 		dev->SetPixelShaderConstantF(30, psK[0], 3);
 
@@ -432,32 +483,22 @@ namespace
 	int   s_chMode = 0;
 	bool  s_chIgnorez = false;
 
-	IDirect3DVertexShader9* s_chVs[2] = {};
+	IDirect3DVertexShader9* s_chVs[2][2][2] = {};
 	IDirect3DPixelShader9*  s_chPs[ChamsLayers::Count] = {};
 	static_assert(sizeof(k_fxChamPs) / sizeof(k_fxChamPs[0]) == ChamsLayers::Count, "fx_cham_build.sh COUNT != ChamsLayers::Count");
 	Defs s_chVsDefs, s_chPsDefs;
 	bool s_chReady = false, s_chGpuFailed = false;
 
-	std::vector<DWORD> Code(const BYTE* bytes, unsigned size)
-	{
-		std::vector<DWORD> c((size + 3) / 4);
-		memcpy(c.data(), bytes, size);
-		return c;
-	}
-
 	bool ChamGpuReady(IDirect3DDevice9* dev)
 	{
 		if (s_chReady) return true;
 		if (s_chGpuFailed) return false;
-		const std::vector<DWORD> vs[2] = { Code(k_fxChamVs0), Code(k_fxChamVs1) };
-		bool ok = true;
-		for (int i = 0; i < 2 && ok; i++)
-			if ((ok = SUCCEEDED(dev->CreateVertexShader(vs[i].data(), &s_chVs[i]))))
-				CollectDefs(vs[i].data(), s_chVsDefs);
+		bool ok = CreateVsTable(dev, k_fxChamVs, s_chVs, s_chVsDefs);
 		for (int m = 0; m < ChamsLayers::Count && ok; m++)
 		{
 			if (!k_fxChamPs[m].bytes) continue;
-			const auto ps = Code(k_fxChamPs[m].bytes, k_fxChamPs[m].size);
+			std::vector<DWORD> ps((k_fxChamPs[m].size + 3) / 4);
+			memcpy(ps.data(), k_fxChamPs[m].bytes, k_fxChamPs[m].size);
 			if ((ok = SUCCEEDED(dev->CreatePixelShader(ps.data(), &s_chPs[m]))))
 				CollectDefs(ps.data(), s_chPsDefs);   // union of every mode's defs
 		}
@@ -466,8 +507,8 @@ namespace
 			DebugLog("CHAM: shaders ready (%d vs defs, %d ps defs)", int(s_chVsDefs.size()), int(s_chPsDefs.size()));
 			return s_chReady = true;
 		}
-		DebugLog("CHAM: gpu FAILED -- shader chams draw as the plain white carrier");
-		for (auto*& v : s_chVs) if (v) { v->Release(); v = nullptr; }
+		DebugLog("CHAM: gpu FAILED -- shader chams draw as the plain white carrier (colour modulated)");
+		ReleaseVsTable(s_chVs);
 		for (auto*& p : s_chPs) if (p) { p->Release(); p = nullptr; }
 		s_chVsDefs.clear(); s_chPsDefs.clear();
 		s_chGpuFailed = true;
@@ -483,11 +524,11 @@ namespace
 
 	HRESULT DrawCham(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT minV, UINT nV, UINT start, UINT prims)
 	{
-		// no shader / not a studio mesh = the carrier (plain white vertexlit) draws as is
-		const int compressed = ChamGpuReady(dev) ? VertexCompression(dev) : -1;
-		DeclDiag(dev, "CHAM", compressed);
+		// no shader / not a studio mesh (no normal to light) = the carrier (plain white vertexlit) draws as is
+		const DeclInfo decl = ChamGpuReady(dev) ? ReadDecl(dev) : DeclInfo{ false, false, false, -1 };
+		DeclDiag(dev, "CHAM", decl);
 		IDirect3DPixelShader9* ps = s_chMode > 0 && s_chMode < ChamsLayers::Count ? s_chPs[s_chMode] : nullptr;
-		if (compressed < 0 || !ps)
+		if (!decl.ok || decl.compressed < 0 || !ps)
 			return o_DIP(dev, type, base, minV, nV, start, prims);
 
 		const bool additive = ChamAdditive(s_chMode);
@@ -497,6 +538,7 @@ namespace
 		IDirect3DPixelShader9* oldPs = nullptr;
 		dev->GetVertexShader(&oldVs);
 		dev->GetPixelShader(&oldPs);
+		IDirect3DVertexShader9* vs = s_chVs[Dx8(oldVs)][decl.skinned][decl.compressed];
 
 		DWORD oldSrgb = 0, oldZFunc = 0, oldZWrite = 0, oldAlphaTest = 0, oldBlend = 0, oldSrc = 0, oldDest = 0, oldColorWrite = 0, oldTexSrgb = 0;
 		dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &oldSrgb);
@@ -526,7 +568,7 @@ namespace
 		else if (blends && (oldZFunc == D3DCMP_LESS || oldZFunc == D3DCMP_GREATER))
 			dev->SetRenderState(D3DRS_ZFUNC, oldZFunc == D3DCMP_LESS ? D3DCMP_LESSEQUAL : D3DCMP_GREATEREQUAL);
 
-		dev->SetVertexShader(s_chVs[compressed]);
+		dev->SetVertexShader(vs);
 		dev->SetPixelShader(ps);
 		dev->SetPixelShaderConstantF(40, psK[0], 2);
 

@@ -1057,6 +1057,11 @@ extern float g_glowVisColor[4];
 extern float g_glowInvisColor[4];
 extern int   g_glowStyle;               // 0 soft, 1 outline
 extern float g_glowSize;                // 1..10 soft blur / 1..6 outline px
+// accent wave on the halo: one colour per player, so a timed sweep offset per player (botox glow_effect_spectator)
+extern bool  g_glowWave;
+extern float g_glowWaveColor[4];
+extern float g_glowWaveSpeed;
+extern float g_glowWaveStrength;
 
 // ==== Inline engine helpers ==============================================================
 // IClientEntityList::GetClientEntity = slot 3. IVEngineClient: GetLocalPlayer = 12,
