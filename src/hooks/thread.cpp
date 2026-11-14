@@ -22,6 +22,7 @@
 #include "../hacks/visuals/skins.h"
 #include "../hacks/visuals/hats.h"
 #include "../hacks/visuals/flipworld.h"
+#include "../hacks/visuals/rear_mirror.h"
 #include "../hacks/hud/mediaplayer.h"
 #include "../hacks/misc/misc_overlays.h"   // ConsoleTint_Install
 #include "../hacks/lua/lua.h"             // eject: wait for the FSN lua shutdown
@@ -354,6 +355,9 @@ static void PollThread()
             // Flip world: WorldToScreenMatrix (HUD), ClientModeShared::CreateMove (A/D + hand),
             // CViewRender::LevelInit (its RT). The mirror itself rides screenfx's two hooks above.
             FlipWorld_Install();
+
+            // Rear view mirror: CViewRender::RenderView (IViewRender slot 6), the back view before the main one.
+            RearMirror_Install();
 
             // Player glow RTs + materials for a mid-map inject: NOT here. Made on this thread they
             // raced the main thread's draws -- stdshader's one static s_ppParams is set + nulled by

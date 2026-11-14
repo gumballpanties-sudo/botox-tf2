@@ -6,6 +6,7 @@
 #include "../../render/render.h"       // W2S_Project
 #include "../../hooks/crashlog.h"      // CrashSpan
 #include "../misc/misc_util.h"         // n_util::DecodeEHandleIndex
+#include "rear_mirror.h"               // RearMirror_Drawing -- lamps record off the main view only
 #include <mutex>
 #include <deque>
 #include <unordered_map>
@@ -520,7 +521,7 @@ static DrawStaticProps_t o_DrawStaticProps = nullptr;
 static void __fastcall h_DrawStaticProps(void* rcx, void** props, int count, bool shadowDepth, bool wireframe)
 {
     MiscHookGuard _g;
-    if (g_wdLightMod && g_wdLightModLamps && !g_eject && !shadowDepth && props && count > 0)
+    if (g_wdLightMod && g_wdLightModLamps && !g_eject && !shadowDepth && props && count > 0 && !RearMirror_Drawing())
         Lamps_Record(props, count);
     o_DrawStaticProps(rcx, props, count, shadowDepth, wireframe);
 }

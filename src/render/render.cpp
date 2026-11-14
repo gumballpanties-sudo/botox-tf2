@@ -38,6 +38,7 @@
 #include "../hacks/esp/esp_declutter.h"  // label stacks shoved apart before the replay (EspQ_Declutter)
 #include <unordered_map>
 #include "../hacks/visuals/esp_preview.h"   // EspPreview::DropTexture in h_Reset
+#include "../hacks/visuals/rear_mirror.h"   // RearMirror_Draw, RearMirror_DropTexture in h_Reset
 #include "../hacks/visuals/player_stencil.h"  // PlayerStencil_ReleaseTargets in h_Reset
 #include "../hacks/visuals/lsd_chams.h"       // SheenNormal_Tick
 #include "../hacks/menu/fonts.h"          // fonts tab: indicator face picked at runtime
@@ -2194,6 +2195,7 @@ static void BuildImGuiFrame()
     }
     // botox end_scene: Web_Present right before the menu -- paint upload, browser window, on-top draw
     { CrashSpan _s("ov/web"); Web_Present(g_d3dDev); }
+    RearMirror_Draw();   // botox end_scene order: after web, before the menu
     { CrashSpan _s("ov/menu"); RenderMenu(); }   // self-gated: draws nothing once g_showMenu is false AND its close-fade has finished
 
     CrashSpan _s("ov/render");
@@ -2467,6 +2469,7 @@ static void Render_ReleaseDeviceObjects()
     Avatar_ReleaseAll();               // avatar textures are DEFAULT-pool too
     PlayerStencil_ReleaseTargets();    // esp: player stencil mask/blur targets, DEFAULT-pool
     EspPreview::DropTexture();         // esp preview: its target is remade, the d3d texture with it
+    RearMirror_DropTexture();          // rear view mirror: same, recaptured at the next mirror pass
     GifTex_ReleaseAll();               // gif frame texture, GDI+ bitmap survives the reset
     SpectatorList_ReleaseTextures();   // spectator list: eyes style row textures, DEFAULT-pool
     Radar_ReleaseTextures();           // csgo radar overview, DEFAULT-pool; the baked pixels rebuild it

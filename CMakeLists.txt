@@ -118,6 +118,7 @@ add_library(botox SHARED
     src/hacks/visuals/lsd_chams.cpp
     src/hacks/visuals/player_stencil.cpp
     src/hacks/visuals/esp_preview_tex.cpp
+    src/hacks/visuals/rear_mirror.cpp
     src/hacks/web/websurface.cpp   # web on surface (botox hacks/web), engine in wv2host
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp

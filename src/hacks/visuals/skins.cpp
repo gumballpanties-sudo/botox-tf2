@@ -2785,8 +2785,23 @@ void Skins_SaveCfg(FILE* f)
     fprintf(f, "enableSkins=%d\n", g_enableSkins ? 1 : 0);
     fprintf(f, "skinsBackpack=%d\n", g_skinsBackpack ? 1 : 0);
     char buf[1024];   // one weapon's block is ~500 bytes; same text the wire carries (skinshare_pure.h)
-    for (const auto& [id, c] : g_skinCfgs)
+    for (const auto& [id, c] : g_skinCfgs) {
         if (SkinPure_Format(buf, sizeof(buf), id, c)) fputs(buf, f);
+        // own line, off the wire (SkinPure_SetField reads it back). Menu input is single-line.
+        char tag[kNameTagLen];
+        SkinPure_CopyName(tag, c.nameTag);
+        if (tag[0]) fprintf(f, "skin_%d_name=%s\n", id, tag);
+    }
+}
+
+// The name tag the local player's weapon of this def shows, null = none. For the in-hand stock
+// weapon (no inventory item behind it, so GetCustomName never runs for it): weaponsel.cpp.
+// Keys are sealed at install, so find() is safe from any thread.
+const char* Skins_NameTagFor(int def)
+{
+    if (!g_enableSkins) return nullptr;
+    const auto f = g_skinCfgs.find(Skins_ConfigKey(def));
+    return (f != g_skinCfgs.end() && f->second.enabled && f->second.nameTag[0]) ? f->second.nameTag : nullptr;
 }
 
 bool Skins_LoadCfg(const char* key, const char* val)

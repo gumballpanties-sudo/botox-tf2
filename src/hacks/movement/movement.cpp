@@ -1891,9 +1891,12 @@ static MvDrift MV_DriftHold(void* pLocal, UserCmd_t* cmd, int frame, const Vec3&
     MvDrift r;
     constexpr float k_awayTarget = 0.0002f;   // u/s left drifting off: 0.000003u a tick
     const float pin = TargetPredictZVel();
+    // slide (!stopAlong): xy < 1 = TryPlayerMove zeroed the move (air stuck), vz still reads as the pin.
+    // a hang (stopAlong) is xy ~0 by design
     const auto on_pin = [&]() {
+        const Vec3 v = EntV3(pLocal, g_offVelocity);
         return !(EntI(pLocal, g_offFlags) & FL_ONGROUND)
-            && fabsf(EntV3(pLocal, g_offVelocity).z - pin) < as::k_pinTol;
+            && fabsf(v.z - pin) < as::k_pinTol && (stopAlong || v.Length2D() >= 1.f);
     };
     const auto velXY = [&]() { const Vec3 v = EntV3(pLocal, g_offVelocity); return Vec3(v.x, v.y, 0.f); };
     // across-face velocity this tick should end with (reads the entity's origin as it stands)
@@ -2038,9 +2041,10 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
         { AutoAlignStickDrop("other"); return false; }
 
     const float pin = TargetPredictZVel();
-    // as::k_pinTol: Valve's DIST_EPSILON clip ends a top-plane pin at -halfgrav + 0.03125
-    const auto on_pin = [pin](float vz) { return fabsf(vz - pin) < as::k_pinTol; };
-    const bool pinned_now = on_pin(s_prePredVel.z);
+    // as::k_pinTol: Valve's DIST_EPSILON clip ends a top-plane pin at -halfgrav + 0.03125.
+    // xy >= 1 (as::SurfPinned): a zeroed move (air stuck) ends on the same vz
+    const auto on_pin = [pin](const Vec3& v) { return as::SurfPinned(v.z, v.Length2D(), pin); };
+    const bool pinned_now = on_pin(s_prePredVel);
     if (s_aaStick && s_aaStickPredPin && !pinned_now)
         s_aaStickDiv++;
     s_aaStickPredPin = false;
@@ -2141,7 +2145,7 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
             EntSetI(pLocal, g_offTickBase, base + z);
             Pred_Simulate(pLocal, pCmd);
             ++simsUsed;
-            if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || !on_pin(EntV3(pLocal, g_offVelocity).z))
+            if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || !on_pin(EntV3(pLocal, g_offVelocity)))
                 break;
             held++;
         }
@@ -2262,8 +2266,52 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     return true;
 }
 
+// air stuck = TryPlayerMove zeroed the move (allFraction 0, 3+ planes, crease reversal, end-pos stuck box:
+// gamemovement.cpp TryPlayerMove) = xy 0, and FinishGravity's half step makes vz read as a pin. a hull corner
+// wedged in a prop / slanted face. our cmd stalls within 2 ticks where the one we got does not = hand it back
+static int s_aaGuardRev = 0;   // reverts, per second on the AA: ticks line
+// this tick's face can wedge the AABB (not square = corner contact; props are refused before any press). only
+// then is an xy 0 pin a stuck: on a square face a head-on surf zeroes xy too (wall + lip clip, crease d <= 0)
+static bool s_aaWedge = false;
+static void AutoAlignGuard(void* pLocal, UserCmd_t* pCmd, const UserCmd_t& got)
+{
+    if (pCmd->forwardmove == got.forwardmove && pCmd->sidemove == got.sidemove && pCmd->buttons == got.buttons)
+        return;
+    if (SimsLeft() < 4)
+        return;
+    const int frame = PredCommandsPredicted() - 1;
+    const auto stalls = [&](UserCmd_t c) -> bool {
+        RestoreToFrame(frame);
+        const int base = EntI(pLocal, g_offTickBase);
+        for (int z = 0; z < 2; z++)
+        {
+            EntSetI(pLocal, g_offTickBase, base + z);
+            Pred_Simulate(pLocal, &c);
+            if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK)
+                return false;
+            // vz too: a slow creep / corner crease is xy < 1 with a live vz, a wedge sits on the pin
+            const Vec3 v = EntV3(pLocal, g_offVelocity);
+            if (v.Length2D() < 1.f && fabsf(v.z - TargetPredictZVel()) < as::k_pinTol)
+                return true;
+        }
+        return false;
+    };
+    UserCmd_t rcv = *pCmd;
+    rcv.forwardmove = got.forwardmove; rcv.sidemove = got.sidemove; rcv.buttons = got.buttons;
+    const bool back = stalls(*pCmd) && !stalls(rcv);
+    RestoreToFrame(frame);
+    if (!back)
+        return;
+    pCmd->forwardmove = got.forwardmove;
+    pCmd->sidemove    = got.sidemove;
+    pCmd->buttons     = got.buttons;
+    s_aaStickOwns    = false;   // PS hold / pixel hop would keep the stalled cmd as AA's
+    s_aaStickPredPin = false;
+    ++s_aaGuardRev;
+}
+
 // ---- Auto align (nudge movement into a nearby wall to set up / hold a pixel surf) ----
-static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
+static void AutoAlignImpl(void* pLocal, UserCmd_t* pCmd)
 {
     static float s_startCircle = 0.f;
     static int   s_aaPropRej = 0;   // faces refused for being a prop (diag, per second)
@@ -2307,7 +2355,10 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
     // latched the first pinned tick before TB could catch the crease, wrote a press over the
     // player's keys that TB then read as input, and spent the sims TB hunts with
     if (!TbBindOn() && AutoAlignStick(pLocal, pCmd))
+    {
+        s_aaWedge = !MV_IsHullFlatWall(s_aaStickN);
         return;
+    }
 
     if (EntI(pLocal, g_offFlags) & FL_ONGROUND)
         return;
@@ -2388,6 +2439,7 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
         s_startCircle = 0.f;
         return;
     }
+    s_aaWedge = !MV_IsHullFlatWall(trace.plane.normal);
     // cvar not on the client = Valve's default, 0 (same read as the stick)
     const bool bWb0 = CvarFloat("sv_wallbug", 0.f) < 0.5f;
     if (!MV_IsHullFlatWall(trace.plane.normal) && !bWb0)
@@ -2461,7 +2513,9 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
                 EntSetI(pLocal, g_offTickBase, base + z);
                 Pred_Simulate(pLocal, pCmd);
                 ++sims;
-                if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || fabsf(EntV3(pLocal, g_offVelocity).z - pin) >= as::k_pinTol)
+                // xy >= 1 on a wedge face only: a zeroed move (air stuck) ends on the same vz (s_aaWedge)
+                const Vec3 v = EntV3(pLocal, g_offVelocity);
+                if ((EntI(pLocal, g_offFlags) & FL_ONGROUND) || !as::SurfPinned(v.z, s_aaWedge ? v.Length2D() : 1.f, pin))
                     break;
                 held++;
             }
@@ -2549,7 +2603,9 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
 
             Pred_Simulate(pLocal, pCmd);
 
-            if (fabsf(EntV3(pLocal, g_offVelocity).z + flSurfZ) < 1.5f)
+            // xy >= 1 on a wedge face only: a zeroed move (air stuck) ends on the same vz (s_aaWedge)
+            const Vec3 vEnd = EntV3(pLocal, g_offVelocity);
+            if (fabsf(vEnd.z + flSurfZ) < 1.5f && (!s_aaWedge || vEnd.Length2D() >= 1.f))
             {
                 bDetect = true;
                 break;
@@ -2586,15 +2642,25 @@ static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
             const Vec3 v = EntV3(pLocal, g_offVelocity);
             // prop= is the new one: ticks whose nearest face was a prop and was refused. A ride
             // that used to end in a wedge now reads as prop counting up with det holding
-            DebugLog("AA: ticks=%d det=%d prop=%d ang=%.2f nx=%.2f ny=%.2f nz=%.3f frac=%.3f "
+            // guard= cmds AutoAlignGuard handed back (ours stalled, yours did not)
+            DebugLog("AA: ticks=%d det=%d prop=%d guard=%d ang=%.2f nx=%.2f ny=%.2f nz=%.3f frac=%.3f "
                      "tan=%.1f xy=%.0f vz=%.1f look=%.1f fwd=%.1f side=%.1f",
-                     s_aaTicks, s_aaDet, s_aaPropRej, flFoundAngle, trace.plane.normal.x,
+                     s_aaTicks, s_aaDet, s_aaPropRej, s_aaGuardRev, flFoundAngle, trace.plane.normal.x,
                      trace.plane.normal.y,
                      trace.plane.normal.z, trace.fraction, flTangentInput, v.Length2D(), v.z,
                      v.Length2D() * TickInterval(), pCmd->forwardmove, pCmd->sidemove);
-            s_aaTicks = 0; s_aaDet = 0; s_aaPropRej = 0;
+            s_aaTicks = 0; s_aaDet = 0; s_aaPropRej = 0; s_aaGuardRev = 0;
         }
     }
+}
+
+static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
+{
+    const UserCmd_t got = *pCmd;
+    s_aaWedge = false;
+    AutoAlignImpl(pLocal, pCmd);
+    if (s_aaWedge)   // square face = native, no guard sims
+        AutoAlignGuard(pLocal, pCmd, got);
 }
 
 // ---- surf stick with the TB bind on: runs right after TextureBug ----------------------------
@@ -2614,7 +2680,9 @@ static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
     // still runs: the stick's wider search (drift / 450 / tangent) is what it is for
     if (!s_aaStick && s_tbAlignDead)
         return;
-    AutoAlignStick(pLocal, pCmd);
+    const UserCmd_t got = *pCmd;
+    if (AutoAlignStick(pLocal, pCmd) && !MV_IsHullFlatWall(s_aaStickN))   // square face = native, no guard sims
+        AutoAlignGuard(pLocal, pCmd, got);
 }
 
 // TB pin tests, ceiling detect, the sweep helpers and HeadSurf all moved INTO

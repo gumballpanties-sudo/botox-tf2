@@ -6,6 +6,7 @@
 #include "../hud/avatar_cache.h"   // Avatar_OnMapChange piggybacks the same hook
 #include "world_fx3.h"   // WorldFx3_LevelShutdown
 #include "../web/websurface.h"   // Web_LevelShutdown, Web_BlockFire
+#include "rear_mirror.h"   // RearMirror_Drawing -- the mirror pass's Push2DView is not the frame's
 
 // Port of fpsoverlay's flipworld.cpp (itself Aletherium's CFlipWorld + CMisc::FlipWorldInput).
 // Every engine number used here is a flipslot:: constant (flipmath.h); fpsoverlay's
@@ -576,7 +577,7 @@ static void __fastcall h_FlipWriteVars(void* rcx, void* buffer, bool allVars)
 static void __fastcall h_FlipPush2D(void* rcx, const void* view, int flags, void* rt, void* frustum)
 {
     MiscHookGuard _g;
-    if (OnGameThread()) {
+    if (OnGameThread() && !RearMirror_Drawing()) {
         FlipLock _l;
         FlipTrackTwoD(s_core.track);
         FlipPublish();

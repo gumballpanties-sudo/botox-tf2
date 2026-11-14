@@ -3,6 +3,7 @@
 #include "../visuals/visuals.h"      // CachedCVar -- mat_queue_mode
 #include "../movement/movement.h"     // Vec3 -- the focus trace's origin and angles come off the view setup
 #include "../visuals/flipworld.h"    // FlipWorld_Render -- mirrored at the end of the post slot
+#include "../visuals/rear_mirror.h"  // RearMirror_Drawing -- the mirror pass gets the engine's slot only
 #include "../web/websurface.h"       // Web_OnPostScreenSpaceEffects -- the world screen's post slot half
 #include "../visuals/chams_api.h"    // Glow_Render -- Amalgam glow pass, before the original post slot
 #include "../../hooks/crashlog.h"    // CrashSpan: stutter probe on the two view slots we own
@@ -1641,7 +1642,7 @@ static void __fastcall h_ViewDrawFade(void* thisptr, unsigned char* color, void*
 
     // Flip world (either DLL) mirrors before DrawViewModels, so the gun's colour and its 0..0.1 depth slice
     // are both unmirrored here: the gun's blur mask lines up either way.
-    if (!g_eject && ((g_dofEnable && !g_dofViewmodelSharp) || (g_fbEnable && g_fbViewmodel)))
+    if (!g_eject && !RearMirror_Drawing() && ((g_dofEnable && !g_dofViewmodelSharp) || (g_fbEnable && g_fbViewmodel)))
         FxViewmodelPassDispatch();
 }
 
@@ -1887,6 +1888,9 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
 {
     MiscHookGuard _g;
     CrashSpan _s("view/post");   // flip world, glow, ssao/dof/bloom/frame blend world passes + the engine's slot
+
+    if (RearMirror_Drawing())
+        return o_DoPostSSE(thisptr, setup);
 
     const DWORD tid = GetCurrentThreadId();
 

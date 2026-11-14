@@ -23,11 +23,24 @@ inline int SkinPure_Format(char* out, size_t cap, int id, const SkinCfg& c)
     return (n > 0 && (size_t)n < cap) ? n : 0;
 }
 
+// Bounded copy into a name tag buffer; null = "". Cuts at a byte, never past the 0.
+inline void SkinPure_CopyName(char (&out)[kNameTagLen], const char* in)
+{
+    int i = 0;
+    if (in) for (; i + 1 < kNameTagLen && in[i]; ++i) out[i] = in[i];
+    out[i] = 0;
+}
+
 // "skin_<def>_" already stripped: field + value -> the struct. false = unknown field.
+// "name" is read here but never written by SkinPure_Format: Skins_SaveCfg adds it on its own
+// line, so the p2p wire and SkinPure_Same (backpack copy rebuild) never see it.
 inline bool SkinPure_SetField(SkinCfg& c, const char* field, const char* val)
 {
     const bool b = (atoi(val) != 0);
-    if      (strcmp(field, "enabled")       == 0) c.enabled       = b;
+    if      (strcmp(field, "name")          == 0) SkinPure_CopyName(c.nameTag, val);
+    // "enabled" opens every block (SkinPure_Format) and a name line only follows when there is
+    // one: clear it here, or a loaded cfg with no name for this weapon keeps the old one.
+    else if (strcmp(field, "enabled")       == 0) { c.enabled = b; c.nameTag[0] = 0; }
     else if (strcmp(field, "paintKitId")    == 0) c.paintKitId    = atoi(val);
     else if (strcmp(field, "pattern")       == 0) c.pattern       = strtoull(val, nullptr, 10);
     else if (strcmp(field, "wear")          == 0) c.wear          = (float)atof(val);
@@ -197,7 +210,46 @@ inline int SkinPure_PatchRestore(const AttrRows& a, PatchState& st)
     return changed;
 }
 
+// ---- name tags: item id -> name (hats_inv.cpp, CEconItem::GetCustomName hook) ----------------
+// Set: "" removes the row. true = the name that id shows changed, so the caller re-announces
+// the item (SOUpdated) and its panels rebuild the name line. Full table = no tag (real name).
+template <int N>
+struct NameTagTable {
+    struct Row { uint64_t id; char name[kNameTagLen]; };
+    Row rows[N] = {};
+    int n = 0;
+
+    const char* Find(uint64_t id) const
+    {
+        for (int i = 0; i < n; ++i) if (rows[i].id == id) return rows[i].name;
+        return nullptr;
+    }
+    bool Set(uint64_t id, const char* name)
+    {
+        char v[kNameTagLen];
+        SkinPure_CopyName(v, name);
+        int i = 0;
+        while (i < n && rows[i].id != id) ++i;
+        if (!v[0]) {
+            if (i == n) return false;
+            rows[i] = rows[--n];
+            return true;
+        }
+        if (i < n) {
+            if (strcmp(rows[i].name, v) == 0) return false;
+            memcpy(rows[i].name, v, sizeof(v));
+            return true;
+        }
+        if (n == N) return false;
+        rows[n].id = id;
+        memcpy(rows[n].name, v, sizeof(v));
+        ++n;
+        return true;
+    }
+};
+
 // Every field equal, live ones included (the backpack copy's name and description show them all).
+// Not the name tag: it is no attribute, a rename only re-announces the copy (SkinsInv_Tick).
 inline bool SkinPure_Same(const SkinCfg& a, const SkinCfg& b)
 {
     char x[1024], y[1024];

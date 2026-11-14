@@ -52,6 +52,22 @@ static uint64_t FakeId(int slot) { return (uint64_t(kIdHigh) << 32) | uint64_t(0
 static uint64_t SkinId(int key)  { return (uint64_t(kSkinIdHigh) << 32) | uint64_t((uint32_t)key); }
 static bool     IsFake(uint64_t id) { return (id >> 32) == kIdHigh || (id >> 32) == kSkinIdHigh; }
 
+// Name tags shown by the h_GetCustomName hook (bottom of file): hat copies, weapon copies and the
+// real weapons we lay a config over. Written by the ticks below (game thread), read wherever the
+// game builds an item name. ponytail: linear table, a map if it ever holds thousands.
+static NameTagTable<kHatSlots + 192> s_tags;
+static SRWLOCK s_tagLock = SRWLOCK_INIT;
+
+// true = the name this id shows changed: the caller re-announces the item (SOUpdated).
+static bool SetTag(uint64_t id, const char* name)
+{
+    AcquireSRWLockExclusive(&s_tagLock);
+    const bool changed = s_tags.Set(id, name);
+    ReleaseSRWLockExclusive(&s_tagLock);
+    if (changed) DebugLog("inv name tag: %llx -> '%s'", (unsigned long long)id, name ? name : "");
+    return changed;
+}
+
 using CEconItemCtor_t  = void*(__fastcall*)(void*);
 using FindTypeCache_t  = void*(__fastcall*)(void*, int);
 using PlatAlloc_t      = void*(__cdecl*)(size_t);
@@ -395,22 +411,25 @@ void HatsInv_Tick(bool want)
                     b = s;
                     upd = true;
                 }
+                if (SetTag(FakeId(i), s.name)) upd = true;        // renamed: only the name line changes
                 if (upd) VCall<void>(c.inv, 2, c.owner, it, 4);   // SOUpdated -> loadout + preview re-read
                 ++n; continue;
             }
         rebuild:
+            SetTag(FakeId(i), "");
             Remove(c, it);
             DebugLog("hats inv: removed slot %d", i);
             if (!GetCtx(c)) return;                    // the vector may have moved
             continue;                                  // re-added next tick
         }
-        if (d && Add(c, i, s, d)) {
-            ++n;
-            s_built[i] = s;
-            DebugLog("hats inv: slot %d def %d '%s' in backpack (id %llx)", i, d->def, d->name,
-                     (unsigned long long)FakeId(i));
-            if (!GetCtx(c)) return;
-        }
+        if (!d) continue;
+        SetTag(FakeId(i), s.name);                     // before SOCreated: the first name line reads it
+        if (!Add(c, i, s, d)) { SetTag(FakeId(i), ""); continue; }
+        ++n;
+        s_built[i] = s;
+        DebugLog("hats inv: slot %d def %d '%s' in backpack (id %llx)", i, d->def, d->name,
+                 (unsigned long long)FakeId(i));
+        if (!GetCtx(c)) return;
     }
     s_count = n;
 }
@@ -672,7 +691,9 @@ static void PatchReal(const InvCtx& c, uint64_t id, int key, const SkinCfg& cfg,
     RealPatch& p = s_real[id];
     const bool fresh = p.item != it;
     p.key = key;
-    if (PatchRealSEH(static_cast<uint8_t*>(it), p, key, cfg)) {
+    const bool rows = PatchRealSEH(static_cast<uint8_t*>(it), p, key, cfg);
+    const bool tag  = SetTag(id, cfg.nameTag);   // ours over its own tag; "" = its own shows again
+    if (rows || tag) {
         VCall<void>(c.inv, 2, c.owner, it, 4);   // SOUpdated: name, quality, icon re-read
         if (fresh) DebugLog("skins inv: key %d laid over equipped item %llx", key, (unsigned long long)id);
     }
@@ -680,10 +701,14 @@ static void PatchReal(const InvCtx& c, uint64_t id, int key, const SkinCfg& cfg,
 
 static void UnpatchReal(const InvCtx& c, RealPatch& p)
 {
+    const bool tag = SetTag(p.id, "");
     if (void* it = FindId(c, p.id))
-        if (it == p.item && RestoreRealSEH(static_cast<uint8_t*>(it), p)) {
-            VCall<void>(c.inv, 2, c.owner, it, 4);
-            DebugLog("skins inv: key %d taken off item %llx", p.key, (unsigned long long)p.id);
+        if (it == p.item) {
+            const bool rows = RestoreRealSEH(static_cast<uint8_t*>(it), p);
+            if (rows || tag) {
+                VCall<void>(c.inv, 2, c.owner, it, 4);
+                DebugLog("skins inv: key %d taken off item %llx", p.key, (unsigned long long)p.id);
+            }
         }
 }
 
@@ -743,6 +768,7 @@ void SkinsInv_Tick(bool want)
         if (!on && st == s_skins.end()) continue;
         void* it = FindId(c, SkinId(key));
         if (!on) {
+            SetTag(SkinId(key), "");
             if (it) {
                 Remove(c, it);
                 if (!GetCtx(c)) return;
@@ -755,12 +781,13 @@ void SkinsInv_Tick(bool want)
 
         if (it && st != s_skins.end() && st->second.def == now.def && SkinPure_Same(st->second.built, cfg)) {
             SkinCopy& b = st->second;
+            const bool tag = SetTag(SkinId(key), cfg.nameTag);   // renamed: SOUpdated, no rebuild
             if (SetEquips(it, now.eq, now.neq)) {
                 VCall<void>(c.inv, 2, c.owner, it, 4);   // SOUpdated: ours takes its positions
                 GiveBack(c, occ, b.eq, b.neq, now.eq, now.neq);
                 DebugLog("skins inv: key %d now in %d loadout position(s)", key, now.neq);
-            } else if (now.neq > 0 && now.under != b.under) {
-                VCall<void>(c.inv, 2, c.owner, it, 4);   // the GC updated a real item under ours: take it back
+            } else if ((now.neq > 0 && now.under != b.under) || tag) {
+                VCall<void>(c.inv, 2, c.owner, it, 4);   // GC updated a real item under ours (take it back), or renamed
             }
             b = now;
             continue;
@@ -772,11 +799,13 @@ void SkinsInv_Tick(bool want)
             Remove(c, it);
             if (!GetCtx(c)) return;
         }
+        SetTag(SkinId(key), cfg.nameTag);   // before SOCreated: the first name line reads it
         if (AddSkin(c, key, now)) {
             s_skins[key] = now;
             DebugLog("skins inv: key %d def %d quality %d in backpack, %d loadout position(s) (id %llx)",
                      key, now.def, SkinPure_InvQuality(cfg), now.neq, (unsigned long long)SkinId(key));
         } else {
+            SetTag(SkinId(key), "");
             if (it && st != s_skins.end()) GiveBack(c, occ, st->second.eq, st->second.neq, nullptr, 0);
             if (st != s_skins.end()) s_skins.erase(st);
             DebugLog("skins inv: key %d def %d NOT added", key, now.def);
@@ -961,10 +990,72 @@ static void InstallGcHook()
     InstallHookAt(fn, "hats: ISteamGameCoordinator::SendMessage", (void*)h_GcSend, (void**)&o_GcSend);
 }
 
+// ---- name tags --------------------------------------------------------------------------------
+// TF2's name tag is attr 500 "custom name attr", a CAttribute_String (protobuf) row only the GC
+// writes. The client reads it in one place, CEconItem::GetCustomName (econ_item.cpp:323): the
+// item name line (Generate_ItemName wraps it in '', econ_item_description.cpp:1044),
+// CEconItemView::GetCustomName and the backpack's name filter all reach it through the item's
+// IEconItemInterface vtable (no direct call to it in client.dll). Hooked there, so no string row
+// is ever made for the game to free with its own allocator one day.
+// x64 client.dll (11-14): client+0x361B90 = CEconItem's second vtable (IEconItemInterface at +8)
+// slot 16 (econ_item_interface.h order; slot 18 IterateAttributes is the call it makes). this =
+// the subobject: slot 7 GetID is `mov rax,[rcx+40h]`, so the id is at this+0x40.
+// Its bytes up to the string are identical to GetCustomDesc (slot 17), so every hit is checked:
+// the lea at +0x2C must load "custom name attr".
+using GetCustomName_t = const char*(__fastcall*)(const void*);
+static GetCustomName_t o_GetCustomName = nullptr;
+
+static const char* __fastcall h_GetCustomName(const void* self)
+{
+    MiscHookGuard _g;
+    if (!g_eject && s_tags.n > 0) {
+        const uint64_t id = *reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(self) + 0x40);
+        AcquireSRWLockShared(&s_tagLock);
+        const char* name = s_tags.Find(id);   // row storage is static: valid after the unlock
+        ReleaseSRWLockShared(&s_tagLock);
+        if (name) return name;
+    }
+    return o_GetCustomName(self);
+}
+
+__declspec(noinline) static bool LoadsNameAttr(const uint8_t* hit, const uint8_t* base, size_t sz)
+{
+    static const char kAttr[] = "custom name attr";
+    __try {
+        const uint8_t* s = hit + 0x33 + *reinterpret_cast<const int32_t*>(hit + 0x2F);   // lea rax,[rip+disp32]
+        return s >= base && s + sizeof(kAttr) <= base + sz && memcmp(s, kAttr, sizeof(kAttr)) == 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static void InstallNameHook()
+{
+    HMODULE client = GetModuleHandleA("client.dll");
+    MODULEINFO mi{};
+    if (!client || !GetModuleInformation(GetCurrentProcess(), client, &mi, sizeof(mi))) return;
+    uint8_t* base = static_cast<uint8_t*>(mi.lpBaseOfDll);
+    const size_t sz = mi.SizeOfImage;
+    PatternScanToken pat[k_patternMaxTokens];
+    const size_t plen = PatternParse("40 53 56 57 41 56 48 81 EC ? ? ? ? 8B 05 ? ? ? ? 33 DB 4C 8B F1 A8 01 75 ? "
+                                     "83 C8 01 48 89 1D ? ? ? ? 89 05 ? ? ? ? 48 8D 05", pat, k_patternMaxTokens);
+    PatternBuildHist(base, sz);
+    size_t off = 0;
+    for (int k = 0; k < 8 && plen && off < sz; ++k) {
+        uint8_t* hit = PatternScan_SEH(base + off, sz - off, pat, plen);
+        if (!hit) break;
+        if (LoadsNameAttr(hit, base, sz)) {
+            InstallHookAt(hit, "inv: CEconItem::GetCustomName", (void*)h_GetCustomName, (void**)&o_GetCustomName);
+            return;
+        }
+        off = (size_t)(hit - base) + 1;
+    }
+    DebugLog("inv: CEconItem::GetCustomName NOT FOUND -- name tags off");
+}
+
 void HatsInv_Install()
 {
     Resolve();
     if (!s_ready) return;
+    InstallNameHook();
     InstallGcHook();
     void** vt = nullptr;
     __try { vt = *reinterpret_cast<void***>(s_invMgr); } __except(EXCEPTION_EXECUTE_HANDLER) {}

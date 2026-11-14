@@ -54,6 +54,7 @@
 // ============================================================================================
 
 extern std::atomic<bool> g_eject;        // dllmain.cpp
+const char* Skins_NameTagFor(int def);   // skins.cpp: enabled config's name tag, null = none
 void DebugLog(const char* fmt, ...);     // dllmain.cpp
 bool GifTex_LocalFile(const char* url, char* out, size_t outSize);   // hud/gif_tex.cpp
 
@@ -375,13 +376,20 @@ namespace
         __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
     }
 
-    // true + out = the name tag (quotes kept, as TF2 shows it)
-    bool NameTag(CBaseEntity* e, wchar_t (&out)[64])
+    // true + out = the name tag (quotes kept, as TF2 shows it). An owned item renamed in the
+    // skinchanger already comes back tagged (hats_inv.cpp GetCustomName hook); a stock weapon has
+    // no inventory item to ask, so the local player's falls back to its config's name tag.
+    bool NameTag(CBaseEntity* e, wchar_t (&out)[64], bool local)
     {
         if (!g_wselNameTags || !ResolveItemName()) return false;
         const wchar_t* w = ItemNameRaw(reinterpret_cast<uint8_t*>(e) + s_offItem);
-        if (!w || wcsncmp(w, L"''", 2) != 0) return false;
-        wcsncpy_s(out, w, _TRUNCATE);
+        if (w && wcsncmp(w, L"''", 2) == 0) { wcsncpy_s(out, w, _TRUNCATE); return true; }
+        const char* tag = local ? Skins_NameTagFor(e->As<CEconEntity>()->m_iItemDefinitionIndex()) : nullptr;
+        if (!tag) return false;
+        wchar_t t[64];   // tag is < 64 bytes, so < 64 utf-16 units + its 0
+        if (!MultiByteToWideChar(CP_UTF8, 0, tag, -1, t, 64)) return false;
+        t[59] = 0;       // 4 quotes + 59 + 0 = out: a long tag keeps its closing quotes
+        _snwprintf_s(out, _TRUNCATE, L"''%ls''", t);
         return true;
     }
 
@@ -532,13 +540,13 @@ namespace
     // UpdateWeapons. anim = false while the hud player just changed (AddAnimationDisable)
     // name tag if the item has one (inventory loads late, tags get renamed: re-checked each
     // second; the description is cached by the game, so a re-check is a lookup), else base name
-    void RefreshName(Item& it, CBaseEntity* e, float real)
+    void RefreshName(Item& it, CBaseEntity* e, float real, bool local)
     {
         if (real < it.nameAt) return;
         it.nameAt = real + 1.f;
         wchar_t was[64];
         wcsncpy_s(was, it.name, _TRUNCATE);
-        const bool tag = NameTag(e, it.name);
+        const bool tag = NameTag(e, it.name, local);
         if (!tag) ItemName(it.token, it.name);
         if (wcscmp(was, it.name))
             DebugLog("weaponsel: name %s \"%ls\"", tag ? "tag" : "base", it.name);
@@ -547,6 +555,7 @@ namespace
     void UpdateWeapons(CTFPlayer* pPlayer, float now, bool anim)
     {
         const float real = I::GlobalVars->realtime;
+        const bool local = pPlayer->entindex() == I::EngineClient->GetLocalPlayer();   // not a spectated player
         static const int nQuality = U::NetVars.GetNetVar("CEconEntity", "m_iEntityQuality");
         bool anyChanges = false;
 
@@ -597,7 +606,7 @@ namespace
             CBaseEntity* e = have[i].e;
             bool known = false;
             for (Item& it : s_items)
-                if (!it.deleted && it.handle == have[i].handle) { known = true; RefreshName(it, e, real); }
+                if (!it.deleted && it.handle == have[i].handle) { known = true; RefreshName(it, e, real, local); }
             if (!known)
             {
                 const wsel::Def* d = FindDef(e->As<CEconEntity>()->m_iItemDefinitionIndex());
@@ -622,7 +631,7 @@ namespace
                 it.quality = nQuality > 0 ? *reinterpret_cast<int*>(uintptr_t(e) + nQuality) : 0;
                 it.token   = d->name;
                 it.nameAt  = -1.f;
-                RefreshName(it, e, real);
+                RefreshName(it, e, real, local);
                 it.activeAt = anim ? now : -1000.f;
                 it.x.Snap(anim ? 1.25f : 0.f);   // .weapon-selection-item translateX(125%)
                 it.x.Set(0.f, now, kDropTime, anim);   // --active: translateX(0px)

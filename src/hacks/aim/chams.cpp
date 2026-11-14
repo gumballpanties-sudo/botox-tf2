@@ -56,6 +56,7 @@ extern char  g_chamsTeamUberCfg[ChamsLayers::kCfgLen];    // same pair, teammate
 extern char  g_chamsTeamCloakCfg[ChamsLayers::kCfgLen];
 
 extern bool  g_espEnable;                // botox m_players: stencil / inner / full-res glow need it
+bool Esp_On();                           // g_espEnable + esp keybind (esp_vars.h); preview keeps plain g_espEnable
 extern bool  g_glowEnable;               // botox "player glow"
 extern float g_glowVisColor[4];
 extern float g_glowInvisColor[4];
@@ -1052,6 +1053,9 @@ namespace
 		st.outlineWave[2] = 1.f / std::clamp(g_esxStencilWaveSize, 0.05f, 4.f);
 		st.outlineWave[3] = std::clamp(g_esxStencilWaveStrength, 0.f, 1.f);
 		Rgba(st.outlineWaveColor, g_esxStencilWaveColor);
+		const float angle = g_esxStencilWaveAngle * 0.017453293f;   // c14.zw
+		st.waveAngle[2] = cosf(angle);
+		st.waveAngle[3] = sinf(angle);
 	}
 
 	// wave anchor boxes (botox player_stencil run()): ndc hull bounds of every glow player, wave phase
@@ -1381,8 +1385,9 @@ void* Glow_PreviewTarget() { return s_previewTarget; }
 void Glow_Render()
 {
 	// botox player_stencil enabled() / inner_enabled(): need the players esp on. Player glow too.
-	const bool bGlow = g_espEnable && g_glowEnable;
-	const bool bLive = g_espEnable && !PlayerStencil_Failed();
+	const bool bEsp = Esp_On();
+	const bool bGlow = bEsp && g_glowEnable;
+	const bool bLive = bEsp && !PlayerStencil_Failed();
 	const bool bOutline = bLive && g_esxStencil, bInner = bLive && g_esxInnerGlow;
 	if (!bGlow && !bOutline && !bInner)
 		return;

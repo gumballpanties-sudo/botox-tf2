@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdio>
 #include "hats_pure.h"
+#include "../../globals/types.h"   // kNameTagLen
 
 // Hat changer: client-side cosmetics on the local player. lmaobox's "Hats" page (lbox dump,
 // FUN_3c968966) creates a tf_wearable, stamps item def + owner, sets the model and Equips it;
@@ -18,8 +19,9 @@ constexpr int kHatSlots = 64;
 // in loadout position eqPos[class]. Bit 0 clear = worn on every class that can (menu default).
 // useHead/zOff: TF2's own loadout item options ("use head origin" + effect height slider, attrs
 // 520/519, -8..8 u). Set only from TF2's loadout screen (hats_inv.cpp GC hook), saved in the cfg.
+// name: name tag (UTF-8, "" = none), shown on the backpack copy (hats_inv.cpp GetCustomName hook).
 struct HatSlot { int def; int style; int unusual; int paint; uint16_t eqMask; uint8_t eqPos[10];
-                 int useHead; float zOff; };
+                 int useHead; float zOff; char name[kNameTagLen]; };
 
 extern bool    g_hatsEnable;
 extern bool    g_hatsBackpack;   // also put each worn hat in TF2's own backpack (hats_inv.cpp)

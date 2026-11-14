@@ -735,6 +735,8 @@ static const CfgEntry kEntries[] = {
     { "prBotClass",       CfgEntry::INT,    &g_prBotClass, 0 },
 
     { "espEnable",               CfgEntry::BOOL,   &g_espEnable, 0 },
+    { "espKey",                  CfgEntry::INT,    &g_espKey, 0 },
+    { "espKeyMode",              CfgEntry::INT,    &g_espKeyMode, 0 },
     { "espPreview",              CfgEntry::BOOL,   &g_espPreview, 0 },
     { "espTeammates",            CfgEntry::BOOL,   &g_espTeammates, 0 },
     { "espMaxDistance",          CfgEntry::FLOAT,  &g_espMaxDistance, 0 },

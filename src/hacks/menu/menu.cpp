@@ -3435,6 +3435,11 @@ static void Tab_Skins()
 
     // ---- extras --------------------------------------------------------------------
     Section("extras");
+    ImGui::InputText("name tag##skname", cfg.nameTag, sizeof(cfg.nameTag));
+    if (ImGui::IsItemHovered())
+        MenuTooltip("custom name, like a tf2 name tag. shows on the backpack / loadout\n"
+                    "item ('show in backpack') and in the weapon selection hud (name tags).\n"
+                    "empty = the item's own name. client-side only.");
     {
         // Available on every weapon. The clock model only exists on an item that carries a
         // warpaint def's static weapon_uses_stattrak_module string, so with no skin picked the
@@ -3609,6 +3614,10 @@ static void Page_Hats()
                 ImGui::EndCombo();
             }
             if (!d->paintable) { ImGui::EndDisabled(); ImGui::TextDisabled("(not paintable)"); }
+            ImGui::InputText("name tag##hatname", s.name, sizeof(s.name));
+            if (ImGui::IsItemHovered())
+                MenuTooltip("custom name, like a tf2 name tag, on the backpack / loadout item\n"
+                            "('show in backpack'). empty = the hat's own name. client-side only.");
             if (ImGui::Button("remove##hatrm", ImVec2(-1.f, 15.f))) s = { 0, 0, -1, -1 };
         } else {
             ImGui::TextDisabled("pick an item on the right");
@@ -3633,7 +3642,9 @@ static void Page_Hats()
                     char lbl[160]; snprintf(lbl, sizeof(lbl), "%s (%d)##hl%d", d->name, d->def, r);
                     if (ImGui::Selectable(lbl, g_hatSlots[s_sel].def == d->def)) {
                         HatSlot& t = g_hatSlots[s_sel];
-                        t = t.def > 0 ? HatSlot{ d->def, 0, t.unusual, t.paint } : HatSlot{ d->def, 0, -1, -1 };
+                        const HatSlot was = t;
+                        t = was.def > 0 ? HatSlot{ d->def, 0, was.unusual, was.paint } : HatSlot{ d->def, 0, -1, -1 };
+                        memcpy(t.name, was.name, sizeof(t.name));   // the name tag stays on the slot through a swap
                     }
                 }
             ImGui::EndListBox();

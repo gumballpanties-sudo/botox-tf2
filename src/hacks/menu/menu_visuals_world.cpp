@@ -61,6 +61,18 @@ static void WdModulationRow(const char* label, bool* enable, float color[4], flo
 
 void Menu_Visuals_World()
 {
+    // botox: right after flip world
+    ImGui::Checkbox("rear view mirror", &g_wdRearMirror);
+    if (g_wdRearMirror) {
+        ImGui::OptionPopup("rear view mirror settings", [&]() {
+            ImGui::SliderInt("width##rear mirror", &g_wdRearMirrorWidth, 80, 1280, "%d px", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderInt("height##rear mirror", &g_wdRearMirrorHeight, 40, 720, "%d px", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderFloat("fov##rear mirror", &g_wdRearMirrorFov, 30.f, 150.f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SliderFloat("rounding##rear mirror", &g_wdRearMirrorRounding, 0.f, 60.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::Checkbox("mirror image##rear mirror", &g_wdRearMirrorFlip);
+        }, ImVec2(220.f, -1.f));
+    }
+
     ImGui::Checkbox("dlight", &g_dlightEnable);
     if (g_dlightEnable) {
         ImGui::OptionPopup("dlight settings", [&]() {

@@ -12,6 +12,7 @@
 #include "world_fx.h"     // WorldFx_Tick -- fullbright + disable interp pokes
 #include "world_fx2.h"    // WorldFx2_Tick/_OnFindMaterial -- dlight, tints
 #include "mc_world.h"     // MCWorld_OnSkyBoxDrawn -- minecraft sky behind the 2D sky draw
+#include "rear_mirror.h"  // RearMirror_Drawing -- the mirror pass draws plain models, no sky pass
 #include "../misc/game_extras.h"   // ChatTranslator_OnUserMessage -- DispatchUserMessage
 #include "../../hooks/crashlog.h"     // CrashSpan: stutter probe on DrawModelExecute (chams, frame blend bones)
 #include <intrin.h>       // _ReturnAddress -- net_graph must still read the real lerp
@@ -376,7 +377,7 @@ void __fastcall h_R_DrawSkyBox(float zFar, int nDrawFlags)
     }
     // minecraft sky: right behind this view's 2D sky draw (botox mc_clouds' point), z-tested so
     // it only lands where nothing opaque is, whichever side of the world the engine draws sky
-    if (!g_eject && g_mcWorldEnable) MCWorld_OnSkyBoxDrawn();
+    if (!g_eject && g_mcWorldEnable && !RearMirror_Drawing()) MCWorld_OnSkyBoxDrawn();
 }
 
 // ==== CS:GO viewmodel bob / gun lower / landing dip =====================================
@@ -1341,6 +1342,12 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
     if (wantHatBody && pInfoB && pMdl) {
         int* pBody = reinterpret_cast<int*>(const_cast<uint8_t*>(pInfoB) + 0x4C);
         *pBody = Hats_Body(entIdx, pMdl, *pBody);
+    }
+
+    // rear view mirror pass: what is hidden stays hidden, no chams / glow / bones / viewmodel work
+    if (RearMirror_Drawing()) {
+        o_DrawModelExecute(rcx, pState, pInfo, pBones);
+        return;
     }
 
     // Glow pass (aim/chams.cpp Glow_Render) drawing its silhouettes through CBaseEntity::DrawModel:

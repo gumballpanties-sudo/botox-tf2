@@ -820,6 +820,19 @@ int  g_prBotClass = 5;        // index into k_prClassArg -- 5 = heavy (biggest d
 
 // -- ESP (src/hacks/aim/esp.cpp, extern list hacks/esp/esp_vars.h) -- botox defaults --
 bool  g_espEnable = false;
+int   g_espKey = 0;
+int   g_espKeyMode = 0;
+
+// botox n_players::esp_on: always / no key = on (menu open too), else render.cpp's bind gate
+bool Esp_On()
+{
+    if (!g_espEnable) return false;
+    if ((g_espKeyMode != 1 && g_espKeyMode != 2) || g_espKey <= 0 || g_espKey > 255) return true;
+    if (g_hwnd && GetForegroundWindow() != g_hwnd) return false;
+    return g_espKeyMode == 1 ? !Binds_Blocked() && (GetAsyncKeyState(g_espKey) & 0x8000) != 0
+                             : Binds_Toggled(g_espKey);
+}
+
 bool  g_espPreview = false;   // visuals > esp "esp preview" checkbox, src/hacks/visuals/esp_preview.h
 bool  g_espTeammates = false;
 float g_espMaxDistance = 0.f;

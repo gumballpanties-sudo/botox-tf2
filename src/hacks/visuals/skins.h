@@ -46,6 +46,7 @@ int  Skins_BuildAttrs(const SkinCfg& c, SkinAttr* out, int cap, bool inv);
 int  Skins_ConfigKey(int def);                    // any def -> config key, 0 = none
 int  Skins_InvDef(int key, const SkinCfg& c);     // def the backpack copy is
 void SkinsInv_Tick(bool want);                    // FSN stage 5; false = take every copy out
+const char* Skins_NameTagFor(int def);            // enabled config's name tag for any def, null = none
 
 // Shared with the hat changer (hats.cpp) -- see the bottom of skins.cpp.
 int         Skins_ModelIndex(const char* path);          // precached or client-side dynamic, 0 = none

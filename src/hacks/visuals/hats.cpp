@@ -2,6 +2,7 @@
 #include "../../globals/globals.h"
 #include "hats.h"
 #include "skins.h"
+#include "skins_pure.h"  // SkinPure_CopyName (hat name tags)
 #include "skinshare.h"   // peers' hats go on THEIR players, same lifecycle, slots after ours
 #include "../../dependencies/data/hatdata.h"
 
@@ -778,6 +779,11 @@ void Hats_SaveCfg(FILE* f)
         fprintf(f, "hat_%d=%d %d %d %d %u", i, c.def, c.style, c.unusual, c.paint, (unsigned)c.eqMask);
         for (int k = 1; k <= 9; ++k) fprintf(f, " %u", (unsigned)c.eqPos[k]);
         fprintf(f, " %d %.3f\n", c.useHead ? 1 : 0, c.zOff);
+        // after its hat_ line: that one resets the slot. "hatname_" is no "hat_" prefix, so
+        // neither Hats_LoadCfg's slot parse nor the p2p wire (skinshare_pure.h) takes it.
+        char tag[kNameTagLen];
+        SkinPure_CopyName(tag, c.name);
+        if (tag[0]) fprintf(f, "hatname_%d=%s\n", i, tag);
     }
 }
 
@@ -791,6 +797,11 @@ bool Hats_LoadCfg(const char* key, const char* val)
         return true;
     }
     if (strcmp(key, "hatsBackpack") == 0) { g_hatsBackpack = atoi(val) != 0; return true; }
+    if (strncmp(key, "hatname_", 8) == 0) {
+        const int i = atoi(key + 8);
+        if (i >= 0 && i < kHatSlots && g_hatSlots[i].def > 0) SkinPure_CopyName(g_hatSlots[i].name, val);
+        return true;
+    }
     if (strncmp(key, "hat_", 4) != 0) return false;
     const int i = atoi(key + 4);
     if (i < 0 || i >= kHatSlots) return true;

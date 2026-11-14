@@ -7,6 +7,13 @@ inline float g_wdWorldFov = 0.f;                                   // m_world_fo
 
 inline bool  g_wdFlipGunOtherSide = false;                         // m_flip_world_mirror_hand
 
+inline bool  g_wdRearMirror = false;                               // m_rear_mirror
+inline int   g_wdRearMirrorWidth = 360;                            // m_rear_mirror_width (logical px)
+inline int   g_wdRearMirrorHeight = 120;                           // m_rear_mirror_height
+inline float g_wdRearMirrorFov = 90.f;                             // m_rear_mirror_fov (horizontal)
+inline float g_wdRearMirrorRounding = 10.f;                        // m_rear_mirror_rounding
+inline bool  g_wdRearMirrorFlip = true;                            // m_rear_mirror_flip: "mirror image"
+
 inline bool  g_wdDlightLocal = false;                              // m_dlight_local
 inline float g_wdDlightLocalColor[4] = { 120 / 255.f, 160 / 255.f, 1.f, 1.f };
 inline int   g_wdDlightBrightness = 5;                             // m_dlight_brightness (dlight exponent)

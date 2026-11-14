@@ -28,6 +28,10 @@ struct CcCurve {
     float y[k_ccMaxPts];
 };
 
+// Name tag buffer, weapons + hats (bytes incl. the 0). TF2's rename limit is 40 characters
+// (MAX_ITEM_CUSTOM_NAME_LENGTH), UTF-8 makes that up to 4 bytes each; 63 bytes is plenty.
+inline constexpr int kNameTagLen = 64;
+
 // -- Skinchanger: one weapon's whole look ----------------------------------------------
 // Kept here rather than in data/skindata.h so globals.h can declare the map without pulling
 // in that file's ~40KB of name tables. Every field is an econ attribute or a def-index
@@ -57,6 +61,9 @@ struct SkinCfg {
     int      weaponSkinDef = 0;  // 15xxx def for a weapon-specific skin (0 = generic warpaint)
     int      reskinDef     = 0;  // reskin variant def index (0 = stock, 741 = Rainblower, ...)
     int      reskinStyle   = 0;  // style index within that reskin (Black Rose 1 = the black one)
+    // Name tag (attr 500 "custom name attr"), UTF-8, "" = none. Not an attribute we write: the
+    // backpack items' CEconItem::GetCustomName is hooked (hats_inv.cpp). Not on the p2p wire.
+    char     nameTag[kNameTagLen] = {};
 };
 
 // -- Econ attribute list (skinchanger) -------------------------------------------------
