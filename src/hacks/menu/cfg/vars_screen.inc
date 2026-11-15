@@ -42,3 +42,4 @@
     { "sfxReflScale",             CfgEntry::FLOAT,  &g_sfxReflScale, 0 },
     { "sfxReflQuality",           CfgEntry::INT,    &g_sfxReflQuality, 0 },
     { "sfxReflSmoothNormals",     CfgEntry::BOOL,   &g_sfxReflSmoothNormals, 0 },
+    { "sfxImagesEnable",          CfgEntry::BOOL,   &g_sfxImagesEnable, 0 },

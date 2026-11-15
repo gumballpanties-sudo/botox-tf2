@@ -560,6 +560,11 @@ set_target_properties(points_style_test PROPERTIES
 # Build + run: cmake --build build --config Release --target visualkeys_test && build\Release\visualkeys_test.exe
 add_executable(visualkeys_test tests/visualkeys_test.cpp)
 
+# Gate test for visuals > images list text form (src/hacks/hud/screen_image_pure.h, same file in
+# botox csgo + css): round trip exact, commas in paths, bad lines dropped alone, fits the cfg line.
+# Build + run: cmake --build build --config Release --target screen_image_test && build\Release\screen_image_test.exe
+add_executable(screen_image_test tests/screen_image_test.cpp)
+
 # Gate test for the MV_DetectWallLines broadphase box (src/hacks/movement/mv_scanbound.h): the one
 # trace that replaces sixteen. Re-runs the scan loop's own per-direction arithmetic and asserts
 # the box contains every trace it would have run -- safe AND tight.

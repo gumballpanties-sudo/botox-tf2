@@ -12,6 +12,7 @@
 #include "../movement/recorder.h"      // movement extras
 #include "fonts.h"         // fonts tab
 #include "visual_keys.h"   // settings tab "visuals config"
+#include "../hud/watermark.h"   // visuals > images list: its own cfg lines (ScreenImages_SaveCfg)
 #include "../lua/lua_bridge.h"   // lua config.*
 #include <cfloat>      // FLT_MAX -- the "this end was never bounded" sentinel below
 #include <algorithm>   // std::sort -- ListConfigs
@@ -1087,6 +1088,9 @@ void SaveConfig(const char* path, bool visuals)
         }
     }
 
+    // visuals > images: a variable count of lines, visuals files too
+    ScreenImages_SaveCfg(f);
+
     // botox: skins (inventory tab) and aimbot vars are never in a visuals file
     if (!visuals)
     {
@@ -1270,6 +1274,9 @@ void LoadConfig(const char* path, bool visuals)
         // strip trailing newline
         size_t vl = strlen(val);
         while (vl > 0 && (val[vl-1] == '\n' || val[vl-1] == '\r')) val[--vl] = '\0';
+
+        // visuals > images lines (never in kEntries / the visual key list): full and visuals loads alike
+        if (ScreenImages_LoadCfg(key, val)) continue;
 
         // botox: a full cfg dropped in the visuals folder still only touches visuals
         if (visuals)

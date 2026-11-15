@@ -140,9 +140,52 @@ inline std::string CvarName(const std::string& cmd)
     return a;
 }
 
-enum class CfgAct { Run, Skip, Exec };
+// ALLOWLIST (11-15: a blocklist ran femboy's ent_remove_all_entities.cfg = ~200 ent_remove_all on
+// the listen server -> server.dll crash; its script.cfg con_logfile-writes into tf/cfg). A line runs
+// only if it is:
+//  - a client-side cvar set (or toggle / incrementvar / multvar of one); the caller decides "client
+//    side" from the cvar's flags (not GAMEDLL / REPLICATED / CHEAT / USERINFO); never mat_* (video
+//    settings), sv_*, or con_logfile (writes files)
+//  - "alias name body" (Alias: caller records it), or a call of an alias this cfg defined (Expand:
+//    caller runs the body through this same filter, never the alias by name)
+//  - testhudanim / echo
+//  - the hud "script" file writers (user's call 11-15): con_logfile (a client cvar, passes the cvar
+//    rule) + sixense_write_bindings / sixense_clear_bindings. femboy / m0re write cfg/*.txt with
+//    them, which their .res files #base to pick a layout (the caller links the paths, see
+//    CustomNamesIn)
+//  - exec (Exec: caller follows it into the hud's own cfg folder only)
+// Everything else (ent_*, mp_*, bot commands, binds, boot commands, unknown) = Skip.
+enum class CfgAct { Run, Skip, Exec, Alias, Expand };
+using NameFn = std::function<bool(const std::string&)>;
 
-inline CfgAct Classify(const std::string& cmd, std::string* execTarget)
+inline bool CvarAllowedName(const std::string& lowerName)
+{
+    return !lowerName.empty() && lowerName.rfind("mat_", 0) != 0 && lowerName.rfind("sv_", 0) != 0
+        && lowerName != "vgui_cache_res_files";
+}
+
+// A script hud's .res does #base "../../../../cfg/x.txt" = <mount root>/../../cfg (tf/cfg when the
+// hud sits in tf/custom/<hud>), and the cfg/x.txt its switch cfgs log says
+// #base "../custom/<hud>/resource/..." = back down through tf/custom. The folder names a hud expects
+// there: every "../custom/<name>/" in its cfg files (lowercase, once). Empty = not a script hud.
+inline std::vector<std::string> CustomNamesIn(const std::string& text)
+{
+    std::vector<std::string> out;
+    const std::string lower = Lower(text);
+    const std::string key = "../custom/";
+    for (size_t at = lower.find(key); at != std::string::npos; at = lower.find(key, at + key.size()))
+    {
+        const size_t b = at + key.size();
+        const size_t e = lower.find_first_of("/\\\"", b);
+        if (e == std::string::npos || e == b || lower[e] == '"') continue;
+        const std::string name = lower.substr(b, e - b);
+        if (name == "." || name == ".." || name.find(':') != std::string::npos) continue;
+        if (std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
+    }
+    return out;
+}
+
+inline CfgAct Classify(const std::string& cmd, std::string* target, const NameFn& clientCvar, const NameFn& knownAlias)
 {
     const auto t = Tokens(cmd);
     if (t.empty()) return CfgAct::Skip;
@@ -150,21 +193,34 @@ inline CfgAct Classify(const std::string& cmd, std::string* execTarget)
     if (a == "exec")
     {
         if (t.size() < 2) return CfgAct::Skip;
-        if (execTarget) *execTarget = t[1];
+        if (target) *target = t[1];
         return CfgAct::Exec;
     }
-    // boot / session commands, the user's own binds, and the reloads multihud does itself
-    static const char* const kSkip[] = {
-        "stuffcmds", "startupmenu", "sv_unlockedchapters", "showconsole", "hideconsole", "toggleconsole",
-        "wait", "quit", "exit", "map", "map_background", "connect", "disconnect", "retry", "reconnect",
-        "host_writeconfig", "bind", "unbind", "unbindall", "bindtoggle", "hud_reloadscheme",
-        "snd_restart", "cl_reload_localization_files", "kill", "explode", "jointeam", "joinclass" };
-    for (const char* s : kSkip) if (a == s) return CfgAct::Skip;
-    if (a[0] == '+' || a[0] == '-') return CfgAct::Skip;   // +attack / -forward
+    if (a == "alias")
+    {
+        if (t.size() < 2) return CfgAct::Skip;
+        if (target) *target = Lower(t[1]);
+        return CfgAct::Alias;
+    }
+    if (a == "testhudanim" || a == "echo" || a == "sixense_write_bindings" || a == "sixense_clear_bindings")
+        return CfgAct::Run;
+    if (knownAlias && knownAlias(a)) { if (target) *target = a; return CfgAct::Expand; }
     const std::string v = CvarName(cmd);
-    // video settings (the "transparent panels" incrementvar mat_aaquality trick) and server cvars
-    if (v.rfind("mat_", 0) == 0 || v.rfind("sv_", 0) == 0) return CfgAct::Skip;
-    return CfgAct::Run;
+    if (!CvarAllowedName(v)) return CfgAct::Skip;
+    return clientCvar && clientCvar(v) ? CfgAct::Run : CfgAct::Skip;
+}
+
+// "alias name body" -> body (quoted or the rest of the line), "" = none
+inline std::string AliasBody(const std::string& cmd)
+{
+    const auto t = Tokens(cmd);
+    if (t.size() < 3) return {};
+    // a quoted body is one token; an unquoted one may be several words
+    const size_t at = cmd.find(t[1]) + t[1].size();
+    std::string rest = cmd.substr(at);
+    const size_t a = rest.find_first_not_of(" \t\"");
+    const size_t b = rest.find_last_not_of(" \t\"");
+    return a == std::string::npos ? std::string() : rest.substr(a, b - a + 1);
 }
 
 // ---- bitmap font file (.vbf) ------------------------------------------------------------------
@@ -182,6 +238,186 @@ inline int VbfGlyphs(const unsigned char* p, size_t n, int loadedCount)
     return count;
 }
 
+// ---- paths ------------------------------------------------------------------------------------
+// lowercase, forward slashes, "." and "x/.." collapsed: vgui binds hud images as "vgui/../hud/x",
+// the files on disk are materials/hud/x.
+inline std::string NormalizePath(const std::string& in)
+{
+    std::vector<std::string> parts;
+    std::string cur;
+    auto push = [&]() {
+        if (cur.empty() || cur == ".") {}
+        else if (cur == ".." && !parts.empty() && parts.back() != "..") parts.pop_back();
+        else parts.push_back(cur);
+        cur.clear();
+    };
+    for (const char ch : in)
+    {
+        const char c = ch == '\\' ? '/' : (char)tolower((unsigned char)ch);
+        if (c == '/') push(); else cur += c;
+    }
+    push();
+    std::string out;
+    for (size_t i = 0; i < parts.size(); ++i) { if (i) out += '/'; out += parts[i]; }
+    return out;
+}
+
+// ---- .res control tree --------------------------------------------------------------------------
+// Names-only view of a vgui .res: every block key (controls, nested controls, if_ blocks), leaves
+// (properties) dropped, lowercase. "#base"/"#include" file names collected for the caller to load
+// (relative to the including file) and merge: KeyValues merges a base file's keys in by name.
+// geometry keys Panel::ApplySettings applies only when present (Panel.cpp:4410 xpos/ypos keep GetPos,
+// ComputeWide/Tall keep the size, 4519 zpos): a key the new hud leaves out kept the old hud's value
+enum : unsigned { kGeoX = 1, kGeoY = 2, kGeoZ = 4, kGeoW = 8, kGeoT = 16 };
+inline unsigned GeoBit(const std::string& lowerKey)
+{
+    return lowerKey == "xpos" ? kGeoX : lowerKey == "ypos" ? kGeoY : lowerKey == "zpos" ? kGeoZ
+         : lowerKey == "wide" ? kGeoW : lowerKey == "tall" ? kGeoT : 0;
+}
+
+struct ResNode
+{
+    std::string name;
+    std::vector<ResNode> kids;
+    unsigned geo = 0;   // kGeo* keys the block sets
+};
+
+inline const ResNode* ResChild(const ResNode& n, const std::string& lowerName)
+{
+    for (const auto& k : n.kids) if (k.name == lowerName) return &k;
+    return nullptr;
+}
+
+// union by name, recursive (a key both sides have keeps one node with both sides' children)
+inline void ResMerge(ResNode& into, const ResNode& from)
+{
+    for (const auto& k : from.kids)
+    {
+        ResNode* hit = nullptr;
+        for (auto& m : into.kids) if (m.name == k.name) { hit = &m; break; }
+        if (hit) { hit->geo |= k.geo; ResMerge(*hit, k); } else into.kids.push_back(k);
+    }
+}
+
+namespace detail {
+struct ResLexer
+{
+    const std::string& s;
+    size_t i = 0;
+    // next token; "" at end. Quotes stripped, '{' '}' are tokens, // comments skipped
+    bool Next(std::string& tok, bool& quoted)
+    {
+        tok.clear(); quoted = false;
+        for (;;)
+        {
+            while (i < s.size() && (unsigned char)s[i] <= ' ') ++i;
+            if (i + 1 < s.size() && s[i] == '/' && s[i + 1] == '/') { while (i < s.size() && s[i] != '\n') ++i; continue; }
+            break;
+        }
+        if (i >= s.size()) return false;
+        const char c = s[i];
+        if (c == '{' || c == '}') { tok = c; ++i; return true; }
+        if (c == '"')
+        {
+            ++i; quoted = true;
+            while (i < s.size() && s[i] != '"') tok += s[i++];
+            if (i < s.size()) ++i;
+            return true;
+        }
+        while (i < s.size() && (unsigned char)s[i] > ' ' && s[i] != '{' && s[i] != '}' && s[i] != '"') tok += s[i++];
+        return true;
+    }
+};
+inline bool IsCond(const std::string& t, bool quoted) { return !quoted && t.size() >= 2 && t.front() == '[' && t.back() == ']'; }
+
+// geo = the owner block's kGeo* bits (null at the file level)
+inline void ParseBlock(ResLexer& lx, std::vector<ResNode>& out, std::vector<std::string>* includes, int depth,
+                       unsigned* geo = nullptr)
+{
+    std::string tok; bool q;
+    while (lx.Next(tok, q))
+    {
+        if (!q && tok == "}") return;
+        if (!q && tok == "{") { std::vector<ResNode> junk; if (depth < 64) ParseBlock(lx, junk, nullptr, depth + 1); continue; }
+        if (IsCond(tok, q)) continue;
+        if (!q && (tok == "#base" || tok == "#include"))
+        {
+            std::string f; bool fq;
+            if (lx.Next(f, fq) && includes) includes->push_back(f);
+            continue;
+        }
+        ResNode node; node.name = Lower(tok);
+        // value or block; a conditional may sit between the key and either
+        std::string v; bool vq;
+        size_t save;
+        do { save = lx.i; if (!lx.Next(v, vq)) return; } while (IsCond(v, vq));
+        if (!vq && v == "{")
+        {
+            if (depth < 64) ParseBlock(lx, node.kids, nullptr, depth + 1, &node.geo);
+            out.push_back(std::move(node));
+        }
+        else if (!vq && v == "}") { lx.i = save; }   // key with no value right before a close: tolerate
+        else if (geo) *geo |= GeoBit(node.name);
+        // else: a property, dropped
+    }
+}
+} // namespace detail
+
+// The .res root is one block named after the file; the controls are its children. Returns a node
+// whose kids are the controls (every top-level block's children, merged).
+inline ResNode ParseRes(const std::string& text, std::vector<std::string>* includes)
+{
+    detail::ResLexer lx{ text };
+    std::vector<ResNode> top;
+    detail::ParseBlock(lx, top, includes, 0);
+    ResNode root;
+    for (const auto& t : top) ResMerge(root, t);
+    return root;
+}
+
+// "#base" target relative to the including file's folder
+inline std::string ResIncludePath(const std::string& includingFile, const std::string& inc)
+{
+    const std::string f = NormalizePath(includingFile);
+    const size_t sl = f.find_last_of('/');
+    return NormalizePath((sl == std::string::npos ? std::string() : f.substr(0, sl + 1)) + inc);
+}
+
+// .res / .txt bytes -> text. utf-16 le (FF FE): the low bytes are enough for names and paths.
+inline std::string ResText(const std::string& b)
+{
+    if (b.size() < 2 || (unsigned char)b[0] != 0xFF || (unsigned char)b[1] != 0xFE) return b;
+    std::string t;
+    for (size_t i = 2; i + 1 < b.size(); i += 2) t += b[i];
+    return t;
+}
+
+// folders a normalized path climbs above its root ("../../cfg/x" = 2), rest = what follows the climb
+inline int Climb(const std::string& norm, std::string* rest)
+{
+    int up = 0;
+    size_t i = 0;
+    while (norm.compare(i, 3, "../") == 0) { ++up; i += 3; }
+    if (rest) *rest = norm.substr(i);
+    return up;
+}
+
+// Script huds #base a cfg/<x>.txt their switch cfgs write into tf/cfg, from any depth: m0re's
+// resource/ui/x.res says "../../../../cfg" (2 above the root = tf from tf/custom/m0re), femboy's
+// scripts/layouts/layout_killfeed.res says "../../../cfg" (1 above). KeyValues joins it onto the file's
+// folder as text, so it lands <root> + n levels up + "cfg". Adds each n this file uses to out (once).
+inline void AddCfgClimbs(const std::string& fileRel, const std::string& text, std::vector<int>& out)
+{
+    std::vector<std::string> inc;
+    ParseRes(text, &inc);
+    for (const auto& i : inc)
+    {
+        std::string rest;
+        const int n = Climb(ResIncludePath(fileRel, i), &rest);
+        if (n > 0 && rest.rfind("cfg/", 0) == 0 && std::find(out.begin(), out.end(), n) == out.end()) out.push_back(n);
+    }
+}
+
 // ---- search path plan -------------------------------------------------------------------------
 // The game mounts every tf/custom/* folder at boot (gameinfo "game+mod+custom_mod"). A hud there
 // would answer every file the picked hud lacks, so while a multihud pick is live the tf/custom huds
@@ -192,14 +428,19 @@ struct Mount
     std::vector<std::string> customOff;    // tf/custom huds we unmounted (restore order = this order)
 };
 
-enum class Op { RemoveHud, RemoveCustom, AddCustom, AddHud };
+enum class Op { RemoveHud, RemoveCustom, AddCustom, AddHud, RaiseMod };
 struct FsOp { Op op; std::string path; };
 
 // pick: "" = off (tf/custom as the game mounted it), kDefault = no hud at all, else hud root dir.
 // Removes run before adds; every add goes to the HEAD of the search path, so the custom huds are
 // re-added before ours (ours ends up above them) and in reverse, which keeps their old order.
+// mods = the tf/custom FOLDERS that are not huds (models, animations, sounds, crosshair packs),
+// alphabetical. After any hud add they are raised (remove + HEAD add, reverse = alphabetical on
+// top) so a file both ship stays the mod's: femboy ships c_spy_animations.mdl, the user's
+// tf/custom/ani has its own (at boot "ani" < "femboy" wins the same way).
 inline std::vector<FsOp> PlanMount(const Mount& cur, const std::string& hudRoot, bool customOff,
-                                   const std::vector<std::string>& customHuds)
+                                   const std::vector<std::string>& customHuds,
+                                   const std::vector<std::string>& mods = {})
 {
     std::vector<FsOp> ops;
     if (!cur.hud.empty()) ops.push_back({ Op::RemoveHud, cur.hud });
@@ -209,16 +450,21 @@ inline std::vector<FsOp> PlanMount(const Mount& cur, const std::string& hudRoot,
         for (auto it = cur.customOff.rbegin(); it != cur.customOff.rend(); ++it)
             ops.push_back({ Op::AddCustom, *it });
     if (!hudRoot.empty()) ops.push_back({ Op::AddHud, hudRoot });
+    const bool added = std::any_of(ops.begin(), ops.end(), [](const FsOp& o) { return o.op == Op::AddHud || o.op == Op::AddCustom; });
+    if (added)
+        for (auto it = mods.rbegin(); it != mods.rend(); ++it) ops.push_back({ Op::RaiseMod, *it });
     return ops;
 }
 
-// the dirs whose files changed meaning: every path the plan touched, once (case-insensitive).
+// the dirs whose files changed meaning: every hud path the plan touched, once (case-insensitive).
+// Raised mods are not: their files answer exactly as before.
 inline std::vector<std::string> Touched(const std::vector<FsOp>& ops)
 {
     std::vector<std::string> out;
     auto lower = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
     for (const auto& o : ops)
     {
+        if (o.op == Op::RaiseMod) continue;
         const std::string l = lower(o.path);
         if (std::none_of(out.begin(), out.end(), [&](const std::string& x) { return lower(x) == l; }))
             out.push_back(o.path);

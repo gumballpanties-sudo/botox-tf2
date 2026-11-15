@@ -1309,13 +1309,14 @@ static void Page_VisualsScreen()
     menu_columns_end();
 }
 
-static const char* kVisualsSub[3] = { "esp", "world", "screen" };
+static const char* kVisualsSub[4] = { "esp", "world", "screen", "images" };
 static int s_visualsSub = 0;
 static void Tab_VisualsRoot()
 {
     if      (s_visualsSub == 0) Page_VisualsEsp();
     else if (s_visualsSub == 1) Page_VisualsWorld();
-    else                        Page_VisualsScreen();
+    else if (s_visualsSub == 2) Page_VisualsScreen();
+    else                        Page_VisualsImages();
 }
 
 // rs::MoveBit mask as a botox MultiCombo. MultiCombo is bit i = item i, so the drawn rows are the
@@ -4019,7 +4020,7 @@ static int s_tab = TAB_AIMBOT;
 // none; visuals/movement/misc carry the sidebar's flyout.
 static const SidebarTab kSidebar[TAB_COUNT] = {
     { kTabNames[TAB_AIMBOT],    nullptr,     0 },
-    { kTabNames[TAB_VISUALS],   kVisualsSub, 3 },
+    { kTabNames[TAB_VISUALS],   kVisualsSub, 4 },
     { kTabNames[TAB_MOVEMENT],  kMoveSub,    5 },
     { kTabNames[TAB_MISC],      kMiscSub,    3 },
     { kTabNames[TAB_INVENTORY], kInvSub,     2 },
