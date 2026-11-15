@@ -9,6 +9,8 @@
 #include "../hud/crosshair.h"   // Crosshair_BlendCombo
 #include "../hud/hud_extra.h"   // fonts tab net graph page reset
 #include "../hud/radar_snap.h"  // csgo radar: overview source / bake status line
+#include "../hud/multihud.h"    // visuals > hud "multihud" combo
+#include "../hud/multihud_pure.h"
 #include "../visuals/lagres.h"
 #include "../movement/movement.h"   // RC_* marker access for the route calculator's marker list
 #include "../movement/points_style.h"   // movement > points page: styles + preview
@@ -1053,6 +1055,30 @@ static void Page_VisualsScreen()
                 const ImVec2 ds = ImGui::GetIO().DisplaySize;
                 ImGui::SliderInt("x##net graph", &g_hudNgX, -1, (int)ds.x, g_hudNgX < 0 ? "stock" : "%d px");
                 ImGui::SliderInt("y##net graph", &g_hudNgY, -1, (int)ds.y, g_hudNgY < 0 ? "stock" : "%d px");
+            }, ImVec2(220.f, -1.f));
+
+        // multihud (hud/multihud.cpp): off = tf/custom huds as the game mounted them, on = the hud
+        // picked in the cog (folders in C:\botox-tf2\huds, rescanned while the combo is open).
+        // Swapped live next frame. Same row shape as "web on surface": checkbox + cog popup.
+        ImGui::Checkbox("multihud", &g_multiHudOn);
+        if (g_multiHudOn)
+            ImGui::OptionPopup("multihud settings", [&]() {
+                const bool stock = !g_multiHud[0] || !strcmp(g_multiHud, mh::kDefault);
+                if (ImGui::BeginCombo("hud##multihud", stock ? "tf2 default" : g_multiHud))
+                {
+                    if (ImGui::Selectable("tf2 default", stock)) g_multiHud[0] = '\0';
+                    for (const auto& h : MultiHud_List())
+                        if (ImGui::Selectable(h.c_str(), !strcmp(g_multiHud, h.c_str())))
+                            strncpy_s(g_multiHud, h.c_str(), _TRUNCATE);
+                    ImGui::EndCombo();
+                }
+                if (ImGui::Button("reload##multihud", ImVec2(-1.f, 15.f))) MultiHud_Reapply();
+                if (ImGui::Button("open huds folder##multihud", ImVec2(-1.f, 15.f)))
+                {
+                    MultiHud_List();   // makes the folder on first use
+                    ShellExecuteA(nullptr, "open", (std::string(CONFIG_DIR) + "\\huds").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+                if (MultiHud_Status()[0]) ImGui::TextWrapped("%s", MultiHud_Status());
             }, ImVec2(220.f, -1.f));
 
         // ---- TF2 crosshair rows (ours, after botox's) -------------------------------------------
@@ -2637,6 +2663,7 @@ static void Page_MiscMain()
         if (g_ptsEnable)
             ImGui::OptionPopup("points settings", []() {
                 ImGui::Checkbox("big font##points", &g_ptsBigFont);
+                ImGui::Checkbox("readout##points", &g_ptsReadout);
                 ImGui::SliderFloat("appear speed##points", &g_ptsAppearSpeed, 0.5f, 20.f, "%.2fx");
                 ImGui::SliderFloat("bob speed##points", &g_ptsBobSpeed, 0.1f, 10.f, "%.2fx");
                 ImGui::SliderFloat("x offset##points", &g_ptsOffsetX, -300.f, 300.f, "%.0f px");

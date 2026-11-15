@@ -63,4 +63,9 @@ inline float g_hudRadarColorBlu[4]      = { 0x1e / 255.f, 0xd2 / 255.f, 1.f, 1.f
 inline float g_hudRadarColorRed[4]      = { 1.f, 0xdd / 255.f, 0x23 / 255.f, 1.f };           // PI_Color_T
 inline float g_hudRadarColorEnemy[4]    = { 1.f, 0x19 / 255.f, 0x19 / 255.f, 1.f };           // PI_Color_Enemy
 
+// multihud (hud/multihud.cpp): off = tf/custom huds as the game mounted them; on = the folder in
+// C:\botox-tf2\huds named here ("" = stock tf2 hud). Swapped live from FrameStageNotify.
+inline bool  g_multiHudOn               = false;
+inline char  g_multiHud[128]            = "";
+
 

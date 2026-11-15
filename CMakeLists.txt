@@ -73,6 +73,7 @@ add_library(botox SHARED
     src/hacks/misc/names.cpp
     src/hacks/menu/menu_misc.cpp
     src/hacks/hud/indicators.cpp
+    src/hacks/hud/multihud.cpp
     src/hacks/menu/menu.cpp
     src/hacks/menu/config.cpp
     src/hooks/thread.cpp
@@ -585,6 +586,13 @@ add_executable(netcvar_test tests/netcvar_test.cpp)
 # grow/leave-alone rule and the lock-free seen-list the recvfrom hot path scans.
 # Build + run: cmake --build build --config Release --target netbuf_test && build\Release\netbuf_test.exe
 add_executable(netbuf_test tests/netbuf_test.cpp)
+
+# Gate test for multihud's engine-free half (src/hacks/hud/multihud_pure.h): hud folder detection
+# (one level of zip nesting), the search path plan (tf/custom huds out while a pick is live, ours
+# re-added last = on top, restore order), the dirs a switch reloads, scheme second spelling,
+# material names.
+# Build + run: cmake --build build --config Release --target multihud_test && build\Release\multihud_test.exe
+add_executable(multihud_test tests/multihud_test.cpp)
 
 # Gate test for the no spread playerperf request (src/hacks/aim/playerperf_pure.h): a bare
 # "playerperf" dumped the whole 60-record history ~10x a second = ~30 KB/s of reliable incoming

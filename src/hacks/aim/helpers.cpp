@@ -4,6 +4,19 @@
 #include "aim_record.h"
 #include "utils.h"
 #include "../menu/fonts.h"   // fonts tab esp face
+bool Aim_Active();           // aim.cpp
+
+// multihud (hud/multihud.cpp): a vgui message "<name>" { a b } for IVGui::PostMessage, built with the
+// game's own KeyValues (ctor + FindKey are aim sigs, so null without the aim half). vgui2 deletes it
+// after dispatch (its tier1 deleteThis -> KeyValuesSystem, the allocator operator new used here).
+void* Aim_NewVguiMsg2i(const char* name, const char* ka, int a, const char* kb, int b)
+{
+	if (!Aim_Active()) return nullptr;
+	KeyValues* kv = new KeyValues(name);
+	kv->SetInt(ka, a);
+	kv->SetInt(kb, b);
+	return kv;
+}
 void DebugLog(const char* fmt, ...);
 
 // ================ SDK/Helpers/ConVars/ConVars.cpp ================

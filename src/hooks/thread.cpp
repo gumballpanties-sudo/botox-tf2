@@ -34,6 +34,7 @@
 #include "../hacks/misc/boot_screen.h"   // eject splash: begin before g_eject, end before unhook
 #include "../hacks/web/websurface.h"     // Web_Destroy at eject
 #include "../hacks/web/webview2host.h"   // wv2::AbandonForExit at game quit
+#include "../hacks/hud/multihud.h"       // eject: wait for the FSN multihud restore
 
 // ==== sv_pure bypass ============================================================
 using CL_CheckForPureServerWhitelist_t = void(__fastcall*)(void** pFilesToReload);
@@ -527,6 +528,10 @@ static void MainThread()
     // Lua: FrameStageNotify closes every script state the frame after g_eject (unload callbacks run
     // on the game thread). No frame = states left open, nothing of theirs runs again.
     for (int i = 0; i < 100 && !g_lua.m_shutdown.load(); ++i) Sleep(10);
+    // Multihud: FrameStageNotify unmounts our hud, remounts tf/custom huds and rebuilds the UI on the
+    // game thread the frame after g_eject (a rebuild can take ~1s). No frame = our search path stays
+    // mounted (files still on disk, nothing dangles) until the game restarts.
+    for (int i = 0; i < 300 && MultiHud_Holding(); ++i) Sleep(10);
 
     // World is back under the cover: "ejected", the game fades back in (<= 1.5s). Present
     // still draws the splash until here, so nothing below may touch d3d before it returns.

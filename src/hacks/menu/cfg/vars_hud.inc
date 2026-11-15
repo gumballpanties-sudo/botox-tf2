@@ -51,3 +51,5 @@
     { "hudRadarColorBlu",          CfgEntry::FLOAT4, g_hudRadarColorBlu, 0 },
     { "hudRadarColorRed",          CfgEntry::FLOAT4, g_hudRadarColorRed, 0 },
     { "hudRadarColorEnemy",        CfgEntry::FLOAT4, g_hudRadarColorEnemy, 0 },
+    { "multiHudOn",                CfgEntry::BOOL,   &g_multiHudOn, 0 },
+    { "multiHud",                  CfgEntry::STR,    g_multiHud, sizeof(g_multiHud) },
