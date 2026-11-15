@@ -30,6 +30,7 @@ namespace
 	constexpr const char* k_entity_meta  = "botox.entity";
 	constexpr const char* k_cmd_meta     = "botox.cmd";
 	constexpr const char* k_event_meta   = "botox.event";
+	constexpr const char* k_model_meta   = "botox.model";
 
 	struct element_ref_t {
 		int m_index;
@@ -2162,6 +2163,158 @@ namespace
 		return 1;
 	}
 
+	/* ---- draw_model ---- */
+
+	enum e_swap : int {
+		swap_pending = 0,
+		swap_ready,
+		swap_failed
+	};
+
+	struct swap_model_t {
+		const void* m_model = nullptr;
+		e_swap m_state      = swap_pending;
+		bool m_reported     = false;
+	};
+
+	struct path_hash {
+		using is_transparent = void;
+		std::size_t operator( )( const std::string_view text ) const
+		{
+			return std::hash< std::string_view >{ }( text );
+		}
+	};
+
+	/* path -> model. node based: draw_model_t::m_swap_name points at a key, keys are never erased.
+	   ponytail: capped, every new path is a permanent engine model_t ( typos too ); no eviction */
+	std::unordered_map< std::string, swap_model_t, path_hash, std::equal_to< > > s_swap_models;
+	constexpr std::size_t k_max_swap_models = 64;
+
+	/* studiohdr_t ints ( only ints up to here, same offsets x86 / x64 ): flags, numbones, numflexdesc */
+	constexpr std::size_t k_hdr_flags  = 0x98;
+	constexpr std::size_t k_hdr_bones  = 0x9C;
+	constexpr std::size_t k_hdr_flexes = 0x104;
+	constexpr int k_studiohdr_static   = 1 << 4; // STUDIOHDR_FLAGS_STATIC_PROP, SDK public/studio.h:2039
+
+	int hdr_int( const void* hdr, const std::size_t offset )
+	{
+		return *reinterpret_cast< const int* >( static_cast< const char* >( hdr ) + offset );
+	}
+
+	/* one console line per path per session */
+	bool first_report( swap_model_t& entry )
+	{
+		return !std::exchange( entry.m_reported, true );
+	}
+
+	/* the engine's DrawModelExecute draws state's studiohdr + hw data with the drawn entity's bones, flex weights
+	   and decals ( csgo source engine/l_studio.cpp:2491, same shape in 2013 ). a foreign model is only safe when it
+	   needs none of those */
+	void set_swap( n_lua::draw_model_t* draw, const char* path )
+	{
+		draw->m_swap_name  = nullptr;
+		draw->m_swap_model = draw->m_swap_hdr = draw->m_swap_hw = nullptr;
+
+		/* studio models only: the engine loads a .bsp as a second world, .vmt / .spr as sprites */
+		const std::string_view view = path;
+		if ( view.size( ) < 5 || _stricmp( path + view.size( ) - 4, ".mdl" ) != 0 )
+			return;
+
+		auto found = s_swap_models.find( view );
+		if ( found == s_swap_models.end( ) ) {
+			if ( s_swap_models.size( ) >= k_max_swap_models )
+				return;
+			found = s_swap_models.try_emplace( std::string( view ) ).first;
+		}
+
+		auto& [ key, entry ] = *found;
+		if ( entry.m_state != swap_ready )
+			return;
+
+		const void* drawn = draw->m_state ? *static_cast< const void* const* >( draw->m_state ) : nullptr;
+		const void* hdr   = nullptr;
+		const void* hw    = nullptr;
+		/* evicted / unloaded = load again next frame */
+		if ( !LuaB_ModelParts( entry.m_model, &hdr, &hw ) ) {
+			entry.m_state = swap_pending;
+			return;
+		}
+		if ( !drawn )
+			return;
+
+		const char* why = nullptr;
+		if ( hdr_int( hdr, k_hdr_flags ) & k_studiohdr_static )
+			why = "static prop models need baked lighting";
+		else if ( hdr_int( hdr, k_hdr_flexes ) > 0 )
+			why = "models with flexes ( faces ) can't be swapped";
+		else if ( hdr_int( hdr, k_hdr_bones ) > hdr_int( drawn, k_hdr_bones ) ) {
+			if ( first_report( entry ) )
+				LuaB_Console( ( "[lua] draw_model: " + key + " not swapped, it has " + std::to_string( hdr_int( hdr, k_hdr_bones ) ) + " bones, " +
+				                ( draw->m_name ? draw->m_name : "the drawn model" ) + " only " + std::to_string( hdr_int( drawn, k_hdr_bones ) ) )
+				                      .c_str( ) );
+			return;
+		}
+
+		if ( why ) {
+			if ( first_report( entry ) )
+				LuaB_Console( ( "[lua] draw_model: " + key + " not swapped, " + why ).c_str( ) );
+			return;
+		}
+
+		draw->m_swap_name  = key.c_str( );
+		draw->m_swap_model = entry.m_model;
+		draw->m_swap_hdr   = hdr;
+		draw->m_swap_hw    = hw;
+	}
+
+	n_lua::draw_model_t* check_draw( lua_State* L )
+	{
+		const auto* serial = static_cast< const unsigned int* >( luaL_checkudata( L, 1, k_model_meta ) );
+		if ( !n_lua_api::s_draw || *serial != n_lua_api::s_draw_serial )
+			luaL_error( L, "model is only valid inside its draw_model callback" );
+		return n_lua_api::s_draw;
+	}
+
+	int l_draw_index( lua_State* L )
+	{
+		n_lua::draw_model_t* draw  = check_draw( L );
+		const std::string_view key = luaL_checkstring( L, 2 );
+
+		if ( key == "name" ) lua_pushstring( L, draw->m_name ? draw->m_name : "" );
+		else if ( key == "index" ) lua_pushinteger( L, draw->m_index );
+		else if ( key == "entity" ) push_entity( L, draw->m_index > 0 && sdk_ready( ) ? entity_at( draw->m_index ) : nullptr );
+		else if ( key == "flags" ) lua_pushinteger( L, draw->m_flags );
+		else if ( key == "x" ) lua_pushnumber( L, draw->m_origin[ 0 ] );
+		else if ( key == "y" ) lua_pushnumber( L, draw->m_origin[ 1 ] );
+		else if ( key == "z" ) lua_pushnumber( L, draw->m_origin[ 2 ] );
+		else if ( key == "hide" ) lua_pushboolean( L, draw->m_hide );
+		else if ( key == "color" ) lua_pushinteger( L, static_cast< lua_Integer >( draw->m_color ) );
+		else if ( key == "model" && draw->m_swap_name ) lua_pushstring( L, draw->m_swap_name );
+		else if ( key == "ptr" ) push_address( L, draw->m_info );
+		else lua_pushnil( L );
+		return 1;
+	}
+
+	int l_draw_newindex( lua_State* L )
+	{
+		n_lua::draw_model_t* draw  = check_draw( L );
+		const std::string_view key = luaL_checkstring( L, 2 );
+
+		if ( key == "hide" ) draw->m_hide = lua_toboolean( L, 3 );
+		else if ( key == "color" ) {
+			draw->m_tint  = !lua_isnil( L, 3 );
+			draw->m_color = draw->m_tint ? static_cast< unsigned int >( luaL_checkinteger( L, 3 ) ) : 0xFFFFFFFFu;
+		} else if ( key == "model" ) {
+			if ( lua_isnil( L, 3 ) ) {
+				draw->m_swap_name  = nullptr;
+				draw->m_swap_model = draw->m_swap_hdr = draw->m_swap_hw = nullptr;
+			} else
+				set_swap( draw, luaL_checkstring( L, 3 ) );
+		} else
+			return luaL_error( L, "model has no writable field '%s'", std::string( key ).c_str( ) );
+		return 0;
+	}
+
 	/* ---- registration ---- */
 
 	void new_meta( lua_State* L, const char* name, const luaL_Reg* methods, const luaL_Reg* metamethods )
@@ -2215,6 +2368,36 @@ void n_lua_api::push_event( lua_State* L )
 {
 	lua_newuserdatauv( L, 1, 0 );
 	luaL_setmetatable( L, k_event_meta );
+}
+
+void n_lua_api::push_draw( lua_State* L )
+{
+	*static_cast< unsigned int* >( lua_newuserdatauv( L, sizeof( unsigned int ), 0 ) ) = s_draw_serial;
+	luaL_setmetatable( L, k_model_meta );
+}
+
+void n_lua_api::load_models( )
+{
+	for ( auto& [ path, entry ] : s_swap_models ) {
+		if ( entry.m_state != swap_pending )
+			continue;
+
+		/* ModelParts here also pulls the mesh in outside any draw */
+		const void* hdr = nullptr;
+		const void* hw  = nullptr;
+		entry.m_model   = LuaB_LoadModel( path.c_str( ) );
+		entry.m_state   = entry.m_model && LuaB_ModelParts( entry.m_model, &hdr, &hw ) ? swap_ready : swap_failed;
+		if ( entry.m_state == swap_failed && first_report( entry ) )
+			LuaB_Console( ( "[lua] draw_model: can't load " + path + " ( missing .mdl / .vvd / .vtx, or sv_pure: sv_pure bypass checkbox )" ).c_str( ) );
+	}
+}
+
+void n_lua_api::reset_models( )
+{
+	for ( auto& [ path, entry ] : s_swap_models ) {
+		entry.m_model = nullptr;
+		entry.m_state = swap_pending;
+	}
 }
 
 const char* n_lua_api::event_name( void* event )
@@ -2412,6 +2595,9 @@ void n_lua_api::open( lua_State* L )
 		                                       { "get_string", l_event_get_string }, { "get_player", l_event_get_player },
 		                                       { nullptr, nullptr } };
 	new_meta( L, k_event_meta, event_methods, nullptr );
+
+	static const luaL_Reg model_meta[ ] = { { "__index", l_draw_index }, { "__newindex", l_draw_newindex }, { nullptr, nullptr } };
+	new_meta( L, k_model_meta, nullptr, model_meta );
 
 	/* source sdk 2013 in_buttons.h / const.h / bspflags.h, same numbers as csgo */
 	static const std::pair< const char*, lua_Integer > buttons[ ] = {

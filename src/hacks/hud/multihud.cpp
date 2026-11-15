@@ -8,6 +8,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
+
+void Hats_HudRemade();   // hats.cpp: forget the CTFHudPlayerClass it held
 
 // multihud: pick a hud folder, the game swaps to it live. Every step is the game's own reload path:
 //  1. search paths: our hud at the HEAD of GAME / mod / custom_mod (gameinfo's tf/custom/* ids:
@@ -76,7 +79,7 @@ constexpr int kSurfGetScreenSize = 38, kSurfOnScreenSizeChanged = 111;
 constexpr int kSurfGetEmbeddedPanel = 6, kSurfGetPopupCount = 79, kSurfGetPopup = 80;
 constexpr int kPnlGetChildCount = 17, kPnlGetChild = 18, kPnlGetParent = 20, kPnlIsAutoDeleteSet = 29, kPnlGetName = 36;
 constexpr int kVguiPostMessage = 20, kVguiPanelToHandle = 15, kVguiHandleToPanel = 16;
-constexpr int kPnlSetSize = 4, kPnlSetZPos = 8, kPnlSetVisible = 14, kPnlGetPanel = 55;
+constexpr int kPnlSetSize = 4, kPnlSetZPos = 8, kPnlSetVisible = 14, kPnlIsVisible = 15, kPnlGetPanel = 55;
 constexpr int kSurfDrawGetTextureFile = 29, kSurfDrawSetTextureFile = 30;
 constexpr int kMsFirstMaterial = 73, kMsNextMaterial = 74, kMsInvalidMaterial = 75, kMsGetMaterial = 76;
 constexpr int kBfsFileExists = 10;                              // IBaseFileSystem (fs+8)
@@ -332,16 +335,24 @@ int RefreshMaterials(const std::vector<std::string>& names, const std::vector<st
 {
     if (!g_matSystem || names.empty()) return 0;
     int n = 0, gone = 0;
-    // Download locks the material system itself (one sync with the render thread per texture)
+    // Download locks the material system itself (one sync with the render thread per texture).
+    // A texture loaded while its file was missing is cached as the error texture under its name and
+    // every material asking for it gets that one: Download rereads it from the file there is now.
+    int errFixed = 0, errStill = 0;
     for (const auto& t : tex)
     {
         if (!VCall<bool>(g_matSystem, kMsIsTextureLoaded, t.c_str())) continue;
         if (!GameFileExists("materials/" + t + ".vtf")) { ++gone; continue; }
         void* tx = VCall<void*>(g_matSystem, kMsFindTexture, t.c_str(), "VGUI", false, 0);
-        if (!tx || VCall<bool>(tx, kTexIsError)) continue;
+        if (!tx) continue;
+        const bool wasError = VCall<bool>(tx, kTexIsError);
         VCall<void>(tx, kTexDownload, (void*)nullptr, 0);
         ++n;
+        if (!wasError) continue;
+        if (VCall<bool>(tx, kTexIsError)) { if (errStill++ < 10) DebugLog("multihud: texture %s still the error texture after a reread", t.c_str()); }
+        else ++errFixed;
     }
+    if (errFixed || errStill) DebugLog("multihud: %d error textures reread from their file, %d still error", errFixed, errStill);
     // every loaded material, matched on its normalized name: vgui loads hud images as
     // "vgui/../hud/x", which a plain IsMaterialLoaded("hud/x") never finds. A material named like a
     // reloaded .vtf is refreshed too (vtf-only override: its mapping size follows the new texture).
@@ -1221,6 +1232,911 @@ bool ReloadCaptions(const std::vector<std::string>& dirs)
     return true;
 }
 
+// ---- vgui texture ids stuck on the error material --------------------------------------------------
+// vguimatsurface binds a texture id once per name (CTextureDictionary::BindTextureToFile, x64 14370:
+// CRC of the name as asked, case kept, entry +0x10; material +0x18; a name with no file still binds,
+// to the error material, and keeps that CRC). vgui2 caches each hud image's Bitmap + id for the
+// session, so an image whose file was missing once (mid switch, a hud without it) stayed magenta
+// checkers through every later switch. The name is gone, the CRC is not: every quoted value of every
+// hud .res / .txt seen this session is a candidate ("x" and "vgui/x", as Bitmap asks), and an id on
+// the error material whose CRC matches one with a file now is bound again (white, then the name:
+// the bind only runs on a NEW name).
+// Dictionary (x64 11-15): CMatSystemSurface vt 28 DrawGetTextureId = 40 53 48 83 EC 20 48 8B DA E8
+// <TextureDictionary()>; entries at dict+8, 0x58 each, id = index, list head u16 dict+0x18, next u16
+// entry+0x52 (FindTextureIdForTextureFile 14850).
+constexpr int kSurfDrawGetTextureId = 28;
+constexpr size_t kTdEntries = 8, kTdHead = 0x18, kTdEntry = 0x58, kTdCrc = 0x10, kTdMat = 0x18, kTdNext = 0x52;
+std::unordered_map<uint32_t, std::string> s_vguiNames;   // CRC -> name, grows with every hud seen
+int s_repairFrames = 0;
+
+void* TextureDict()
+{
+    static void* d = nullptr;
+    static bool tried = false;
+    if (tried) return d;
+    tried = true;
+    void* s = Surface();
+    if (!s) return nullptr;
+    __try
+    {
+        const uint8_t* fn = static_cast<const uint8_t*>((*static_cast<void***>(s))[kSurfDrawGetTextureId]);
+        static const uint8_t k[] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xDA, 0xE8 };
+        if (memcmp(fn, k, sizeof k)) return nullptr;
+        d = reinterpret_cast<void* (*)()>(fn + 14 + *reinterpret_cast<const int32_t*>(fn + 10))();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { d = nullptr; }
+    return d;
+}
+struct VgId { int id; uint32_t crc; void* mat; };
+int ReadVguiIds(void* dict, VgId* out, int cap)
+{
+    __try
+    {
+        const uint8_t* base = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(dict) + kTdEntries);
+        int idx = *reinterpret_cast<uint16_t*>(static_cast<uint8_t*>(dict) + kTdHead), n = 0;
+        for (int guard = 0; base && idx != 0xFFFF && guard < 65536 && n < cap; ++guard)
+        {
+            const uint8_t* e = base + (size_t)idx * kTdEntry;
+            out[n++] = { idx, *reinterpret_cast<const uint32_t*>(e + kTdCrc), *reinterpret_cast<void* const*>(e + kTdMat) };
+            idx = *reinterpret_cast<const uint16_t*>(e + kTdNext);
+        }
+        return n;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+void* VguiIdMaterial(void* dict, int id)
+{
+    __try
+    {
+        const uint8_t* base = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(dict) + kTdEntries);
+        return base ? *reinterpret_cast<void* const*>(base + (size_t)id * kTdEntry + kTdMat) : nullptr;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+std::vector<std::string> s_vguiLearned;   // hud dirs already read (lower case)
+void LearnVguiNames(const std::vector<std::string>& dirs)
+{
+    for (const auto& d : dirs)
+    {
+        const std::string key = mh::Lower(d);
+        if (std::find(s_vguiLearned.begin(), s_vguiLearned.end(), key) != s_vguiLearned.end()) continue;
+        s_vguiLearned.push_back(key);
+        for (const char* sub : { "resource", "scripts" })
+            WalkFiles(d + "\\" + sub, "", [&](const std::string& r) {
+                const std::string low = mh::Lower(r);
+                if (low.size() < 4 || (low.compare(low.size() - 4, 4, ".res") && low.compare(low.size() - 4, 4, ".txt"))) return;
+                std::string text;
+                if (!ReadText(d + "\\" + sub + "\\" + r, text)) return;
+                for (const auto& t : mh::QuotedTokens(mh::ResText(text)))
+                {
+                    if (t.find_first_of("/\\") == std::string::npos && t.size() < 3) continue;
+                    s_vguiNames.emplace(mh::Crc32(t), t);
+                    s_vguiNames.emplace(mh::Crc32("vgui/" + t), "vgui/" + t);
+                }
+            });
+    }
+}
+// "when" names the log line; returns ids still on the error material
+int RepairVguiIds(const char* when)
+{
+    void* dict = TextureDict();
+    void* s = Surface();
+    if (!dict || !s) { DebugLog("multihud: vgui texture dictionary not found (%s), stuck images not checked", when); return -1; }
+    static VgId ids[65536];
+    const int n = ReadVguiIds(dict, ids, 65536);
+    if (n < 0) { DebugLog("multihud: vgui texture dictionary unreadable (%s)", when); return -1; }
+    int err = 0, fixed = 0, noFile = 0, unknown = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        if (!ids[i].mat || !VCall<bool>(ids[i].mat, kMatIsError)) continue;
+        ++err;
+        const auto it = s_vguiNames.find(ids[i].crc);
+        if (it == s_vguiNames.end()) { ++unknown; continue; }
+        if (!GameFileExists("materials/" + mh::NormalizePath(it->second) + ".vmt")) { ++noFile; continue; }
+        VCall<void>(s, kSurfDrawSetTextureFile, ids[i].id, "vgui/white", 0, false);
+        VCall<void>(s, kSurfDrawSetTextureFile, ids[i].id, it->second.c_str(), 0, false);
+        void* now = VguiIdMaterial(dict, ids[i].id);
+        const bool ok = now && !VCall<bool>(now, kMatIsError);
+        fixed += ok;
+        if (fixed <= 20 || !ok)
+            DebugLog("multihud: vgui id %d (%s) was on the error material, bound again: %s", ids[i].id, it->second.c_str(),
+                     ok ? "ok" : "STILL error");
+    }
+    if (err)
+        DebugLog("multihud: %s -- %d of %d vgui ids on the error material: %d bound again, %d no file on the search path "
+                 "(error at boot too), %d name never seen", when, err, n, fixed, noFile, unknown);
+    return err - fixed;
+}
+
+// ---- hud elements: remade like boot ----------------------------------------------------------
+// The reapply (hud_reloadscheme) only re-runs ApplySettings on panels that already exist, and a .res
+// key the new hud leaves out keeps whatever the old hud set: position, colors, border, font, text,
+// image, code-made children. Viewport panels are remade by RebuildPanels; the hud elements (every
+// DECLARE_HUDELEMENT: health, ammo, killfeed, chat ...) are made once, by CHud::Init at client start.
+// So they are made again here the same way and the old ones deleted = the objects a game started
+// with this hud has.
+//  1. detach: gHUD.m_HudList count -> 0. The old elements stay alive until step 4, so no address is
+//     reused and every pointer maps one way; their dtor's RemoveHudElement then finds nothing.
+//  2. CHudElementHelper::CreateAllElements (hud_element_helper.cpp:72) + Init on each new one in list
+//     order (CHud::Init, hud.cpp:411). Usermessage hooks are blocked meanwhile: the boot ones are
+//     still registered and dispatch through gHUD.FindElement (hud_macros.h:24), a second
+//     registration would run every handler twice.
+//  3. every pointer in client.dll's .data to an old element (any non-virtual base) or to one of its
+//     panels (matched by path + class) is re-pointed: ClientModeTFNormal caches 13 of them
+//     (clientmode_tf.cpp:403..433, function static = .data), ClientModeShared 3, tf_hud_statpanel one.
+//     No counterpart = nulled once the old one is deleted.
+//  4. render group lockers cleared (old element pointers, hud.cpp:534), old elements deleted tail
+//     first (CHud::Shutdown, hud.cpp:507), then any .data word an old dtor nulled that held a NEW
+//     pointer is put back (dtor "g_pX = NULL" after the new ctor set it).
+//  5. in a game: CHud::VidInit + CHud::LevelInit, what a map load runs on the elements.
+// client x64 11-15: gHUD +0x20 m_HudList memory, +0x30 count; element vt 0 scalar deleting dtor,
+// 2 Init, 8 GetName (CHud::Init 28cc10, FindElement 28c8f0); gHUD +0xa0 render group map nodes
+// (0x18 each, group ptr +0x10), +0xb2 count, group +0x18 locker count (CHud::LevelInit 28d3d0).
+// Kill switch: file C:\botox-tf2\nohudremake = the old in-place reapply only.
+constexpr size_t kHudListMem = 0x20, kHudListCount = 0x30, kHudGroups = 0xa0, kHudGroupCount = 0xb2;
+constexpr size_t kGroupNode = 0x18, kGroupNodeValue = 0x10, kGroupLockers = 0x18;
+constexpr int kElemDtor = 0, kElemInit = 2, kElemGetName = 8, kEngIsInGame = 26;
+
+struct HudFns
+{
+    uint8_t* ghud = nullptr;
+    void (*create)() = nullptr;
+    void (*vidInit)(void*) = nullptr;
+    void (*levelInit)(void*) = nullptr;
+    void (*add)(void*, uintptr_t) = nullptr;   // CHud::AddHudElement (the call in CreateAllElements)
+    bool tried = false, ok = false;
+};
+HudFns s_hf;
+
+using HookMsg_t = void(__fastcall*)(void*, const char*, void*);
+HookMsg_t o_HookMsg = nullptr;
+bool s_blockMsgHooks = false;   // main thread only (the only thread that hooks messages)
+int  s_blockedMsgHooks = 0;
+void __fastcall h_HookMsg(void* um, const char* name, void* fn)
+{
+    if (s_blockMsgHooks) { ++s_blockedMsgHooks; return; }
+    o_HookMsg(um, name, fn);
+}
+// ISurface 87 SolveTraverse (vguimatsurface x64 134c0). SETUP_PANEL in a hud element's ctor runs it =
+// ApplySchemeSettings + Think + PerformLayout on a half-built object. At boot there is no game and
+// those return early; mid-game CHudArenaClassLayout::PerformLayout (tf_hud_arena_class_layout.cpp:80
+// -> 165) read m_ClassImages[0] before the ctor made it (crash 11-15 17:52, client+0x9451B1). Skipped
+// while elements are built: hud_reloadscheme right after applies + lays out every one, built.
+using Solve_t = void(__fastcall*)(void*, uintptr_t, bool);
+Solve_t o_Solve = nullptr;
+bool s_quietSolve = false;      // main thread
+int  s_skippedSolves = 0;
+void __fastcall h_Solve(void* surf, uintptr_t panel, bool force)
+{
+    if (s_quietSolve) { ++s_skippedSolves; return; }
+    o_Solve(surf, panel, force);
+}
+constexpr int kSurfSolveTraverse = 87;
+
+bool ResolveHud()
+{
+    if (s_hf.tried) return s_hf.ok;
+    s_hf.tried = true;
+    const HMODULE c = GetModuleHandleA("client.dll");
+    if (!c) return false;
+    uint8_t* cr = PatternScan(c, "40 53 48 83 EC 20 48 8B 1D ? ? ? ? 48 85 DB 74 ? 48 8B 43 08 FF D0 48 85 C0 74 ? 48 8B D0 48 8D 0D ? ? ? ? E8");
+    uint8_t* li = PatternScan(c, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 45 33 F6 48 8B F1 "
+                                 "41 8B DE 39 59 30 7E ? 0F 1F 84 00 00 00 00 00 48 8B 46 20 8B D3 48 8B 0C D0 48 8B 01 FF 50 20");
+    uint8_t* vi = PatternScan(c, "48 89 5C 24 08 57 48 83 EC 20 33 DB 48 8B F9 39 59 30 7E ? 0F 1F 40 00 0F 1F 84 00 00 00 00 00 "
+                                 "48 8B 47 20 48 8B 0C D8 48 8B 01 FF 50 18");
+    uint8_t* hm = PatternScan(c, "40 53 55 41 57 48 83 EC 20 4D 8B F8 48 8B DA 48 8B E9 E8 ? ? ? ? 83 F8 FF 75 ? 48 8B D3 48 8D 0D");
+    if (!cr || !li || !vi || !hm)
+    {
+        DebugLog("multihud: hud element remake OFF, pattern missing (create %p levelinit %p vidinit %p hookmsg %p)",
+                 (void*)cr, (void*)li, (void*)vi, (void*)hm);
+        return false;
+    }
+    // AddHudElement's this inside CreateAllElements: lea rcx, [gHUD] at +0x20
+    s_hf.ghud = cr + 0x20 + 7 + *reinterpret_cast<int32_t*>(cr + 0x20 + 3);
+    s_hf.create = reinterpret_cast<void (*)()>(cr);
+    s_hf.levelInit = reinterpret_cast<void (*)(void*)>(li);
+    s_hf.vidInit = reinterpret_cast<void (*)(void*)>(vi);
+    // ... lea rcx, [gHUD] (+0x20) ; call CHud::AddHudElement (+0x27)
+    s_hf.add = reinterpret_cast<void (*)(void*, uintptr_t)>(cr + 0x27 + 5 + *reinterpret_cast<int32_t*>(cr + 0x28));
+    if (!InstallHookAt(hm, "multihud: CUserMessages::HookMessage", (void*)&h_HookMsg, (void**)&o_HookMsg)) return false;
+    if (!InstallVTableHook(Surface(), kSurfSolveTraverse, "multihud: ISurface::SolveTraverse", (void*)&h_Solve, (void**)&o_Solve))
+        return false;
+    DebugLog("multihud: hud remake ready (gHUD %p)", (void*)s_hf.ghud);
+    s_hf.ok = true;
+    return true;
+}
+
+// complete object + its non-virtual base subobject offsets, from the x64 RTTI complete object locator
+struct RttiInfo { uintptr_t complete = 0, vt = 0; int n = 0; int mdisp[32] = {}; };
+bool ReadRtti(void* obj, RttiInfo& out)
+{
+    __try
+    {
+        void** vt = *static_cast<void***>(obj);
+        const uint8_t* col = static_cast<const uint8_t*>(vt[-1]);
+        if (*reinterpret_cast<const uint32_t*>(col) != 1) return false;
+        const uint32_t off = *reinterpret_cast<const uint32_t*>(col + 4);
+        const uintptr_t base = reinterpret_cast<uintptr_t>(col) - *reinterpret_cast<const uint32_t*>(col + 20);
+        const uint8_t* chd = reinterpret_cast<const uint8_t*>(base + *reinterpret_cast<const uint32_t*>(col + 16));
+        const uint32_t nb = *reinterpret_cast<const uint32_t*>(chd + 8);
+        const uint32_t* arr = reinterpret_cast<const uint32_t*>(base + *reinterpret_cast<const uint32_t*>(chd + 12));
+        out.complete = reinterpret_cast<uintptr_t>(obj) - off;
+        out.vt = *reinterpret_cast<const uintptr_t*>(out.complete);
+        out.n = 0;
+        for (uint32_t i = 0; i < nb && i < 64 && out.n < 32; ++i)
+        {
+            const uint8_t* bcd = reinterpret_cast<const uint8_t*>(base + arr[i]);
+            const int mdisp = *reinterpret_cast<const int*>(bcd + 8), pdisp = *reinterpret_cast<const int*>(bcd + 12);
+            if (pdisp != -1) continue;   // in a virtual base: no fixed offset
+            bool dup = false;
+            for (int k = 0; k < out.n; ++k) dup |= out.mdisp[k] == mdisp;
+            if (!dup) out.mdisp[out.n++] = mdisp;
+        }
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+int ReadHudList(uint8_t* ghud, uintptr_t* out, int cap)
+{
+    __try
+    {
+        const int n = *reinterpret_cast<int*>(ghud + kHudListCount);
+        uintptr_t* mem = *reinterpret_cast<uintptr_t**>(ghud + kHudListMem);
+        if (n < 0 || n > cap || (n && !mem)) return -1;
+        for (int i = 0; i < n; ++i) out[i] = mem[i];
+        return n;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+bool SetHudListCount(uint8_t* ghud, int n)
+{
+    __try { *reinterpret_cast<int*>(ghud + kHudListCount) = n; return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// the old list back after a failed make: the new ones were appended over it from index 0
+constexpr size_t kHudListAlloc = 0x28;
+bool RestoreHudList(uint8_t* ghud, const uintptr_t* list, int n)
+{
+    __try
+    {
+        uintptr_t* mem = *reinterpret_cast<uintptr_t**>(ghud + kHudListMem);
+        if (!mem || *reinterpret_cast<int*>(ghud + kHudListAlloc) < n) return false;
+        for (int i = 0; i < n; ++i) mem[i] = list[i];
+        *reinterpret_cast<int*>(ghud + kHudListCount) = n;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+int ClearLockers(uint8_t* ghud)
+{
+    __try
+    {
+        uint8_t* nodes = *reinterpret_cast<uint8_t**>(ghud + kHudGroups);
+        const int n = *reinterpret_cast<uint16_t*>(ghud + kHudGroupCount);
+        if (!nodes || n > 1024) return -1;
+        int cleared = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            uint8_t* g = *reinterpret_cast<uint8_t**>(nodes + (size_t)i * kGroupNode + kGroupNodeValue);
+            if (!g) continue;
+            int* cnt = reinterpret_cast<int*>(g + kGroupLockers);
+            if (*cnt > 0) { cleared += *cnt; *cnt = 0; }
+        }
+        return cleared;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+bool CallElem(uintptr_t e, int slot)
+{
+    __try { VCall<void>(reinterpret_cast<void*>(e), slot); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool DeleteElem(uintptr_t e)
+{
+    __try { VCall<void*>(reinterpret_cast<void*>(e), kElemDtor, 1u); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool CallCreate(void (*fn)())
+{
+    __try { fn(); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool CallHud(void (*fn)(void*), void* ghud)
+{
+    __try { fn(ghud); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool CallHudAdd(void (*fn)(void*, uintptr_t), void* ghud, uintptr_t e)
+{
+    __try { fn(ghud, e); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool CopyWords(const uint64_t* src, uint64_t* dst, size_t n)
+{
+    __try { memcpy(dst, src, n * 8); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool CasWord(uint64_t* p, uint64_t want, uint64_t to)
+{
+    __try { return (uint64_t)InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(p), (LONG64)to, (LONG64)want) == want; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// client.dll's writable data (.data, .bss folded in) as 8-byte words
+bool ClientData(uint64_t*& words, size_t& count)
+{
+    const HMODULE m = GetModuleHandleA("client.dll");
+    if (!m) return false;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(m);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(reinterpret_cast<const uint8_t*>(m) + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        if (!memcmp(sec[i].Name, ".data", 6) && (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE))
+        {
+            words = reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(m) + sec[i].VirtualAddress);
+            count = sec[i].Misc.VirtualSize / 8;
+            return true;
+        }
+    return false;
+}
+
+// handle: vgui, 0 = none; vp = its VPANEL (elements only); owner = index of its element (children)
+struct HudObj { uintptr_t ptr = 0; RttiInfo r; std::string path; unsigned long handle = 0; uintptr_t vp = 0; int owner = -1; };
+constexpr int kPnlSetParent = 16;   // IPanel: 14 SetVisible 15 IsVisible 16 SetParent 17 GetChildCount
+const char* ElemNameRaw(uintptr_t e)
+{
+    __try { return VCall<const char*>(reinterpret_cast<void*>(e), kElemGetName); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+std::string ElemName(uintptr_t e)
+{
+    const char* nm = ElemNameRaw(e);
+    char buf[128];
+    return nm && CopyName(nm, buf, sizeof buf) ? std::string(buf) : std::string();
+}
+// the hud elements (path = element name) and every client panel under each (path = name/child/...)
+void ReadHud(const uintptr_t* list, int n, std::vector<HudObj>& elems, std::vector<HudObj>& kids)
+{
+    void* pn = VGui_GetPanelInterface();
+    void* s = Surface();
+    void* iv = Ivgui();
+    const uintptr_t root = s ? VCall<uintptr_t>(s, kSurfGetEmbeddedPanel) : 0;
+    auto handleOf = [iv](uintptr_t vp) { return iv ? VCall<unsigned long>(iv, kVguiPanelToHandle, vp) : 0ul; };
+    std::unordered_map<uintptr_t, uintptr_t> vpOf;   // complete client object -> its VPANEL
+    if (pn && root)
+        ForEachVPanel(pn, root, [&](uintptr_t vp) {
+            if (void* cp = VCall<void*>(pn, kPnlGetPanel, vp, "ClientDLL"))
+            {
+                RttiInfo r;
+                if (ReadRtti(cp, r)) vpOf.emplace(r.complete, vp);
+            }
+        });
+    for (int i = 0; i < n; ++i)
+    {
+        HudObj e;
+        e.ptr = list[i];
+        if (!ReadRtti(reinterpret_cast<void*>(e.ptr), e.r)) continue;
+        e.path = ElemName(e.ptr);
+        const auto it = vpOf.find(e.r.complete);
+        if (it != vpOf.end()) { e.vp = it->second; e.handle = handleOf(it->second); }
+        elems.push_back(e);
+        if (!pn || it == vpOf.end()) continue;
+        // children, depth first, path = element name + vgui names
+        std::vector<std::pair<uintptr_t, std::string>> stack{ { it->second, e.path } };
+        while (!stack.empty() && kids.size() < 40000)
+        {
+            const auto [vp, path] = stack.back();
+            stack.pop_back();
+            const int cn = VCall<int>(pn, kPnlGetChildCount, vp);
+            for (int k = 0; k < cn && k < 4096; ++k)
+            {
+                const uintptr_t c = VCall<uintptr_t>(pn, kPnlGetChild, vp, k);
+                if (!c) continue;
+                const char* nm = VCall<const char*>(pn, kPnlGetName, c);
+                char buf[128];
+                if (!nm || !CopyName(nm, buf, sizeof buf)) buf[0] = 0;
+                const std::string p = path + "/" + buf;
+                if (void* cp = VCall<void*>(pn, kPnlGetPanel, c, "ClientDLL"))
+                {
+                    HudObj o;
+                    o.ptr = reinterpret_cast<uintptr_t>(cp);
+                    o.handle = handleOf(c);
+                    o.owner = (int)elems.size() - 1;
+                    if (ReadRtti(cp, o.r)) { o.path = p; kids.push_back(o); }
+                }
+                if (p.size() < 1024) stack.push_back({ c, p });
+            }
+        }
+    }
+}
+std::vector<std::pair<uint64_t, uint64_t>> Match(const std::vector<HudObj>& o, const std::vector<HudObj>& n)
+{
+    std::vector<mh::PanelNode> a, b;
+    for (const auto& x : o) a.push_back({ x.r.complete, x.path, x.r.vt });
+    for (const auto& x : n) b.push_back({ x.r.complete, x.path, x.r.vt });
+    return mh::MatchByPath(a, b);
+}
+
+// false = nothing changed (could not start); the in-place reapply still runs after
+bool RemakeHudElements()
+{
+    if (Exists(std::string(CONFIG_DIR) + "\\nohudremake", false)) { DebugLog("multihud: hud remake skipped (nohudremake file)"); return false; }
+    if (!ResolveHud()) return false;
+    const DWORD t0 = GetTickCount();
+    static uintptr_t oldList[2048], newList[2048];
+    const int nOld = ReadHudList(s_hf.ghud, oldList, 2048);
+    if (nOld <= 0) { DebugLog("multihud: hud list unreadable (%d), no remake", nOld); return false; }
+    std::vector<HudObj> oldElems, oldKids;
+    ReadHud(oldList, nOld, oldElems, oldKids);
+
+    // 1 + 2: detach, make, Init. The old elements leave the vgui tree too: at boot a new ctor that
+    // looks a sibling up by name (FindChildByName on the viewport) finds nothing or a new one, never
+    // an old one it would keep after the delete.
+    void* pn = VGui_GetPanelInterface();
+    std::vector<std::pair<uintptr_t, uintptr_t>> parents;   // old element vp -> parent vp
+    if (pn)
+        for (const auto& e : oldElems)
+            if (e.vp)
+            {
+                parents.push_back({ e.vp, VCall<uintptr_t>(pn, kPnlGetParent, e.vp) });
+                VCall<void>(pn, kPnlSetParent, e.vp, (uintptr_t)0);
+            }
+    // every panel in the tree now: a ctor that faults leaves a half-built one parented in
+    std::vector<uintptr_t> before;
+    void* s = Surface();
+    const uintptr_t root = s ? VCall<uintptr_t>(s, kSurfGetEmbeddedPanel) : 0;
+    if (pn && root) ForEachVPanel(pn, root, [&](uintptr_t vp) { before.push_back(vp); });
+    std::sort(before.begin(), before.end());
+    if (!SetHudListCount(s_hf.ghud, 0)) return false;
+    s_blockMsgHooks = true;
+    s_blockedMsgHooks = 0;
+    s_quietSolve = true;
+    s_skippedSolves = 0;
+    const bool made = CallCreate(s_hf.create);
+    const int nNew = ReadHudList(s_hf.ghud, newList, 2048);
+    int initFail = 0;
+    for (int i = 0; made && i < nNew; ++i) initFail += !CallElem(newList[i], kElemInit);
+    s_quietSolve = false;
+    s_blockMsgHooks = false;
+    if (!made || nNew <= 0)
+    {
+        // old list + tree back as they were; whatever the make put in the tree leaves it (leaked, never
+        // drawn or thought: a half-built panel would crash its first Think)
+        int dropped = 0;
+        if (pn && root)
+        {
+            std::vector<uintptr_t> added;
+            ForEachVPanel(pn, root, [&](uintptr_t vp) {
+                if (!std::binary_search(before.begin(), before.end(), vp)) added.push_back(vp);
+            });
+            std::sort(added.begin(), added.end());
+            for (const uintptr_t vp : added)
+                if (VCall<uintptr_t>(pn, kPnlGetParent, vp) && !std::binary_search(added.begin(), added.end(), VCall<uintptr_t>(pn, kPnlGetParent, vp)))
+                {
+                    VCall<void>(pn, kPnlSetVisible, vp, false);
+                    VCall<void>(pn, kPnlSetParent, vp, (uintptr_t)0);
+                    ++dropped;
+                }
+        }
+        const bool back = RestoreHudList(s_hf.ghud, oldList, nOld);
+        for (const auto& [vp, parent] : parents) VCall<void>(pn, kPnlSetParent, vp, parent);
+        DebugLog("multihud: CreateAllElements FAULTED (%d made, %d half-built panels dropped), old hud elements %s",
+                 nNew, dropped, back ? "kept" : "NOT restorable");
+        return false;
+    }
+    std::vector<HudObj> newElems, newKids;
+    ReadHud(newList, nNew, newElems, newKids);
+
+    // 3: old -> new for every non-virtual base of every element / panel
+    std::vector<mh::PtrFix> fixes;
+    std::vector<uint64_t> newAddrs;
+    std::unordered_map<uint64_t, unsigned long> oldHandle;   // old base address -> vgui handle (outlives the delete?)
+    auto addObj = [&](const HudObj& o, uint64_t to) {
+        for (int k = 0; k < o.r.n; ++k)
+        {
+            fixes.push_back({ o.r.complete + o.r.mdisp[k], to ? to + o.r.mdisp[k] : 0 });
+            oldHandle.emplace(o.r.complete + o.r.mdisp[k], o.handle);
+        }
+    };
+    std::unordered_map<uint64_t, uint64_t> twin;
+    for (const auto& p : Match(oldElems, newElems)) twin.emplace(p.first, p.second);
+    for (const auto& p : Match(oldKids, newKids)) twin.emplace(p.first, p.second);
+    // Elements no factory makes (named like no new one): game code adds them at runtime and keeps them
+    // itself (tf_hud_itemeffectmeter.cpp:67, the charge meters, DHANDLEs in g_ItemEffectMeterManager,
+    // remade only on the next post_inventory_application). Deleting them = meters gone until resupply.
+    // They stay: back in the tree and the hud list, reapplied in place like before.
+    std::vector<char> keep(oldElems.size(), 0);
+    int kept = 0;
+    for (size_t i = 0; i < oldElems.size(); ++i)
+    {
+        if (twin.count(oldElems[i].r.complete)) continue;
+        const bool named = std::any_of(newElems.begin(), newElems.end(),
+                                       [&](const HudObj& n) { return !_stricmp(n.path.c_str(), oldElems[i].path.c_str()); });
+        if (named) continue;
+        keep[i] = 1;
+        ++kept;
+        for (const auto& [vp, parent] : parents)
+            if (vp == oldElems[i].vp) VCall<void>(pn, kPnlSetParent, vp, parent);
+        CallHudAdd(s_hf.add, s_hf.ghud, oldElems[i].ptr);
+        DebugLog("multihud: hud element '%s' kept (runtime-made, no factory)", oldElems[i].path.c_str());
+    }
+    auto kept_ = [&](const HudObj& o, bool isKid) {
+        const int e = isKid ? o.owner : (int)(&o - oldElems.data());
+        return e >= 0 && e < (int)keep.size() && keep[e];
+    };
+    for (const auto* v : { &newElems, &newKids })
+        for (const auto& o : *v) for (int k = 0; k < o.r.n; ++k) newAddrs.push_back(o.r.complete + o.r.mdisp[k]);
+    std::sort(newAddrs.begin(), newAddrs.end());
+    for (const auto* v : { &oldElems, &oldKids })
+        for (const auto& o : *v)
+        {
+            if (kept_(o, v == &oldKids)) continue;
+            if (std::binary_search(newAddrs.begin(), newAddrs.end(), (uint64_t)o.r.complete)) continue;   // shared, not dying
+            const auto it = twin.find(o.r.complete);
+            addObj(o, it == twin.end() ? 0 : it->second);
+        }
+    mh::SortFixes(fixes);
+
+    uint64_t* data = nullptr;
+    size_t words = 0;
+    std::vector<uint64_t> copy;
+    mh::FixHits hits;
+    std::vector<std::pair<size_t, uint64_t>> nulls, keeps;   // after the delete: old -> 0, new put back
+    int mapped = 0;
+    if (ClientData(data, words))
+    {
+        copy.resize(words);
+        if (CopyWords(data, copy.data(), words))
+        {
+            hits = mh::ScanWords(copy.data(), words, fixes);
+            for (const size_t i : hits.mapped)
+            {
+                const mh::PtrFix* f = mh::FindFix(fixes, copy[i]);
+                if (!CasWord(data + i, copy[i], f->to)) continue;
+                keeps.push_back({ i, f->to });   // an old dtor's "g_pX = NULL" must not take it back
+                if (++mapped <= 40)
+                    DebugLog("multihud: client.dll .data +0x%zx re-pointed to the new hud object", (size_t)((uint8_t*)(data + i) - (uint8_t*)GetModuleHandleA("client.dll")));
+            }
+            for (const size_t i : hits.unmapped) nulls.push_back({ i, copy[i] });
+            for (size_t i = 0; i < words; ++i)
+                if (copy[i] && std::binary_search(newAddrs.begin(), newAddrs.end(), copy[i])) keeps.push_back({ i, copy[i] });
+        }
+    }
+    else DebugLog("multihud: client.dll .data not found, cached hud pointers NOT re-pointed");
+
+    // 4: lockers, delete old tail first, then the .data words the dtors touched
+    const int lockers = ClearLockers(s_hf.ghud);
+    int delFail = 0;
+    for (int i = nOld - 1; i >= 0; --i)
+    {
+        const bool isKept = std::any_of(oldElems.begin(), oldElems.end(), [&](const HudObj& e) {
+            return e.ptr == oldList[i] && keep[&e - oldElems.data()]; });
+        if (!isKept) delFail += !DeleteElem(oldList[i]);
+    }
+    Hats_HudRemade();
+    int nulled = 0, putBack = 0, alive = 0;
+    void* iv = Ivgui();
+    for (const auto& [i, v] : nulls)
+    {
+        // a panel the old element did not own (autodelete off, parented in) is still there: keep it
+        const auto h = oldHandle.find(v);
+        if (iv && h != oldHandle.end() && h->second && VCall<uintptr_t>(iv, kVguiHandleToPanel, h->second)) { ++alive; continue; }
+        nulled += CasWord(data + i, v, 0);
+    }
+    for (const auto& [i, v] : keeps) putBack += CasWord(data + i, 0, v);
+
+    DebugLog("multihud: hud elements remade in %lu ms -- %d old (%zu panels) deleted (%d dtor faults), %d new (%zu panels), "
+             "%d Init faults, %d message hooks held back, %d ctor solves deferred, .data: %d re-pointed, %d nulled (%d left: "
+             "panel outlived its element), %d new pointers put back, %d render group locks cleared, %d old elements without "
+             "rtti, %d runtime-made kept",
+             GetTickCount() - t0, nOld - kept, oldKids.size(), delFail, nNew, newKids.size(), initFail, s_blockedMsgHooks,
+             s_skippedSolves, mapped, nulled, alive, putBack, lockers, nOld - (int)oldElems.size(), kept);
+    return true;
+}
+// The loading screen / stats panel: CTFStatsSummaryPanel "TFStatsSummary" on the GameUI root, made by
+// GStatsSummaryPanel() on first use into a plain static (tf_statsummary.cpp:90..125). The game's own
+// DestroyStatsSummaryPanel = MarkForDeletion + static = NULL; done the same way here (the static is
+// found as the .data word pointing at the panel), the next use makes it boot-fresh. The copy embedded in
+// the loadout dialog goes with reload_char_info. No .data word found = left alone (someone else owns it).
+constexpr int kVguiMarkForDeletion = 17;   // IVGui: 15 PanelToHandle 16 HandleToPanel 17 MarkPanelForDeletion
+void RecreateStatsSummary()
+{
+    void* pn = VGui_GetPanelInterface();
+    void* s = Surface();
+    void* iv = Ivgui();
+    const uintptr_t root = s ? VCall<uintptr_t>(s, kSurfGetEmbeddedPanel) : 0;
+    if (!pn || !iv || !root) return;
+    std::vector<uintptr_t> found;
+    ForEachVPanel(pn, root, [&](uintptr_t vp) {
+        char nm[64];
+        const char* n = VCall<const char*>(pn, kPnlGetName, vp);
+        if (!n || !CopyName(n, nm, sizeof nm) || strcmp(nm, "TFStatsSummary")) return;
+        for (uintptr_t p = VCall<uintptr_t>(pn, kPnlGetParent, vp); p; p = VCall<uintptr_t>(pn, kPnlGetParent, p))
+        {
+            const char* pnm = VCall<const char*>(pn, kPnlGetName, p);
+            char b[64];
+            if (pnm && CopyName(pnm, b, sizeof b) && !strcmp(b, "character_info")) return;   // the embedded one
+        }
+        found.push_back(vp);
+    });
+    uint64_t* data = nullptr;
+    size_t words = 0;
+    if (found.empty() || !ClientData(data, words)) return;
+    std::vector<uint64_t> copy(words);
+    if (!CopyWords(data, copy.data(), words)) return;
+    for (const uintptr_t vp : found)
+    {
+        void* cp = VCall<void*>(pn, kPnlGetPanel, vp, "ClientDLL");
+        RttiInfo r;
+        if (!cp || !ReadRtti(cp, r)) continue;
+        std::vector<mh::PtrFix> fixes;
+        for (int k = 0; k < r.n; ++k) fixes.push_back({ r.complete + r.mdisp[k], 0 });
+        mh::SortFixes(fixes);
+        const mh::FixHits h = mh::ScanWords(copy.data(), words, fixes);
+        int nulled = 0;
+        for (const size_t i : h.unmapped) nulled += CasWord(data + i, copy[i], 0);
+        if (!nulled) { DebugLog("multihud: stats summary panel: no static points at it, left alone"); continue; }
+        VCall<void>(iv, kVguiMarkForDeletion, vp);
+        DebugLog("multihud: stats summary panel marked for deletion (%d .data refs nulled), next use makes it fresh", nulled);
+    }
+}
+
+// ---- closed vgui Frames left at alpha 0 (report 11-15: console invisible after a switch) ------------
+// vgui Frame (Frame.cpp:1818) fades out on close when the scheme's Frame.TransitionEffectTime > 0 =
+// alpha animated to 0; FinishClose never puts it back. Opening fades in only while that time is still
+// > 0 (OnThink, Frame.cpp:1045). Closed under a fading hud, opened under a hud with 0 (m0re) = drawn
+// at alpha 0: visible, on top, focused, unseen (diag 11-15: GameConsole vis 1, popup 158 of 159).
+// A game started with one hud never mixes the two. After a switch every CLOSED Frame, any module
+// (GameUI console, options, server browser, client dialogs), gets alpha 255 = how it starts at boot.
+// vgui_controls Panel::m_flAlpha = +0x1BC (x64 11-15: GetAlpha = cvttss2si eax,[rcx+1BCh] in client
+// and gameui; gameui SetAlpha a0d40 movss [rcx+1BCh]). VPanel vt 38 = Client() (vguimatsurface 10e68).
+constexpr size_t kPanelAlpha = 0x1bc;
+constexpr int kVPanelClient = 38;
+bool FixAlphaRaw(void* panel, float& was)
+{
+    __try
+    {
+        float* a = reinterpret_cast<float*>(static_cast<char*>(panel) + kPanelAlpha);
+        was = *a;
+        if (was >= 255.f) return false;
+        *a = 255.f;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void* VPanelClient(uintptr_t vp)
+{
+    __try { return VCall<void*>(reinterpret_cast<void*>(vp), kVPanelClient); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+void RestoreFrameAlpha()
+{
+    void* pn = VGui_GetPanelInterface();
+    void* s = Surface();
+    const uintptr_t root = s ? VCall<uintptr_t>(s, kSurfGetEmbeddedPanel) : 0;
+    if (!pn || !root) return;
+    static std::vector<std::pair<void*, bool>> frameCache;   // vtable -> is a vgui::Frame
+    std::vector<uintptr_t> all;
+    ForEachVPanel(pn, root, [&](uintptr_t vp) { all.push_back(vp); });
+    const int pc = VCall<int>(s, kSurfGetPopupCount);
+    for (int i = 0; i < pc && i < 1024; ++i)
+        if (const uintptr_t p = VCall<uintptr_t>(s, kSurfGetPopup, i)) all.push_back(p);
+    std::sort(all.begin(), all.end());
+    all.erase(std::unique(all.begin(), all.end()), all.end());
+    int fixed = 0;
+    for (const uintptr_t vp : all)
+    {
+        if (VCall<bool>(pn, kPnlIsVisible, vp)) continue;   // open (or fading): its own fade owns alpha
+        void* cp = VPanelClient(vp);
+        if (!cp || !HasBaseCached(cp, ".?AVFrame@vgui@@", frameCache)) continue;
+        float was = 0.f;
+        if (!FixAlphaRaw(cp, was)) continue;
+        char nm[64] = "?";
+        if (const char* n = VCall<const char*>(pn, kPnlGetName, vp)) CopyName(n, nm, sizeof nm);
+        if (fixed++ < 20) DebugLog("multihud: closed frame '%s' was at alpha %.0f (faded out under the old hud), back to 255", nm, was);
+    }
+    if (fixed) DebugLog("multihud: %d closed frames back to alpha 255", fixed);
+}
+
+// ---- the matchmaking dashboard (top bar: chat, party, find a game / resume / disconnect) -------------
+// CTFMatchmakingDashboard "MMDashboard" is made once by GetMMDashboard() into a function static and
+// handed to CMMDashboardParentManager::AddPanel (raw Panel* in its CUtlSortVector m_vecPanels,
+// tf_matchmaking_dashboard.cpp:250, _parent_manager.cpp:69). On a resolution change TF2 remakes only
+// the side panels and Reload()s it in place (tf_viewport.cpp:453), so its code-made TopBar kept the old
+// hud's look (grey bar 11-15). Remade like RemovePanel + DestroyStatsSummaryPanel do it: out of the
+// manager's list, static nulled, MarkPanelForDeletion; TFViewport::OnScreenSizeChanged (RebuildPanels)
+// then calls GetMMDashboard() -> a new one. The manager is found as the .data-held object whose vtable
+// is CMMDashboardParentManager's (RTTI), its list as the CUtlVector holding the dashboard.
+// client module image: RTTI type name -> complete object vtable VA, 0 = not found
+uintptr_t FindVtableRaw(HMODULE mod, const char* typeName);
+uintptr_t FindVtable(HMODULE mod, const char* typeName)
+{
+    __try { return FindVtableRaw(mod, typeName); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+uintptr_t FindVtableRaw(HMODULE mod, const char* typeName)
+{
+    if (!mod) return 0;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(mod);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(reinterpret_cast<const uint8_t*>(mod) + dos->e_lfanew);
+    const uint8_t* img = reinterpret_cast<const uint8_t*>(mod);
+    const size_t size = nt->OptionalHeader.SizeOfImage, nlen = strlen(typeName) + 1;
+    const uint8_t* td = nullptr;
+    for (size_t i = 0x10; i + nlen < size && !td; ++i)
+        if (img[i] == '.' && !memcmp(img + i, typeName, nlen)) td = img + i - 0x10;
+    if (!td) return 0;
+    const uint32_t tdRva = (uint32_t)(td - img);
+    for (size_t i = 0; i + 24 <= size; i += 4)
+    {
+        const uint32_t* c = reinterpret_cast<const uint32_t*>(img + i);
+        if (c[3] != tdRva || c[0] != 1 || c[1] != 0) continue;   // COL: sig 1, offset 0, type descriptor
+        const uint64_t colVa = reinterpret_cast<uint64_t>(img + i);
+        for (size_t j = 0; j + 8 <= size; j += 8)
+            if (*reinterpret_cast<const uint64_t*>(img + j) == colVa) return reinterpret_cast<uintptr_t>(img + j + 8);
+    }
+    return 0;
+}
+bool ReadU64(uint64_t p, uint64_t& out)
+{
+    __try { out = *reinterpret_cast<const uint64_t*>(p); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// removes `item` from a CUtlVector<T*> member of obj (first 0x80 bytes), true = removed
+bool RemoveFromObjVector(uint8_t* obj, uint64_t item)
+{
+    __try
+    {
+        for (size_t off = 8; off <= 0x60; off += 8)
+        {
+            uint64_t* mem = *reinterpret_cast<uint64_t**>(obj + off);
+            const int alloc = *reinterpret_cast<int*>(obj + off + 8);
+            int* size = reinterpret_cast<int*>(obj + off + 0x10);
+            if (!mem || *size <= 0 || *size > alloc || alloc > 4096) continue;
+            for (int i = 0; i < *size; ++i)
+                if (mem[i] == item)
+                {
+                    for (int k = i; k + 1 < *size; ++k) mem[k] = mem[k + 1];
+                    --*size;
+                    return true;
+                }
+        }
+        return false;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void RecreateDashboard()
+{
+    void* pn = VGui_GetPanelInterface();
+    void* s = Surface();
+    void* iv = Ivgui();
+    const uintptr_t root = s ? VCall<uintptr_t>(s, kSurfGetEmbeddedPanel) : 0;
+    const HMODULE client = GetModuleHandleA("client.dll");
+    if (!pn || !iv || !root || !client) return;
+    const uintptr_t dvp = FindPanel(pn, root, "MMDashboard", 0);
+    void* dcp = dvp ? VCall<void*>(pn, kPnlGetPanel, dvp, "ClientDLL") : nullptr;
+    RttiInfo dr;
+    if (!dcp || !HasRttiBase(dcp, ".?AVCTFMatchmakingDashboard@@") || !ReadRtti(dcp, dr)) return;
+    static uintptr_t mgrVt = FindVtable(client, ".?AVCMMDashboardParentManager@@");
+    uint64_t* data = nullptr;
+    size_t words = 0;
+    if (!mgrVt || !ClientData(data, words)) { DebugLog("multihud: dashboard not remade (parent manager vtable %p)", (void*)mgrVt); return; }
+    std::vector<uint64_t> copy(words);
+    if (!CopyWords(data, copy.data(), words)) return;
+    // the manager: a .data word pointing at an object with its vtable
+    uint8_t* mgr = nullptr;
+    for (size_t i = 0; i < words && !mgr; ++i)
+    {
+        const uint64_t w = copy[i];
+        if (w < 0x10000 || w > 0x7FFFFFFFFFFF || (w & 7)) continue;
+        uint64_t vt = 0;
+        if (ReadU64(w, vt) && vt == mgrVt) mgr = reinterpret_cast<uint8_t*>(w);
+    }
+    if (!mgr) { DebugLog("multihud: dashboard not remade (parent manager not found in .data)"); return; }
+    // GetMMDashboard's static first: without it the getter would hand out the deleted one
+    std::vector<mh::PtrFix> fixes;
+    for (int k = 0; k < dr.n; ++k) fixes.push_back({ dr.complete + dr.mdisp[k], 0 });
+    mh::SortFixes(fixes);
+    const std::vector<size_t> refs = mh::ScanWords(copy.data(), words, fixes).unmapped;
+    if (refs.empty()) { DebugLog("multihud: dashboard not remade (no .data static points at it)"); return; }
+    uint64_t dashPanel = 0;   // the Panel* AddPanel stored: try every non-virtual base
+    for (int k = 0; k < dr.n && !dashPanel; ++k)
+        if (RemoveFromObjVector(mgr, dr.complete + dr.mdisp[k])) dashPanel = dr.complete + dr.mdisp[k];
+    if (!dashPanel) { DebugLog("multihud: dashboard not remade (not in the parent manager's list)"); return; }
+    int nulled = 0;
+    for (const size_t i : refs) nulled += CasWord(data + i, copy[i], 0);
+    VCall<void>(iv, kVguiMarkForDeletion, dvp);
+    DebugLog("multihud: matchmaking dashboard out of the parent manager, %d .data refs nulled, marked for deletion: "
+             "the viewport rebuild makes it again", nulled);
+}
+
+// 5: a map load's element calls, once the reapply has applied scheme + layout to the new elements (at
+// boot both ran long before the first map)
+void HudMapInit()
+{
+    if (!s_hf.ok || !g_engine || !VCall<bool>(g_engine, kEngIsInGame)) return;
+    const bool vid = CallHud(s_hf.vidInit, s_hf.ghud);
+    const bool lvl = CallHud(s_hf.levelInit, s_hf.ghud);
+    DebugLog("multihud: in a game: hud VidInit %s, LevelInit %s", vid ? "ok" : "FAULTED", lvl ? "ok" : "FAULTED");
+}
+
+// ---- console watch (diag, report 11-15: console window gone after a switch, typing still works) ------
+// GameUI's CGameConsoleDialog ("GameConsole", gameui.dll) is never touched by name here. When it turns
+// visible in the first opens after a switch, log what decides if it draws: its own state, every
+// ancestor, and what paints after it (later popups, later siblings).
+constexpr int kPnlGetZPos = 9, kPnlIsPopup = 24, kPnlIsFullyVisible = 26;
+unsigned long s_conHandle = 0;
+bool s_conWasVisible = false;
+int s_conLogIn = 0, s_conLogs = 0;
+std::string PanelTag(void* pn, uintptr_t vp)
+{
+    char nm[96] = "?";
+    if (const char* n = VCall<const char*>(pn, kPnlGetName, vp)) CopyName(n, nm, sizeof nm);
+    int x = 0, y = 0, w = 0, h = 0;
+    VCall<void>(pn, kPnlGetPos, vp, &x, &y);
+    VCall<void>(pn, kPnlGetSize, vp, &w, &h);
+    char buf[256];
+    snprintf(buf, sizeof buf, "'%s' vis %d full %d popup %d z %d at %d,%d %dx%d", nm, (int)VCall<bool>(pn, kPnlIsVisible, vp),
+             (int)VCall<bool>(pn, kPnlIsFullyVisible, vp), (int)VCall<bool>(pn, kPnlIsPopup, vp),
+             VCall<int>(pn, kPnlGetZPos, vp), x, y, w, h);
+    return buf;
+}
+void LogConsoleState(void* pn, uintptr_t con)
+{
+    DebugLog("multihud: console opened -- %s", PanelTag(pn, con).c_str());
+    for (uintptr_t p = VCall<uintptr_t>(pn, kPnlGetParent, con), d = 0; p && d < 16; p = VCall<uintptr_t>(pn, kPnlGetParent, p), ++d)
+        DebugLog("multihud:   parent %d %s", (int)d, PanelTag(pn, p).c_str());
+    if (const uintptr_t par = VCall<uintptr_t>(pn, kPnlGetParent, con))
+    {
+        const int n = VCall<int>(pn, kPnlGetChildCount, par);
+        bool after = false;
+        for (int i = 0; i < n && i < 256; ++i)
+        {
+            const uintptr_t c = VCall<uintptr_t>(pn, kPnlGetChild, par, i);
+            if (c == con) { after = true; continue; }
+            if (after && c && VCall<bool>(pn, kPnlIsVisible, c)) DebugLog("multihud:   sibling drawn after it %s", PanelTag(pn, c).c_str());
+        }
+    }
+    void* s = Surface();
+    const int pc = VCall<int>(s, kSurfGetPopupCount);
+    int at = -1;
+    for (int i = 0; i < pc && i < 1024; ++i)
+    {
+        const uintptr_t p = VCall<uintptr_t>(s, kSurfGetPopup, i);
+        if (p == con) { at = i; continue; }
+        if (at >= 0 && p && VCall<bool>(pn, kPnlIsVisible, p)) DebugLog("multihud:   popup after it [%d] %s", i, PanelTag(pn, p).c_str());
+    }
+    DebugLog("multihud:   console popup index %d of %d", at, pc);
+}
+void ConsoleWatch()
+{
+    void* pn = VGui_GetPanelInterface();
+    void* iv = Ivgui();
+    void* s = Surface();
+    if (!pn || !iv || !s || s_conLogs <= 0) return;
+    uintptr_t con = s_conHandle ? VCall<uintptr_t>(iv, kVguiHandleToPanel, s_conHandle) : 0;
+    if (!con)
+    {
+        static DWORD next = 0;
+        if (GetTickCount() < next) return;
+        next = GetTickCount() + 2000;
+        const int pc = VCall<int>(s, kSurfGetPopupCount);
+        for (int i = 0; i < pc && i < 1024 && !con; ++i)
+        {
+            const uintptr_t p = VCall<uintptr_t>(s, kSurfGetPopup, i);
+            const char* n = p ? VCall<const char*>(pn, kPnlGetName, p) : nullptr;
+            char nm[64];
+            if (n && CopyName(n, nm, sizeof nm) && !strcmp(nm, "GameConsole")) con = p;
+        }
+        if (!con)
+            if (const uintptr_t root = VCall<uintptr_t>(s, kSurfGetEmbeddedPanel)) con = FindPanel(pn, root, "GameConsole", 0);
+        if (!con) return;
+        s_conHandle = VCall<unsigned long>(iv, kVguiPanelToHandle, con);
+    }
+    const bool vis = VCall<bool>(pn, kPnlIsVisible, con);
+    if (vis && !s_conWasVisible) s_conLogIn = 3;   // after Activate's MoveToFront + first layout
+    s_conWasVisible = vis;
+    if (s_conLogIn > 0 && --s_conLogIn == 0) { LogConsoleState(pn, con); --s_conLogs; }
+}
+
 // ---- the switch ------------------------------------------------------------------------------
 void Reload(const std::vector<std::string>& dirs, const std::string& label, const std::string& root)
 {
@@ -1248,8 +2164,22 @@ void Reload(const std::vector<std::string>& dirs, const std::string& label, cons
     const bool snd = std::any_of(dirs.begin(), dirs.end(), [](const std::string& d) { return Exists(d + "\\sound", true); });
     if (snd) Exec("snd_restart");              // cached hud sounds (hitsound, killsound)
     const unsigned long msSound = lap();
-    ResetStale();                              // keys the new hud leaves out: back to the panel defaults
+    LearnVguiNames(dirs);                      // image names both huds use: CRC -> name for stuck ids
+    RepairVguiIds("switch");
+    const bool remade = RemakeHudElements();   // boot-fresh hud elements, new scheme + cfg already in place
+    const unsigned long msRemake = lap();
+    ResetStale();                              // keys the new hud leaves out (panels still reapplied in place)
     Exec("hud_reloadscheme");                  // viewport + hud elements on the new scheme + cvars
+    if (remade) HudMapInit();
+    // loadout / char info: a GameUI-root singleton the viewport rebuild never reaches. TF2's own
+    // "reload_char_info" (character_info_panel.cpp:36) marks it for deletion and makes it again =
+    // boot-fresh. Only when it exists: it is made lazily on first use, like at boot.
+    if (void* pn = VGui_GetPanelInterface(); pn && Surface())
+        if (const uintptr_t root = VCall<uintptr_t>(Surface(), kSurfGetEmbeddedPanel); root && FindPanel(pn, root, "character_info", 0))
+            Exec("reload_char_info");
+    RecreateStatsSummary();
+    RecreateDashboard();                       // before RebuildPanels: TFViewport remakes it there
+    s_conLogs = 5;                             // console diag: the next opens after this switch
     int w = 0, h = 0, posted = -1;
     if (void* s = Surface()) VCall<void>(s, kSurfGetScreenSize, &w, &h);
     if (w > 0 && h > 0) posted = RebuildPanels(w, h);
@@ -1261,11 +2191,14 @@ void Reload(const std::vector<std::string>& dirs, const std::string& label, cons
     VGui_ResetPanelCache();
     // the posted messages dispatch in this frame's vgui RunFrame; diff once they all have
     s_removalFrames = s_resSnaps.empty() ? 0 : 3;
+    s_repairFrames = 3;                        // images first bound by this frame's paint
+    RestoreFrameAlpha();                       // closed frames the old hud faded out
     const unsigned long msPanels = lap();
     DebugLog("multihud: %s -- %d schemes, %d materials (%d vgui ids rebound), %d bitmap fonts, %d string files%s, "
-             "%d cfg commands%s, %d branches | ms: flush %lu schemes %lu materials %lu strings %lu cfg %lu sound %lu "
-             "panels %lu", label.c_str(), schemes, mats, rebound, vbf, strings, captions ? ", captions" : "", cfg,
-             snd ? ", sounds" : "", posted, msFlush, msSchemes, msMats, msStrings, msCfg, msSound, msPanels);
+             "%d cfg commands%s, hud elements %s, %d branches | ms: flush %lu schemes %lu materials %lu strings %lu "
+             "cfg %lu sound %lu remake %lu panels %lu", label.c_str(), schemes, mats, rebound, vbf, strings,
+             captions ? ", captions" : "", cfg, snd ? ", sounds" : "", remade ? "remade" : "reapplied in place", posted,
+             msFlush, msSchemes, msMats, msStrings, msCfg, msSound, msRemake, msPanels);
     SetStatus("%s loaded (%.1f s)", label.c_str(), (GetTickCount() - t0) / 1000.f);
 }
 
@@ -1340,6 +2273,12 @@ void MultiHud_MainTick()
     // mid map load, the pick waits for the first frame after it
     if (!g_engine || VCall<bool>(g_engine, kEngIsDrawingLoadingImage)) return;
     if (s_removalFrames > 0 && --s_removalFrames == 0) ApplyRemovals();
+    if (s_repairFrames > 0 && --s_repairFrames == 0)
+    {
+        RepairVguiIds("3 frames after the switch");
+        RestoreFrameAlpha();                   // frames whose close fade finished during the switch
+    }
+    ConsoleWatch();
     const bool again = s_reapply.exchange(false);
     const std::string pick = mh::Pick(g_multiHudOn, g_multiHud);
     if (!again && s_applied == pick) return;

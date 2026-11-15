@@ -529,6 +529,9 @@ static void __fastcall h_HudUpdate(void* hud)
     s_inHud = false;
 }
 
+// multihud deleted + remade every hud element: the CTFHudPlayerClass s_hud named is gone
+void Hats_HudRemade() { s_hud = nullptr; }
+
 __declspec(noinline) static void HudRefresh()
 {
     if (!s_hud || !o_HudUpdate) return;

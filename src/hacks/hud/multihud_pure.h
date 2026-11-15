@@ -472,4 +472,94 @@ inline std::vector<std::string> Touched(const std::vector<FsOp>& ops)
     return out;
 }
 
+// ---- vgui texture ids (multihud.cpp RepairVguiIds) ------------------------------------------------
+// tier1 CRC32 (checksum_crc.cpp): reflected 0xEDB88320, init + final xor 0xFFFFFFFF (= zlib crc32).
+// vguimatsurface keys a texture id on the CRC of the exact name it was bound with, case kept
+// (CTextureDictionary::BindTextureToFile, x64 11-15), and keeps that CRC when the bind found no file.
+inline uint32_t Crc32(const char* s, size_t n)
+{
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i)
+    {
+        c ^= (unsigned char)s[i];
+        for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+inline uint32_t Crc32(const std::string& s) { return Crc32(s.data(), s.size()); }
+
+// every "quoted" value on one line of a .res / .txt, as written (image names, hud_textures files)
+inline std::vector<std::string> QuotedTokens(const std::string& text)
+{
+    std::vector<std::string> out;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        if (text[i] != '"') continue;
+        const size_t e = text.find('"', i + 1);
+        if (e == std::string::npos) break;
+        const size_t nl = text.find('\n', i + 1);
+        if (nl < e) { i = nl; continue; }   // unclosed on its line: not a value
+        if (e > i + 1 && e - i - 1 < 260) out.push_back(text.substr(i + 1, e - i - 1));
+        i = e;
+    }
+    return out;
+}
+
+// ---- hud element remake (multihud.cpp RemakeHudElements) -----------------------------------------
+// old object address -> new one, 0 = no counterpart (the pointer gets nulled once the old one is gone)
+struct PtrFix { uint64_t from = 0, to = 0; };
+inline void SortFixes(std::vector<PtrFix>& v)
+{
+    std::stable_sort(v.begin(), v.end(), [](const PtrFix& a, const PtrFix& b) { return a.from < b.from; });
+    v.erase(std::unique(v.begin(), v.end(), [](const PtrFix& a, const PtrFix& b) { return a.from == b.from; }), v.end());
+}
+inline const PtrFix* FindFix(const std::vector<PtrFix>& v, uint64_t p)
+{
+    auto it = std::lower_bound(v.begin(), v.end(), p, [](const PtrFix& f, uint64_t x) { return f.from < x; });
+    return it != v.end() && it->from == p ? &*it : nullptr;
+}
+// words = a copy of a module's writable data; indices of words holding an old pointer, split by
+// whether the new hud has a counterpart
+struct FixHits { std::vector<size_t> mapped, unmapped; };
+inline FixHits ScanWords(const uint64_t* w, size_t n, const std::vector<PtrFix>& fixes)
+{
+    FixHits h;
+    if (fixes.empty()) return h;
+    const uint64_t lo = fixes.front().from, hi = fixes.back().from;
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (w[i] < lo || w[i] > hi) continue;
+        if (const PtrFix* f = FindFix(fixes, w[i])) (f->to ? h.mapped : h.unmapped).push_back(i);
+    }
+    return h;
+}
+// a panel object: its path under the hud element ("CHudChat/HudChatHistory") + class (vtable)
+struct PanelNode { uint64_t obj = 0; std::string path; uint64_t cls = 0; };
+// old -> new where (path, class) names exactly one object on each side; the rest stay unmatched
+inline std::vector<std::pair<uint64_t, uint64_t>> MatchByPath(const std::vector<PanelNode>& olds,
+                                                              const std::vector<PanelNode>& news)
+{
+    auto key = [](const PanelNode& p) { return Lower(p.path) + '\x01' + std::to_string(p.cls); };
+    auto byKey = [&](const std::vector<PanelNode>& v) {
+        std::vector<std::pair<std::string, size_t>> k;
+        for (size_t i = 0; i < v.size(); ++i) k.emplace_back(key(v[i]), i);
+        std::sort(k.begin(), k.end());
+        return k;
+    };
+    const auto ko = byKey(olds), kn = byKey(news);
+    auto unique = [](const std::vector<std::pair<std::string, size_t>>& k, size_t i) {
+        return (i == 0 || k[i - 1].first != k[i].first) && (i + 1 == k.size() || k[i + 1].first != k[i].first);
+    };
+    std::vector<std::pair<uint64_t, uint64_t>> out;
+    size_t j = 0;
+    for (size_t i = 0; i < ko.size(); ++i)
+    {
+        if (!unique(ko, i)) continue;
+        while (j < kn.size() && kn[j].first < ko[i].first) ++j;
+        if (j < kn.size() && kn[j].first == ko[i].first && unique(kn, j))
+            out.emplace_back(olds[ko[i].second].obj, news[kn[j].second].obj);
+    }
+    return out;
+}
+
 } // namespace mh

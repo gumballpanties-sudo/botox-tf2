@@ -14,6 +14,10 @@ bool LuaB_BindActive(int key, int style);                // 0 always, 1 hold, 2 
 void LuaB_MousePos(int& x, int& y);                      // game window client px
 bool LuaB_AimReady();                                    // aim half up = I:: interfaces valid
 
+// lua draw_model swaps (lua_dih.cpp), lua thread only, never inside a draw for LoadModel
+const void* LuaB_LoadModel(const char* path);            // FindOrLoadModel; null = failed / error.mdl
+bool LuaB_ModelParts(const void* model, const void** hdr, const void** hw);   // studiohdr + studiohwdata, false = no mesh
+
 // config.cpp kEntries, every botox setting by its cfg key
 struct LuaCfgVar
 {
