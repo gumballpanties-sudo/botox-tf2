@@ -1144,6 +1144,7 @@ static void Page_VisualsScreen()
                     if (g_chCsgoStyle == 0)
                         ImGui::Checkbox("spread lines##csgo", &g_chCsgoArcs);
                     ImGui::Checkbox("arms##csgo", &g_chCsgoPips);
+                    ImGui::Checkbox("enemy red##csgo", &g_chCsgoEnemyRed);
                 }
                 else
                 {
@@ -1156,10 +1157,11 @@ static void Page_VisualsScreen()
                     ImGui::Checkbox("dot##csx",     &g_csXDot);
                     ImGui::Checkbox("outline##csx", &g_csXOutline);
                     if (g_csXOutline)
-                        // whole pixels: csgo's outline is an int vgui rect
-                        SliderF("outline thickness##csx", &g_csXOutlineTh, 1.f, 3.f, "%.0f");
+                        // cl_crosshair_outlinethickness range; fractions truncate per edge like csgo
+                        SliderF("outline thickness##csx", &g_csXOutlineTh, 0.1f, 3.f, "%.1f");
                     ImGui::Checkbox("t style##csx",   &g_csXT);
                     ImGui::Checkbox("use alpha##csx", &g_csXUseAlpha);
+                    ImGui::Checkbox("linear##csx",    &g_chCsgoLinear);   // UnlitGeneric sRGB write
                     if (g_chCsgoStyle <= 3)   // 2/3 are the dynamic ones; 4 never moves
                     {
                         SliderF("velocity sens##csx",   &g_chCsgoVelSens, 0.f, 2.f, "%.2f");
@@ -1562,7 +1564,7 @@ static void Page_MovementMain()
                 ImGui::Label("air stuck keybind");
                 ImGui::Keybind("air stuck key", &g_airStuckKey, &g_airStuckMode);
                 ImGui::Checkbox("use movement fix##as", &g_asMovementFix);
-                ImGui::Checkbox("drift hang (sv_wallbug 0)##as", &g_asDriftHang);
+                ImGui::Checkbox("lip hang (sv_wallbug 0)##as", &g_asDriftHang);   // lip hang + drift hang (airstuck.inl)
                 SliderF("extra reach##as", &g_asExtraReach, 0.f, 32.f, "%.2f");
                 SliderF("fan budget##as", &g_asBudget, 5.f, 90.f, "%.0f%% tick");
             }, ImVec2(220.f, -1));

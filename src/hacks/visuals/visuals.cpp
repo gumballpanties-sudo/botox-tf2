@@ -16,6 +16,7 @@
 #include "../misc/game_extras.h"   // ChatTranslator_OnUserMessage -- DispatchUserMessage
 #include "../../hooks/crashlog.h"     // CrashSpan: stutter probe on DrawModelExecute (chams, frame blend bones)
 #include "../lua/lua.h"               // g_lua.on_draw_model -- lua draw_model callback
+#include "../hud/multihud.h"          // MultiHud_PropDiagEnt -- what stops drawing across a hud switch
 #include <intrin.h>       // _ReturnAddress -- net_graph must still read the real lerp
 
 // ConVar-string redirect scratch, file-local because nothing outside this file has ever
@@ -1483,6 +1484,9 @@ void __fastcall h_DrawModelExecute(void* rcx, const void* pState, const void* pI
 {
     MiscHookGuard _g;
     CrashSpan _s("dme/model");   // includes the engine's own draw: max = one slow model, sum = the frame's models
+    if (g_mhPropDiag && pInfo)   // multihud prop diag: entity_index +0x44, pModel +0x20 (ModelRenderInfo_t)
+        MultiHud_PropDiagEnt(*reinterpret_cast<const int*>(static_cast<const uint8_t*>(pInfo) + 0x44),
+                             *reinterpret_cast<const void* const*>(static_cast<const uint8_t*>(pInfo) + 0x20));
     if (Lua_DrawModel(rcx, pState, pInfo, pBones)) return;
     h_DrawModelExecute_impl(rcx, pState, pInfo, pBones);
 }

@@ -110,6 +110,8 @@ add_library(botox SHARED
     src/hacks/visuals/mc_world.cpp
     src/hacks/menu/menu_visuals_screenfx.cpp
     src/hacks/screen/aspect_stretch.cpp
+    src/hacks/screen/vgui_stretch.cpp   # aspect ratio stretch hud / crosshair on tf2's own vgui
+    src/hacks/screen/res_spoof.cpp      # resolution spoofer (botox resolution_spoof.cpp)
     src/hacks/hud/gif_tex.cpp
     src/hacks/hud/avatar_cache.cpp
     src/hacks/screen/blur_rect.cpp
@@ -322,6 +324,11 @@ add_executable(giftex_test tests/giftex_test.cpp)
 # Build + run: cmake --build build --config Release --target hudmath_test && build\Release\hudmath_test.exe
 add_executable(hudmath_test tests/hudmath_test.cpp)
 
+# Gate test for the csgo target id timers (src/hacks/hud/targetid_pure.h): the panorama
+# crosshair's enemy red -- 0.4 s hover delay, 0.2 s hold, swap, clock reset, DistanceToRay.
+# Build + run: cmake --build build --config Release --target targetid_test && build\Release\targetid_test.exe
+add_executable(targetid_test tests/targetid_test.cpp)
+
 # Gate test for the csgo radar's pure halves (src/hacks/hud/radar_pure.h): nav mesh reader on a
 # synthetic v16 / TF sub-version 2 file, overview fit, CS:GO radar transforms, icon states, shading.
 # Build + run: cmake --build build --config Release --target radar_test && build\Release\radar_test.exe
@@ -354,6 +361,14 @@ target_compile_definitions(fbmath_test PRIVATE FB_SRC_DIR="${CMAKE_CURRENT_SOURC
 
 # Gate test for the aspect ratio overlay stretch math (src/hacks/screen/aspect_stretch_math.h).
 add_executable(aspect_stretch_test tests/aspect_stretch_test.cpp)
+
+# Gate test for the vgui stretch math (src/hacks/screen/vgui_stretch_math.h): layout width, the
+# tick's change plan, cursor round trips, the render context matrix op order, crosshair names.
+add_executable(vgui_stretch_test tests/vgui_stretch_test.cpp)
+
+# Gate test for the resolution spoofer math (src/hacks/screen/res_spoof_math.h): botox target size,
+# aspect gates, halving chain, net graph height, menu list.
+add_executable(res_spoof_test tests/res_spoof_test.cpp)
 
 # Gate test for the dpi scale math (src/render/dpi_math.h, botox render.cpp 1:1): pivot, shown <->
 # layout round trips a panel drag relies on, anchored edges, the 1:1 window slide.

@@ -17,6 +17,9 @@ struct HudSnap
     // sniper crosshair: holding a sniper rifle, not zoomed (botox: awp/ssg/auto, !is_scoped)
     bool  sniperUnscoped = false;
 
+    // csgo panorama crosshair: GetIDTarget() is an enemy player -> .crosshair--enemy
+    bool  csgoEnemy = false;
+
     // aimbot fov circle: radius in engine px, 0 = nothing to draw
     float fovRadius = 0.f;
 

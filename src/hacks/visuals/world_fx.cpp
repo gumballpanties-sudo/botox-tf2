@@ -7,6 +7,7 @@
 #include "../network/netregion.h"     // FindMatSystemSurface -- cloak meter hook
 #include "world_fx3.h"                // WorldFx3_Frame -- trail, dlights, modulation, per frame
 #include "../../render/render.h"      // W2S_Project -- third person crosshair
+#include "../screen/res_spoof.h"      // ResSpoof_Vars + rsp:: aspect gates (aspect ratio / stretched res)
 #include <mutex>
 
 // ==== fullbright + disable interp ===================================================
@@ -35,9 +36,12 @@ void WorldFx_Tick()
     // (sdk view.cpp:1116, viewrender.cpp:1075) -> whole 3D view stretches. 0 = engine default.
     // Off / eject -> 0 once (botox on_release restores the same way). This tick runs on
     // Present, which keeps rendering past g_eject until the hooks come off.
+    // botox screen.cpp: aspect_on() / aspect_wanted() -- the aspect ratio row, or a stretched
+    // resolution spoofer res (its width / height), res_spoof_math.h
     static CachedCVar cc_aspect;
     static bool s_arWas = false, s_arMissLogged = false;
-    const bool arOn = g_aspectRatioEnable && !g_eject;
+    const rsp::Vars arVars = ResSpoof_Vars();
+    const bool arOn = rsp::AspectOn(arVars);
     if (arOn || s_arWas)
     {
         ConVar* ar = cc_aspect.Get("r_aspectratio");
@@ -47,7 +51,7 @@ void WorldFx_Tick()
         }
         else
         {
-            float want = arOn ? g_aspectRatioValue : 0.f;
+            float want = arOn ? rsp::AspectWanted(arVars) : 0.f;
             if (arOn) want = want < 0.5f ? 0.5f : (want > 4.f ? 4.f : want);   // botox slider range
             if (ar->GetFloat() != want)
             {

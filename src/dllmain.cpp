@@ -467,6 +467,7 @@ float g_chCsgoBlack     = 1.0f;     // 1 = csgo's own wash strength
 float g_chCsgoVelSens   = 1.f;      // 1 = csgo's own step sizes, 0 = movement moves nothing
 float g_chCsgoSmooth    = 0.f;      // seconds to ease into a new gap/spread, 0 = snap (csgo)
 bool  g_chCsgoArcs      = true;     // the 4 thin spread lines
+bool  g_chCsgoEnemyRed  = true;     // .crosshair--enemy #c93121 over an enemy (csgo target id)
 bool  g_chCsgoPips      = true;     // the 4 green gap arms
 float g_chCsgoAspect    = 1.f;      // arm length w:h, both style families
 float g_chCsgoGapAspect = 1.f;      // gap w:h, both style families

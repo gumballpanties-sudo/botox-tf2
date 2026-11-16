@@ -96,6 +96,37 @@ inline constexpr float k_pinTol = 0.05f;
 // botox pixel_surf `pinned`: vz on the pin AND still sliding ( xy < 1 = a wall hang, not a surf )
 inline bool SurfPinned(float vz, float vxy, float pin) { return std::fabs(vz - pin) < k_pinTol && vxy >= 1.f; }
 
+// auto align surf stick: no candidate held = ride over, ONLY if the search ran. Pool empty before the
+// stick (simsUsed 0) = nothing flown = keep. Search cut by the sim pool / cmd clock (cut) = no proof
+// either: keep while the real START still pins (it is the last tick's move that pinned it)
+inline bool StickLost(int heldDrift, int best, int simsUsed, bool cut, bool pinnedNow)
+{
+    if (heldDrift > 0 || best > 0 || simsUsed == 0) return false;
+    return !(cut && pinnedNow);
+}
+
+// sv_wallbug 0 lip hang: the wish whose AirAccelerate (gamemovement.cpp:1705) takes the pre-move xy
+// velocity (vx, vy) to `closing` u/s INTO the face (n = unit face normal, out of the wall) and 0 along it.
+// k = airaccel * dt * friction (u/s per unit wish), wmax = m_flMaxSpeed (AirMove clamps the wish to it).
+// Out of reach in one tick: the into part is kept (it is the pin) and the along part brakes with the rest.
+// Out: unit dir (dx, dy) + magnitude m, m 0 = no wish
+inline void HangWish(float vx, float vy, float nx, float ny, float closing, float k, float wmax,
+                     float& dx, float& dy, float& m)
+{
+    dx = dy = m = 0.f;
+    if (!(k > 0.f) || !(wmax > 0.f)) return;
+    const float tx = -ny, ty = nx;
+    const float along = vx * tx + vy * ty, across = vx * nx + vy * ny;
+    const float smax = k * wmax;
+    const float dAcross = std::clamp(-closing - across, -smax, smax);
+    const float rem = std::sqrt(std::max(smax * smax - dAcross * dAcross, 0.f));
+    const float dAlong = std::clamp(-along, -rem, rem);
+    const float gx = dAlong * tx + dAcross * nx, gy = dAlong * ty + dAcross * ny;
+    const float s = std::sqrt(gx * gx + gy * gy);
+    if (s < 1e-6f) return;
+    dx = gx / s; dy = gy / s; m = s / k;
+}
+
 // air stuck approach: wall face seen by the line column but hull not on it. Lumi's fan only pins
 // a hull already flush ( its wishes are 1..120 at 78..90 deg off straight-in = ~0.3 u/s per tick of
 // pull ), so a face further than k_fanGap u off the hull edge gets a straight-in full press instead

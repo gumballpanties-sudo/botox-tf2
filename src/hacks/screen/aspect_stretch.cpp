@@ -1,5 +1,6 @@
 #include "aspect_stretch.h"
 #include "aspect_stretch_math.h"
+#include "res_spoof.h"   // ResSpoof_Vars + rsp:: aspect gates
 #include "../../globals/globals.h"
 #include "../../dependencies/imgui/imgui.h"
 #include "../../dependencies/imgui/imgui_internal.h"
@@ -25,10 +26,15 @@ static void StretchList(ImDrawList* l, int v0, int c0, float pivot, float scale,
 
 void AspectStretch_Run(void (*draw)(), AsKind kind)
 {
-    const bool wanted = g_aspectRatioEnable && !g_eject &&
-        (kind == AsCrosshair ? (g_sfxAspectCheatOverlay || g_sfxAspectCrosshair || g_sfxAspectHud) : g_sfxAspectCheatOverlay);
+    // botox overlay_aspect_scale (crosshair || hud) + aspect_cheat_overlay: the aspect ratio row,
+    // or a stretched resolution spoofer res (res_spoof_math.h; its eject gate is in there)
+    const rsp::Vars v = ResSpoof_Vars();
+    const bool wanted = kind == AsCrosshair
+        ? (rsp::AspectCheatOverlay(v) || rsp::AspectCrosshair(v) || rsp::AspectHud(v))
+        : rsp::AspectCheatOverlay(v);
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
-    const float ratio = g_aspectRatioValue < 0.5f ? 0.5f : (g_aspectRatioValue > 4.f ? 4.f : g_aspectRatioValue);
+    const float want = rsp::AspectWanted(v);
+    const float ratio = want < 0.5f ? 0.5f : (want > 4.f ? 4.f : want);
     const float scale = AsScale(screen.x, screen.y, ratio);
     if (!wanted || fabsf(scale - 1.f) < 0.001f) { draw(); return; }
 

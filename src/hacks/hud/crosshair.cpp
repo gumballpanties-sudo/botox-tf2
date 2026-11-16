@@ -1171,10 +1171,21 @@ static void RenderCsgoPanorama(bool bStatic)
     // Every css colour reaches the vertex as linear light, so when we are blending in
     // linear light the wash has to be decoded the same way. Black decodes to black, so
     // the two black washes below need no branch.
+    // .crosshair--enemy (crosshair.css:140) swaps the dot/arc background and the green pip
+    // wash to crosshairEnemyColor #c93121 while GetIDTarget() is an enemy player -- the trace +
+    // 0.4 s delay / 0.2 s hold run on the game thread (aim/hud_aim.cpp, hud/targetid_pure.h).
+    // The black parts keep their washes; the class only names those two selectors.
+    float rgb[3] = { g_chCsgoColor[0], g_chCsgoColor[1], g_chCsgoColor[2] };
+    if (g_chCsgoEnemyRed)
+    {
+        HudSnap hs;
+        if (HudSnap_Read(hs, GetTickCount64()) && hs.csgoEnemy)
+        { rgb[0] = 0xc9 / 255.f; rgb[1] = 0x31 / 255.f; rgb[2] = 0x21 / 255.f; }
+    }
     const bool  lin = ChCsLinear();
-    const int   r = lin ? ChCsToLinear8(g_chCsgoColor[0]) : (int)(g_chCsgoColor[0] * 255.f);
-    const int   g = lin ? ChCsToLinear8(g_chCsgoColor[1]) : (int)(g_chCsgoColor[1] * 255.f);
-    const int   b = lin ? ChCsToLinear8(g_chCsgoColor[2]) : (int)(g_chCsgoColor[2] * 255.f);
+    const int   r = lin ? ChCsToLinear8(rgb[0]) : (int)(rgb[0] * 255.f);
+    const int   g = lin ? ChCsToLinear8(rgb[1]) : (int)(rgb[1] * 255.f);
+    const int   b = lin ? ChCsToLinear8(rgb[2]) : (int)(rgb[2] * 255.f);
     const float aMul = g_chCsgoColor[3];
     const ImU32 litCol = IM_COL32(r, g, b, (int)(255.f * aMul + 0.5f));
     const float pipAlpha = aMul * kCsPipOpacity;
@@ -1276,26 +1287,44 @@ static void RenderCsgoPanorama(bool bStatic)
 // Distance), so the bars don't kick out while firing.
 static constexpr float kCsXDistGoal = 4.0f;   // cl_crosshairgap_useweaponvalue 0
 
+// RoundFloatToInt (mathlib.h:1654): fld + fistp on win32 csgo, i.e. the FPU's default
+// round-half-to-EVEN, not floor(x + 0.5). lrintf runs the same mode.
+static inline int CsRound(float f) { return (int)lrintf(f); }
+// YRES (cdll_util.h:63): y * ((float)ScreenHeight() / 480.0) -- a DOUBLE divide, narrowed
+// back to float on the way into RoundFloatToInt.
+static inline float CsYres(float y, int scrH) { return (float)(y * ((float)scrH / 480.0)); }
+
+// MatSystemSurface paints both rects through UnlitGeneric (materials/vgui/white.vmt, and
+// white_additive.vmt = the same plus $additive -> SRCALPHA/ONE): the vertex shader decodes
+// the colour with GammaToLinear = pow(c, 2.2) (vertexlit_and_unlit_generic_vs20.fxc:318,
+// common_fxc.h:261 -- NOT the piecewise sRGB curve panorama uses) and the pass writes sRGB
+// (vertexlitgeneric_dx9_helper.cpp:875). So the bars blend in linear light exactly like the
+// reticle, and a csgo green 50 lands on screen as 46, not 50.
+static inline int CsXToLinear8(int c8)
+{
+    return (int)(powf((float)c8 / 255.f, 2.2f) * 255.f + 0.5f);
+}
+
+// DrawCrosshairRect (weapon_csbase.cpp:407). The outline is DrawFilledRect(x0 - flThick, ...)
+// into ISurface's INT parameters (ISurface.h:112): each edge is TRUNCATED, so a fractional
+// cl_crosshair_outlinethickness grows the left/top edge by ceil(t) and the right/bottom by
+// floor(t). 0.5 = one pixel up-left, none down-right -- csgo's lopsided outline, kept.
 // vgui draws the outline with plain alpha and, when cl_crosshairusealpha is 0, the bar
 // itself additively off the whiteAdditive texture -- so the blend flips per rect.
 static void CsXRect(ImDrawList* dl, int r, int g, int b, int a,
-                    float x0, float y0, float x1, float y1, bool bAdditive)
+                    int x0, int y0, int x1, int y1, bool bAdditive)
 {
-    if (a <= 0) return;
     if (g_csXOutline)
     {
-        // csgo's outline is a vgui DrawFilledRect on INTEGER screen coords (:407), and
-        // every bar coord here already comes out of int math -- the thickness was the
-        // one float in the path, so a 0.5 or 1.5 put the outline edge on a half pixel
-        // and imgui feathered it into a grey haze instead of a hard black band. Whole
-        // pixels only, min 1 (csgo's own floor for "outline on").
-        float t = floorf(g_csXOutlineTh + 0.5f);
-        if (t < 1.f) t = 1.f;
+        float t = g_csXOutlineTh;
+        if (t < 0.1f) t = 0.1f; else if (t > 3.f) t = 3.f;   // the convar's own range
+        const int ox0 = (int)((float)x0 - t), oy0 = (int)((float)y0 - t);
+        const int ox1 = (int)((float)x1 + t), oy1 = (int)((float)y1 + t);
         if (bAdditive) dl->AddCallback(ChCsBlendNormal, nullptr);
-        dl->AddRectFilled(ImVec2(x0 - t, y0 - t), ImVec2(x1 + t, y1 + t), IM_COL32(0, 0, 0, a));
+        dl->AddRectFilled(ImVec2((float)ox0, (float)oy0), ImVec2((float)ox1, (float)oy1), IM_COL32(0, 0, 0, a));
         if (bAdditive) dl->AddCallback(ChCsBlendAdd, nullptr);
     }
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(r, g, b, a));
+    dl->AddRectFilled(ImVec2((float)x0, (float)y0), ImVec2((float)x1, (float)y1), IM_COL32(r, g, b, a));
 }
 
 static void RenderCsgoClassic(int style)
@@ -1344,24 +1373,25 @@ static void RenderCsgoClassic(int style)
 
     const float maxCross = g_csXSplitDist;
     const float cappedSpreadDist = (spreadDist > maxCross) ? maxCross : spreadDist;
-    const float yres = scrH / 480.0f;
-    const int iSpread       = (style < 4) ? (int)floorf(spreadDist       * yres + 0.5f) : 2;
-    const int iCappedSpread = (style < 4) ? (int)floorf(cappedSpreadDist * yres + 0.5f) : 2;
+    const int iSpread       = (style < 4) ? CsRound(CsYres(spreadDist,       scrH)) : 2;
+    const int iCappedSpread = (style < 4) ? CsRound(CsYres(cappedSpreadDist, scrH)) : 2;
 
     // 2132 -- note the gap rides ScreenHeight/1200 while the bars ride YRES
-    int iDist   = (int)floorf(s_dist * scrH / 1200.0f + g_csXGap + 0.5f);
+    int iDist   = CsRound(s_dist * scrH / 1200.0f + g_csXGap);
     int iCapped = 0;
     // arm aspect, w:h -- the short axis keeps cl_crosshairsize, the long one stretches
     const float cAsp     = g_chCsgoAspect > 0.01f ? g_chCsgoAspect : 0.01f;
-    const int iBarSizeH  = (int)floorf(g_csXSize * (cAsp >= 1.f ? cAsp : 1.f) * yres + 0.5f);
-    const int iBarSizeV  = (int)floorf(g_csXSize * (cAsp <= 1.f ? (1.f / cAsp) : 1.f) * yres + 0.5f);
-    int iBarThickness    = (int)floorf(g_csXThick * yres + 0.5f);
+    const int iBarSizeH  = CsRound(CsYres(g_csXSize * (cAsp >= 1.f ? cAsp : 1.f), scrH));
+    const int iBarSizeV  = CsRound(CsYres(g_csXSize * (cAsp <= 1.f ? (1.f / cAsp) : 1.f), scrH));
+    int iBarThickness    = CsRound(CsYres(g_csXThick, scrH));
     if (iBarThickness < 1) iBarThickness = 1;
 
     if (iSpread > 0 && bDyn)
     {
-        iDist = iSpread + (int)g_csXGap;
-        if (style == 2) iCapped = iCappedSpread + (int)g_csXGap;
+        // :2144 is int = int + FLOAT: the sum is truncated, so a gap of -1.5 takes 1.5 off
+        // and lands one pixel in (3 + -1.5 = 1.5 -> 1), where (int)gap would have taken 1.
+        iDist = (int)((float)iSpread + g_csXGap);
+        if (style == 2) iCapped = (int)((float)iCappedSpread + g_csXGap);
     }
     else if (style == 4 || (iSpread == 0 && bDyn))
     {
@@ -1386,9 +1416,11 @@ static void RenderCsgoClassic(int style)
 
     const int cxi = scrW / 2, cyi = scrH / 2;
 
-    int   r = (int)(g_chCsgoColor[0] * 255.f);
-    int   g = (int)(g_chCsgoColor[1] * 255.f);
-    int   b = (int)(g_chCsgoColor[2] * 255.f);
+    // cl_crosshaircolor_r/g/b are ints; the picker's float is rounded back onto that grid
+    int   r = (int)(g_chCsgoColor[0] * 255.f + 0.5f);
+    int   g = (int)(g_chCsgoColor[1] * 255.f + 0.5f);
+    int   b = (int)(g_chCsgoColor[2] * 255.f + 0.5f);
+    if (ChCsLinear()) { r = CsXToLinear8(r); g = CsXToLinear8(g); b = CsXToLinear8(b); }
     const bool bAdditive = !g_csXUseAlpha;
     int alpha = g_csXAlpha;
     if (alpha < 0) alpha = 0; else if (alpha > 255) alpha = 255;
@@ -1402,7 +1434,9 @@ static void RenderCsgoClassic(int style)
     int   barSizeInnerH = iBarSizeH;
     int   barSizeInnerV = iBarSizeV;
 
-    if (bAdditive) dl->AddCallback(ChCsBlendAdd, nullptr);
+    // vgui/white is UnlitGeneric too: the alpha-blended bars sRGB-write just like the additive
+    // ones, so the state is set for both, not only for the add
+    dl->AddCallback(bAdditive ? ChCsBlendAdd : ChCsBlendNormal, nullptr);
 
     // style 2 past the split distance grows a second pair of pips outside the first
     if (style == 2 && spreadDist > maxCross)
@@ -1421,8 +1455,8 @@ static void RenderCsgoClassic(int style)
         const int outerLeft  = innerLeft  - barSizeOuterH;
         const int outerRight = innerRight + barSizeOuterH;
         const int y0 = cyi - iBarThickness / 2, y1 = y0 + iBarThickness;
-        CsXRect(dl, r, g, b, (int)alphaOuter, (float)outerLeft,  (float)y0, (float)innerLeft,  (float)y1, bAdditive);
-        CsXRect(dl, r, g, b, (int)alphaOuter, (float)innerRight, (float)y0, (float)outerRight, (float)y1, bAdditive);
+        CsXRect(dl, r, g, b, (int)alphaOuter, outerLeft,  y0, innerLeft,  y1, bAdditive);
+        CsXRect(dl, r, g, b, (int)alphaOuter, innerRight, y0, outerRight, y1, bAdditive);
 
         const int innerTop    = (cyi - iDistV - iBarThickness / 2) - barSizeInnerV;
         const int innerBottom = innerTop + 2 * (iDistV + barSizeInnerV) + iBarThickness;
@@ -1430,8 +1464,8 @@ static void RenderCsgoClassic(int style)
         const int outerBottom = innerBottom + barSizeOuterV;
         const int x0 = cxi - iBarThickness / 2, x1 = x0 + iBarThickness;
         if (!g_csXT)
-            CsXRect(dl, r, g, b, (int)alphaOuter, (float)x0, (float)outerTop, (float)x1, (float)innerTop, bAdditive);
-        CsXRect(dl, r, g, b, (int)alphaOuter, (float)x0, (float)innerBottom, (float)x1, (float)outerBottom, bAdditive);
+            CsXRect(dl, r, g, b, (int)alphaOuter, x0, outerTop, x1, innerTop, bAdditive);
+        CsXRect(dl, r, g, b, (int)alphaOuter, x0, innerBottom, x1, outerBottom, bAdditive);
     }
 
     // horizontal bars
@@ -1440,8 +1474,8 @@ static void RenderCsgoClassic(int style)
     const int outerLeft  = innerLeft  - barSizeInnerH;
     const int outerRight = innerRight + barSizeInnerH;
     const int y0 = cyi - iBarThickness / 2, y1 = y0 + iBarThickness;
-    CsXRect(dl, r, g, b, (int)alphaInner, (float)outerLeft,  (float)y0, (float)innerLeft,  (float)y1, bAdditive);
-    CsXRect(dl, r, g, b, (int)alphaInner, (float)innerRight, (float)y0, (float)outerRight, (float)y1, bAdditive);
+    CsXRect(dl, r, g, b, (int)alphaInner, outerLeft,  y0, innerLeft,  y1, bAdditive);
+    CsXRect(dl, r, g, b, (int)alphaInner, innerRight, y0, outerRight, y1, bAdditive);
 
     // vertical bars -- cl_crosshair_t drops the top one
     const int innerTop    = cyi - innerDistV - iBarThickness / 2;
@@ -1450,17 +1484,17 @@ static void RenderCsgoClassic(int style)
     const int outerBottom = innerBottom + barSizeInnerV;
     const int x0 = cxi - iBarThickness / 2, x1 = x0 + iBarThickness;
     if (!g_csXT)
-        CsXRect(dl, r, g, b, (int)alphaInner, (float)x0, (float)outerTop, (float)x1, (float)innerTop, bAdditive);
-    CsXRect(dl, r, g, b, (int)alphaInner, (float)x0, (float)innerBottom, (float)x1, (float)outerBottom, bAdditive);
+        CsXRect(dl, r, g, b, (int)alphaInner, x0, outerTop, x1, innerTop, bAdditive);
+    CsXRect(dl, r, g, b, (int)alphaInner, x0, innerBottom, x1, outerBottom, bAdditive);
 
     if (g_csXDot)
     {
         const int dx0 = cxi - iBarThickness / 2, dx1 = dx0 + iBarThickness;
         const int dy0 = cyi - iBarThickness / 2, dy1 = dy0 + iBarThickness;
-        CsXRect(dl, r, g, b, alpha, (float)dx0, (float)dy0, (float)dx1, (float)dy1, bAdditive);
+        CsXRect(dl, r, g, b, alpha, dx0, dy0, dx1, dy1, bAdditive);
     }
 
-    if (bAdditive) dl->AddCallback(ChCsEnd, nullptr);
+    dl->AddCallback(ChCsEnd, nullptr);
 }
 
 // ==== botox sniper crosshair (indicators.cpp sniper_crosshair_*) =====================

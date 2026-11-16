@@ -6,6 +6,8 @@
 #include "../lua/lua.h"   // lua tick / frame_stage / eject shutdown (h_FrameStageNotify)
 #include "../web/websurface.h"   // Web_MainTick (FRAME_START)
 #include "../hud/multihud.h"     // MultiHud_MainTick (FRAME_START) / MultiHud_Eject
+#include "../screen/vgui_stretch.h"   // VguiStretch_MainTick (FRAME_START) / VguiStretch_Eject
+#include "../screen/res_spoof.h"      // ResSpoof_FrameStage (net graph) / ResSpoof_Eject
 #include "skinshare.h"   // peers' loadouts: applied to THEIR weapons below, same passes as ours
 #include "../../hooks/crashlog.h"   // CrashSpan: stutter probe per FSN module
 #include "visuals.h"
@@ -1881,7 +1883,7 @@ static void __fastcall h_FrameStageNotify(int stage)
     // before this hook stops running -- nothing else would ever undo it. Same for flip world's
     // cl_flipviewmodels: its SetValue sends userinfo, so it goes back from this thread (eject
     // waits for it, thread.cpp).
-    if (g_eject) { KsColorRestoreAll(); FlipWorld_Release(); if (stage == 0) MultiHud_Eject(); return; }
+    if (g_eject) { KsColorRestoreAll(); FlipWorld_Release(); if (stage == 0) { MultiHud_Eject(); VguiStretch_Eject(); ResSpoof_Eject(); } return; }
 
     // Flip world's hold/release also has to run out of a match, where CreateMove does not.
     if (stage == 5) { FlipWorld_Tick(); FlipWorld_RenderStart(); }   // RenderView follows: W2S stays true for the 3D pass
@@ -1892,6 +1894,12 @@ static void __fastcall h_FrameStageNotify(int stage)
     // Multihud: search path swap + scheme / panel rebuild. Main thread, FRAME_START, outside any
     // vgui paint (the rebuild deletes and remakes viewport panels), main menu included.
     if (stage == 0) { CrashSpan _s("fsn/multihud"); MultiHud_MainTick(); }
+    // Aspect ratio stretch hud: vgui's screen size override + the relayout it needs. Same spot and
+    // reason as multihud (the relayout remakes viewport panels). A switch and a stretch change in one
+    // frame relay out twice (both posts dispatch, the second finds panels already sized): harmless.
+    if (stage == 0) { CrashSpan _s("fsn/vgstretch"); VguiStretch_MainTick(); }
+    // Resolution spoofer "scale net graph" (botox on_frame_stage_notify): a convar write, game thread.
+    if (stage == 0) ResSpoof_FrameStage();
 
     if (!g_engine || !g_entityList) return;
 

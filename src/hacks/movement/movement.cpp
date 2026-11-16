@@ -2006,6 +2006,8 @@ static float s_aaStickPress = 10.f;  // last press that pinned: the no-proof fal
 static bool  s_aaStickPredPin = false;   // last cmd's pick said the next tick pins (div diag)
 static int   s_aaStickRideTick = 0;      // ticks since latch, for the per-tick trace
 static Vec3  s_aaStickAnchor{};          // origin of the latch tick (a real pin): drift hold 'a' steers back to it
+static Vec3  s_aaStickLastMove{};        // world wish the stick wrote last tick (valid while s_aaStickRideTick > 0)
+static int   s_aaStickCutKeep = 0;       // diag, per second: rides kept on a cut search (as::StickLost)
 // diag, per second: full = held the whole horizon, part = held some ticks, div = picked a move
 // the sim said pins and the real tick did not (sim lie, not a dead end)
 static int   s_aaStickTicks = 0, s_aaStickFull = 0, s_aaStickPart = 0, s_aaStickMissTot = 0;
@@ -2132,6 +2134,7 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     // ride speed they add nothing (addspeed <= 0). 144 = both passes, every press, 8 ticks
     constexpr int k_stickPressCap = 144;
     int simsUsed = 0, pressSims = 0;
+    bool cut = false;   // sim pool / cmd clock ended the press search early: a 0 then proves nothing
 
     // ticks the move keeps the pin, 0..horizon (same cmd every tick)
     const auto proof = [&](const Vec3& mv) -> int
@@ -2140,8 +2143,9 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
         RestoreToFrame(frame);
         const int base = EntI(pLocal, g_offTickBase);
         int held = 0;
-        for (int z = 0; z < k_stickHorizon && SimsLeft() > 0; z++)
+        for (int z = 0; z < k_stickHorizon; z++)
         {
+            if (SimsLeft() <= 0) { cut = true; break; }
             EntSetI(pLocal, g_offTickBase, base + z);
             Pred_Simulate(pLocal, pCmd);
             ++simsUsed;
@@ -2183,7 +2187,10 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     static constexpr float k_press[] = { 10.f, 20.f, 30.f, 50.f, 75.f, 100.f, 200.f, 450.f, 0.f };
     int   best = 0;
     float bestPress = s_aaStickPress;
-    Vec3  bestMove = vInto * s_aaStickPress + vTan * flTan;   // no proof = keep pressing, keep steering
+    // no proof = repeat last tick's move: a pinned START is that move's own proof. Not press + your
+    // steer: at ride speed a mostly along-face wish has addspeed <= 0 under the 30 cap, so it adds no
+    // closing speed, and on sv_wallbug 0 no closing = the lip brush is skipped = fall
+    Vec3  bestMove = s_aaStickRideTick > 0 ? s_aaStickLastMove : vInto * s_aaStickPress + vTan * flTan;
     const bool bDriftWins = heldDrift >= k_stickHorizon;
     for (int pass = 0; pass < 2 && best < k_stickHorizon && !bDriftWins; pass++)
     {
@@ -2193,7 +2200,8 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
             continue;
         for (const float m : k_press)
         {
-            if (SimsLeft() < k_stickHorizon || pressSims + k_stickHorizon > k_stickPressCap)
+            if (SimsLeft() < k_stickHorizon) { cut = true; break; }
+            if (pressSims + k_stickHorizon > k_stickPressCap)
                 break;
             const Vec3 mv = vInto * m + vTan * t;
             const int s0 = simsUsed;
@@ -2207,8 +2215,12 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     // 4-tick miss window kept writing a press / a zero move over the fall, i.e. over whatever the
     // player or an earlier feature (edge bug, strafe) had in the cmd
     // simsUsed 0 = the pool was empty (TB ran first and spent it), nothing was flown: that is no
-    // proof the ride is over, so keep the no-proof press (bestMove) instead of dropping a live ride
-    if (heldDrift == 0 && best == 0 && simsUsed > 0)
+    // proof the ride is over, so keep the no-proof press (bestMove) instead of dropping a live ride.
+    // Same for a search the pool / clock CUT (drift hold spent the last sims, or the clock blew
+    // mid-proof): 'lost' there dropped live rides on a budget call, not a physics one. Kept only
+    // while the real START still pins (as::StickLost)
+    const bool noProof = heldDrift == 0 && best == 0;
+    if (as::StickLost(heldDrift, best, simsUsed, cut, pinned_now))
     {
         pCmd->forwardmove = flUserFwd;
         pCmd->sidemove    = flUserSide;
@@ -2217,6 +2229,7 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
         return false;
     }
     s_aaWallDetected = true;   // PixelSurf's hunt gate: we are on a wall
+    if (noProof && simsUsed > 0) s_aaStickCutKeep++;
 
     // drift hold wins outright when it holds a press-search horizon, and on any tie below it
     const bool bDrift = heldDrift > 0 && (bDriftWins || heldDrift >= best);
@@ -2237,9 +2250,11 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     // strafe proven 2 ticks, and every gain strafe re-clips the face (+DIST_EPSILON off it): the
     // 8-tick proof loses to a 2-tick greedy one and the drift ends the ride a few ticks later.
     // No gain is possible there anyway: at ride speed only a near-across wish accelerates.
+    // The no-proof repeat owns it too (same reason, and its START proof beats a 2-tick sim).
     // Cvar not on the client = Valve's default, 0
-    s_aaStickOwns = bDrift || (best > 0 && CvarFloat("sv_wallbug", 0.f) < 0.5f);
+    s_aaStickOwns = bDrift || CvarFloat("sv_wallbug", 0.f) < 0.5f;
     s_aaStickPredPin = best > 0;
+    s_aaStickLastMove = bDrift ? dh.wish : bestMove;
 
     s_aaStickTicks++;
     s_aaStickBestSum += best;
@@ -2255,13 +2270,13 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     // k = measured gain), p = press search
     if (g_debugLogEnable && (s_aaStickRideTick < 32 || best < k_stickHorizon))
         DebugLog("AA: stick t=%d %c pin=%d best=%d press=%.4f dh=%d doff=%.5f va=%.5f/%.5f k=%.4f tan=%.0f "
-                 "gap=%.4f off=%.4f anc=%.4f pd=%.5f life=%.1f vz=%.3f xy=%.1f duck=%d/%d sims=%d",
+                 "gap=%.4f off=%.4f anc=%.4f pd=%.5f life=%.1f vz=%.3f xy=%.1f duck=%d/%d sims=%d cut=%d",
                  s_aaStickRideTick, bDrift ? driftMode : 'p', pinned_now ? 1 : 0, best, bestPress, heldDrift,
                  flDriftOff, flAway0, flVaNone, flDriftK, flTan, flGap,
                  org.x * s_aaStickN.x + org.y * s_aaStickN.y,
                  s_aaStickAnchor.x * s_aaStickN.x + s_aaStickAnchor.y * s_aaStickN.y,
                  flPlaneD, (MV_SURF_EPS - flPlaneD) / (MV_SURF_EPS * TickInterval()), s_prePredVel.z, s_prePredVel.Length2D(),
-                 (s_prePredFlags & FL_DUCKING) ? 1 : 0, (pCmd->buttons & IN_DUCK) ? 1 : 0, simsUsed);
+                 (s_prePredFlags & FL_DUCKING) ? 1 : 0, (pCmd->buttons & IN_DUCK) ? 1 : 0, simsUsed, cut ? 1 : 0);
     s_aaStickRideTick++;
     return true;
 }
@@ -2344,11 +2359,12 @@ static void AutoAlignImpl(void* pLocal, UserCmd_t* pCmd)
         if (sec != s_stickSec)
         {
             s_stickSec = sec;
-            DebugLog("AA: stick ticks=%d full=%d part=%d miss=%d avg=%.1f div=%d press=%.0f",
+            // keep = ticks a cut search kept a still-pinned ride (used to be a 'lost' release)
+            DebugLog("AA: stick ticks=%d full=%d part=%d miss=%d avg=%.1f div=%d press=%.0f keep=%d",
                      s_aaStickTicks, s_aaStickFull, s_aaStickPart, s_aaStickMissTot,
-                     float(s_aaStickBestSum) / float(s_aaStickTicks), s_aaStickDiv, s_aaStickPress);
+                     float(s_aaStickBestSum) / float(s_aaStickTicks), s_aaStickDiv, s_aaStickPress, s_aaStickCutKeep);
             s_aaStickTicks = s_aaStickFull = s_aaStickPart = s_aaStickMissTot = 0;
-            s_aaStickDiv = s_aaStickBestSum = 0;
+            s_aaStickDiv = s_aaStickBestSum = s_aaStickCutKeep = 0;
         }
     }
     // TB bind on = the stick runs AFTER TextureBug instead (AutoAlignStickAfterTb): run here it

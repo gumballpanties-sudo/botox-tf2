@@ -20,6 +20,13 @@ inline bool  g_sfxAspectHud          = false;
 inline bool  g_sfxAspectCrosshair    = false;   // botox m_aspect_ratio_overlay
 inline bool  g_sfxAspectCheatOverlay = false;
 
+// resolution spoofer (botox m_resolution_spoof*, res_spoof.cpp)
+inline bool  g_resSpoof          = false;
+inline int   g_resSpoofWidth     = 1024;
+inline int   g_resSpoofHeight    = 768;
+inline bool  g_resSpoofStretch   = true;    // "stretch to fill"
+inline bool  g_resSpoofNetGraph  = true;    // "scale net graph"
+
 // sharpen / film grain / vignette / invert / posterize / deband / channel shift (color_correction.cpp)
 inline float g_sfxSharpenStrength  = 0.65f;
 inline float g_sfxSharpenThreshold = 0.f;

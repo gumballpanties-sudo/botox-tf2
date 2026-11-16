@@ -182,7 +182,7 @@ static struct
     int   lastCmd = -1; float lastYaw = 0.f, lastMove = 0.f;          // s_last
     float startAng = 0.f;
     bool  latched = false; int len = 0;
-    int   sims = 0, holds = 0, pins = 0, steers = 0, resends = 0, nowall = 0, drifts = 0;
+    int   sims = 0, holds = 0, pins = 0, steers = 0, resends = 0, nowall = 0, drifts = 0, hangs = 0;
 } s_as;
 
 static void AirStuck(void* pLocal, UserCmd_t* cmd)
@@ -196,10 +196,10 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         if (sec != s_sec)
         {
             s_sec = sec;
-            if (g_debugLogEnable && (s_as.holds || s_as.pins || s_as.steers || s_as.resends || s_as.nowall || s_as.drifts))
-                DebugLog("AS: holds=%d drifts=%d pins=%d steers=%d resends=%d nowall=%d sims=%d", s_as.holds, s_as.drifts,
-                         s_as.pins, s_as.steers, s_as.resends, s_as.nowall, s_as.sims);
-            s_as.holds = s_as.pins = s_as.steers = s_as.resends = s_as.nowall = s_as.sims = s_as.drifts = 0;
+            if (g_debugLogEnable && (s_as.holds || s_as.pins || s_as.steers || s_as.resends || s_as.nowall || s_as.drifts || s_as.hangs))
+                DebugLog("AS: holds=%d hangs=%d drifts=%d pins=%d steers=%d resends=%d nowall=%d sims=%d", s_as.holds, s_as.hangs,
+                         s_as.drifts, s_as.pins, s_as.steers, s_as.resends, s_as.nowall, s_as.sims);
+            s_as.holds = s_as.pins = s_as.steers = s_as.resends = s_as.nowall = s_as.sims = s_as.drifts = s_as.hangs = 0;
         }
     }
     const auto end = [&](const char* why) {
@@ -315,6 +315,79 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
             UserCmd_t c = cmdFor(viewYaw, 0.f);   // AS's own cmd shape: movement keys / jump stripped
             int sims = 0;
             const Vec3 cdir(cn.x / cl, cn.y / cl, 0.f);
+
+            // ---- LIP HANG first on sv_wallbug 0: brake along the face, keep pressing INTO it ----------
+            // A pin on wallbug 0 is a lip / seam top plane, and the trace only counts that brush while the
+            // move CROSSES its front plane (a box ending in front of a plane = brush skipped). So the hull
+            // must keep closing on the face; the hair-away hold below skips the lip and falls (drifts=0 in
+            // every wallbug 0 log). A tick that pins clips top then face and is left (along, +1/32, +1/32);
+            // with along ~0 that points against the pre-move velocity -> stop dead (gamemovement.cpp:2782):
+            // the hull does not move at all, the next tick is the same tick = fixed point, and Valve's
+            // 1/32 push rides in the bump that never runs. as::HangWish re-solves every tick for 0 along +
+            // `cIn` u/s in; each press flown closed loop, sims judge. Model from SDK TryPlayerMove + the
+            // engine brush clip rule (not in the SDK): UNVERIFIED in game
+            if (CvarFloat("sv_wallbug", 0.f) < 0.5f)
+            {
+                const float k    = CvarFloat("sv_airaccelerate", 10.f) * dt * AsSurfaceFriction(pLocal);
+                const float wmax = g_offMaxspeed > 0 ? EntF(pLocal, g_offMaxspeed) : 450.f;
+                int   bestHeld = 0;
+                float bestC = 0.f, bestFwd = 0.f, bestSide = 0.f;
+                Vec3  bestWish{};
+                // 4.5 = 30 wish from still; the press must cross the face shell each tick (>= ~2.1 u/s)
+                for (const float cIn : { 4.5f, 3.f, 7.f, 11.f, 20.f })
+                {
+                    if (SimsLeft() < horizon || clock.Expired()) break;
+                    RestoreToFrame(nBase - 1);
+                    const int base = EntI(pLocal, g_offTickBase);
+                    int held = 0;
+                    float f0 = 0.f, s0 = 0.f;
+                    Vec3 w0{};
+                    for (int z = 0; z < horizon && canSim(); ++z)
+                    {
+                        const Vec3 v = EntV3(pLocal, g_offVelocity), o = EntV3(pLocal, g_offOrigin);
+                        float dx, dy, m;
+                        as::HangWish(v.x, v.y, cdir.x, cdir.y, cIn, k, wmax, dx, dy, m);
+                        MV_WriteWishWorld(&c, Vec3(dx, dy, 0.f), m);
+                        if (z == 0) { f0 = c.forwardmove; s0 = c.sidemove; w0 = Vec3(dx * m, dy * m, 0.f); }
+                        EntSetI(pLocal, g_offTickBase, base + z);
+                        Pred_Simulate(pLocal, &c);
+                        ++sims;
+                        if (!pinnedNow()) break;
+                        ++held;
+                        const Vec3 v2 = EntV3(pLocal, g_offVelocity), o2 = EntV3(pLocal, g_offOrigin);
+                        if (o2.x == o.x && o2.y == o.y && o2.z == o.z && v2.x == v.x && v2.y == v.y && v2.z == v.z)
+                            { held = horizon; break; }   // same state in, same state out: held for good
+                    }
+                    RestoreToFrame(nBase - 1);
+                    if (held > bestHeld) { bestHeld = held; bestC = cIn; bestFwd = f0; bestSide = s0; bestWish = w0; }
+                    if (bestHeld >= horizon) break;
+                }
+                s_as.sims += sims;
+                sims = 0;
+                if (bestHeld >= horizon)
+                {
+                    ++s_as.hangs;
+                    send(RAD2DEGF(atan2f(bestWish.y, bestWish.x)), bestWish.Length2D(), true, "hang");
+                    cmd->forwardmove = bestFwd;   // the proven bits, not send()'s re-rotation of them
+                    cmd->sidemove    = bestSide;
+                    s_asStamp.fwd    = bestFwd;
+                    s_asStamp.side   = bestSide;
+                    s_as.hold        = false;     // re-solved every tick, never replayed
+                    static int s_hLog = -1000;
+                    if (g_debugLogEnable && cmd->command_number - s_hLog > 16)
+                    {
+                        s_hLog = cmd->command_number;
+                        DebugLog("AS: hang c=%.1f n=%.3f,%.3f wish=%.2f xy=%.2f z=%.3f vz=%.3f", bestC, cdir.x, cdir.y,
+                                 bestWish.Length2D(), vel.Length2D(), origin.z, vel.z);
+                    }
+                    return;
+                }
+                static int s_hsLog = -1000;
+                if (g_debugLogEnable && bestHeld > 0 && cmd->command_number - s_hsLog > 16 && (s_hsLog = cmd->command_number, true))
+                    DebugLog("AS: hang short held=%d/%d c=%.1f xy=%.2f z=%.3f vz=%.3f", bestHeld, horizon, bestC,
+                             vel.Length2D(), origin.z, vel.z);
+            }
+
             MvDrift dh = MV_DriftHold(pLocal, &c, nBase - 1, cdir, true, horizon, sims);
             // short = CREEP INTO THE FACE: close half the gap to the trace shell every tick. The hull never
             // reaches the shell, so no clip fires and Valve's +DIST_EPSILON push never happens (MV_DriftHold

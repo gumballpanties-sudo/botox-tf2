@@ -7,6 +7,7 @@
 #include "../../hooks/crashlog.h"      // CrashSpan
 #include "../misc/misc_util.h"         // n_util::DecodeEHandleIndex
 #include "rear_mirror.h"               // RearMirror_Drawing -- lamps record off the main view only
+#include "../hud/multihud.h"           // MultiHud_PropDiagStatic -- what stops drawing across a hud switch
 #include <mutex>
 #include <deque>
 #include <unordered_map>
@@ -523,6 +524,7 @@ static void __fastcall h_DrawStaticProps(void* rcx, void** props, int count, boo
     MiscHookGuard _g;
     if (g_wdLightMod && g_wdLightModLamps && !g_eject && !shadowDepth && props && count > 0 && !RearMirror_Drawing())
         Lamps_Record(props, count);
+    if (g_mhPropDiag && !shadowDepth && props && count > 0) MultiHud_PropDiagStatic(props, count);
     o_DrawStaticProps(rcx, props, count, shadowDepth, wireframe);
 }
 

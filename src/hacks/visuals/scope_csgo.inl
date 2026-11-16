@@ -10,6 +10,7 @@
 #include "scope_csgo.h"
 #include "scope_csgo_tex.h"
 #include "vm_csgo.h"
+#include "../screen/vgui_stretch.h"   // VguiStretch_LayoutWidth (stretch hud)
 #include <atomic>
 
 // ---- addresses (client.dll x64, 2026-09-17, each sig unique, checked offline) ------------
@@ -256,7 +257,10 @@ static bool ScCs_FrameSafe(uintptr_t vpanel)
     if (!ScCs_EnsureTextures()) return false;
 
     const ImVec2 ds = ImGui::GetIO().DisplaySize;   // the HUD root is full screen
-    const int W = (int)ds.x, H = (int)ds.y;
+    // stretch hud: this paint is widened like the hud around it (vgui_stretch.cpp), so lay out in
+    // the narrow vgui width -- the scope comes out widened onto the screen, as botox csgo's does
+    const int lw = VguiStretch_LayoutWidth();
+    const int W = lw > 0 ? lw : (int)ds.x, H = (int)ds.y;
     if (W <= 0 || H <= 0) return false;
     const float bob = g_scCsgoBob ? g_scCsgoBobScale : 0.f;
     const ScCsFrame f = ScCs_Layout(s_scCs, w, inacc, g_scCsgoZoom ? w.zoomFov2 : w.zoomFov1,

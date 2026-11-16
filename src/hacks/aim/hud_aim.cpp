@@ -3,6 +3,7 @@
 #include "aimbot.h"       // F::Aimbot.m_bToggled: the aim key's toggle latch
 #include "aim_record.h"   // BacktrackLerp: m_fLerpTime as the server computes it
 #include "../hud/hud_snap.h"
+#include "../hud/targetid_pure.h"
 #include "../menu/cfg/vars_hud.h"
 #include <climits>
 #include <cmath>
@@ -11,6 +12,9 @@
 
 void DebugLog(const char* fmt, ...);   // dllmain.cpp
 bool Binds_Blocked();                  // render.cpp: aim key typed in chat = not held
+extern bool g_chCsgoEnable;            // dllmain.cpp: csgo crosshair, styles 0/1 = panorama
+extern int  g_chCsgoStyle;
+extern bool g_chCsgoEnemyRed;
 
 // ============================================================================================
 // HUD extras, game thread half. botox reads these straight off g_ctx/g_interfaces inside its
@@ -52,6 +56,101 @@ namespace
 	bool IsSniperRifle(int id)
 	{
 		return id == TF_WEAPON_SNIPERRIFLE || id == TF_WEAPON_SNIPERRIFLE_DECAP || id == TF_WEAPON_SNIPERRIFLE_CLASSIC;
+	}
+
+	// ---- csgo crosshair enemy red: C_CSPlayer::UpdateIDTarget (c_cs_player.cpp:6537) ---------
+	// CTraceFilterSimple(local, COLLISION_GROUP_NONE): everything but us. TF2's two invisible
+	// team brushes pass, csgo has nothing like them.
+	class CTraceFilterTargetId : public ITraceFilter
+	{
+	public:
+		CBaseEntity* pSkip = nullptr;
+		bool ShouldHitEntity(IHandleEntity* pServerEntity, int) override
+		{
+			if (!pServerEntity || pServerEntity == pSkip) return false;
+			switch (reinterpret_cast<CBaseEntity*>(pServerEntity)->GetClassID())
+			{
+			case ETFClassID::CFuncAreaPortalWindow:
+			case ETFClassID::CFuncRespawnRoomVisualizer: return false;
+			default: return true;
+			}
+		}
+		TraceType_t GetTraceType() const override { return TRACE_EVERYTHING; }
+	};
+
+	constexpr unsigned kContentsOpaque  = 0x80;     // bspflags.h CONTENTS_OPAQUE
+	constexpr unsigned kIgnoreNodrawOpq = 0x2000;   // bspflags.h CONTENTS_IGNORE_NODRAW_OPAQUE
+	constexpr unsigned kSurfHitbox      = 0x8000;   // bspflags.h SURF_HITBOX
+	constexpr unsigned kMaskVisNpcs     = CONTENTS_SOLID | CONTENTS_MOVEABLE | kContentsOpaque
+	                                    | CONTENTS_MONSTER | kIgnoreNodrawOpq;   // MASK_VISIBLE_AND_NPCS
+
+	bool HitNonWorld(const CGameTrace& tr) { return tr.m_pEnt && tr.m_pEnt->entindex() != 0; }
+
+	// UTIL_ClipTraceToPlayers (util_shared.cpp:690), as shipped: smallestFraction starts from
+	// the caller's trace while each player trace is a fraction of the longer ray.
+	void ClipTraceToPlayers(const Vec3& vStart, const Vec3& vEnd, unsigned nMask, ITraceFilter* pFilter, CGameTrace* pTr)
+	{
+		Ray_t ray; ray.Init(vStart, vEnd);
+		float flSmallest = pTr->fraction;
+		const float a[3] = { vStart.x, vStart.y, vStart.z }, b[3] = { vEnd.x, vEnd.y, vEnd.z };
+		const int nMax = I::EngineClient->GetMaxClients();
+		for (int k = 1; k <= nMax; ++k)
+		{
+			auto pEnt = I::ClientEntityList->GetClientEntity(k);
+			if (!pEnt) continue;
+			auto pPlayer = pEnt->As<CBaseEntity>();
+			if (!pPlayer->IsPlayer() || pPlayer->IsDormant() || !pPlayer->As<CTFPlayer>()->IsAlive()) continue;
+			if (pFilter && !pFilter->ShouldHitEntity(pPlayer, nMask)) continue;
+			const Vec3 c = pPlayer->GetCenter();
+			const float p[3] = { c.x, c.y, c.z };
+			const float flRange = tid::DistanceToRay(p, a, b);
+			if (flRange < 0.f || flRange > 60.f) continue;
+			CGameTrace tPlayer = {};
+			I::EngineTrace->ClipRayToEntity(ray, nMask | CONTENTS_HITBOX, pPlayer, &tPlayer);
+			if (tPlayer.fraction < flSmallest) { *pTr = tPlayer; flSmallest = tPlayer.fraction; }
+		}
+	}
+
+	// The entity index the crosshair is on this frame, 0 = none. The 0.4 s delay / 0.2 s hold
+	// that turn it into GetIDTarget() are tid::TargetId (hud/targetid_pure.h, tested).
+	int TraceIdTarget(CTFPlayer* pLocal)
+	{
+		const Vec3 vEye = pLocal->GetAbsOrigin() + pLocal->m_vecViewOffset();   // CalcPlayerView: the rendered eye
+		Vec3 vFwd; Math::AngleVectors(I::EngineClient->GetViewAngles(), &vFwd);
+		Vec3 vEnd = vEye + vFwd * 2500.f;
+		const Vec3 vStart = vEye + vFwd * 10.f;
+
+		CTraceFilterTargetId filter; filter.pSkip = pLocal;
+		CGameTrace tr = {};
+		SDK::Trace(vStart, vEnd, kMaskVisNpcs | MASK_SOLID, &filter, &tr);
+		vEnd = tr.endpos + vFwd * 32.f;
+		if (!tr.startsolid && !HitNonWorld(tr))
+			ClipTraceToPlayers(vStart, vEnd + vFwd * 40.f, MASK_SOLID | CONTENTS_HITBOX, &filter, &tr);   // hitboxes outside the hull
+
+		if (tr.startsolid || !HitNonWorld(tr) || tr.m_pEnt == pLocal) return 0;
+		CBaseEntity* pEntity = tr.m_pEnt;
+		// only test against hit boxes for enemy players: the hull alone does not count
+		if (pEntity->m_iTeamNum() != pLocal->m_iTeamNum())
+		{
+			CGameTrace trHb = {};
+			SDK::Trace(vStart, vEnd, kMaskVisNpcs | CONTENTS_HITBOX, &filter, &trHb);
+			if (!(trHb.surface.flags & kSurfHitbox)) return 0;
+		}
+		return pEntity->entindex();
+	}
+
+	// csgo_hudreticle.cpp GetPlayerTargetIDRenderData: m_bWantEnemyCrosshair = an enemy PLAYER
+	bool CsgoEnemyUnderCrosshair(CTFPlayer* pLocal)
+	{
+		static tid::TargetId s_tid;
+		const float now = I::GlobalVars->curtime;
+		s_tid.Update(now, TraceIdTarget(pLocal));
+		const int idx = s_tid.Get(now);
+		if (idx <= 0) return false;
+		auto pEnt = I::ClientEntityList->GetClientEntity(idx);
+		if (!pEnt) return false;
+		auto pBase = pEnt->As<CBaseEntity>();
+		return pBase->IsPlayer() && pBase->m_iTeamNum() != pLocal->m_iTeamNum();
 	}
 
 	// botox aimbot_fov_circle: project a point 5 deg above the view and measure it, so the
@@ -173,6 +272,8 @@ void HudAim_Collect(CTFPlayer* pLocal)
 		CTFWeaponBase* pWeapon = H::Entities.GetWeapon();
 		if (g_hudSniperCh && s.alive && pWeapon)
 			s.sniperUnscoped = IsSniperRifle(pWeapon->GetWeaponID()) && !pLocal->InCond(TF_COND_ZOOMED);
+		if (g_chCsgoEnable && g_chCsgoStyle <= 1 && g_chCsgoEnemyRed && s.alive)
+			s.csgoEnemy = CsgoEnemyUnderCrosshair(pLocal);
 		if (g_hudFovCircle)
 			s.fovRadius = FovRadius(pLocal, pWeapon);
 		if (g_hudNg)

@@ -35,6 +35,8 @@
 #include "../hacks/web/websurface.h"     // Web_Destroy at eject
 #include "../hacks/web/webview2host.h"   // wv2::AbandonForExit at game quit
 #include "../hacks/hud/multihud.h"       // eject: wait for the FSN multihud restore
+#include "../hacks/screen/vgui_stretch.h" // stretch hud: install + eject wait for the FSN override drop
+#include "../hacks/screen/res_spoof.h"    // resolution spoofer: its DEFAULT-pool targets at teardown
 
 // ==== sv_pure bypass ============================================================
 using CL_CheckForPureServerWhitelist_t = void(__fastcall*)(void** pFilesToReload);
@@ -225,6 +227,7 @@ static void PollThread()
                           (void**)&o_PaintTraverse);
     else DebugLog("vgui: VGUI_Panel009 not found -- crosshair falls back to EndScene");
     ConsoleTint_Install();   // botox console color (ISurface::DrawSetColor)
+    VguiStretch_Install();   // aspect ratio stretch hud / crosshair (PaintTraverseEx + cursor)
 
     InstallVTableHook(g_modelRender, 19, "nohats: DrawModelExecute",
                       (void*)h_DrawModelExecute, (void**)&o_DrawModelExecute);
@@ -532,6 +535,15 @@ static void MainThread()
     // game thread the frame after g_eject (a rebuild can take ~1s). No frame = our search path stays
     // mounted (files still on disk, nothing dangles) until the game restarts.
     for (int i = 0; i < 300 && MultiHud_Holding(); ++i) Sleep(10);
+    // Stretch hud: the same FrameStageNotify drops vgui's screen size override and relays the UI out
+    // on the real screen. No frame = the override goes from here (field writes only), panels keep
+    // the narrow layout until the next resolution change.
+    for (int i = 0; i < 100 && VguiStretch_Holding(); ++i) Sleep(10);
+    VguiStretch_EjectFallback();
+    // Resolution spoofer "scale net graph": the same FrameStageNotify puts the player's
+    // net_graphheight back with the real setter. No frame = raw int + string from here.
+    for (int i = 0; i < 100 && ResSpoof_Holding(); ++i) Sleep(10);
+    ResSpoof_EjectFallback();
 
     // World is back under the cover: "ejected", the game fades back in (<= 1.5s). Present
     // still draws the splash until here, so nothing below may touch d3d before it returns.
@@ -626,6 +638,7 @@ static void MainThread()
         ColorCorr_Destroy();
         Bloom_Destroy();
         ScreenFx_Destroy();
+        ResSpoof_Destroy();       // resolution spoofer capture / target / chain, DEFAULT pool
         Render_FlushDeferred();   // textures still waiting out a frame (render.cpp graveyard)
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();

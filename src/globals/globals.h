@@ -542,6 +542,7 @@ extern float g_chCsgoBlack;    // scales both black washes; 1 = csgo (#000000AA 
 extern float g_chCsgoVelSens;  // scales every velocity-driven gap/spread term, 1 = csgo
 extern float g_chCsgoSmooth;   // ease time (s) on gap + spread, 0 = csgo's hard snap
 extern bool  g_chCsgoArcs;     // draw the 4 animated spread lines (style 0)
+extern bool  g_chCsgoEnemyRed; // styles 0/1: red over an enemy, csgo target id timers (hud_aim.cpp)
 extern bool  g_chCsgoPips;     // draw the 4 green gap arms (styles 0/1)
 extern float g_chCsgoAspect;   // arm length w:h -- pips on 0/1, bar size on 2/3/4
 extern float g_chCsgoGapAspect;// gap w:h -- pip offset on 0/1, bar distance on 2/3/4

@@ -4,6 +4,7 @@
 #include "aim_record.h"
 #include "utils.h"
 #include "../menu/fonts.h"   // fonts tab esp face
+#include "../screen/vgui_stretch.h"   // VguiStretch_RealScreenSize (stretch hud narrows GetScreenSize)
 bool Aim_Active();           // aim.cpp
 
 // multihud (hud/multihud.cpp): a vgui message "<name>" { a b } for IVGui::PostMessage, built with the
@@ -126,6 +127,9 @@ void CDraw::EndClipping()
 
 void CDraw::UpdateScreenSize()
 {
+	// aspect ratio stretch hud: vgui's screen size is the narrow layout then (vgui_stretch.cpp);
+	// esp / W2S and these draws are real screen pixels
+	if (VguiStretch_RealScreenSize(m_nScreenW, m_nScreenH)) return;
 	I::MatSystemSurface->GetScreenSize(m_nScreenW, m_nScreenH);
 }
 

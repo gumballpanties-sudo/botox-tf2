@@ -2,6 +2,7 @@
 #include "dpi_math.h"
 #include "../globals/globals.h"
 #include "../hacks/screen/aspect_stretch_math.h"
+#include "../hacks/screen/res_spoof.h"    // ResSpoof_Vars + rsp:: aspect gates (panel mouse undo)
 #include "../hacks/screen/blur_rect.h"   // BlurRect_ScaleJob: a panel's blur rect grows with it
 #include "../dependencies/imgui/imgui_internal.h"
 #include "../dependencies/imgui/freetype/imgui_freetype.h"
@@ -421,9 +422,11 @@ ImVec2 Dpi_PanelMouse(ImVec2 pos, ImVec2 size)
     const ImVec2 shown = Dpi_PanelPos(pos, size);
     const float dpi = s_panelScale;
     ImVec2 m = s_mouse;
-    if (g_aspectRatioEnable && g_sfxAspectCheatOverlay && !g_eject)
+    const rsp::Vars av = ResSpoof_Vars();   // same gate the stretch drew with (aspect_stretch.cpp)
+    if (rsp::AspectCheatOverlay(av))
     {
-        const float ratio = g_aspectRatioValue < 0.5f ? 0.5f : (g_aspectRatioValue > 4.f ? 4.f : g_aspectRatioValue);
+        const float want = rsp::AspectWanted(av);
+        const float ratio = want < 0.5f ? 0.5f : (want > 4.f ? 4.f : want);
         const float stretch = AsScale(s_screen.x, s_screen.y, ratio);
         if (std::fabs(stretch - 1.f) >= 0.001f)
         {

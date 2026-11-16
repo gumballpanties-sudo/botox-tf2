@@ -7,6 +7,7 @@
 #include "world_fx3.h"   // WorldFx3_LevelShutdown
 #include "../web/websurface.h"   // Web_LevelShutdown, Web_BlockFire
 #include "rear_mirror.h"   // RearMirror_Drawing -- the mirror pass's Push2DView is not the frame's
+#include "../screen/res_spoof.h"   // ResSpoof_CfgWriteBegin/End -- rides the config writer hook below
 
 // Port of fpsoverlay's flipworld.cpp (itself Aletherium's CFlipWorld + CMisc::FlipWorldInput).
 // Every engine number used here is a flipslot:: constant (flipmath.h); fpsoverlay's
@@ -569,7 +570,9 @@ static void __fastcall h_FlipWriteVars(void* rcx, void* buffer, bool allVars)
     int pref = -1;
     { FlipLock _l; pref = s_core.vmPref; }
     char* s = (pref >= 0 && s_cvFlipVM) ? FlipCvarString(s_cvFlipVM) : nullptr;
+    ResSpoof_CfgWriteBegin();   // resolution spoofer: the player's own net_graphheight for the write
     FlipCfgWrite(s, pref, [&] { o_FlipWriteVars(rcx, buffer, allVars); });
+    ResSpoof_CfgWriteEnd();
 }
 
 // ---- IVRenderView::Push2DView: the 3D pass is over ----------------------------------------------------

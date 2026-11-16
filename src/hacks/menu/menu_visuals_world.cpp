@@ -3,6 +3,8 @@
 #include "../screen/screenfx_passes.h"
 #include "../visuals/world_fx.h"
 #include "../visuals/world_fx3_math.h"   // world/prop texture presets + categories
+#include "../screen/res_spoof.h"          // resolution spoofer: screen size + botox res list
+#include <cstdio>
 
 // Called inside menu.cpp's "screen" group (Page_VisualsScreen, col1): botox
 // menu_tab_visuals.cpp (aspect ratio; third person moved to misc > game). Colour correction
@@ -28,6 +30,38 @@ void Menu_Visuals_Camera()
             ImGui::Checkbox("stretch hud##aspect ratio", &g_sfxAspectHud);
             ImGui::Checkbox("stretch crosshair##aspect ratio", &g_sfxAspectCrosshair);
             ImGui::Checkbox("stretch cheat overlays##aspect ratio", &g_sfxAspectCheatOverlay);
+        }, ImVec2(220.f, -1.f));
+
+    // botox: real res untouched, finished frame (world + hud + menus) crunched to the res and
+    // scaled back up (res_spoof.cpp)
+    ImGui::Checkbox("resolution spoofer", &g_resSpoof);
+    if (g_resSpoof)
+        ImGui::OptionPopup("resolution spoofer settings", [&]() {
+            // real back buffer from the pass; 0 before the first frame = list everything
+            int screenW = 0, screenH = 0;
+            ResSpoof_ScreenSize(screenW, screenH);
+
+            char preview[32];
+            snprintf(preview, sizeof(preview), "%dx%d", g_resSpoofWidth, g_resSpoofHeight);
+            if (ImGui::BeginCombo("resolution##res spoof", preview))
+            {
+                for (const rsp::Res& res : rsp::k_resolutions)
+                {
+                    if (!rsp::Listed(res.w, res.h, screenW, screenH)) continue;
+                    char label[48];
+                    snprintf(label, sizeof(label), "%dx%d  %s", res.w, res.h, res.aspect);
+                    if (ImGui::Selectable(label, g_resSpoofWidth == res.w && g_resSpoofHeight == res.h))
+                    {
+                        g_resSpoofWidth  = res.w;
+                        g_resSpoofHeight = res.h;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            // off: square pixels at the res's line count, world keeps the screen shape
+            ImGui::Checkbox("stretch to fill##res spoof", &g_resSpoofStretch);
+            ImGui::Checkbox("scale net graph##res spoof", &g_resSpoofNetGraph);
         }, ImVec2(220.f, -1.f));
 }
 

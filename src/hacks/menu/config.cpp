@@ -946,6 +946,7 @@ static const CfgEntry kEntries[] = {
     { "chCsgoVelSens",    CfgEntry::FLOAT,  &g_chCsgoVelSens, 0 },
     { "chCsgoSmooth",     CfgEntry::FLOAT,  &g_chCsgoSmooth, 0 },
     { "chCsgoArcs",       CfgEntry::BOOL,   &g_chCsgoArcs, 0 },
+    { "chCsgoEnemyRed",   CfgEntry::BOOL,   &g_chCsgoEnemyRed, 0 },
     { "chCsgoPips",       CfgEntry::BOOL,   &g_chCsgoPips, 0 },
     { "chCsgoAspect",     CfgEntry::FLOAT,  &g_chCsgoAspect, 0 },
     { "chCsgoGapAspect",  CfgEntry::FLOAT,  &g_chCsgoGapAspect, 0 },

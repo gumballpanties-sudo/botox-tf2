@@ -11,14 +11,15 @@
 #include <unordered_map>
 
 void Hats_HudRemade();   // hats.cpp: forget the CTFHudPlayerClass it held
+bool Hats_IsOurs(int entIdx);   // hats.cpp: our own hat entities (prop diag skips them)
 
 // multihud: pick a hud folder, the game swaps to it live. Every step is the game's own reload path:
 //  1. search paths: our hud at the HEAD of GAME / mod / custom_mod (gameinfo's tf/custom/* ids:
 //     BuildGroup::LoadControlSettings reads .res from custom_mod then vgui = tf2_misc.vpk,
 //     BuildGroup.cpp:923), tf/custom huds unmounted, so what the pick lacks = the default file.
-//  2. vgui_cache_res_files 0 while our mounts are live: the .res cache is a static of vgui_controls,
-//     so client, GameUI, ServerBrowser, engine and vguimatsurface each hold one (BuildGroup.cpp:61),
-//     and only client's is ever cleared (hud_reloadscheme). The cvar is shared by all of them.
+//  2. vgui_cache_res_files 0 during the switch (back a few frames after, SetResCache): the .res cache is
+//     a static of vgui_controls, so client, GameUI, ServerBrowser, engine and vguimatsurface each hold
+//     one (BuildGroup.cpp:61), and only client's is ever cleared (hud_reloadscheme). One shared cvar.
 //  3. hud_reloadscheme: KeyValues cache + client res cache flush (clientmode_shared.cpp:311).
 //  4. schemes: vgui2 never rereads a loaded scheme (LoadSchemeFromFileEx returns the one it has,
 //     ReloadSchemes deletes borders under live panels), so each scheme file the hud touches is
@@ -472,7 +473,14 @@ void RestoreCvars()
     }
     s_cvarBackup.clear();
 }
-// off while our mounts are live, the user's value back after (eject / off)
+// Off for one switch: from Reload until the posted rebuild has dispatched (MultiHud_MainTick, 3 frames),
+// then the user's value back. Off for as long as a pick was live (round 3) = every LoadControlSettings
+// read + parsed its .res and #base chain from disk mid-game (freeze panel, spawn meters, quest
+// trackers...): the lag after a switch (11-15). The client's cache is flushed by hud_reloadscheme and
+// refills from the new hud; the other modules' caches keep their boot entries.
+// ponytail: GameUI / ServerBrowser dialogs hidden during the switch apply that boot .res when next shown
+// (same ceiling as STATUS "GameUI dialogs ... not covered"); clear their BuildGroup::m_dictCachedResFiles
+// if a hud ever needs it.
 void SetResCache(bool off)
 {
     if (off && s_resCacheOrig.empty())
@@ -1375,7 +1383,7 @@ int RepairVguiIds(const char* when)
 // Kill switch: file C:\botox-tf2\nohudremake = the old in-place reapply only.
 constexpr size_t kHudListMem = 0x20, kHudListCount = 0x30, kHudGroups = 0xa0, kHudGroupCount = 0xb2;
 constexpr size_t kGroupNode = 0x18, kGroupNodeValue = 0x10, kGroupLockers = 0x18;
-constexpr int kElemDtor = 0, kElemInit = 2, kElemGetName = 8, kEngIsInGame = 26;
+constexpr int kElemDtor = 0, kElemInit = 2, kElemLevelShutdown = 5, kElemGetName = 8, kEngIsInGame = 26;
 
 struct HudFns
 {
@@ -1687,6 +1695,18 @@ bool RemakeHudElements()
     if (pn && root) ForEachVPanel(pn, root, [&](uintptr_t vp) { before.push_back(vp); });
     std::sort(before.begin(), before.end());
     if (!SetHudListCount(s_hf.ghud, 0)) return false;
+    // In a game every old element had LevelInit (map load or HudMapInit): LevelShutdown each first, as a
+    // level end does (CHud::LevelShutdown, hud.cpp:541). The dtors do not undo LevelInit:
+    // CHudItemAttributeTracker adds itself as a GC SO cache listener there and only LevelShutdown removes
+    // it (tf_hud_item_progress_tracker.cpp:1580/1592, dtor 546fe0 = no remove) -> deleted listener, the
+    // next item update (strange kill count) called it: crash 11-15 19:56:50, client+0x7888A1
+    // CGCClientSharedObjectContext::PreSOUpdate. Also CTargetID's floating health icon + the CP icons
+    // (freed there, leaked otherwise). Kept (runtime-made) ones too: HudMapInit LevelInits the whole list.
+    // Same IsInGame gate as HudMapInit, same frame.
+    const bool inGame = g_engine && VCall<bool>(g_engine, kEngIsInGame);
+    int shutFail = 0;
+    if (inGame)
+        for (int i = 0; i < nOld; ++i) shutFail += !CallElem(oldList[i], kElemLevelShutdown);
     s_blockMsgHooks = true;
     s_blockedMsgHooks = 0;
     s_quietSolve = true;
@@ -1719,6 +1739,7 @@ bool RemakeHudElements()
         }
         const bool back = RestoreHudList(s_hf.ghud, oldList, nOld);
         for (const auto& [vp, parent] : parents) VCall<void>(pn, kPnlSetParent, vp, parent);
+        if (back && inGame) CallHud(s_hf.levelInit, s_hf.ghud);   // the LevelShutdown above, undone
         DebugLog("multihud: CreateAllElements FAULTED (%d made, %d half-built panels dropped), old hud elements %s",
                  nNew, dropped, back ? "kept" : "NOT restorable");
         return false;
@@ -1824,6 +1845,8 @@ bool RemakeHudElements()
     }
     for (const auto& [i, v] : keeps) putBack += CasWord(data + i, 0, v);
 
+    DebugLog("multihud: %s", inGame ? (shutFail ? "old elements LevelShutdown, SOME FAULTED" : "old elements LevelShutdown ok")
+                                    : "not in a game, no LevelShutdown");
     DebugLog("multihud: hud elements remade in %lu ms -- %d old (%zu panels) deleted (%d dtor faults), %d new (%zu panels), "
              "%d Init faults, %d message hooks held back, %d ctor solves deferred, .data: %d re-pointed, %d nulled (%d left: "
              "panel outlived its element), %d new pointers put back, %d render group locks cleared, %d old elements without "
@@ -2264,27 +2287,214 @@ void Apply(const std::string& pick)
     s_holding = !s_mount.hud.empty() || !s_mount.customOff.empty();
 }
 
+// ---- prop diag (round 12) ------------------------------------------------------------------------
+// User 11-16: after a switch SOME map props go invisible, stay solid, come back on the next map, any
+// hud. Not found from code (STATUS round 11 list). Opt-in file C:\botox-tf2\mhpropdiag: a switch in a
+// game first records kPdFrames frames of what draws (static props handed to
+// CStaticPropMgr::DrawStaticProps, map entities through DrawModelExecute), then switches, waits
+// kPdWaitMs, records again and logs every one that stopped drawing with its state then vs now: which
+// layer drops it (leaf system handle, fade alpha, ShouldDraw, dormancy, model). Stand still while it
+// runs: turning changes what is in view. Main thread only (FRAME_START, view render, both hooks).
+// A map load or disconnect mid-diag drops it: the recorded pointers die with the map.
+struct PdStatic { const void* mdl; int rh, alpha, flags, draw; };
+struct PdEnt { const void* mdl; void* ent; };
+struct PropDiag
+{
+    int phase = 0;   // 0 off, 1 recording before (the pick waits), 2 switched (waiting), 3 recording after
+    int frames = 0;
+    DWORD t = 0;
+    std::unordered_map<void*, PdStatic> sb, sa;   // renderable -> state when first seen
+    std::unordered_map<int, PdEnt> eb, ea;         // entity index -> model, entity
+};
+PropDiag s_pd;
+constexpr int kPdFrames = 20;
+constexpr DWORD kPdWaitMs = 3000;
+constexpr int kPdList = 30;                    // per kind, so a whole-map loss does not flood the log
+constexpr int kPdFirstMapEnt = 102;            // 1..101 = player slots (TF2 x64 MAX_PLAYERS 101)
+// CStaticProp (visuals.cpp CStaticProp_Layout = Aletherium's): m_Alpha +60, m_Flags +63
+constexpr int kSpAlpha = 60, kSpFlags = 63;
+// IClientRenderable 3 ShouldDraw, 8 RenderHandle, 9 GetModel; IClientUnknown 5 GetClientRenderable;
+// IClientNetworkable 8 IsDormant; IClientEntityList 0 GetClientNetworkable (hats.cpp, world_fx3.cpp, live)
+constexpr int kRendShouldDraw = 3, kRendHandle = 8, kRendModel = 9, kUnkRenderable = 5, kNetDormant = 8;
+
+int ReadByteAt(uintptr_t p)
+{
+    __try { return *reinterpret_cast<const uint8_t*>(p); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+// rh -1 = no handle call, 0xFFFF = INVALID_CLIENT_RENDER_HANDLE (out of the leaf system)
+void ReadRend(void* r, const void*& mdl, int& rh, int& draw)
+{
+    mdl = nullptr; rh = -1; draw = -1;
+    __try
+    {
+        mdl = VCall<const void*>(r, kRendModel);
+        draw = VCall<bool>(r, kRendShouldDraw) ? 1 : 0;
+        if (const uint16_t* h = VCall<const uint16_t*>(r, kRendHandle)) rh = *h;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+PdStatic ReadStatic(void* r)
+{
+    PdStatic s{ nullptr, -1, -1, -1, -1 };
+    ReadRend(r, s.mdl, s.rh, s.draw);
+    RttiInfo ri;   // props[] are IClientRenderable* (+8 in CStaticProp): fields off the complete object
+    if (ReadRtti(r, ri))
+    {
+        s.alpha = ReadByteAt(ri.complete + kSpAlpha);
+        s.flags = ReadByteAt(ri.complete + kSpFlags);
+    }
+    return s;
+}
+const char* PdModelName(const void* mdl)
+{
+    if (!mdl || !g_modelInfo) return "?";
+    const char* n = nullptr;
+    __try { n = VCall<const char*>(g_modelInfo, 3, mdl); } __except (EXCEPTION_EXECUTE_HANDLER) { n = nullptr; }
+    return n ? n : "?";
+}
+struct PdEntNow { void* ent = nullptr; const void* mdl = nullptr; int dormant = -1, rh = -1, draw = -1; };
+PdEntNow ReadEntNow(int idx)
+{
+    PdEntNow o;
+    o.ent = GetClientEntity(idx);
+    if (!o.ent) return o;
+    void* rend = nullptr;
+    __try
+    {
+        if (void* net = VCall<void*>(g_entityList, 0, idx)) o.dormant = VCall<bool>(net, kNetDormant) ? 1 : 0;
+        rend = VCall<void*>(o.ent, kUnkRenderable);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { rend = nullptr; }
+    if (rend) ReadRend(rend, o.mdl, o.rh, o.draw);
+    return o;
+}
+void PropDiagAbort(const char* why)
+{
+    if (!s_pd.phase) return;
+    DebugLog("multihud: propdiag dropped (%s)", why);
+    s_pd = PropDiag{};
+    g_mhPropDiag = false;
+}
+void PropDiagReport()
+{
+    std::unordered_map<const void*, int> modelsAfter;
+    for (const auto& kv : s_pd.sa) ++modelsAfter[kv.second.mdl];
+    for (const auto& kv : s_pd.ea) ++modelsAfter[kv.second.mdl];
+    DebugLog("multihud: propdiag -- static props drawn before %zu, after %zu | map entities drawn before %zu, after %zu",
+             s_pd.sb.size(), s_pd.sa.size(), s_pd.eb.size(), s_pd.ea.size());
+    int gs = 0;
+    for (const auto& [r, then] : s_pd.sb)
+    {
+        if (s_pd.sa.count(r)) continue;
+        if (++gs > kPdList) continue;
+        const PdStatic now = ReadStatic(r);   // static props live as long as the map
+        DebugLog("multihud: propdiag static GONE %s | then rh %d alpha %d flags 0x%x draw %d | now rh %d alpha %d "
+                 "flags 0x%x draw %d | same model drawn after: %s", PdModelName(then.mdl), then.rh, then.alpha,
+                 then.flags, then.draw, now.rh, now.alpha, now.flags, now.draw, modelsAfter.count(then.mdl) ? "yes" : "no");
+    }
+    int ge = 0;
+    for (const auto& [idx, then] : s_pd.eb)
+    {
+        if (s_pd.ea.count(idx)) continue;
+        if (++ge > kPdList) continue;
+        const PdEntNow now = ReadEntNow(idx);
+        DebugLog("multihud: propdiag entity GONE #%d %s | now %s, dormant %d, shoulddraw %d, rh %d, model %s | same model "
+                 "drawn after: %s", idx, PdModelName(then.mdl),
+                 !now.ent ? "no entity" : now.ent != then.ent ? "another entity" : "same entity",
+                 now.dormant, now.draw, now.rh, now.ent ? PdModelName(now.mdl) : "-", modelsAfter.count(then.mdl) ? "yes" : "no");
+    }
+    DebugLog("multihud: propdiag -- %d static props + %d map entities stopped drawing (first %d of each listed). "
+             "rh 65535 = out of the leaf system, alpha 0 = faded, dormant 1 = server says out of PVS",
+             gs, ge, kPdList);
+}
+// per frame, before the pick check: abort / wait / finish
+void PropDiagTick()
+{
+    if (!s_pd.phase) return;
+    if (!VCall<bool>(g_engine, kEngIsInGame)) { PropDiagAbort("left the game"); return; }
+    if (s_pd.phase == 2 && GetTickCount() - s_pd.t >= kPdWaitMs)
+    {
+        s_pd.phase = 3;
+        s_pd.frames = 0;
+        g_mhPropDiag = true;
+        DebugLog("multihud: propdiag recording after the switch (%d frames)", kPdFrames);
+    }
+    else if (s_pd.phase == 3 && ++s_pd.frames >= kPdFrames)
+    {
+        g_mhPropDiag = false;
+        PropDiagReport();
+        s_pd = PropDiag{};
+    }
+}
+// true = hold the pick this frame (recording what draws before it)
+bool PropDiagDefer()
+{
+    if (s_pd.phase == 1)
+    {
+        if (++s_pd.frames < kPdFrames) return true;
+        g_mhPropDiag = false;
+        return false;
+    }
+    if (s_pd.phase) return false;   // another pick mid-diag: switch now, PropDiagSwitched restarts the wait
+    if (!VCall<bool>(g_engine, kEngIsInGame) || !Exists(std::string(CONFIG_DIR) + "\\mhpropdiag", false)) return false;
+    s_pd = PropDiag{};
+    s_pd.phase = 1;
+    g_mhPropDiag = true;
+    DebugLog("multihud: propdiag recording before the switch (%d frames), stand still", kPdFrames);
+    return true;
+}
+void PropDiagSwitched()
+{
+    if (!s_pd.phase) return;
+    s_pd.phase = 2;
+    s_pd.t = GetTickCount();
+    s_pd.sa.clear();
+    s_pd.ea.clear();
+    g_mhPropDiag = false;
+}
+
 } // namespace
+
+bool g_mhPropDiag = false;
+
+void MultiHud_PropDiagStatic(void** props, int count)
+{
+    auto& m = s_pd.phase == 1 ? s_pd.sb : s_pd.sa;
+    for (int i = 0; i < count; ++i)
+        if (props[i] && !m.count(props[i])) m.emplace(props[i], ReadStatic(props[i]));
+}
+void MultiHud_PropDiagEnt(int entIdx, const void* model)
+{
+    if (entIdx < kPdFirstMapEnt || entIdx >= 2048 || !model || Hats_IsOurs(entIdx)) return;
+    auto& m = s_pd.phase == 1 ? s_pd.eb : s_pd.ea;
+    if (!m.count(entIdx)) m.emplace(entIdx, PdEnt{ model, GetClientEntity(entIdx) });
+}
 
 void MultiHud_MainTick()
 {
     if (g_eject) return;
     // IVEngineClient::IsDrawingLoadingImage (28, after IsInGame 26 / IsConnected 27): no rebuild
     // mid map load, the pick waits for the first frame after it
-    if (!g_engine || VCall<bool>(g_engine, kEngIsDrawingLoadingImage)) return;
+    if (!g_engine) return;
+    if (VCall<bool>(g_engine, kEngIsDrawingLoadingImage)) { PropDiagAbort("map load"); return; }
     if (s_removalFrames > 0 && --s_removalFrames == 0) ApplyRemovals();
     if (s_repairFrames > 0 && --s_repairFrames == 0)
     {
         RepairVguiIds("3 frames after the switch");
         RestoreFrameAlpha();                   // frames whose close fade finished during the switch
+        SetResCache(false);                    // rebuild dispatched: .res from memory again while playing
     }
     ConsoleWatch();
+    PropDiagTick();
     const bool again = s_reapply.exchange(false);
     const std::string pick = mh::Pick(g_multiHudOn, g_multiHud);
-    if (!again && s_applied == pick) return;
+    if (!again && s_applied == pick) { if (s_pd.phase == 1) PropDiagAbort("pick changed back"); return; }
+    if (PropDiagDefer()) { if (again) s_reapply = true; return; }   // "before" frames first
     s_applied = pick;
     DebugLog("multihud: switch to '%s'", s_applied.c_str());
     Apply(s_applied);
+    PropDiagSwitched();
 }
 
 void MultiHud_Eject()
@@ -2297,6 +2507,7 @@ void MultiHud_Eject()
 
 bool MultiHud_Holding() { return s_holding; }
 void MultiHud_Reapply() { s_reapply = true; }
+int  MultiHud_RebuildPanels(int oldW, int oldH) { return RebuildPanels(oldW, oldH); }
 
 std::vector<std::string> MultiHud_List()
 {

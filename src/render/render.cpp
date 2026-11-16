@@ -68,6 +68,8 @@
 #include "../dependencies/fonts/minecraft_ttf.h"
 #include <timeapi.h>
 #include "../hacks/screen/aspect_stretch.h"   // AspectStretch_Run (aspect ratio overlay stretch)
+#include "../hacks/screen/vgui_stretch.h"     // VguiStretch_PaintBegin/End (tf2's own hud + crosshair)
+#include "../hacks/screen/res_spoof.h"        // ResSpoof_Frame (resolution spoofer, vgui point / Present)
 #include "dpi.h"                              // botox dpi scale + dpi scale panels
 #pragma comment(lib, "winmm.lib")
 
@@ -2296,6 +2298,7 @@ static void __fastcall OvFn_Call(void* self)
     s_rtEspSeq = 0;
     s_rtLuaSeq = 0;
     if (s_gameCount > 0) RenderSubset(s_gameLists, s_gameCount);   // scene is open: vgui's own
+    ResSpoof_Frame(dev);   // resolution spoofer: the finished frame, crosshair in, crunched + scaled back up
     s_vguiDrew = true;
 }
 
@@ -2317,10 +2320,14 @@ bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel);   // remove hud element
 void h_PaintTraverse(void* panels, VPANEL_t vpanel, bool forceRepaint, bool allowForce)
 {
     if (WorldFx3_SkipPanel(panels, vpanel)) return;   // a removed HUD panel: it and its children unpainted
+    // aspect ratio stretch hud / crosshair: this panel's subtree widened (vgui_stretch.cpp). First,
+    // so the csgo scope below lands in the same widened space as the hud it sits under.
+    const bool stretched = VguiStretch_PaintBegin(panels, vpanel);
     ScopeCsgo_PrePaintTraverse(panels, vpanel);   // csgo scope: just before the HUD root, under the HUD
     const bool consoleTint = ConsoleTint_Begin(panels, vpanel);   // botox console color
     o_PaintTraverse(panels, vpanel, forceRepaint, allowForce);
     if (consoleTint) ConsoleTint_End();
+    if (stretched) VguiStretch_PaintEnd();
 
     // s_vguiDrew is NOT tested here any more: it is the render thread's, and under multicore
     // the main thread would read the previous frame's true and skip queueing this one
@@ -2377,12 +2384,14 @@ void h_PaintTraverse(void* panels, VPANEL_t vpanel, bool forceRepaint, bool allo
     ScreenFxPasses_Frame(dev);
 
     BuildImGuiFrame();
-    if (s_gameCount <= 0) { s_vguiDrew = true; return; }
 
     // vgui paints between the game's own BeginScene/EndScene, so a scene is already open.
     // ImGui_ImplDX9_RenderDrawData saves and restores a full state block, so the material
     // system's render state survives this untouched.
-    RenderSubset(s_gameLists, s_gameCount);
+    if (s_gameCount > 0) RenderSubset(s_gameLists, s_gameCount);
+    // Resolution spoofer: the frame is finished here (last panel painted, crosshair in) and this
+    // is still the recorded half -- crunched to the spoofed res and scaled back up in place.
+    ResSpoof_Frame(dev);
     s_vguiDrew = true;
 }
 
@@ -2465,6 +2474,7 @@ static void Render_ReleaseDeviceObjects()
     Bloom_Destroy();                   // same story: two shaders and three DEFAULT-pool targets
     ScreenFx_Destroy();                // INTZ + probe targets, all DEFAULT-pool: a live one fails the Reset
     ScreenFxPasses_Destroy();          // one shader + one DEFAULT-pool scene copy
+    ResSpoof_Destroy();                // resolution spoofer capture / target / chain, DEFAULT pool
     MediaPlayer_ReleaseTexture();      // cover art is DEFAULT-pool too; the decoded pixels rebuild it
     Indicators_ReleaseTextures();      // mitosis morph texture; rebuilt on the next split
     Avatar_ReleaseAll();               // avatar textures are DEFAULT-pool too
@@ -2668,6 +2678,17 @@ chain:
         const bool menuUp    = g_showMenu || psWinOpen;
         if (menuUp) ClipCursor(nullptr);
 
+        // Resolution spoofer, botox's own spot: a frame the vgui pass never reached (EndScene
+        // fallback, loading) is crunched here instead, before the overlays and the menu go on top.
+        // Latched: a frame the vgui point already crunched skips straight through.
+        if (ResSpoof_Pending() && SUCCEEDED(dev->BeginScene()))
+        {
+            s_menuScene = true;       // h_EndScene stands down for our own scene
+            ResSpoof_Frame(dev);
+            dev->EndScene();
+            s_menuScene = false;
+        }
+
         // The menu half of the frame built in h_EndScene. Rendered HERE, which is both
         // what puts it on top of the crosshair (every EndScene pass has already run) and
         // what keeps it out of the recording -- a capture hook that owns the Present entry
@@ -2707,6 +2728,7 @@ chain:
     Bloom_NewFrame();       // same latch, same three call sites
     ScreenFx_NewFrame();    // same latch for the depth resolve: one copy per frame
     ScreenFxPasses_NewFrame();   // same latch, same three call sites
+    ResSpoof_NewFrame();         // resolution spoofer: once a frame, vgui point or Present
     BlurRect_NewFrame();         // clears this frame's blur job slots
 
     return hr;
