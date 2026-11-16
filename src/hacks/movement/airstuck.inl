@@ -84,6 +84,8 @@ static float AsSurfaceFriction(void* pLocal)
     return (f >= 0.1f && f <= 1.f) ? f : 1.f;   /* datamap miss reads garbage: never trust it */
 }
 
+static int s_asSvAcks = 0, s_asSvStops = 0;   // AS_Sync diag, printed + reset per second by AirStuck
+
 /* online the engine keeps its own START while the server's END differs < 0.0625u / 0.5u/s ( cl_pred_optimize 2, c_baseentity.cpp:656/681,
    prediction.cpp:1681 ); pins are exact floats, so armed = full re-predict off the server snapshot every packet ( offline already is ).
    log: server END of the acked cmd vs the START we built on */
@@ -143,6 +145,11 @@ static void AS_Sync(void* pLocal, UserCmd_t* cmd, const bool armed)
     EntSetV3(pLocal, g_offVelocity, velocity);
     EntSetI(pLocal, g_offTickBase, tick_base);
 
+    // diag: acked cmds the SERVER ended on -halfgrav (stuck). wb0 sims never see these (11-16 log: 53 server
+    // stops / ~500 ticks, 0 predicted), so this is the only measure of how well AS sticks there
+    ++s_asSvAcks;
+    if (IsTargetVz(sv_velocity.z, as::k_pinTol)) ++s_asSvStops;
+
     const Vec3 d  = sv_origin - ring[ack & 127].origin;
     const Vec3 dv = sv_velocity - ring[ack & 127].velocity;
     if (d.x == 0.0f && d.y == 0.0f && d.z == 0.0f && dv.x == 0.0f && dv.y == 0.0f && dv.z == 0.0f) {
@@ -197,9 +204,10 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         {
             s_sec = sec;
             if (g_debugLogEnable && (s_as.holds || s_as.pins || s_as.steers || s_as.resends || s_as.nowall || s_as.drifts || s_as.hangs))
-                DebugLog("AS: holds=%d hangs=%d drifts=%d pins=%d steers=%d resends=%d nowall=%d sims=%d", s_as.holds, s_as.hangs,
-                         s_as.drifts, s_as.pins, s_as.steers, s_as.resends, s_as.nowall, s_as.sims);
+                DebugLog("AS: holds=%d hangs=%d drifts=%d pins=%d steers=%d resends=%d nowall=%d sims=%d svstop=%d/%d", s_as.holds,
+                         s_as.hangs, s_as.drifts, s_as.pins, s_as.steers, s_as.resends, s_as.nowall, s_as.sims, s_asSvStops, s_asSvAcks);
             s_as.holds = s_as.pins = s_as.steers = s_as.resends = s_as.nowall = s_as.sims = s_as.drifts = s_as.hangs = 0;
+            s_asSvAcks = s_asSvStops = 0;
         }
     }
     const auto end = [&](const char* why) {

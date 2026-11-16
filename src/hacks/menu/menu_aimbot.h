@@ -5,4 +5,4 @@
 // elsewhere, so this never touches one; it draws its own rows with the same shared helpers
 // aim.cpp's own tab already uses (MenuSection/MenuBindKey, src/hacks/menu/menu.h).
 void Menu_Aimbot_Config();   // aimbot tab "configuration" group
-void Menu_Visuals_ScopeOverlay();   // visuals > screen "remove scope overlay" row
+void Menu_Visuals_ScopeOverlay();   // visuals > screen > hud "remove scope overlay" row

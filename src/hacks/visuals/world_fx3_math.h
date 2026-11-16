@@ -88,34 +88,50 @@ inline void RagdollForce(int mode, float strength, float f[3])
 // BaseClass(NULL, "...") string, or the class name for DECLARE_HUDELEMENT panels built with
 // pElementName. Children count too (HudPlayerHealth / HudPlayerClass live in HudPlayerStatus):
 // h_PaintTraverse runs once per panel. Max 31 rows (MultiCombo int mask), k_wdHudCount must match.
-struct HudElem { const char* label; const char* panels[7]; };
+// Each name checked 11-16 against its SDK ctor AND the stock hudlayout.res fieldName (a .res
+// fieldName renames the panel, Panel.cpp:4607). Building status is "BuildingStatus_*" (its
+// container ctor passes that, not the class name). New rows go at the END: index = cfg slot.
+// Left out: HudUpgradePanel (mvm upgrade station, clickable: hidden it still eats input),
+// HudScope (visuals > screen > hud "remove scope overlay" does it), CriticalPanel / HudMiniGame /
+// CoachedByPanel (debug, unused, coaching).
+struct HudElem { const char* label; const char* panels[8]; };
 inline constexpr HudElem k_hudElems[] = {
     { "health",                { "HudPlayerHealth" } },
     { "class portrait",        { "HudPlayerClass" } },
     { "ammo",                  { "HudWeaponAmmo" } },
     { "weapon selection",      { "HudWeaponSelection", "ItemQuickSwitchPanel" } },
-    { "killfeed",              { "HudDeathNotice" } },
+    { "killfeed",              { "HudDeathNotice", "CTFStreakNotice" } },
     { "damage & heal numbers", { "CDamageAccountPanel", "CHealthAccountPanel", "CHudAccountPanel" } },
-    { "target id",             { "CMainTargetID", "CSpectatorTargetID", "CSecondaryTargetID" } },
-    { "timer & objective",     { "HudObjectiveStatus", "HudKothTimeStatus", "HudControlPointIcons", "HudMatchStatus" } },
+    { "target id & inspect",   { "CMainTargetID", "CSpectatorTargetID", "CSecondaryTargetID", "HudInspectPanel" } },
+    { "timer & objective",     { "HudObjectiveStatus", "HudKothTimeStatus", "HudControlPointIcons", "HudMatchStatus",
+                                 "CTFFlagCalloutPanel" } },
     { "uber meter",            { "HudMedicCharge" } },
     { "class meters",          { "HudItemEffectMeter", "HudDemomanCharge", "HudDemomanPipes", "HudBowCharge",
-                                 "HudFlameRocketCharge", "HudSapperCharge", "HudScopeCharge" } },
-    { "building status",       { "CHudBuildingStatusContainer_Engineer", "CHudBuildingStatusContainer_Spy" } },
+                                 "HudFlameRocketCharge", "HudSapperCharge", "HudScopeCharge", "HudSpellMenu" } },
+    { "building status",       { "BuildingStatus_Engineer", "BuildingStatus_Spy" } },
     { "build & disguise menu", { "HudMenuEngyBuild", "HudMenuEngyDestroy", "HudMenuSpyDisguise", "HudEurekaEffectTeleportMenu" } },
     { "disguise status",       { "DisguiseStatus" } },
     { "chat",                  { "HudChat" } },
     { "voice & taunt menu",    { "HudMenu", "HudMenuTauntSelection" } },
-    { "alerts",                { "HudAlert", "NotificationPanel", "HudTeamGoal", "HudTeamSwitch" } },
-    { "hint text",             { "HudHintDisplay", "HudHintKeyDisplay" } },
+    { "alerts",                { "HudAlert", "NotificationPanel", "HudTeamGoal", "HudTeamSwitch", "HudTeamGoalTournament",
+                                 "HudStalemate", "AchievementNotificationPanel", "QueueHUDStatus" } },
+    { "hint & training text",  { "HudHintDisplay", "HudHintKeyDisplay", "HudTrainingMsg", "HudTrainingInfoMsg",
+                                 "AnnotationsPanel", "AnnotationsPanelCallout" } },
     { "vote",                  { "CHudVote" } },
     { "damage indicator",      { "HudDamageIndicator" } },
     { "game crosshair",        { "HudCrosshair" } },
-    { "spectator panel",       { "specgui" } },
-    { "freeze cam",            { "FreezePanel" } },
+    { "spectator panel",       { "specgui", "HudSpectatorExtras" } },
+    { "freeze cam",            { "FreezePanel", "FreezePanelCallout" } },
     { "death stats",           { "StatPanel" } },
-    { "win panel",             { "WinPanel", "ArenaWinPanel" } },
+    { "win panel",             { "WinPanel", "ArenaWinPanel", "PVEWinPanel", "MatchSummary" } },
     { "mvm status",            { "HudMannVsMachineStatus", "CurrencyStatusPanel" } },
+    { "boss health",           { "HudBossHealth" } },
+    { "voice chat icons",      { "HudVoiceSelfStatus", "HudVoiceStatus" } },
+    { "closed captions",       { "HudCloseCaption" } },
+    { "tournament & waiting",  { "HudTournament", "HudTournamentSetup", "HudStopWatch", "WaitingForPlayersPanel" } },
+    { "arena",                 { "HudArenaNotification", "HudArenaCapPointCountdown", "HudArenaClassLayout",
+                                 "HudArenaVsPanel", "HudArenaPlayerCount" } },
+    { "item & quest trackers", { "ItemAttributeTracker", "QuestNotificationPanel", "HudAchievementTracker" } },
 };
 inline constexpr int k_hudElemCount = (int)(sizeof(k_hudElems) / sizeof(k_hudElems[0]));
 

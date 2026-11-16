@@ -758,7 +758,6 @@ static void Page_VisualsScreen()
     {
         // MENU_SLOT visuals_screen (third person, aspect ratio)
         Menu_Visuals_Camera();
-        Menu_Visuals_ScopeOverlay();   // menu_aimbot.cpp (Vars side)
 
         // botox menu_tab_visuals.cpp 1181-1237, 1:1 (one shader pass with the screen filters,
         // colorcorrect.cpp / fx_grade.hlsl)
@@ -986,6 +985,8 @@ static void Page_VisualsScreen()
                 if (style == 3 && g_hudSniperChOutline)
                     SliderF("outline thickness##sniper crosshair", &g_hudSniperChOutlineThick, 0.1f, 3.f, "%.1f");
             }, ImVec2(220.f, -1.f));
+
+        Menu_Visuals_ScopeOverlay();   // menu_aimbot.cpp (Vars side)
 
         ImGui::Checkbox("aimbot fov circle", &g_hudFovCircle);
         if (g_hudFovCircle)
@@ -1458,7 +1459,15 @@ static void Page_MovementMain()
                     SliderF("edge bug predict time", &g_edgeBugPredictTime, 0.02f, 2.f, "%.2f s");
                     ImGui::Checkbox("autostrafe to edge", &g_edgeBugToEdge);
                     if (g_edgeBugToEdge)
+                    {
                         SliderF("max path bend##ebstrafemax", &g_edgeBugStrafeAngleMax, 0.f, 180.f, "%.0f deg");
+                        // bisect a sideways push between a run that lands on the lip and one that misses it
+                        ImGui::Checkbox("lip refine##ebrefine", &g_edgeBugLipRefine);
+                        if (g_edgeBugLipRefine)
+                            SliderI("refine steps##ebrefsteps", &g_edgeBugRefineSteps, 1, 12);
+                    }
+                    // TF2: the duck sweep is always on (botox "duck timing"), so full window sits here
+                    ImGui::Checkbox("full window##ebfullwin", &g_edgeBugFullWindow);
                     ImGui::Checkbox("mouse steer##ebsteer", &g_edgeBugMouseSteer);
                     if (g_edgeBugMouseSteer)
                         SliderI("paths##ebpaths", &g_edgeBugPaths, 1, 8);

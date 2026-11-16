@@ -1410,6 +1410,42 @@ void __fastcall h_HookMsg(void* um, const char* name, void* fn)
 // those return early; mid-game CHudArenaClassLayout::PerformLayout (tf_hud_arena_class_layout.cpp:80
 // -> 165) read m_ClassImages[0] before the ctor made it (crash 11-15 17:52, client+0x9451B1). Skipped
 // while elements are built: hud_reloadscheme right after applies + lays out every one, built.
+// Dashboard tooltip statics (crash 11-16, console opened after a switch: vgui2+0x1CEA0 SetVisible on a
+// null vpanel, from Panel::Think -> m_pTooltips->PerformLayout). GetDashboardTooltip (client x64 68d750,
+// tf_matchmaking_dashboard.cpp:164) hands out &s_ToolTip[type] and re-reads its m_pEmbeddedPanel (+0x48)
+// = GetPanel(k_eToolTipSmallFont + type) on every call; GetCompRanksTooltip (693ef0) same with side
+// panel 16. The rebuild's TFViewport::OnScreenSizeChanged -> RecreateAll remakes side panels in enum
+// order, and the playlist (0) calls GetDashboardTooltip in its ctor before panels 11-13 are remade ->
+// the static keeps the deleted panel -> CTFDashboardTooltip::PerformLayout (68f7e0) SetVisible(false)
+// on freed memory the first time a panel holding it thinks visible. Fix: call the getters again after
+// RecreateAll, before Think: from the root SolveTraverse (vgui RunFrame) for a few frames after a switch.
+using TipGet_t = void* (__fastcall*)(int);
+using RankTipGet_t = void* (__fastcall*)();
+int s_tipRebinds = 0;           // root traverses left to rebind on (main thread)
+void RebindDashboardTips()
+{
+    static TipGet_t tip = nullptr;
+    static RankTipGet_t rank = nullptr;
+    static bool tried = false;
+    if (!tried)
+    {
+        tried = true;
+        if (const HMODULE c = GetModuleHandleA("client.dll"))
+        {
+            tip = reinterpret_cast<TipGet_t>(PatternScan(c, "40 53 57 48 83 EC 38 8B 05 ? ? ? ? 48 63 F9 48 8D 0D ? ? ? ? A8 01 0F 85"));
+            rank = reinterpret_cast<RankTipGet_t>(PatternScan(c, "48 83 EC 28 8B 05 ? ? ? ? A8 01 0F 85 ? ? ? ? 83 C8 01 "
+                                                                 "48 89 7C 24 20 45 33 C0 89 05 ? ? ? ? 33 D2 48 89 5C 24 30"));
+        }
+        DebugLog("multihud: dashboard tooltip getters %p (comp ranks %p)", (void*)tip, (void*)rank);
+    }
+    __try
+    {
+        if (tip) for (int t = 0; t < 3; ++t) tip(t);   // k_eSmallFont..k_eLargeFont
+        if (rank) rank();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { tip = nullptr; rank = nullptr; DebugLog("multihud: dashboard tooltip rebind faulted, off"); }
+}
+
 using Solve_t = void(__fastcall*)(void*, uintptr_t, bool);
 Solve_t o_Solve = nullptr;
 bool s_quietSolve = false;      // main thread
@@ -1417,6 +1453,9 @@ int  s_skippedSolves = 0;
 void __fastcall h_Solve(void* surf, uintptr_t panel, bool force)
 {
     if (s_quietSolve) { ++s_skippedSolves; return; }
+    // root only: a SETUP_PANEL solve can run inside RecreateAll while a side panel slot is NULL, and
+    // GetPanel would make a second one there
+    if (s_tipRebinds > 0 && panel == VCall<uintptr_t>(surf, kSurfGetEmbeddedPanel)) { --s_tipRebinds; RebindDashboardTips(); }
     o_Solve(surf, panel, force);
 }
 constexpr int kSurfSolveTraverse = 87;
@@ -2203,6 +2242,7 @@ void Reload(const std::vector<std::string>& dirs, const std::string& label, cons
     RecreateStatsSummary();
     RecreateDashboard();                       // before RebuildPanels: TFViewport remakes it there
     s_conLogs = 5;                             // console diag: the next opens after this switch
+    s_tipRebinds = 4;                          // before the rebuild: the surface path runs RunFrame inside
     int w = 0, h = 0, posted = -1;
     if (void* s = Surface()) VCall<void>(s, kSurfGetScreenSize, &w, &h);
     if (w > 0 && h > 0) posted = RebuildPanels(w, h);
@@ -2483,6 +2523,7 @@ void MultiHud_MainTick()
     {
         RepairVguiIds("3 frames after the switch");
         RestoreFrameAlpha();                   // frames whose close fade finished during the switch
+        RebindDashboardTips();                 // again, in case the SolveTraverse hook is off
         SetResCache(false);                    // rebuild dispatched: .res from memory again while playing
     }
     ConsoleWatch();

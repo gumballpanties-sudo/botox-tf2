@@ -77,7 +77,7 @@ Removes `fn` from `name`. Pass the same function value you registered.
 | any game event name, e.g. `player_death` | `event` | only that event. |
 | `level_init` | none | after a map loaded (CViewRender::LevelInit). |
 | `level_shutdown` | none | map unloading. |
-| `draw_model` | `model` | every DrawModelExecute call, every pass: players, hats, weapons, your viewmodel, buildings, ragdolls. Static props never come here. Hide, tint or swap it, see [`model`](#model). |
+| `draw_model` | `model` | every DrawModelExecute call, every pass: players, hats, weapons, your viewmodel, buildings, ragdolls. Static props never come here. Hide, tint, swap or animate it, see [`model`](#model). |
 | `unload` | none | the script is being unloaded (button, error, `client.unload`, eject). |
 
 ```lua
@@ -352,6 +352,24 @@ Prediction data map field (not networked), e.g. `"m_MoveType"`, `"m_nButtons"`, 
 
 #### `entity:set_datafield(name, type, value...)`
 
+#### `entity:animate(path, sequence, cycle)`
+
+Poses this player with another model's animation, on your client only: the game's own bone merge (`EF_BONEMERGE`, what taunt and emote plugins use) done to the player's real bones. `path`'s skeleton plays `sequence` (name like `"taunt01"`, or 0-based index) at `cycle` (0 to 1: a looping sequence wraps, a one shot holds its last frame) where the player stands. Bones with the same name follow it, bones the animation model lacks keep their own motion relative to their parent. Because the real bones move, everything built from them follows: the model in every pass, weapons and cosmetics bone merged to it, effects at attachments. The server and movement don't change.
+
+Call it every frame (`frame_stage` with `stages.render_start`: right before the game sets bones up to draw). It holds for that frame and the next, so a script that stops calling ends it a frame later; `entity:animate(nil)` ends it at once. Returns the sequence length in seconds, or `nil` like [`model:animate`](#modelanimatepath-sequence-cycle), whose animation model rules it shares. Works on your own player only (others: `model:animate` on their draws, so botox's aimbot and backtrack never read a posed bone) and only in third person (first person draws no body, and the camera height reads the head bone).
+
+```lua
+local ANIMS = "models/player/soldier_animations.mdl"
+local start = globals.realtime()
+
+callbacks.register("frame_stage", function(stage)
+    local me = entities.local_player()
+    if stage == stages.render_start and me and me:is_alive() then
+        me:animate(ANIMS, "taunt01", (globals.realtime() - start) / 2.8) -- soldier, third person to see it
+    end
+end)
+```
+
 ---
 
 ## cmd
@@ -441,6 +459,26 @@ callbacks.register("draw_model", function(m)
         m.model = "models/weapons/c_models/c_custom_scattergun.mdl"
     elseif m.entity and m.entity:is_player() and m.entity:is_enemy() then
         m.color = color(255, 80, 80, 255)
+    end
+end)
+```
+
+#### `model:animate(path, sequence, cycle)`
+
+Poses this draw with another model's animation, the way the game's bone merge (`EF_BONEMERGE`) does: `path`'s skeleton plays `sequence` (name like `"taunt01"`, or 0-based index) at `cycle` (0 to 1: a looping sequence wraps, a one shot holds its last frame) where this model stands, and every bone with the same name follows it. Bones the animation model lacks keep their rest offset from their parent. Works on mesh-less animation models: TF2 keeps a class's sequences in `models/player/<class>_animations.mdl`, the class model only `$includemodel`s them. Combine with `m.model` to animate the swapped mesh. `m:animate(nil)` cancels it for this draw.
+
+Returns the sequence length in seconds (add `frametime / length` to `cycle` each frame for its own speed), or `nil` while the model loads, when it can't load (one console line says why) or has no such sequence.
+
+Loads like a swap: at the start of the next frame, so the first frame draws the normal pose, and again after a map change. At most 16 animation models per session. Only the model's own sequences, not ones it pulls in with `$includemodel`; a blend sequence plays its first animation; up to 128 bones. Only this draw moves: the entity's bones, attachments and what hangs on them (weapons, cosmetics) keep the real pose. To pose a player and everything on it, use [`entity:animate`](#entityanimatepath-sequence-cycle). Glow outlines and the rear view mirror show the real pose.
+
+```lua
+local ANIMS = "models/player/soldier_animations.mdl"
+local start = globals.realtime()
+
+callbacks.register("draw_model", function(m)
+    -- enemy soldiers taunt in the picture only ( weapons, hats and hitboxes stay put )
+    if m.name:find("player/soldier.mdl", 1, true) and m.entity and m.entity:is_enemy() then
+        m:animate(ANIMS, "taunt01", (globals.realtime() - start) / 2.8)
     end
 end)
 ```

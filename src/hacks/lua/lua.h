@@ -86,7 +86,19 @@ namespace n_lua
 		const void* m_swap_model = nullptr;
 		const void* m_swap_hdr   = nullptr;
 		const void* m_swap_hw    = nullptr;
+		/* model:animate, set only once the root is loaded and the sequence exists. entry = lua_api.cpp anim_model_t */
+		const void* m_anim_entry = nullptr;
+		int m_anim_sequence      = 0;
+		float m_anim_cycle       = 0.f;
 	};
+
+	/* lua_api.cpp, plain types for the dih / hook TUs. game thread.
+	   model:animate bones for one draw ( visuals.cpp Lua_DrawModel ): target = the drawn or swapped studiohdr_t, state / info =
+	   DrawModelState_t / ModelRenderInfo_t. one static buffer until the next call. null = draw as is */
+	const void* animate_draw( const draw_model_t& draw, const void* target_hdr, const void* state, const void* info );
+	/* entity:animate: from CTFPlayer_BuildTransformations ( aim/hooks.cpp ) after the original, rewrites the entity's bone cache
+	   ( bones in bone_mask ) with the script's pose before SetupBones builds attachments off it. hdr = CStudioHdr* */
+	void pose_entity_bones( void* entity, const void* studio_hdr, const void* camera_transform, int bone_mask );
 
 	struct impl_t {
 		/* game thread. on_tick = init / request queue / buttons / saves ( FrameStageNotify start, every frame ),

@@ -668,6 +668,9 @@ extern int   g_edgeBugLockType;      // 0 smooth / 1 full
 extern float g_edgeBugLockStrength;  // 0-100 %
 extern int   g_edgeBugStance;        // 0 any (jump-eating ducked find = fallback) / 1 ducked / 2 stand
 extern bool  g_edgeBugCurStance;     // duck held -> ducked only, else standing only (all styles)
+extern bool  g_edgeBugLipRefine;     // botox style: lip refine pass (to edge only)
+extern int   g_edgeBugRefineSteps;   // 1-12 halvings per refine bracket
+extern bool  g_edgeBugFullWindow;    // botox style: duck sweep over the whole window
 extern int   g_edgeBugDelTicks;     extern bool g_edgeBugDelAdvanced; extern float g_edgeBugDelAngleLimit;
 extern int   g_edgeBugDelSearch;    extern bool g_edgeBugDelSilent;   extern bool  g_edgeBugDelMouseFix;
 extern float g_edgeBugDnaScan;      extern bool g_edgeBugDnaAdvanced; extern int   g_edgeBugDnaRange;

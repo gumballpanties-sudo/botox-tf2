@@ -72,7 +72,7 @@ void Menu_Aimbot_Config()
 
 // Amalgam Removals::Scope: CTFPlayerShared_InCond hook (aim/hooks.cpp) says "not zoomed"
 // to CHudScope::ShouldDraw only, so the black overlay goes, zoom stays.
-// Drawn in visuals > screen; lives here because menu.cpp can't see Vars (SDK clash).
+// Drawn in visuals > screen > hud; lives here because menu.cpp can't see Vars (SDK clash).
 void Menu_Visuals_ScopeOverlay()
 {
 	VarCheckbox(Vars::Visuals::Removals::Scope, "remove scope overlay");

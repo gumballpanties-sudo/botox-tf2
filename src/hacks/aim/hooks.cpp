@@ -12,6 +12,7 @@
 #include "nospread_hitscan.h"
 #include "movesim.h"
 #include "esp.h"
+#include "../lua/lua.h"   // n_lua::pose_entity_bones (entity:animate)
 #include "../visuals/esp_preview.h"
 #include "backtrack.h"
 #include "scope_fov.h"
@@ -62,6 +63,9 @@ MAKE_HOOK(CBaseAnimating_MaintainSequenceTransitions, S::CBaseAnimating_Maintain
 	// non-injected when idle. (The engine itself already early-returns this during prediction, so the
 	// local player's predicted pose is unaffected either way.) Same targets as Interpolate.
 	if (RemoveInterpTarget(rcx))
+		return;
+	// lua animation roots: one ent serves every script / player, so it must show exactly the asked sequence + cycle
+	if (EspPreview::IsAnimRoot(rcx))
 		return;
 
 	CALL_ORIGINAL(rcx, boneSetup, flCycle, pos, q);
@@ -1062,6 +1066,9 @@ MAKE_HOOK(CTFPlayer_BuildTransformations, S::CTFPlayer_BuildTransformations(), v
 	CALL_ORIGINAL(rcx, hdr, pos, q, cameraTransform, boneMask, boneComputed);
 
 	pPlayer->m_fFlags() = iOriginal;
+
+	// lua entity:animate: rewrite the bones just built, before SetupBones makes attachments off them
+	n_lua::pose_entity_bones(rcx, hdr, &cameraTransform, boneMask);
 }
 
 // ================ CTFRocketLauncher_CheckReloadMisfire.cpp ================

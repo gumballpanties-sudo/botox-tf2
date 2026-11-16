@@ -605,6 +605,9 @@ float g_edgeBugLockStrength = 100.f;
 // 0 = any (ducked find that eats the next jump only as fallback), 1 = ducked only, 2 = stand only
 int   g_edgeBugStance = 0;
 bool  g_edgeBugCurStance = false;     // only the stance the duck key is in now (overrides stance)
+bool  g_edgeBugLipRefine = true;      // botox m_edgebug_lip_refine: bisect a sideways push onto the lip
+int   g_edgeBugRefineSteps = 7;       // botox m_edgebug_refine_steps, halvings per bracket 1..12
+bool  g_edgeBugFullWindow = true;     // botox m_edgebug_full_window: duck press/release at every tick, leftover budget
 // donor styles (botox m_edgebug_del_* / m_edgebug_dna_*)
 int   g_edgeBugDelTicks = 64;
 bool  g_edgeBugDelAdvanced = false;

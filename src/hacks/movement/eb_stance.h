@@ -248,6 +248,60 @@ inline MvEbOut MV_EbBrakeOut(bool bug, bool landed, float z, bool baseLanded, fl
     return kEbOutLand;
 }
 
+// ================= lip refine (botox PASS 0b, edgebug.cpp:1219) ===============================
+// zero move (variant 0 stand / 1 duck) pushed square to the path for b ticks, grid +-2 +-6 +-12,
+// then the land / miss boundary between two b is bisected: the bug sits on it.
+// Fractional last push tick: AirAccelerate (gamemovement.cpp:1705) adds accel * wish * dt, capped
+// at min(wish, 30) - 0 for a wish square to the velocity -> wish = 30 * frac / (accel * dt) buys
+// exactly 30 * frac u/s (TF2 sv_airaccelerate 10 at 66.67: wish 200 * frac).
+inline float MV_EbBendWish(float frac, float airAccel, float dt)
+{
+    if (frac >= 1.f) return 450.f;
+    const float w = 30.f * frac / (airAccel * dt);
+    return w < 450.f ? w : 450.f;
+}
+
+// a run's contact counts as "on the lip" only at the lip's level: a lower floor = a miss
+inline bool MV_EbOnLip(int con, float cz, float lip)
+{
+    return con >= 0 && fabsf(cz - lip) < 1.f;
+}
+
+// val[j] = signed push ticks (0 = base run), con[j] = contact tick (-1 none), cz[j] = contact z,
+// n <= 7. ONE lip per variant: the landing nearest b = 0 (your path); a run on any other floor is
+// a miss, so no bracket can lock onto a step the big pushes carried it to. Brackets = neighbours on
+// the signed b line whose on-lip state differs, nearest b = 0 first (|a + b| ascending; ties keep
+// line order, = botox's MSVC small-n insertion sort). Returns bracket count, *lip = lip z.
+struct MvEbBracket { float land, miss; };
+inline int MV_EbRefineBrackets(const float* val, const int* con, const float* cz, int n,
+                               MvEbBracket* out, float* lip)
+{
+    if (n > 7) n = 7;
+    int nearLand = -1;
+    for (int j = 0; j < n; j++)
+        if (con[j] >= 0 && (nearLand < 0 || fabsf(val[j]) < fabsf(val[nearLand]))) nearLand = j;
+    *lip = nearLand >= 0 ? cz[nearLand] : 0.f;
+    if (nearLand < 0) return 0;
+    int idx[7];
+    for (int j = 0; j < n; j++) idx[j] = j;
+    for (int a = 1; a < n; a++)   // sort by val
+        for (int b = a; b > 0 && val[idx[b]] < val[idx[b - 1]]; b--) { const int t = idx[b]; idx[b] = idx[b - 1]; idx[b - 1] = t; }
+    int order[6], no = 0;
+    for (int j = 0; j + 1 < n; j++) order[no++] = j;
+    auto key = [&](int p) { return fabsf(val[idx[p]] + val[idx[p + 1]]); };
+    for (int a = 1; a < no; a++)
+        for (int b = a; b > 0 && key(order[b]) < key(order[b - 1]); b--) { const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t; }
+    int nb = 0;
+    for (int q = 0; q < no; q++)
+    {
+        const int ja = idx[order[q]], jb = idx[order[q] + 1];
+        const bool la = MV_EbOnLip(con[ja], cz[ja], *lip), lb = MV_EbOnLip(con[jb], cz[jb], *lip);
+        if (la == lb) continue;
+        out[nb++] = la ? MvEbBracket{ val[ja], val[jb] } : MvEbBracket{ val[jb], val[ja] };
+    }
+    return nb;
+}
+
 // ================= deep pass cost (TF2 port, not botox) =======================================
 // botox spends the whole clock share whenever reach says geometry is near. 10-31 log: 515 of 667
 // searches hit the cap, 6 of them found; far / no contact = 525 no-find searches at ~7ms each.
