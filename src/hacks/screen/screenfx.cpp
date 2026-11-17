@@ -80,7 +80,7 @@ static double FxNowUs()
 // frameblend.cpp holds one open around its run and nesting them is not allowed.
 // Enum order = run order (stamps diff in this order): botox do_post_screen_space_effects.cpp.
 // fb runs in the late half after the web screen, so fb gpu includes the web draw when placed.
-enum { k_passDv, k_passRefl, k_passAo, k_passWarp, k_passDof, k_passFb, k_passN };
+enum { k_passDv, k_passRefl, k_passAo, k_passFog, k_passWarp, k_passDof, k_passFb, k_passN };
 struct FxGpuFrame { IDirect3DQuery9* freq = nullptr; IDirect3DQuery9* ts[k_passN + 1]{}; bool pending = false; };
 static FxGpuFrame s_gpu[4];
 static int    s_gpuIdx  = 0;
@@ -147,12 +147,12 @@ static void FxCostLog()
                  s_costProbeN ? s_costProbeUs / s_costProbeN : 0.0, s_costProbeN);
     if (s_passCpuN || s_passGpuN) {
         const double g = s_passGpuN ? 1.0 / s_passGpuN : 0.0, c = s_passCpuN ? 1.0 / s_passCpuN : 0.0;
-        DebugLog("^FX: pass gpu ms -- dv %.3f refl %.3f ao %.3f warp %.3f dof %.3f fb %.3f (%d) | cpu us -- "
-                 "dv %.0f refl %.0f ao %.0f warp %.0f dof %.0f fb %.0f (%d)",
+        DebugLog("^FX: pass gpu ms -- dv %.3f refl %.3f ao %.3f fog %.3f warp %.3f dof %.3f fb %.3f (%d) | cpu us -- "
+                 "dv %.0f refl %.0f ao %.0f fog %.0f warp %.0f dof %.0f fb %.0f (%d)",
                  s_passGpuMs[0] * g, s_passGpuMs[1] * g, s_passGpuMs[2] * g, s_passGpuMs[3] * g,
-                 s_passGpuMs[4] * g, s_passGpuMs[5] * g, s_passGpuN,
+                 s_passGpuMs[4] * g, s_passGpuMs[5] * g, s_passGpuMs[6] * g, s_passGpuN,
                  s_passCpuUs[0] * c, s_passCpuUs[1] * c, s_passCpuUs[2] * c, s_passCpuUs[3] * c,
-                 s_passCpuUs[4] * c, s_passCpuUs[5] * c, s_passCpuN);
+                 s_passCpuUs[4] * c, s_passCpuUs[5] * c, s_passCpuUs[6] * c, s_passCpuN);
     }
     s_costResolveUs = s_costResolveMax = s_costProbeUs = 0.0;
     s_costResolveN = s_costProbeN = 0;
@@ -319,7 +319,7 @@ static DWORD s_endSceneTid = 0;   // thread our EndScene draw runs on
 static bool FxWantDepthPass()
 {
     return g_aoEnable || g_dofEnable || g_fbEnable || g_reflEnable || g_emphasizeEnable || g_showDepthEnable ||
-           ScreenFxPasses_WarpWanted();
+           ScreenFxPasses_WarpWanted() || ScreenFxPasses_FogWanted();
 }
 
 bool ScreenFx_View(FxViewSetup& out)
@@ -1400,6 +1400,7 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
     const bool wantRefl  = g_reflEnable;                          // reflections
     const bool wantDv    = g_emphasizeEnable || g_showDepthEnable; // botox depth_view
     const bool wantWarp  = ScreenFxPasses_WarpWanted();            // depth distort + depth channel shift
+    const bool wantFog   = ScreenFxPasses_FogWanted();             // adaptive fog
     const bool wantPass  = FxWantDepthPass();
 
     if (!dev || (!wantPass && !wantProbe)) return;
@@ -1520,7 +1521,7 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
                     tc = now;
                 };
                 // botox do_post_screen_space_effects.cpp order: depth view, reflections, ao,
-                // depth warp, dof | web screen | true motion blur, bloom | flip world.
+                // adaptive fog, depth warp, dof | web screen | true motion blur, bloom | flip world.
                 // This is the half before the web screen; ScreenFx_FrameLate is the half after.
                 if (wantDv)   ScreenFxPasses_DepthView(dev, rt, desc, ScreenFx_DepthTexture(), view);
                 mark(k_passDv);
@@ -1528,6 +1529,9 @@ void ScreenFx_Frame(IDirect3DDevice9* dev, bool fromPostSlot)
                 mark(k_passRefl);
                 if (wantAo)   Ssao_Draw(dev, rt, desc, ScreenFx_DepthTexture(), view);
                 mark(k_passAo);
+                // under dof (dof blurs the fog) and under depth warp (fog warps with its frame)
+                if (wantFog)  ScreenFxPasses_AdaptiveFog(dev, rt, desc, ScreenFx_DepthTexture(), view);
+                mark(k_passFog);
                 // botox: before dof so the blur lands on the distorted frame (dof's focus still
                 // reads the undistorted depth there too)
                 if (wantWarp) ScreenFxPasses_Warp(dev, rt, desc, ScreenFx_DepthTexture(), view);

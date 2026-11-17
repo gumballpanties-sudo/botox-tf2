@@ -847,6 +847,24 @@ static void Page_VisualsScreen()
                 SliderF("particle guard##dof", &g_fxParticleGuard, 0.f, 1.f, "%.2f");
             }, ImVec2(220.f, -1.f));
 
+        // botox adaptive fog (OtisFX AdaptiveFog.fx knobs + ranges), drawn under dof
+        ImGui::Checkbox("adaptive fog", &g_adaptiveFogEnable);
+        if (g_adaptiveFogEnable)
+            ImGui::OptionPopup("adaptive fog settings", [&]() {
+                constexpr ImGuiColorEditFlags k_fogNoAlpha = ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB |
+                    ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop |
+                    ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoBorder | ImGuiColorEditFlags_NoAlpha;
+                ImGui::ColorRow("fog color##adaptive fog", g_adaptiveFogColor, k_fogNoAlpha);
+                SliderF("max fog##adaptive fog", &g_adaptiveFogMax, 0.f, 1.f, "%.3f");
+                SliderF("fog curve##adaptive fog", &g_adaptiveFogCurve, 0.f, 175.f, "%.2f");
+                SliderF("fog start##adaptive fog", &g_adaptiveFogStart, 0.f, 1.f, "%.3f");
+
+                ImGui::Label("bloom");
+                SliderF("threshold##adaptive fog", &g_adaptiveFogBloomThreshold, 0.f, 50.f, "%.2f");
+                SliderF("power##adaptive fog", &g_adaptiveFogBloomPower, 0.f, 100.f, "%.1f");
+                SliderF("width##adaptive fog", &g_adaptiveFogBloomWidth, 0.f, 1.f, "%.3f");
+            }, ImVec2(220.f, -1.f));
+
         ImGui::Checkbox("ambient occlusion", &g_aoEnable);
         if (g_aoEnable)
             ImGui::OptionPopup("ambient occlusion settings", [&]() {
