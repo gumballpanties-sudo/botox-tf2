@@ -85,6 +85,8 @@
 "chamsBacktrackXqz",
 "chamsCloak",
 "chamsEnable",
+"chamsGlassBump",
+"chamsGlassRefract",
 "chamsLocalEnable",
 "chamsOccluded",
 "chamsRagdolls",

@@ -40,7 +40,7 @@
 #include "../hacks/visuals/esp_preview.h"   // EspPreview::DropTexture in h_Reset
 #include "../hacks/visuals/rear_mirror.h"   // RearMirror_Draw, RearMirror_DropTexture in h_Reset
 #include "../hacks/visuals/player_stencil.h"  // PlayerStencil_ReleaseTargets in h_Reset
-#include "../hacks/visuals/lsd_chams.h"       // SheenNormal_Tick
+#include "../hacks/visuals/lsd_chams.h"       // SheenNormal_Tick, GlassChams_ReleaseTargets in h_Reset
 #include "../hacks/menu/fonts.h"          // fonts tab: indicator face picked at runtime
 #include "../hacks/lua/lua.h"             // lua paint callback (h_PaintTraverse)
 #include "../hacks/lua/lua_draw.h"        // lua render.* replay (RenderLuaQueue)
@@ -2479,6 +2479,7 @@ static void Render_ReleaseDeviceObjects()
     Indicators_ReleaseTextures();      // mitosis morph texture; rebuilt on the next split
     Avatar_ReleaseAll();               // avatar textures are DEFAULT-pool too
     PlayerStencil_ReleaseTargets();    // esp: player stencil mask/blur targets, DEFAULT-pool
+    GlassChams_ReleaseTargets();       // glass chams rt copies, DEFAULT-pool, remade at the next glass layer
     EspPreview::DropTexture();         // esp preview: its target is remade, the d3d texture with it
     RearMirror_DropTexture();          // rear view mirror: same, recaptured at the next mirror pass
     GifTex_ReleaseAll();               // gif frame texture, GDI+ bitmap survives the reset

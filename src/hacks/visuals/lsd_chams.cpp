@@ -34,6 +34,8 @@
 #include "../screen/shaders/fx_sheen_ps3.h"   // k_fxSheenPs3Bytes (engine sheen pass ps_3_0)
 #include "../screen/shaders/fx_cham_vs.h"     // k_fxChamVs[2][2][2]: float / compressed verts
 #include "../screen/shaders/fx_cham_ps.h"     // k_fxChamPs[mode]
+#include "../screen/shaders/fx_glass_vs.h"    // k_fxGlassVs[2][2][3]: float / float + tangent stream / compressed
+#include "../screen/shaders/fx_glass_ps.h"    // k_fxGlassPs[3]: no normal map / s1 / s3
 #include <algorithm>
 #include <cmath>
 #include <atomic>
@@ -612,6 +614,242 @@ namespace
 		return hr;
 	}
 
+	// ---- botox hacks/visuals/glass_chams.cpp: own materials (normal map) like two tone, refracting a copy of the bound rt ----
+	std::atomic<bool> s_glArmed{ false };
+	float s_glTint[4] = {}, s_glRefract = 0.f, s_glBump = 0.f;   // render thread only
+	bool  s_glIgnorez = false, s_glTranslucent = false, s_glCopyPending = false;
+
+	// vs: [dx8][skinned][plain, plain + tangent stream, compressed]. ps: no normal map, normal map in s1, s3
+	IDirect3DVertexShader9* s_glVs[2][2][3] = {};
+	IDirect3DPixelShader9*  s_glPs[3] = {};
+	Defs s_glVsDefs, s_glPsDefs;
+	bool s_glGpuFailed = false;
+	constexpr DWORD kGlassFrameStage = 15;   // fx_glass_ps.hlsl FrameSampler
+
+	bool GlassGpuReady(IDirect3DDevice9* dev)
+	{
+		if (s_glPs[0]) return true;
+		if (s_glGpuFailed) return false;
+		bool ok = CreateVsTable(dev, k_fxGlassVs, s_glVs, s_glVsDefs);
+		for (int i = 0; i < 3 && ok; i++)
+		{
+			std::vector<DWORD> ps((k_fxGlassPs[i].size + 3) / 4);
+			memcpy(ps.data(), k_fxGlassPs[i].bytes, k_fxGlassPs[i].size);
+			if ((ok = SUCCEEDED(dev->CreatePixelShader(ps.data(), &s_glPs[i]))))
+				CollectDefs(ps.data(), s_glPsDefs);   // defs differ per variant: union
+		}
+		if (ok)
+		{
+			DebugLog("GLASS: shaders ready (%d vs defs, %d ps defs)", int(s_glVsDefs.size()), int(s_glPsDefs.size()));
+			return true;
+		}
+		DebugLog("GLASS: gpu FAILED -- glass layers draw as the model's own materials");
+		ReleaseVsTable(s_glVs);
+		for (auto*& p : s_glPs) if (p) { p->Release(); p = nullptr; }
+		s_glVsDefs.clear(); s_glPsDefs.clear();
+		s_glGpuFailed = true;
+		return false;
+	}
+
+	// copy of the bound rt, keyed by its desc. ponytail: 2 entries (main view + preview / mirror rt), a 3rd rt churns creates
+	struct GlassFrame { IDirect3DTexture9* tex; IDirect3DSurface9* surf; IDirect3DSurface9* resolve; D3DSURFACE_DESC desc; unsigned used; };
+	GlassFrame  s_glFrames[2] = {};
+	GlassFrame* s_glFrame = nullptr;   // copied at the current layer's first dip
+	unsigned    s_glClock = 0;
+	bool        s_glCopyFailed = false, s_glDirectFailed = false;
+
+	void ReleaseGlassFrame(GlassFrame& f)
+	{
+		if (f.resolve) f.resolve->Release();
+		if (f.surf) f.surf->Release();
+		if (f.tex) f.tex->Release();
+		f = GlassFrame{};
+	}
+
+	bool SameTarget(const D3DSURFACE_DESC& a, const D3DSURFACE_DESC& b)
+	{
+		return a.Width == b.Width && a.Height == b.Height && a.Format == b.Format && a.MultiSampleType == b.MultiSampleType &&
+		       a.MultiSampleQuality == b.MultiSampleQuality;
+	}
+
+	// botox frame_copy.h: msaa rt -> rt texture is a legal resolve (one blit); refused once = always the two blit hop
+	HRESULT CopyRt(IDirect3DDevice9* dev, IDirect3DSurface9* rt, IDirect3DSurface9* hop, IDirect3DSurface9* dst)
+	{
+		if (!hop || !s_glDirectFailed)
+		{
+			const HRESULT direct = dev->StretchRect(rt, nullptr, dst, nullptr, D3DTEXF_NONE);
+			if (SUCCEEDED(direct) || !hop) return direct;
+			s_glDirectFailed = true;
+		}
+		const HRESULT resolved = dev->StretchRect(rt, nullptr, hop, nullptr, D3DTEXF_NONE);
+		return FAILED(resolved) ? resolved : dev->StretchRect(hop, nullptr, dst, nullptr, D3DTEXF_NONE);
+	}
+
+	// nullptr = glass off until the next device reset (logged once)
+	GlassFrame* CopyGlassFrame(IDirect3DDevice9* dev)
+	{
+		if (s_glCopyFailed) return nullptr;
+		IDirect3DSurface9* rt = nullptr;
+		if (FAILED(dev->GetRenderTarget(0, &rt)) || !rt) return nullptr;
+
+		D3DSURFACE_DESC desc = {};
+		GlassFrame* f = nullptr;
+		if (SUCCEEDED(rt->GetDesc(&desc)))
+		{
+			for (GlassFrame& e : s_glFrames)
+				if (e.tex && SameTarget(e.desc, desc)) f = &e;
+			if (!f)
+			{
+				f = s_glFrames[0].used <= s_glFrames[1].used ? &s_glFrames[0] : &s_glFrames[1];
+				ReleaseGlassFrame(*f);
+				if (FAILED(dev->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET, desc.Format, D3DPOOL_DEFAULT, &f->tex, nullptr)) ||
+				    FAILED(f->tex->GetSurfaceLevel(0, &f->surf)) ||
+				    (desc.MultiSampleType != D3DMULTISAMPLE_NONE &&
+				     FAILED(dev->CreateRenderTarget(desc.Width, desc.Height, desc.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &f->resolve, nullptr))))
+				{
+					DebugLog("GLASS: copy %ux%u fmt %d msaa %d creation FAILED, glass off", desc.Width, desc.Height, int(desc.Format), int(desc.MultiSampleType));
+					ReleaseGlassFrame(*f);
+					f = nullptr;
+				}
+				else
+					f->desc = desc;
+			}
+			if (f)
+			{
+				const HRESULT hr = CopyRt(dev, rt, f->resolve, f->surf);
+				if (FAILED(hr))
+				{
+					DebugLog("GLASS: copy FAILED %#lx fmt %d msaa %d, glass off", (unsigned long)hr, int(desc.Format), int(desc.MultiSampleType));
+					f = nullptr;
+				}
+				else
+					f->used = ++s_glClock;
+			}
+		}
+		rt->Release();
+		if (!f) s_glCopyFailed = true;
+		return f;
+	}
+
+	HRESULT DrawGlass(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT minV, UINT nV, UINT start, UINT prims)
+	{
+		// no shader / not a studio mesh (no normal to bend) = the model's own material draws as is
+		const DeclInfo decl = GlassGpuReady(dev) ? ReadDecl(dev) : DeclInfo{ false, false, false, -1 };
+		DeclDiag(dev, "GLASS", decl);
+		if (!decl.ok || decl.compressed < 0)
+			return o_DIP(dev, type, base, minV, nV, start, prims);
+
+		/* one rt copy per layer, before its first mesh (later meshes refract the same frame, never each other). no copy = own material.
+		   ponytail: full rt per copy, 10 glass ghosts = 10 copies; copy the model's screen rect if it shows in perf */
+		if (s_glCopyPending)
+		{
+			s_glCopyPending = false;
+			s_glFrame = CopyGlassFrame(dev);
+		}
+		if (!s_glFrame)
+			return o_DIP(dev, type, base, minV, nV, start, prims);
+
+		IDirect3DVertexShader9* oldVs = nullptr;
+		IDirect3DPixelShader9* oldPs = nullptr;
+		dev->GetVertexShader(&oldVs);
+		dev->GetPixelShader(&oldPs);
+
+		const int bump = BumpSampler(oldPs);
+		IDirect3DVertexShader9* vs = s_glVs[Dx8(oldVs)][decl.skinned][decl.compressed ? 2 : decl.tangent ? 1 : 0];
+		const int psIndex = bump == 1 ? 1 : bump == 3 ? 2 : 0;
+
+		DWORD oldSrgb = 0, oldZFunc = 0, oldZWrite = 0, oldAlphaTest = 0, oldAlphaRef = 0, oldBlend = 0, oldSrc = 0, oldDest = 0, oldColorWrite = 0;
+		dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &oldSrgb);
+		dev->GetRenderState(D3DRS_ZFUNC, &oldZFunc);
+		dev->GetRenderState(D3DRS_ZWRITEENABLE, &oldZWrite);
+		dev->GetRenderState(D3DRS_ALPHATESTENABLE, &oldAlphaTest);
+		dev->GetRenderState(D3DRS_ALPHAREF, &oldAlphaRef);
+		dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &oldBlend);
+		dev->GetRenderState(D3DRS_SRCBLEND, &oldSrc);
+		dev->GetRenderState(D3DRS_DESTBLEND, &oldDest);
+		dev->GetRenderState(D3DRS_COLORWRITEENABLE, &oldColorWrite);
+
+		const float psK[3][4] = { { s_glTint[0], s_glTint[1], s_glTint[2], s_glTint[3] },
+			{ s_glRefract, s_glBump, oldAlphaTest ? 1.f : 0.f, float(oldAlphaRef & 0xFF) / 255.f },
+			{ 1.f / float(s_glFrame->desc.Width), 1.f / float(s_glFrame->desc.Height), 0.f, 0.f } };
+
+		// raw bytes in, raw bytes out (srgb read + write off) = the copy lands exactly as it was drawn
+		static const D3DSAMPLERSTATETYPE kSamplers[] = { D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER,
+			D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE, D3DSAMP_MAXMIPLEVEL };
+		static const DWORD kSamplerValues[] = { D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTEXF_NONE, FALSE, 0 };
+		DWORD oldSamplers[7] = {};
+		IDirect3DBaseTexture9* oldTex = nullptr;
+
+		float oldPsK[3][4] = {};
+		static std::vector<Saved> savedVs, savedPs;   // render thread only
+		savedVs.clear(); savedPs.clear();
+
+		dev->GetPixelShaderConstantF(30, oldPsK[0], 3);
+		SaveConsts(dev, true, s_glVsDefs, savedVs);
+		SaveConsts(dev, false, s_glPsDefs, savedPs);
+		for (int i = 0; i < 7; i++)
+		{
+			dev->GetSamplerState(kGlassFrameStage, kSamplers[i], &oldSamplers[i]);
+			dev->SetSamplerState(kGlassFrameStage, kSamplers[i], kSamplerValues[i]);
+		}
+		dev->GetTexture(kGlassFrameStage, &oldTex);
+		dev->SetTexture(kGlassFrameStage, s_glFrame->tex);
+
+		// tint is a display value: no linear -> srgb on write. alpha test = clip in our ps
+		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+		dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+		if (s_glIgnorez)
+			dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+		else if (s_glTranslucent && (oldZFunc == D3DCMP_LESS || oldZFunc == D3DCMP_GREATER))
+			dev->SetRenderState(D3DRS_ZFUNC, oldZFunc == D3DCMP_LESS ? D3DCMP_LESSEQUAL : D3DCMP_GREATEREQUAL);
+
+		dev->SetVertexShader(vs);
+		dev->SetPixelShader(s_glPs[psIndex]);
+		dev->SetPixelShaderConstantF(30, psK[0], 3);
+
+		// opaque = own blend off whatever the material asked; translucent = depth only prepass first ( two tone ), then blend
+		if (s_glTranslucent)
+		{
+			if (!s_glIgnorez)
+			{
+				dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+				dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+				o_DIP(dev, type, base, minV, nV, start, prims);
+				dev->SetRenderState(D3DRS_COLORWRITEENABLE, oldColorWrite);
+			}
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+			dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+			dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+		}
+		else
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+		if (s_glIgnorez || s_glTranslucent)
+			dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+
+		const HRESULT hr = o_DIP(dev, type, base, minV, nV, start, prims);
+
+		// constants before shaders: the engine shader's own defs must win their slots
+		dev->SetRenderState(D3DRS_SRGBWRITEENABLE, oldSrgb);
+		dev->SetRenderState(D3DRS_ZFUNC, oldZFunc);
+		dev->SetRenderState(D3DRS_ZWRITEENABLE, oldZWrite);
+		dev->SetRenderState(D3DRS_ALPHATESTENABLE, oldAlphaTest);
+		dev->SetRenderState(D3DRS_ALPHABLENDENABLE, oldBlend);
+		dev->SetRenderState(D3DRS_SRCBLEND, oldSrc);
+		dev->SetRenderState(D3DRS_DESTBLEND, oldDest);
+		dev->SetPixelShaderConstantF(30, oldPsK[0], 3);
+		RestoreConsts(dev, true, savedVs);
+		RestoreConsts(dev, false, savedPs);
+		dev->SetVertexShader(oldVs);
+		dev->SetPixelShader(oldPs);
+		for (int i = 0; i < 7; i++)
+			dev->SetSamplerState(kGlassFrameStage, kSamplers[i], oldSamplers[i]);
+		dev->SetTexture(kGlassFrameStage, oldTex);
+		if (oldVs) oldVs->Release();
+		if (oldPs) oldPs->Release();
+		if (oldTex) oldTex->Release();
+		return hr;
+	}
+
 	// ---- normal blend weapon sheen (fx_sheen_ps.hlsl) ----
 	IDirect3DPixelShader9* s_shPs[2] = {};   // ps_2_b, ps_3_0: the engine pass is either, ours must pair with its vs
 	Defs s_shPsDefs;
@@ -719,6 +957,8 @@ namespace
 		MiscHookGuard _g;
 		if (s_ttArmed.load(std::memory_order_relaxed))
 			return DrawTwoTone(dev, type, base, minV, nV, start, prims);
+		if (s_glArmed.load(std::memory_order_relaxed))
+			return DrawGlass(dev, type, base, minV, nV, start, prims);
 		if (s_armed.load(std::memory_order_relaxed))
 			return DrawLsd(dev, type, base, minV, nV, start, prims);
 		if (s_chArmed.load(std::memory_order_relaxed))
@@ -810,6 +1050,56 @@ namespace
 	ChFunctor s_chArms[1024];
 	unsigned  s_chArmNext = 0;
 	ChFunctor s_chDisarm = { s_chDisarmVt };
+
+	// glass: same ring scheme, each arm also asks for a fresh rt copy at the layer's first dip
+	struct GlFunctor { void** vfptr; float tint[4]; float refract, bump; bool ignorez; };
+	void __fastcall Fn_GlArm(void* p)
+	{
+		auto* f = static_cast<GlFunctor*>(p);
+		memcpy(s_glTint, f->tint, sizeof(s_glTint));
+		s_glRefract = f->refract;
+		s_glBump = f->bump;
+		s_glIgnorez = f->ignorez;
+		s_glTranslucent = f->tint[3] < 1.f;
+		s_glCopyPending = true;
+		s_glArmed.store(true, std::memory_order_relaxed);
+	}
+	void __fastcall Fn_GlDisarm(void*) { s_glArmed.store(false, std::memory_order_relaxed); }
+
+	void* s_glArmVt[4]    = { (void*)&Fn_AddRef, (void*)&Fn_Release, (void*)&Fn_Dtor, (void*)&Fn_GlArm };
+	void* s_glDisarmVt[4] = { (void*)&Fn_AddRef, (void*)&Fn_Release, (void*)&Fn_Dtor, (void*)&Fn_GlDisarm };
+	GlFunctor s_glArms[1024];
+	unsigned  s_glArmNext = 0;
+	GlFunctor s_glDisarm = { s_glDisarmVt };
+}
+
+void GlassChams_Begin(const float tint[4], float refract, float bump, bool ignorez)
+{
+	EnsureHook();
+	if (!o_DIP) return;
+	GlFunctor& f = s_glArms[s_glArmNext++ & 1023];
+	f.vfptr = s_glArmVt;
+	memcpy(f.tint, tint, sizeof(f.tint));
+	f.refract = refract;
+	f.bump = bump;
+	f.ignorez = ignorez;
+	if (!ScreenFx_QueueFunctor(&f))
+		Fn_GlArm(&f);   // mat_queue_mode 0: this thread is the render thread
+}
+
+void GlassChams_End()
+{
+	if (!o_DIP) return;
+	if (!ScreenFx_QueueFunctor(&s_glDisarm))
+		Fn_GlDisarm(&s_glDisarm);
+}
+
+void GlassChams_ReleaseTargets()
+{
+	for (GlassFrame& f : s_glFrames) ReleaseGlassFrame(f);
+	s_glFrame = nullptr;
+	s_glClock = 0;
+	s_glCopyFailed = false;
 }
 
 void SheenNormal_Tick()

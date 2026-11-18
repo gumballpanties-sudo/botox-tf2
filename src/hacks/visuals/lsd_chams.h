@@ -27,3 +27,11 @@ void ShaderChams_End();
 
 void TwoToneChams_Begin(const float light[4], const float dark[4], float threshold, float edge, bool ignorez);
 void TwoToneChams_End();
+
+// botox hacks/visuals/glass_chams.{h,cpp}: the "glass" layer draws the model's OWN materials like two tone (normal map
+// stays bound); while armed the DIP detour copies the bound rt once per layer and swaps in fx_glass_* (that copy refracted
+// by the normal mapped normal). tint 0..1 display, alpha pre-scaled; refract = world units, bump = normal map strength.
+// ReleaseTargets: the rt copies are DEFAULT pool, dropped before a device Reset.
+void GlassChams_Begin(const float tint[4], float refract, float bump, bool ignorez);
+void GlassChams_End();
+void GlassChams_ReleaseTargets();
