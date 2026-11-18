@@ -354,7 +354,9 @@ CrashSpan::~CrashSpan()
 
 static constexpr double k_stutterMs   = 33.0;    // one frame of 30 fps
 static constexpr double k_spanNoteMs  = 4.0;     // a span worth naming even in a smooth window
-static constexpr int    k_maxSummaries = 180;    // 30 minutes of 10 s windows
+// 3 hours of 10 s windows: 180 (30 min) went blind right where "worse after a long stream" lives.
+// ~300 bytes each, under the 1 MB reset in OpenFile.
+static constexpr int    k_maxSummaries = 1080;
 
 // The 4 worst single runs this window. Spans nest (overlay/build holds ov/*), so the one
 // worst span is always the parent -- the runners-up name the child that made it slow.
@@ -392,12 +394,15 @@ static void StutterSummary(double worstFrameMs, int stutterFrames, double window
         EnterCriticalSection(&s_cs);
         Banner();
         SYSTEMTIME t{}; GetLocalTime(&t);
+        // a stream / recorder hook in the Present chain: Discord injects when the stream starts, so per line
+        const int capture = (GetModuleHandleW(L"DiscordHook64.dll") ? 1 : 0) | (GetModuleHandleW(L"graphics-hook64.dll") ? 2 : 0) |
+                            (GetModuleHandleW(L"nvspcap64.dll") ? 4 : 0);
         Out("[%02d:%02d:%02d] STUTTER %d frame(s) >= %.0f ms in %.0f s, worst %.0f ms | worst span %s %.1f ms"
-            " (x%ld, %.0f ms total) | busiest %s %.0f ms total (x%ld, %.1f avg)",
+            " (x%ld, %.0f ms total) | busiest %s %.0f ms total (x%ld, %.1f avg) | capture=%d",
             t.wHour, t.wMinute, t.wSecond, stutterFrames, k_stutterMs, windowMs / 1000.0, worstFrameMs,
             iMax >= 0 ? s_span[iMax].tag : "-", worstMax, iMax >= 0 ? s_span[iMax].n : 0L, iMax >= 0 ? s_span[iMax].sumMs : 0.0,
             iSum >= 0 ? s_span[iSum].tag : "-", worstSum, iSum >= 0 ? s_span[iSum].n : 0L,
-            (iSum >= 0 && s_span[iSum].n) ? s_span[iSum].sumMs / s_span[iSum].n : 0.0);
+            (iSum >= 0 && s_span[iSum].n) ? s_span[iSum].sumMs / s_span[iSum].n : 0.0, capture);
         PrintTopSpans();
         if (s_summaries == k_maxSummaries) Out("   (stutter summary cap reached -- no further lines)");
         LeaveCriticalSection(&s_cs);

@@ -526,8 +526,22 @@ void Performance(bool restore)
         if (now != k.value) KnobSet(k, k.value);
     }
 
+    // A stream / recorder hook in our Present (discord screenshare, obs, shadowplay) hands frames to an
+    // encoder in another process: high priority here can starve it, and its hook then waits in Present.
+    // Hook loaded = normal priority (botox misc.cpp performance 1:1). 1 Hz poll, a module list walk.
+    static bool      s_capture     = false;
+    static ULONGLONG s_captureNext = 0;
+    if (const ULONGLONG t = GetTickCount64(); t >= s_captureNext)
+    {
+        s_captureNext = t + 1000;
+        const bool was = s_capture;
+        s_capture = GetModuleHandleW(L"DiscordHook64.dll") || GetModuleHandleW(L"graphics-hook64.dll") ||
+                    GetModuleHandleW(L"nvspcap64.dll");
+        if (s_capture != was) DebugLog("performance: capture hook %s", s_capture ? "loaded (high priority held off)" : "gone");
+    }
+
     const HANDLE process = GetCurrentProcess();
-    if (enabled && g_perfHighPriority)
+    if (enabled && g_perfHighPriority && !s_capture)
     {
         if (!s_storedClass && (s_storedClass = GetPriorityClass(process)) != 0)
             SetPriorityClass(process, HIGH_PRIORITY_CLASS);
