@@ -812,6 +812,7 @@ extern float g_asExtraReach;       // wall scan reach past the hull, units (def 
 extern float g_asBudget;           // search clock, percent of one tick (def 50, 10-90)
 extern bool g_asMovementFix;       // botox "use movement fix" (def true) -- off forces the pin view+move onto the cmd
 extern bool g_asDriftHang;         // air stuck: drift hang first on a pinned start (sv_wallbug 0)
+extern bool g_asFreeze;            // air stuck: exact-axis freeze stage before the lumi fan
 // wave 3 (Aletherium): pixel surf finder + assist
 extern bool g_psFinder;    extern int g_psFinderKey;    extern int g_psFinderMode;
 extern float g_psFinderMargin;     // scan margin above/below the aimed column (def 8, 0-64)

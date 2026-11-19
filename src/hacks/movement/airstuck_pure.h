@@ -2,6 +2,7 @@
 // airstuck_pure.h -- pure math shared by airstuck.inl / pixelsurf.inl (botox air_stuck.cpp +
 // tick_scale.h ports). No engine, so tests/airstuck_test.cpp can run it.
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 
 namespace as
@@ -135,5 +136,62 @@ inline void HangWish(float vx, float vy, float nx, float ny, float closing, floa
 inline constexpr float k_fanGap = 2.f;
 inline float WallGap(float frac, float reach, float edge) { return frac * reach - edge; }
 inline bool  WallFar(float frac, float reach, float edge) { return WallGap(frac, reach, edge) > k_fanGap; }
+
+// ---- exact-axis freeze: botox csgo air_stuck.cpp n_as_h (11-15) 1:1. Vertical face only (n.z == 0),
+// so z never enters d. Engine float order of cmodel.cpp's plane test ----
+struct FzPlane { float nx, ny, dist; };      // trace plane: normal out of the wall + dist
+struct FzHull  { float ex, ey, ox, oy; };    // Ray_t::Init: ext = (maxs - mins) / 2, off = (mins + maxs) / 2
+
+// d of a hull-trace point at ray centre (px, py): Dot(p, n) - (dist + DotProductAbs(n, ext))
+inline float FzEngDp(float px, float py, const FzPlane& P, const FzHull& H)
+{
+    float d = std::fabs(P.nx * H.ex) + std::fabs(P.ny * H.ey);
+    d = P.dist + d;
+    return (px * P.nx + py * P.ny) - d;
+}
+inline float FzEngD(float ox, float oy, const FzPlane& P, const FzHull& H) { return FzEngDp(ox + H.ox, oy + H.oy, P, H); }
+// d at the END of a free move: end = origin + v dt, ray END = (origin + off) + (end - origin)
+inline float FzEngDAfter(float ox, float oy, const FzPlane& P, const FzHull& H, float vx, float vy, float dt)
+{
+    const float ex = ox + vx * dt, ey = oy + vy * dt;
+    return FzEngDp((ox + H.ox) + (ex - ox), (oy + H.oy) + (ey - oy), P, H);
+}
+// exact distance (double) and the float grid it is read on (q = ulp of the dot sum)
+inline double FzTrueD(float ox, float oy, const FzPlane& P, const FzHull& H)
+{
+    const double D = (double)P.dist + (double)H.ex * std::fabs((double)P.nx) + (double)H.ey * std::fabs((double)P.ny);
+    return ((double)ox + H.ox) * P.nx + ((double)oy + H.oy) * P.ny - D;
+}
+inline float FzGridQ(float ox, float oy, const FzPlane& P, const FzHull& H)
+{
+    const float px = ox + H.ox, py = oy + H.oy;
+    const float v  = std::fabs(px * P.nx + py * P.ny);
+    return std::nextafter(v, FLT_MAX) - v;
+}
+// AirAccelerate (gamemovement.cpp:1705) after AirMove's maxspeed clamp, xy only. Returns accelspeed
+inline float FzAccel(float& vx, float& vy, float wx, float wy, float ws, float airaccel, float dt, float fric,
+                     float cap, float maxSpeed)
+{
+    const float wishspeed = std::min(ws, maxSpeed);
+    const float add = std::min(wishspeed, cap) - (vx * wx + vy * wy);
+    if (add <= 0.f) return 0.f;
+    const float a = std::min(airaccel * wishspeed * dt * fric, add);
+    vx += a * wx;
+    vy += a * wy;
+    return a;
+}
+// freeze press: straight along n so the END lands at true d = k q / 16. dvn = the normal velocity change
+// that does it; reachable when one AirAccelerate step gives exactly a = |dvn| (ws = a / coef within
+// maxSpeed, a within addspeed). v0n = START velocity . n. Out: ws, sg (+1 = out along n, -1 = into the wall)
+inline bool FzWish(int k, float q, double trueD, float v0n, float dt, float coef, float cap, float maxSpeed,
+                   float& ws, float& sg)
+{
+    const float dvn = (float)((k * (double)q / 16.0 - trueD) / dt) - v0n;
+    if (std::fabs(dvn) < 1e-7f || !(coef > 0.f)) return false;
+    sg = dvn > 0.f ? 1.f : -1.f;
+    const float a = std::fabs(dvn);
+    ws = a / coef;
+    return ws <= maxSpeed && a <= std::min(ws, cap) - sg * v0n;
+}
 
 }   // namespace as

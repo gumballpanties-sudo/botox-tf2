@@ -1592,6 +1592,7 @@ static void Page_MovementMain()
                 ImGui::Keybind("air stuck key", &g_airStuckKey, &g_airStuckMode);
                 ImGui::Checkbox("use movement fix##as", &g_asMovementFix);
                 ImGui::Checkbox("lip hang (sv_wallbug 0)##as", &g_asDriftHang);   // lip hang + drift hang (airstuck.inl)
+                ImGui::Checkbox("axis freeze##as", &g_asFreeze);                  // END stuck test pin (airstuck.inl)
                 SliderF("extra reach##as", &g_asExtraReach, 0.f, 32.f, "%.2f");
                 SliderF("fan budget##as", &g_asBudget, 5.f, 90.f, "%.0f%% tick");
             }, ImVec2(220.f, -1));

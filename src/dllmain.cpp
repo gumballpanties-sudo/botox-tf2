@@ -755,6 +755,7 @@ float g_asExtraReach = 4.f;  // botox m_air_stuck_extra_reach
 float g_asBudget = 50.f;     // botox m_air_stuck_budget (percent of a tick)
 bool g_asMovementFix = true;    // botox m_movement_fix (air_stuck.cpp:168 -- off forces view+move onto cmd)
 bool g_asDriftHang = true;      // sv_wallbug 0: hold a pinned hull still off the face (MV_DriftHold)
+bool g_asFreeze = true;         // exact-axis freeze (botox csgo 11-15): END stuck test pin, before lumi
 // wave 3 (Aletherium): pixel surf finder + assist
 bool g_psFinder = false;    int g_psFinderKey = 0;    int g_psFinderMode = 1;
 float g_psFinderMargin = 8.f;

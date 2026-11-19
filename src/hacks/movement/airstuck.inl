@@ -189,7 +189,8 @@ static struct
     int   lastCmd = -1; float lastYaw = 0.f, lastMove = 0.f;          // s_last
     float startAng = 0.f;
     bool  latched = false; int len = 0;
-    int   sims = 0, holds = 0, pins = 0, steers = 0, resends = 0, nowall = 0, drifts = 0, hangs = 0;
+    bool  freeze = false;   // last cmd = a freeze (or its hold replay): frozen = no move, skip the drift hang
+    int   sims = 0, holds = 0, pins = 0, steers = 0, resends = 0, nowall = 0, drifts = 0, hangs = 0, freezes = 0;
 } s_as;
 
 static void AirStuck(void* pLocal, UserCmd_t* cmd)
@@ -203,16 +204,19 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         if (sec != s_sec)
         {
             s_sec = sec;
-            if (g_debugLogEnable && (s_as.holds || s_as.pins || s_as.steers || s_as.resends || s_as.nowall || s_as.drifts || s_as.hangs))
-                DebugLog("AS: holds=%d hangs=%d drifts=%d pins=%d steers=%d resends=%d nowall=%d sims=%d svstop=%d/%d", s_as.holds,
-                         s_as.hangs, s_as.drifts, s_as.pins, s_as.steers, s_as.resends, s_as.nowall, s_as.sims, s_asSvStops, s_asSvAcks);
+            if (g_debugLogEnable && (s_as.holds || s_as.pins || s_as.steers || s_as.resends || s_as.nowall || s_as.drifts || s_as.hangs
+                                     || s_as.freezes))
+                DebugLog("AS: holds=%d hangs=%d drifts=%d freezes=%d pins=%d steers=%d resends=%d nowall=%d sims=%d svstop=%d/%d",
+                         s_as.holds, s_as.hangs, s_as.drifts, s_as.freezes, s_as.pins, s_as.steers, s_as.resends, s_as.nowall,
+                         s_as.sims, s_asSvStops, s_asSvAcks);
             s_as.holds = s_as.pins = s_as.steers = s_as.resends = s_as.nowall = s_as.sims = s_as.drifts = s_as.hangs = 0;
+            s_as.freezes = 0;
             s_asSvAcks = s_asSvStops = 0;
         }
     }
     const auto end = [&](const char* why) {
         if (s_as.latched) DebugLog("AS: unstuck why=%s held=%d z=%.3f", why, s_as.len, s_prePredOrigin.z);
-        s_as.latched = false; s_as.len = 0; s_as.hold = false;
+        s_as.latched = false; s_as.len = 0; s_as.hold = false; s_as.freeze = false;
     };
     // ps assist arc in flight / pending: sim-proven, AS move+duck stomp = off the arc (log: "AS: lumi" on
     // the launch tick, outcome liveA != promA, hop cut before the seam). Ride hold is NOT the arc: AS keeps it
@@ -233,6 +237,12 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
     const Vec3  mins = EntV3(pLocal, g_offMins), maxs = EntV3(pLocal, g_offMaxs);
     const float extX = (std::max)(fabsf(mins.x), fabsf(maxs.x)), extY = (std::max)(fabsf(mins.y), fabsf(maxs.y));
     const bool  startPinned = IsTargetVz(vel.z, 0.05f);
+    // a freeze (or its hold) went out last cmd and START is not pinned: refused (offline the engine, online the server)
+    if (s_as.freeze && !startPinned)
+    {
+        DebugLog("AS: freeze lost z=%.3f vel=%.3f,%.3f,%.3f cp=%d", origin.z, vel.x, vel.y, vel.z, nBase);
+        s_as.freeze = false;
+    }
     AsClock clock;
     clock.Start(std::clamp(g_asBudget, 5.f, 90.f) * 0.01f, dt);
 
@@ -281,6 +291,7 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         s_asStamp = { cmd->command_number, cmd->viewangles, cmd->forwardmove, cmd->sidemove, cmd->buttons };
         s_as.lastCmd = cmd->command_number; s_as.lastYaw = yaw; s_as.lastMove = move;
         s_as.hold = pin; s_as.yaw = yaw; s_as.move = move;
+        s_as.freeze = false;   // only the freeze stage + its hold replay set / carry it
         s_asHolding = pin;
         if (pin && !s_as.latched)
             DebugLog("AS: stuck by=%s yaw=%.2f fwd=%.3f z=%.3f vz=%.2f xy=%.2f", what, yaw, move, origin.z, vel.z, vel.Length2D());
@@ -302,7 +313,8 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
     // drifting: MV_DriftHold (movement.cpp) brakes xy to 0 and leaves the across-face velocity a hair
     // away, re-solved every tick and proven 16 ticks closed loop. On sv_wallbug 1 / an exact-zero crease
     // the bare tick has no offset and it simply parks; if it cannot hold, the botox path below runs
-    if (startPinned && g_asDriftHang)
+    // a frozen START (freeze = no move, no clip) has no drift to hang against: its hold replay below owns it
+    if (startPinned && g_asDriftHang && !s_as.freeze)
     {
         TraceFilterWorldProps cfil; cfil.Setup(pLocal);
         Vec3 cn{};
@@ -441,7 +453,14 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
             ++s_as.sims;
             const bool held = pinnedNow();
             RestoreToFrame(nBase - 1);
-            if (held) { ++s_as.holds; send(s_as.yaw, s_as.move, true, "hold"); return; }
+            if (held)
+            {
+                const bool fz = s_as.freeze;   // csgo keep_freeze: the hold of a freeze is still a freeze
+                ++s_as.holds;
+                send(s_as.yaw, s_as.move, true, "hold");
+                s_as.freeze = fz;
+                return;
+            }
             DebugLog("AS: hold break t=%d yaw=%.1f fwd=%.4f", s_as.len, s_as.yaw, s_as.move);
         }
     }
@@ -450,13 +469,15 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
     TraceFilterWorldProps fil; fil.Setup(pLocal);
     bool found = false;
     Vec3 n{};
+    GameTrace_t ctr{};   // the face the hull touches (the freeze reads its plane dist)
     for (int i = 0; i < 4 && !found; ++i)
     {
         const float a = (float)(i * 90) * 0.017453292f;
         GameTrace_t tr{};
         TraceHull(origin, Vec3(origin.x + cosf(a) * 0.05f, origin.y + sinf(a) * 0.05f, origin.z), mins, maxs, MASK_PLAYERSOLID, &fil, &tr);
-        if (tr.DidHit() && fabsf(tr.plane.normal.z) <= 0.35f) { found = true; n = tr.plane.normal; }
+        if (tr.DidHit() && fabsf(tr.plane.normal.z) <= 0.35f) { found = true; n = tr.plane.normal; ctr = tr; }
     }
+    const bool touching = found;
     if (found) s_as.startAng = atan2f(-n.y, -n.x);
     // the column reaches the full "extra reach" slider (was capped at 2u here, so 4 = 2): a face past
     // as::k_fanGap is an APPROACH target below, not a fan target
@@ -484,6 +505,70 @@ static void AirStuck(void* pLocal, UserCmd_t* cmd)
         if (!resend()) { s_as.startAng = 0.f; end("nowall"); }
         RestoreToFrame(nBase - 1);
         return;
+    }
+
+    // ---- freeze: exact-axis face, hull on it (botox csgo air_stuck.cpp 11-15) ------------------------------
+    // TryPlayerMove re-tests a full-distance bump UNSWEPT at endpos (gamemovement.cpp:2636): startsolid there =
+    // velocity 0 + break before SetAbsOrigin = no move, END vel (0, 0, pin). No ClipVelocity on that path, so
+    // sv_wallbug never reaches it. csgo: box brushes count touching as inside in absolute coords while the swept
+    // test is relative to START = a band at the face; END aimed straight in at true d = k q/16. Whether TF2's
+    // engine has that band is UNVERIFIED (engine code not in the SDK): sims judge, `freezes=0` = it does not.
+    // A fixed point (same cmd re-freezes, chain = k_chain) wins, else the longest; a 1-tick freeze is still sent:
+    // frozen = no move, so next tick solves again from the same START at rest, where the fixed point is
+    if (g_asFreeze && touching && !ctr.startsolid && (fabsf(n.x) == 1.f || fabsf(n.y) == 1.f))
+    {
+        const as::FzPlane P{ n.x, n.y, ctr.plane.dist };
+        const as::FzHull  H{ (maxs.x - mins.x) * 0.5f, (maxs.y - mins.y) * 0.5f, (mins.x + maxs.x) * 0.5f, (mins.y + maxs.y) * 0.5f };
+        const float d1 = as::FzEngD(origin.x, origin.y, P, H);
+        if (d1 > 0.f)   // d <= 0 = startsolid, not a pin
+        {
+            const double dt1  = as::FzTrueD(origin.x, origin.y, P, H);
+            const float  q1   = as::FzGridQ(origin.x, origin.y, P, H);
+            const float  aa   = CvarFloat("sv_airaccelerate", 10.f), fric = AsSurfaceFriction(pLocal);
+            const float  wmax = g_offMaxspeed > 0 ? EntF(pLocal, g_offMaxspeed) : 450.f;
+            const float  v0n  = vel.x * n.x + vel.y * n.y;   // StartGravity only touches z
+            constexpr int k_order[8] = { 16, 12, 20, 8, 24, 10, 14, 18 };
+            float ends[8]{};
+            int   nEnds = 0, tried = 0, bestK = 0, bestT = 0;
+            float bestYaw = 0.f, bestWs = 0.f;
+            const int simsAt = s_as.sims;
+            for (const int k : k_order)
+            {
+                if (bestT >= k_chain || !canSim() || (tried > 0 && clock.Expired())) break;
+                float ws = 0.f, sg = 0.f;
+                if (!as::FzWish(k, q1, dt1, v0n, dt, aa * dt * fric, 30.f, wmax, ws, sg)) continue;
+                float vx = vel.x, vy = vel.y;
+                as::FzAccel(vx, vy, n.x * sg, n.y * sg, ws, aa, dt, fric, 30.f, wmax);
+                const float dEnd = as::FzEngDAfter(origin.x, origin.y, P, H, vx, vy, dt);
+                if (std::find(ends, ends + nEnds, dEnd) != ends + nEnds) continue;   // same END float = same sim
+                ends[nEnds++] = dEnd;
+                ++tried;
+                const float yaw   = RAD2DEGF(atan2f(n.y * sg, n.x * sg));
+                const int   ticks = chain(cmdFor(yaw, ws), nullptr);
+                if (ticks > bestT) { bestT = ticks; bestK = k; bestYaw = yaw; bestWs = ws; }
+            }
+            RestoreToFrame(nBase - 1);
+            static int s_fLog = -1000;
+            const bool logNow = g_debugLogEnable && cmd->command_number - s_fLog > 16;
+            if (bestT > 0)
+            {
+                ++s_as.freezes;
+                send(bestYaw, bestWs, true, "freeze");
+                s_as.freeze = true;
+                if (logNow)
+                {
+                    s_fLog = cmd->command_number;
+                    DebugLog("AS: freeze k=%d ticks=%d yaw=%.2f fwd=%.4f d=%.3g q=%.3g vn=%.3f xy=%.2f try=%d sims=%d cp=%d",
+                             bestK, bestT, bestYaw, bestWs, dt1, q1, v0n, vel.Length2D(), tried, s_as.sims - simsAt, nBase);
+                }
+                return;
+            }
+            if (tried && logNow)
+            {
+                s_fLog = cmd->command_number;
+                DebugLog("AS: freeze miss d=%.3g q=%.3g vn=%.3f try=%d sims=%d", dt1, q1, v0n, tried, s_as.sims - simsAt);
+            }
+        }
     }
 
     // ---- approach: face in reach, hull not on it -> straight-in full press, no sims ---------------------

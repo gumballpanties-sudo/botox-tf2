@@ -552,6 +552,7 @@ static const CfgEntry kEntries[] = {
     { "asBudget",         CfgEntry::FLOAT,  &g_asBudget, 0 },
     { "asMovementFix",    CfgEntry::BOOL,   &g_asMovementFix, 0 },
     { "asDriftHang",      CfgEntry::BOOL,   &g_asDriftHang, 0 },
+    { "asFreeze",         CfgEntry::BOOL,   &g_asFreeze, 0 },
     { "airStuckKey",      CfgEntry::INT,    &g_airStuckKey, 0 },
     { "airStuckMode",     CfgEntry::INT,    &g_airStuckMode, 0 },
 
