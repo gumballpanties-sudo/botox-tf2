@@ -56,6 +56,7 @@ inline bool  g_specGamesenseBar      = true;    // m_spectators_gamesense_bar
 inline bool  g_specSkebobBg          = true;    // m_spectators_skebob_background
 inline bool  g_specSkebobTitle       = true;    // m_spectators_skebob_title
 inline int   g_specHeroinType        = 1;       // heroin-new spectator_list_mode: 0 legacy, 1 regular, 2 interwebz
+inline float g_specHotwheelsGap      = 2.f;     // m_spectators_hotwheels_gap (header box -> rows box)
 // botox m_watermark_evolve_alpha -- the donor shares ONE var between the ev0lve watermark and the
 // ev0lve spectator list; own name here so it can't collide with the watermark's.
 // chillware v2 window position (ImGui window, imgui.ini is off in this dll): -1 = donor's first-use spot
