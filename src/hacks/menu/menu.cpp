@@ -3876,6 +3876,7 @@ struct MenuStyleRow
     ImFont* (*regFont)();    // nullptr = leave the chrome font alone (default style)
     ImFont* (*boldFont)();
     bool gamesense = false;  // skeet frame + gradient bar over the window (GamesenseFrame), layout untouched
+    bool primordial = false; // black 180 outer line + solid accent line (PrimordialFrame), scrollbar colours
 };
 
 static const MenuStyleRow k_menuStyles[] = {
@@ -3909,7 +3910,23 @@ static const MenuStyleRow k_menuStyles[] = {
     { "gamesense", IM_COL32(20, 20, 20, 255), IM_COL32(12, 12, 12, 255), IM_COL32(23, 23, 23, 255), IM_COL32(35, 35, 35, 255),
       IM_COL32(10, 10, 10, 255), IM_COL32(10, 10, 10, 255), IM_COL32(23, 23, 23, 255), IM_COL32(205, 205, 205, 255),
       IM_COL32(120, 120, 120, 255), 0.f, 0.f, 0.f, nullptr, nullptr, true },
+    // csgo menu.cpp "primordial" row: primordial.bin frame 41 r9, content 29, tiles 34, widget 29 + 41 r2,
+    // tooltip 29 + 41 r2, label 210, idle value 127, its own roboto pair
+    { "primordial", IM_COL32(29, 29, 29, 255), IM_COL32(41, 41, 41, 255), IM_COL32(34, 34, 34, 255), IM_COL32(29, 29, 29, 255),
+      IM_COL32(41, 41, 41, 255), IM_COL32(41, 41, 41, 255), IM_COL32(29, 29, 29, 255), IM_COL32(210, 210, 210, 255),
+      IM_COL32(127, 127, 127, 255), 9.f, 2.f, 2.f, []() -> ImFont* { return g_fontPrimordialRoboto13; },
+      []() -> ImFont* { return g_fontPrimordialRobotoMedium13; }, false, true },
 };
+
+// csgo menu.cpp primordial_frame: black 180 line 1 px outside the r9 frame, solid accent line under the band
+static void PrimordialFrame(ImDrawList* dl, const ImVec2& pos, const ImVec2& size, float bandH)
+{
+    const ImVec2 max(pos.x + size.x, pos.y + size.y);
+    dl->PushClipRect(ImVec2(pos.x - 1.f, pos.y - 1.f), ImVec2(max.x + 1.f, max.y + 1.f), false);
+    dl->AddRect(ImVec2(pos.x - 1.f, pos.y - 1.f), ImVec2(max.x + 1.f, max.y + 1.f), IM_COL32(0, 0, 0, 180), ImGui::GetStyle().WindowRounding + 1.f);
+    dl->AddRectFilled(ImVec2(pos.x, pos.y + bandH - 1.f), ImVec2(max.x, pos.y + bandH), ImGui::GetColorU32(ImGuiCol_Accent));
+    dl->PopClipRect();
+}
 
 // csgo menu.cpp gamesense_frame: 6 px frame outside the window (12 / 60 / 40 x3 / 60), 2 px bar over the band's
 // top edge = majorkahook g_color1..3 (37b1da -> cc46cd -> cce335), second row same rgb at half alpha
@@ -3954,6 +3971,15 @@ static void MenuStyleApply(const MenuStyleRow& s)
     // null = font not loaded (system calibri missing): keep the verdana pair, chrome calls CalcTextSize on it
     if (ImFont* f = s.regFont ? s.regFont() : nullptr)   g_menuReg  = f;
     if (ImFont* f = s.boldFont ? s.boldFont() : nullptr) g_menuBold = f;
+    // primordial scrollbar: track 34, thumb 41 / hover 61 / held accent, round ends
+    if (s.primordial)
+    {
+        style.Colors[ImGuiCol_ScrollbarBg]          = ImGui::ColorConvertU32ToFloat4(IM_COL32(34, 34, 34, 255));
+        style.Colors[ImGuiCol_ScrollbarGrab]        = ImGui::ColorConvertU32ToFloat4(IM_COL32(41, 41, 41, 255));
+        style.Colors[ImGuiCol_ScrollbarGrabHovered] = ImGui::ColorConvertU32ToFloat4(IM_COL32(61, 61, 61, 255));
+        style.Colors[ImGuiCol_ScrollbarGrabActive]  = style.Colors[ImGuiCol_Accent];
+        style.ScrollbarRounding = 9.f;
+    }
 }
 
 // botox tab_settings: col1 "config" + "system", col2 "visuals config" + "menu". Left out, no
@@ -4472,6 +4498,7 @@ void RenderMenu()
     dl->PopClipRect();
     RenderFadedGradientLine(dl, ImVec2(wp.x, botY), ImVec2(wz.x, 1.f), ImColor(Accent()));
     if (k_menuStyles[g_menuStyle].gamesense) GamesenseFrame(dl, wp, wz);
+    if (k_menuStyles[g_menuStyle].primordial) PrimordialFrame(dl, wp, wz, mf::kHeaderH);
 
     // ---- title: "botox" bold white, then " | <date>" regular accent, same baseline,
     // centred as one unit in the top band.

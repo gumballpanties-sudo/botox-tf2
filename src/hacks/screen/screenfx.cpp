@@ -1959,11 +1959,7 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
         ScreenFxPasses_WarpTick();
     }
 
-    // Player glow (aim/chams.cpp): Amalgam runs CGlow::RenderMain here, before the original --
-    // scene complete, viewmodel + HUD still to come. Material-system calls only, so queued mode is fine.
-    if (!g_eject) { Chams_RenderCloaked(); Glow_Render(); }
-
-    const bool ret = o_DoPostSSE(thisptr, setup);
+    if (!g_eject) Chams_RenderCloaked();
 
     /* THE GOOD PLACE TO DRAW, when we are allowed to. Here the 3D scene is finished and the
        HUD and the viewmodel are not drawn yet (viewrender.cpp:2157, DrawViewModels at 2160),
@@ -2022,6 +2018,13 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
     // the shutter: frame blend's world half, over the web screen (ScreenFx_FrameLate)
     if (route == 1)      ScreenFx_FrameLate(g_d3dDev);
     else if (route == 2) FxQueueOnRenderThread(&s_fxFunctorLate);
+
+    // Player glow + stencil (aim/chams.cpp) over every pass above (botox: glow after the passes).
+    // The passes restore the depth-stencil, so the marks still z test vs the scene. Glow_Render stays
+    // ahead of the original: the engine glow (cart, intel) leaves stencil 1/2 and the halo needs 0.
+    if (!g_eject) Glow_Render();
+
+    const bool ret = o_DoPostSSE(thisptr, setup);
 
     // Flip world: the world is finished and DrawViewModels is next (viewrender.cpp:2160), so the gun
     // draws unmirrored over it. After the passes above so they still read a z buffer that matches the colour.
