@@ -1466,16 +1466,16 @@ static void LongJump(void* pLocal, UserCmd_t* pCmd)
 //   cmd B  first AIRBORNE cmd -- DO NOT PRESS. A press here is the +20 above. Released, the
 //          engine's OnUnDuck finds CanUnduck refused (~4u of clearance) and takes its "still
 //          under something" branch: m_bDucked + FL_DUCKING stamped for FREE, no origin change.
-//   cmd C+ FL_DUCKING set, m_bDucking=0 -> PRESS AND HOLD. OnDuck skips both branches (the press
-//          is not an edge, the transition is closed), so it does nothing to our state -- it only
-//          keeps Duck() out of OnUnDuck, which stops the engine retrying CanUnduck and taking
-//          the drop on a tick of its own choosing (19u one hop, 22u the next -- sub-unit
-//          geometry, an earlier build's coin flip: 6 of 11 hops died inside the floor on it).
-//   release once a down-trace says the drop clears -> OnUnDuck -> FinishUnDuck: the feet fall
-//          20u out of the arc with room underneath. Apex ~46 -> ~26.
-// The -20 is a fixed teleport, so taking it anywhere before apex costs the same 20u -- the
-// release tick buys safety, not height. The +20 is never paid, so this can never be a crouch
-// jump, and lj stays lj.
+//   cmd C+ NOTHING (heroin FUN_18007cab0: |= IN_JUMP|IN_DUCK on the takeoff cmd, then hands off).
+//          The engine retries CanUnduck every cmd and takes the -20 itself the first cmd it has
+//          20u under the hull. Apex ~50 -> ~32.
+// WHY NO HOLD: TF2 gives 2 air ducks per air event (TF_AIRDUCKED_COUNT, DuckOverrides strips the
+// rest). Cmd B's release spends one. An earlier build held IN_DUCK from cmd C to pick a safer drop
+// tick, and letting go of that hold spent the second: no crouch until landing ("can't crouch
+// after mj"). Cost of letting the engine pick: from a launch >= ~0.6u over the floor (bhop
+// landings sit ~0.7u up) its drop tick leaves the feet < 2u up at vz < 250 and CategorizePosition
+// grounds the hop at ~19u (routesim_test). heroin takes the same deal.
+// The +20 is never paid, so this can never be a crouch jump, and lj stays lj.
 //
 // TWO ENGINE REFUSALS THE HOP CAN STILL LOSE TO, logged by name rather than guessed at:
 //   FL_DUCKING at cmd start -- CheckJumpButton refuses the jump outright (non-scout).
@@ -1487,26 +1487,6 @@ static void LongJump(void* pLocal, UserCmd_t* pCmd)
 static constexpr float k_mjLaunchVz = 200.f;   // a real TF2 launch reads ~277 post-pred
 
 static bool  s_miniHit    = false;   // takeoff duck went out this tick (indicator flash)
-static bool  s_mjHoldDuck = false;   // holding the engine off until the -20 drop is SAFE
-
-static constexpr float k_mjRiseClear = 26.f;   // rising: release only with 6u to spare
-static constexpr float k_mjFallClear = 21.f;   // falling: 20u is all the engine itself asks
-// CategorizePosition's own down-trace. Feet inside this band of a floor = FL_ONGROUND and vz
-// zeroed, whichever way the player was moving -- that is what killed the hops (the -20
-// left the feet 0.1u up and the engine grounded a player still rising at 229) and it is also
-// the honest test for "this cmd really can touch down".
-static constexpr float k_mjLandSlack    = 2.f;
-
-// free space straight down under the hull, capped at flMax (flMax = nothing in the way)
-static float MJ_ClearBelow(void* pLocal, const Vec3& vOrg, float flMax)
-{
-    if (g_offMins <= 0 || g_offMaxs <= 0 || !g_engineTrace) return 0.f;
-    TraceFilterWorldProps filter; filter.Setup(pLocal);
-    GameTrace_t tr{};
-    TraceHull(vOrg, vOrg - Vec3(0, 0, flMax), EntV3(pLocal, g_offMins), EntV3(pLocal, g_offMaxs),
-              MASK_PLAYERSOLID, &filter, &tr);
-    return flMax * tr.fraction;
-}
 
 static void MiniJump(void* pLocal, UserCmd_t* pCmd)
 {
@@ -1514,7 +1494,6 @@ static void MiniJump(void* pLocal, UserCmd_t* pCmd)
     if (!On(g_miniJump, g_miniJumpKey, g_miniJumpMode) || !g_globalVars || g_offFlags <= 0)
     {
         s_miniShouldDuck = false;
-        s_mjHoldDuck     = false;
         return;
     }
 
@@ -1526,59 +1505,9 @@ static void MiniJump(void* pLocal, UserCmd_t* pCmd)
     const Vec3 vVel        = g_offVelocity > 0 ? EntV3(pLocal, g_offVelocity) : Vec3();
     const Vec3 vOrg        = g_offOrigin   > 0 ? EntV3(pLocal, g_offOrigin)   : Vec3();
 
-    // Touched ground again -> drop everything we were holding.
+    // Touched ground again -> drop the legacy hold.
     if (bGroundPre && bGroundPost)
-    {
         s_miniShouldDuck = false;
-        s_mjHoldDuck     = false;
-    }
-
-    // ---- hold the engine off the unduck retry -- and NEVER press on cmd B -------------------
-    // THE GATE WAS READING THE OUTCOME IT EXISTS TO PREVENT. An earlier build opened this
-    // block on the POST-prediction ground flag. Pred_Start runs at the top of the post-pred
-    // section, BEFORE MiniJump, so the cmd is always simulated with our IN_DUCK still absent. On
-    // the one tick where clearance crosses the engine's own 20u CanUnduck bar, that duck-free sim
-    // takes FinishUnDuck, drops the feet 20u onto the floor and comes back FL_ONGROUND -- so the
-    // gate answered "we already landed" and skipped the press that would have prevented it.
-    // Ground is asked of the state the cmd STARTS on; a post-pred landing is believed only when
-    // the floor is actually reachable this cmd (k_mjLandSlack); velocity comes from the pre-pred
-    // snapshot too (the predicted vz reads 0.0 on the artifact cmd and would call a player rising
-    // at 229 a faller, then use the wrong clearance bar).
-    if (s_mjHoldDuck && !bGroundPre)
-    {
-        const bool  bFlDuck = (s_prePredFlags & FL_DUCKING) != 0;
-        const float flVz    = s_prePredVel.z;
-        const float flFall  = flVz < 0.f ? -flVz * TickInterval() : 0.f;
-        const float flRaw   = MJ_ClearBelow(pLocal, s_prePredOrigin, 48.f);
-        // the release edge is seen on the NEXT cmd, so test the clearance there: rising gains
-        // a tick, falling loses one
-        const float flClear = flRaw - flFall;
-        const bool  bRoom   = flClear >= (flVz > 0.f ? k_mjRiseClear : k_mjFallClear);
-        // the floor is further off than this tick's fall can carry us: no button set lands us
-        // here, so a predicted FL_ONGROUND is the -20 teleport and nothing else
-        const bool  bLanding = flRaw <= flFall + k_mjLandSlack;
-
-        if (!bFlDuck && !s_prePredDucking)
-            s_mjHoldDuck = false;          // engine already took the -20 (or never stamped)
-        else if (s_prePredDucking)
-        {
-            // cmd B: the GROUND transition is still open. A press here goes to OnDuck's bInAir
-            // arm -> FinishDuck -> +20 -> a crouch jump, which is the bug in one line.
-            // Say nothing this cmd and let OnUnDuck stamp FL_DUCKING for free.
-        }
-        else if (bLanding)
-        {
-            // genuinely about to touch down. Let go: a ducked landing stalls the next jump ~13
-            // ticks (DuckOverrides), and there is no height left to save this close to the floor
-            s_mjHoldDuck = false;
-        }
-        else if (!bRoom)
-            pCmd->buttons |= IN_DUCK;      // hold the engine off until the drop is safe
-        else
-        {
-            s_mjHoldDuck = false;          // release: FinishUnDuck with room under the hull
-        }
-    }
 
     // ---- optional hold duck: pre-landing unduck ---------------------------------------------
     // Holding the duck into the air is NOT a mini jump -- the transition finishes airborne
@@ -1620,10 +1549,9 @@ static void MiniJump(void* pLocal, UserCmd_t* pCmd)
         {
             pCmd->buttons |= IN_DUCK;
             s_miniHit   = true;
-            // legacy "hold duck" keeps its own pre-landing release; otherwise the duck is held
-            // only as far as the safe drop above
+            // legacy "hold duck" keeps its own pre-landing release; otherwise this one cmd is
+            // all of it (heroin)
             if (g_miniJumpHoldDuck) s_miniShouldDuck = true;
-            else                    s_mjHoldDuck = true;
         }
         else
         {
@@ -3137,6 +3065,10 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
 
 void MV_GetIndicators(MvInd_t& out) { out = s_mvInd; }
 
+// recorder.cpp's approach (ground friction) reads the same cvar cache / datamap field
+float MV_CvarFloat(const char* name, float def) { return CvarFloat(name, def); }
+float MV_SurfaceFriction(void* pLocal) { return pLocal ? AsSurfaceFriction(pLocal) : 1.f; }
+
 void Movement_Run(UserCmd_t* pCmd)
 {
     if (g_eject || !pCmd) return;
@@ -3353,11 +3285,17 @@ static void AS_LastWriterSeh(UserCmd_t* pCmd)
     }
     Pred_AbortIfOpen();
 }
+static void RecorderFinalSeh(UserCmd_t* pCmd)   // __try can't share a function with the guard (C2712)
+{
+    __try { Recorder_CmdFinal(pCmd); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
 void Movement_AirStuckLastWriter(UserCmd_t* pCmd)
 {
     if (g_eject || !pCmd || !g_predReady) return;
     MiscHookGuard _g;
     AS_LastWriterSeh(pCmd);
+    // after the stamp: a replay goes back on whatever rewrote it, a recording stores the sent cmd
+    RecorderFinalSeh(pCmd);
 }
 
 void Movement_RunGuarded(UserCmd_t* pCmd)

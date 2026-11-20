@@ -412,7 +412,7 @@ static void DoubleJumpStrafe(void* pLocal, UserCmd_t* pCmd)
 
 // ==== auto crouch: duck ahead of a landing too low to stand in (simplified from botox
 // movement.cpp:2144 -- that version compares a standing-land trace vs a ducking-land trace;
-// here we trust CategorizePosition's own down-trace the way MJ_ClearBelow above does: one
+// here we trust CategorizePosition's own down-trace: one
 // hull trace at the HULL'S STANDING height. A floor that trace cannot reach but a ducked
 // hull (62u tall, routesim.h) would is exactly the "stand would clip, duck wouldn't" case) ====
 static void AutoCrouch(void* pLocal, UserCmd_t* pCmd)

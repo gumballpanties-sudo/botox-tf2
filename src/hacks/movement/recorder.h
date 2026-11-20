@@ -4,23 +4,26 @@
 #include "recorder_ser.h"
 
 // Movement recorder: botox hacks/movement/movement_recorder.cpp 1:1 on this pipeline.
-// Record a route (or clip the last N seconds), walk onto its start, replay it tick for tick.
+// Record a route (or let the clipper cut one per move-from-standing), walk onto its start,
+// replay it tick for tick.
 // Playback keeps the recorded WORLD wish dir under any sent view (CorrectMovement), so the
 // camera can be free, original, turned (left/right/back) or spinning.
-// Not ported: CS:GO jetpack replay, round freeze events (TF2 preround: the 2 s approach
+// Not ported: CS:GO jetpack replay, round freeze events (TF2 preround: the 3 s approach
 // give-up covers it), botox's detection-window toasts (messages go to chat instead).
 // Clips live under kRecorderDir, one ".rec" file per clip (map + tickrate inside the file).
 static constexpr const char* kRecorderDir = "C:\\botox-tf2\\recorder";
 
 inline bool  g_recEnable           = false;
-inline bool  g_recShowLine         = true;
+inline bool  g_recShowLine         = true;    // playback / approach / recording line
+inline bool  g_recPreviewLine      = false;   // idle: route lines within 300u of their start
 inline bool  g_recRender           = true;    // timer box
 inline int   g_recPosition         = 0;       // timer: top left / bottom left / bottom right
 inline bool  g_recLockVa           = true;    // original playback viewangles
 inline bool  g_recLockGoingToStart = true;    // freeze the mouse while walking to the start
-inline bool  g_recClipper          = false;   // rolling buffer of the last g_recClipSeconds
+inline bool  g_recClipper          = false;   // auto clips: move from standing, stop = clip
 inline bool  g_recClipperBox       = true;
-inline float g_recClipSeconds      = 15.f;
+inline float g_recClipStopDelay    = 0.25f;   // s at rest that ends a clip
+inline float g_recClipMax          = 60.f;    // s, longer = front cut ("cut")
 inline bool  g_recStopOnMove       = false;   // fresh WASD/jump/duck press = take over
 inline bool  g_recForceWeapon      = true;
 inline int   g_recYaw              = 0;       // original / left / right / backwards / spinning
@@ -48,6 +51,9 @@ enum RecAction : unsigned
 void Recorder_CmdStart(void* pLocal, UserCmd_t* pCmd);
 void Recorder_CmdPrePred(UserCmd_t* pCmd);   // re-lay it: pre features may have rewritten it
 void Recorder_CmdEnd(UserCmd_t* pCmd);       // keys/actions, approach, step, record the final cmd
+// after the last writer (air stuck stamp, aimbot, lua): playing = put the replay back on,
+// recording = the stored frame takes what really went out
+void Recorder_CmdFinal(UserCmd_t* pCmd);
 bool Recorder_OwnsCmd();                     // playing or walking to the start
 void Recorder_FrameStart();                  // FrameStageNotify FRAME_START: per-frame camera
 void Recorder_MouseInput(float* x, float* y);// OverrideMouseInput: mouse lock
@@ -56,6 +62,7 @@ void Recorder_MouseInput(float* x, float* y);// OverrideMouseInput: mouse lock
 void Recorder_Request(unsigned actions);     // menu buttons, consumed on the next cmd
 void Recorder_Render();                      // path, route starts, timer, clipper box, editor
 void Recorder_MenuRoutes();                  // "routes" group body (list, edit, delete, refresh)
+void Recorder_MenuClips();                   // "clip buffer" group body (finished clips, save, clear)
 void Recorder_Refresh();
 bool Recorder_EditorOpen();                  // imgui owns input while true
 bool Recorder_EditorKey(unsigned vk);        // WndProc fresh keydown: ENTER opens/closes, ESC closes

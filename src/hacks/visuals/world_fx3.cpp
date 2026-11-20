@@ -568,7 +568,12 @@ static void Lamps_Forget()
 // off Amalgam IMaterialSystem.h with MSVC overload grouping; the same count lands FindMaterial on 71,
 // GetBackBufferDimensions 31, CreateNamedRTEx 85 and GetRenderContext 98, all four confirmed live
 // (flipmath.h flipslot). IMaterial: GetName 0, GetTextureGroupName 1, ColorModulate 28,
-// IsErrorMaterial 42, GetColorModulation 45 (same count, anchors IncRef 12 / DecRef 13 / 28 / 42).
+// IsErrorMaterial 42, GetColorModulation 45 (same count, anchors IncRef 12 / DecRef 13 / 28 / 42),
+// IsPrecached 56 (Amalgam IMaterial.h, last slot). x64 materialsystem.dll: 28 and 45 both call
+// CMaterial::Precache (vt 62) first, so tinting a not-yet-loaded material loads its vmt + textures
+// from disk; the walk did that to every unloaded world/prop/sky material in the dict (1-2.6 s
+// view/wfxmat hitches 11-14). Unloaded ones wait in s_modPending until the engine precaches them
+// itself (CMatRenderContext::Bind, first draw), then Mod_Promote tints them.
 // Group 4 = lighting modulation's light glow / bloom materials (UC post 2), checked first so a glow
 // sprite in the world/prop group takes the light colour, not night-mode world tint. The post walked
 // every material every frame (200 cap) with no way back; here it rides the same 1s-throttled walk +
@@ -599,6 +604,8 @@ static unsigned NameHash(const char* s)
 
 struct ModSaved { unsigned hash; int group; float orig[3]; };
 static std::unordered_map<void*, ModSaved> s_modSaved;
+struct ModPending { void* m; unsigned hash; int group; };
+static std::vector<ModPending> s_modPending;   // matched by the last walk but not precached yet
 static float s_modNextWalk = 0.f;
 static int   s_modLastMask = 0;
 static int   s_modCount    = -1;   // GetNumMaterials at the last walk
@@ -636,11 +643,26 @@ __declspec(noinline) static void MatGetModulation(void* m, float* rgb)
 {
     __try { VCall<void>(m, 45, &rgb[0], &rgb[1], &rgb[2]); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
+__declspec(noinline) static bool MatPrecached(void* m)
+{
+    __try { return VCall<bool>(m, 56); } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// 1 = precached now: orig read + tinted, 0 = still unloaded, -1 = unreadable (drop it)
+__declspec(noinline) static int MatPromote(void* m, const float* rgb, float* orig)
+{
+    __try {
+        if (!VCall<bool>(m, 56)) return 0;
+        VCall<void>(m, 45, &orig[0], &orig[1], &orig[2]);
+        VCall<void>(m, 28, rgb[0], rgb[1], rgb[2]);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
 
 static void Mod_Walk(int mask, const float wanted[k_modGroups][3], bool restoreOff)
 {
     if (!s_matSys) s_matSys = GetInterface("materialsystem.dll", "VMaterialSystem082");
     if (!s_matSys) return;
+    s_modPending.clear();
     int touched = 0;
     unsigned short h = 0;
     void* m = nullptr;
@@ -656,6 +678,7 @@ static void Mod_Walk(int mask, const float wanted[k_modGroups][3], bool restoreO
 
         if (mask & (1 << group)) {
             if (it == s_modSaved.end()) {
+                if (!MatPrecached(m)) { s_modPending.push_back({ m, hash, group }); continue; }
                 ModSaved sv{ hash, group, { 1.f, 1.f, 1.f } };
                 MatGetModulation(m, sv.orig);
                 it = s_modSaved.emplace(m, sv).first;
@@ -668,7 +691,26 @@ static void Mod_Walk(int mask, const float wanted[k_modGroups][3], bool restoreO
         }
     }
     static int s_logged = -1;
-    if (touched && s_logged != mask) { s_logged = mask; DebugLog("worldfx3: modulation mask %d on %d materials", mask, touched); }
+    if (touched && s_logged != mask) {
+        s_logged = mask;
+        DebugLog("worldfx3: modulation mask %d on %d materials, %zu unloaded (tinted on first draw)", mask, touched, s_modPending.size());
+    }
+}
+
+// Pending materials the engine has precached since the walk: save + tint them now.
+// ponytail: follows stored pointers like the colour path in Mod_Frame; only runs while the count
+// has not moved since the walk (no frees in between), a same-frame free+alloc would slip by.
+static void Mod_Promote(const float wanted[k_modGroups][3])
+{
+    for (size_t i = 0; i < s_modPending.size();) {
+        const ModPending p = s_modPending[i];
+        ModSaved sv{ p.hash, p.group, { 1.f, 1.f, 1.f } };
+        const int r = MatPromote(p.m, wanted[p.group], sv.orig);
+        if (!r) { ++i; continue; }
+        if (r > 0) s_modSaved[p.m] = sv;
+        s_modPending[i] = s_modPending.back();
+        s_modPending.pop_back();
+    }
 }
 
 static void Mod_Frame()
@@ -706,7 +748,10 @@ static void Mod_Frame()
         // free at level change, which clears this map); a same-frame free+alloc would slip by.
         for (auto& kv : s_modSaved)
             if (mask & (1 << kv.second.group)) MatModulate(kv.first, wanted[kv.second.group]);
-    } else return;   // nothing new, or the count moved inside the 1s throttle: next walk catches it
+    } else {   // nothing new, or the count moved inside the 1s throttle: next walk catches it
+        if (!countMoved && !s_modPending.empty()) Mod_Promote(wanted);
+        return;
+    }
 
     s_modLastMask = mask;
     memcpy(s_modLast, wanted, sizeof(wanted));
@@ -1185,7 +1230,7 @@ static void LevelForget()
     Tex_RestoreAll(true);   // live walk only, then the refs we hold go
     Decal_UnhideAll();
     s_localImpacts.clear();
-    s_modSaved.clear(); s_modLastMask = 0;
+    s_modSaved.clear(); s_modPending.clear(); s_modLastMask = 0;
     memset(s_dlLit, 0, sizeof(s_dlLit));
     Lamps_Forget();   // old map's props are freed: never compare their pointers against the new map's
     s_trailValid = false;

@@ -866,7 +866,6 @@ static std::string RcKeyLabel(int k)
 static void RenderRouteKeys()
 {
     ImFont* font = g_menuReg ? g_menuReg : ImGui::GetFont();   // botox verdana 11
-    ImFont* bold = g_menuBold ? g_menuBold : font;              // botox verdana bold 11
     constexpr float k_band = 25.f, k_pad = 8.f, k_gap = 22.f;
     struct Hint { const char* label; std::string key; };
     const Hint hints[] = {
@@ -883,26 +882,11 @@ static void RenderRouteKeys()
     int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse;
     if (!g_showMenu) flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs;
     ImGui::SetNextWindowSize(ImVec2(body_w + k_pad * 2.f, k_band + k_pad + row_h * (float)IM_ARRAYSIZE(hints)), ImGuiCond_Always);
-    ImGui::Begin("botox-route-calc-keys", nullptr, flags);
+    MenuPanelBegin("botox-route-calc-keys", "route calculator", flags);
     {
         ImGuiWindow* w = ImGui::GetCurrentWindow();
         ImDrawList* wdl = w->DrawList;
         const ImVec2 pos = w->Pos, size = w->Size;
-        const float rounding = ImGui::GetStyle().WindowRounding;
-        const char* title = "route calculator";
-
-        ImGui::PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + k_band), false);
-        wdl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + k_band), IM_COL32(25, 25, 25, 255), rounding, ImDrawFlags_RoundCornersTop);
-        ImGui::PopClipRect();
-        RenderFadedGradientLine(wdl, ImVec2(pos.x, pos.y + k_band - 1.f), ImVec2(size.x, 1.f),
-                                ImColor(ImGui::GetColorU32(ImGuiCol_Accent)));
-        const ImVec2 ts = bold->CalcTextSizeA(bold->FontSize, FLT_MAX, 0.f, title);
-        wdl->AddText(bold, bold->FontSize, ImVec2(pos.x + (size.x - ts.x) * 0.5f, pos.y + (k_band - ts.y) * 0.5f),
-                     IM_COL32(255, 255, 255, 255), title);
-        ImGui::PushClipRect(ImVec2(pos.x + 1.f, pos.y + 1.f), ImVec2(pos.x + size.x - 1.f, pos.y + size.y - 1.f), false);
-        wdl->AddRect(ImVec2(pos.x + 1.f, pos.y + 1.f), ImVec2(pos.x + size.x - 1.f, pos.y + size.y - 1.f),
-                     IM_COL32(50, 50, 50, 255), rounding);
-        ImGui::PopClipRect();
 
         float y = pos.y + k_band + 2.f;
         for (const Hint& h : hints)
@@ -1164,68 +1148,49 @@ void RenderPsPointWindow()
     Vec3 pos; int mask = 127; float radius = 0.f;
     if (!PS_PointGet(s_psPointWin, pos, mask, radius)) { s_psPointWin = -1; return; }
 
-    ImGuiIO& io = ImGui::GetIO();
+    // botox points_ui.cpp render_point_settings_window: centred, 250 wide, panel chrome, controls from
+    // y 30 in the menu's own font + widgets (was a Tahoma 13 popup with section heads)
     const ImVec2 view = ImGui::GetMainViewport()->Size;   // logical (dpi) px, io.DisplaySize is the screen
-    ImGui::SetNextWindowPos(ImVec2(view.x * 0.5f + 48.f, view.y * 0.5f - 24.f), ImGuiCond_Appearing);
-    if (ImGui::Begin("ps point", nullptr,
-        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar))
+    ImGui::SetNextWindowPos(ImVec2(view.x * 0.5f, view.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(250.f, 0.f), ImVec2(250.f, FLT_MAX));
+    MenuPanelBegin("botox-point-settings-ui", "pixelsurf point settings",
+                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                       ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetCursorPosY(30.f);
+
+    // per-point engage radius. Unchecked follows the global slider (stored 0),
+    // checked pins this spot to its own distance regardless of what the slider is doing
+    bool bOverride = radius > 0.f;
+    if (ImGui::Checkbox("override radius", &bOverride))
+        PS_PointSetRadius(s_psPointWin, bOverride ? (g_psAssistRadius > 0.f ? g_psAssistRadius : 300.f) : 0.f);
+    ImGui::IndentRow();
+    if (bOverride)
     {
-        // same chrome as the main menu: bold title, then bold-label + line section
-        // heads. Was TextDisabled labels between Separators -- a second look for
-        // the same job.
-        // Not the menu chrome -- a standalone HUD popup. Default font is verdana 11 now
-        // (botox menu spec section 6/9), so this pushes back to its old Tahoma 13 for
-        // every Checkbox/Slider label below (they draw with "whatever font is current").
-        ImGui::PushFont(g_fontReg ? g_fontReg : ImGui::GetFont());
-        ImGui::PushFont(g_fontBold);
-        ImGui::TextUnformatted("ps point");
-        ImGui::PopFont();
-        ImGui::TextDisabled("z %.3f", pos.z);
-
-        MenuSectionHeader("allowed jumps");
-        // labels in mask-bit order (movement.h PsTypeBit). One per row, like every
-        // other checkbox list in the menu (this was the only 2-up column layout).
-        static const char* kLabels[7] = { "mini", "regular", "mini+duck", "crouch", "long", "long+duck", "double jump" };
-        int newMask = mask;
-        for (int k = 0; k < 7; k++)
-        {
-            bool on = (newMask >> k) & 1;
-            if (ImGui::Checkbox(kLabels[k], &on))
-                newMask = on ? (newMask | (1 << k)) : (newMask & ~(1 << k));
-        }
-        if (newMask != mask)
-            PS_PointSetMask(s_psPointWin, newMask);
-
-        // per-point engage radius. Unchecked follows the global slider (stored 0),
-        // checked pins this spot to its own distance regardless of what the slider is doing
-        MenuSectionHeader("engage radius");
-        bool bOverride = radius > 0.f;
-        if (ImGui::Checkbox("override radius", &bOverride))
-            PS_PointSetRadius(s_psPointWin, bOverride ? (g_psAssistRadius > 0.f ? g_psAssistRadius : 300.f) : 0.f);
-        if (bOverride)
-        {
-            float flNew = radius;
-            ImGui::Indent(10.f);            // menu's kSubIndent for an option of an option
-            // label must be visible: the menu's slider draws its label AND its value
-            // in one row gated on label_size.x > 0, so a "##hidden" label ate the
-            // number too. Width comes from the column, so no PushItemWidth here.
-            if (ImGui::SliderFloat("radius", &flNew, 40.f, 1024.f, "%.0f"))
-                PS_PointSetRadius(s_psPointWin, flNew);
-            ImGui::Unindent(10.f);
-        }
-        else
-            ImGui::TextDisabled("using global: %.0f", g_psAssistRadius);
-
-        MenuSectionHeader("point");
-        if (ImGui::Button("delete point", ImVec2(-1.f, 0.f)))
-        {
-            PS_PointDelete(s_psPointWin);
-            s_psPointWin = -1;
-        }
-        ImGui::TextDisabled("enter: close   backspace: delete");
-        ImGui::PopFont();
+        float flNew = radius;
+        if (ImGui::SliderFloat("radius", &flNew, 40.f, 1024.f, "%.0f"))
+            PS_PointSetRadius(s_psPointWin, flNew);
     }
+    else
+        ImGui::TextDisabled("using global: %.0f", g_psAssistRadius);
+
+    // labels in mask-bit order (movement.h PsTypeBit)
+    static const char* kLabels[7] = { "mini", "regular", "mini+duck", "crouch", "long", "long+duck", "double jump" };
+    int newMask = mask;
+    for (int k = 0; k < 7; k++)
+    {
+        bool on = (newMask >> k) & 1;
+        if (ImGui::Checkbox(kLabels[k], &on))
+            newMask = on ? (newMask | (1 << k)) : (newMask & ~(1 << k));
+    }
+    if (newMask != mask)
+        PS_PointSetMask(s_psPointWin, newMask);
+
+    if (ImGui::Button("delete point", ImVec2(-1.f, 15.f)))
+    {
+        PS_PointDelete(s_psPointWin);
+        s_psPointWin = -1;
+    }
+    ImGui::TextDisabled("z %.3f   enter: close   backspace: delete", pos.z);
     ImGui::End();
 }
 

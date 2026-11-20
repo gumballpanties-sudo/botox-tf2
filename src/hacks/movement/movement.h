@@ -161,6 +161,8 @@ void Movement_RunGuarded(UserCmd_t* pCmd);
 // botox air_stuck_final_stamp + air_stuck_shot_proof: call AFTER every other writer of the cmd
 // (the aim hook calls it after its aimbot / prediction end). No-op unless air stuck sent a pin.
 void Movement_AirStuckLastWriter(UserCmd_t* pCmd);
+float MV_CvarFloat(const char* name, float def);   // movement.cpp CvarFloat (cached ConVar read)
+float MV_SurfaceFriction(void* pLocal);           // m_surfaceFriction datamap field, 1 when missing
 
 // Re-express forwardmove/sidemove/upmove: they are read as a wish in vWishAngle's frame
 // and written back in vOldAngles' frame. Silent movement passes the fake angle as the

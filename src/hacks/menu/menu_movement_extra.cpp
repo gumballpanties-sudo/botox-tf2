@@ -19,8 +19,18 @@ void Menu_Movement_Indicators()
         ImGui::OptionPopup("velocity indicator settings", [&]() {
             ImGui::Combo("style##velocity indicator style", &g_viStyle, kIndStyleNames);
 
-            if (g_viStyle == IND_STYLE_SMOOTH)
+            if (g_viStyle == IND_STYLE_SMOOTH || g_viStyle == IND_STYLE_KAMIBEBRA) {
                 ImGui::Combo("comes from##velocity indicator", &g_viSmoothOrigin, kSmoothOriginNames);
+                // kamibebra auto = fades in place, no direction
+                if (g_viStyle == IND_STYLE_SMOOTH || g_viSmoothOrigin != SMOOTH_ORIGIN_AUTO) {
+                    // random = pre speed rolls its own angle in +-max each show
+                    ImGui::Checkbox("random angle##velocity indicator", &g_viSmoothRandomAngle);
+                    if (g_viSmoothRandomAngle)
+                        ImGui::SliderFloat("max angle##velocity indicator", &g_viSmoothAngle, 0.f, 90.f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+                    else
+                        ImGui::SliderFloat("angle##velocity indicator", &g_viSmoothAngle, -90.f, 90.f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+                }
+            }
 
             if (g_viStyle == IND_STYLE_KAMIDERE)
                 ImGui::ColorRow("kami shadow color##velocity indicator", g_indKamiShadowColor);
@@ -131,8 +141,15 @@ void Menu_Movement_Indicators()
 
             ImGui::Combo("style##keybind indicator style", &g_kiStyle, kIndStyleNames);
 
-            if (g_kiStyle == IND_STYLE_SMOOTH)
+            if (g_kiStyle == IND_STYLE_SMOOTH || g_kiStyle == IND_STYLE_KAMIBEBRA) {
                 ImGui::Combo("comes from##keybind indicators", &g_kiSmoothOrigin, kSmoothOriginNames);
+                // random = each tag rolls its own angle in +-max on turn on
+                ImGui::Checkbox("random angle##keybind indicators", &g_kiSmoothRandomAngle);
+                if (g_kiSmoothRandomAngle)
+                    ImGui::SliderFloat("max angle##keybind indicators", &g_kiSmoothAngle, 0.f, 90.f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+                else
+                    ImGui::SliderFloat("angle##keybind indicators", &g_kiSmoothAngle, -90.f, 90.f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+            }
 
             if (g_kiStyle == IND_STYLE_STATIC)
                 ImGui::SliderFloat("fade in##keybind indicators", &g_kiStaticFade, 0.f, 1.f, "%.2f s");
@@ -336,7 +353,8 @@ void Menu_Movement_Recorder()
     if (menu_group_begin("recorder"))
     {
         ImGui::Checkbox("movement recorder", &g_recEnable);
-        ImGui::Checkbox("show recording line", &g_recShowLine);
+        ImGui::Checkbox("show route lines", &g_recShowLine);
+        ImGui::Checkbox("route lines near start", &g_recPreviewLine);
         ImGui::Checkbox("show recorder timer", &g_recRender);
         if (g_recRender)
             ImGui::OptionPopup("recorder timer settings", [&]() {
@@ -346,7 +364,8 @@ void Menu_Movement_Recorder()
         if (g_recClipper)
         {
             ImGui::Checkbox("show clipper box", &g_recClipperBox);
-            ImGui::SliderFloat("clipper duration##recorder", &g_recClipSeconds, 1.f, 120.f, "%.0f s");
+            ImGui::SliderFloat("clip stop delay##recorder", &g_recClipStopDelay, 0.f, 2.f, g_recClipStopDelay > 0.005f ? "%.2f s" : "instant");
+            ImGui::SliderFloat("max clip length##recorder", &g_recClipMax, 5.f, 300.f, "%.0f s");
         }
         ImGui::Checkbox("original playback viewangles", &g_recLockVa);
         ImGui::Combo("playback yaw", &g_recYaw, "original\0left\0right\0backwards\0spinning\0");
@@ -374,7 +393,7 @@ void Menu_Movement_Recorder()
         ImGui::Keybind("recorder clear key", &g_recKeyClear, &unused, false);
         if (g_recClipper)
         {
-            ImGui::Label("clip route");
+            ImGui::Label("save clip");
             ImGui::Keybind("recorder clip key", &g_recKeyClip, &unused, false);
         }
     }
@@ -385,7 +404,7 @@ void Menu_Movement_Recorder()
         static constexpr struct { const char* label; unsigned action; } kActions[] = {
             { "start recording", REC_START_REC }, { "stop recording", REC_STOP_REC }, { "save route", REC_SAVE },
             { "start playback", REC_START_PLAY }, { "stop playback", REC_STOP_PLAY }, { "clear route", REC_CLEAR },
-            { "clip route", REC_CLIP },
+            { "save clip", REC_CLIP },
         };
         ImGui::BeginDisabled(!g_recEnable);
         for (const auto& a : kActions)
@@ -404,6 +423,13 @@ void Menu_Movement_Recorder()
     if (menu_group_begin("routes"))
         Recorder_MenuRoutes();
     menu_group_end();
+
+    if (g_recClipper)
+    {
+        if (menu_group_begin("clip buffer"))
+            Recorder_MenuClips();
+        menu_group_end();
+    }
 
     menu_columns_end();
 }

@@ -1026,7 +1026,9 @@ static const CfgEntry kEntries[] = {
     { "recLockGoingToStart",CfgEntry::BOOL, &g_recLockGoingToStart, 0 },
     { "recClipper",         CfgEntry::BOOL, &g_recClipper, 0 },
     { "recClipperBox",      CfgEntry::BOOL, &g_recClipperBox, 0 },
-    { "recClipSeconds",     CfgEntry::FLOAT,&g_recClipSeconds, 0 },
+    { "recClipMax",         CfgEntry::FLOAT,&g_recClipMax, 0 },   // was recClipSeconds (15 s cap): new key so a stale one can't cap
+    { "recClipStopDelay",   CfgEntry::FLOAT,&g_recClipStopDelay, 0 },
+    { "recPreviewLine",     CfgEntry::BOOL, &g_recPreviewLine, 0 },
     { "recStopOnMove",      CfgEntry::BOOL, &g_recStopOnMove, 0 },
     { "recForceWeapon",     CfgEntry::BOOL, &g_recForceWeapon, 0 },
     { "recYaw",             CfgEntry::INT,  &g_recYaw, 0 },

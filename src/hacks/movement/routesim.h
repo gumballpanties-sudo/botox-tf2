@@ -93,8 +93,7 @@ struct State
     // ---- not engine state: dih's own feature memory, as the next cmd will read it ----
     // who holds IN_DUCK: bits 1 the player's duck key (crouch walk off), 2 PixelSurf
     // (s_psAirDuckHeld, OR'd after prediction until the feet touch or a duck-free prediction
-    // lands, movement.cpp:3209 / 3823), 4 MiniJump (s_mjHoldDuck, OR'd after prediction until
-    // room / landing, movement.cpp:1238)
+    // lands, movement.cpp:3209 / 3823)
     int   hold = 0;
     int   psAge = 17;           // cmds since PixelSurf's pin; < 17 = s_shouldPixelSurf still latched
     bool  psRiding = false;     // s_psRidingNow as the last cmd left it
@@ -158,37 +157,88 @@ inline float DuckH(const Params& p)  { return 62.f * p.scale; }
 inline float HullH(const State& s, const Params& p) { return s.ducked ? DuckH(p) : StandH(p); }
 inline float DuckShift(const Params& p) { return StandH(p) - DuckH(p); }
 
+// ---- ONE TRACE, Z ONLY: TracePlayerBBox against one axial brush face, float for float ------------
+// botox proj-rc-tpm-split-1010 (route_engine.cpp trace_z), on the engine's GENERIC brush path:
+// TF2's 2013 engine has no box-brush table, so CM_ClipBoxToBrush (csgo src engine/cmodel.cpp:1513)
+// with Ray_t::Init (cmodel.h:84), CM_BoxTrace's m_end = m_Start + m_Delta and
+// CM_ComputeTraceEndpoints (:2254):
+//   * a move hits a face only if its END reaches the TRUE face (d1 > 0 && d2 > 0 = no hit). The
+//     true face is 1/32 under a floor marker (a marker is where a trace stops) and 1/32 over a
+//     ceiling marker. An end inside that 1/32 skin is NO hit: the hull stays IN the skin, up to
+//     0.03125 under the marker -- the size of the whole pixelsurf window (kSurfLo..kSurfHi)
+//   * the next move into the face starts inside the skin: enter frac = max(d1 - eps, 0) = 0, no
+//     move, vz clipped. CategorizePosition then grounds it with frac 0, which never snaps
+//   * every end is ((z + half) - half) + frac * delta: the hull centre round trip is in the
+//     engine's float bits, free fall included
+// RouteSim used to put every landing exactly ON the marker and needed the feet over the marker to
+// be over the box. The engine check logged minijump 0.0050 off on a flat floor every solve: the
+// minijump's landing tick ended inside the skin
+struct ZTrace { bool hit = false; float frac = 1.f; float end = 0.f; };
+// a move nothing stops: fraction 1, endpos = (m_Start + m_StartOffset) + m_Delta
+inline float FreeZ(float z, float to, float H)
+{
+    const float half = H * 0.5f;
+    return ((z + half) + -half) + (to - z);
+}
+// up = the face is over the head (a ceiling's bottom); H = the hull swept (mins.z = 0)
+inline ZTrace TraceZ(float z, float to, float H, float face, bool up)
+{
+    const float half  = H * 0.5f;                       // m_Extents.z == m_StartOffset.z
+    const float delta = to - z;                         // m_Delta
+    const float p1    = z + half;                       // m_Start: the box centre
+    const float p2    = p1 + delta;                     // m_end
+    const float dist  = (up ? -face : face) + half;     // plane->dist + DotProductAbs(normal, extents)
+    const float d1    = (up ? -p1 : p1) - dist;
+    const float d2    = (up ? -p2 : p2) - dist;
+    ZTrace t;
+    if (d1 > 0.f && !(d2 > 0.f))                        // in front at the start, on/behind it at the end
+    {
+        float f = d1 - kDistEps;                        // enter: "could be negative if d1 < epsilon"
+        if (f < 0.f) f = 0.f;
+        t.hit  = true;
+        t.frac = f / (d1 - d2);
+    }
+    const float start = p1 + -half;                     // m_Start + m_StartOffset
+    t.end = t.hit ? start + t.frac * delta : start + delta;
+    return t;
+}
+// the floor's true face: the marker is where a trace stops, 1/32 over it
+inline float FloorFace(float floorEff) { return floorEff - kDistEps; }
+
 inline void SetGround(State& s, bool on)
 {
     if (on) { s.vz = 0.f; s.airDucked = 0; }
     s.ground = on;
 }
 
-// hull bottom at/over the plane top = over the floor; lower = beside the ledge
-inline bool OverFloor(const State& s, const World& w) { return w.floor && s.z >= w.floorEff - 0.001f; }
+// feet over the floor's TRUE face = over the floor (inside the 1/32 skin included: the top plane
+// is in front of both ends of a sideways move there, CM_ClipBoxToBrush skips the brush, the hull
+// slides in over it). At or under the face = beside the ledge
+inline bool OverFloor(const State& s, const World& w) { return w.floor && s.z > FloorFace(w.floorEff); }
 
-inline void Categorize(State& s, const World& w)
+inline void Categorize(State& s, const World& w, const Params& p)
 {
     if (s.vz > kNonJumpVz) { SetGround(s, false); return; }
     const bool moveToEnd = s.ground;
-    const float end = s.z - (2.f + (moveToEnd ? kStepSize : 0.f));
-    if (OverFloor(s, w) && end < w.floorEff)
-    {
-        // StayOnGround subsumed: fraction > 0 && < 1, delta > 0.5 * COORD_RESOLUTION
-        if (moveToEnd && s.z > w.floorEff && std::fabs(s.z - w.floorEff) > 0.015625)
-            s.z = w.floorEff;
-        SetGround(s, true);
-    }
-    else
-        SetGround(s, false);
+    if (!OverFloor(s, w)) { SetGround(s, false); return; }
+    // tf_gamemovement.cpp:2373: 2 down, + step size while grounded (float order kept)
+    const float to = moveToEnd ? (s.z - 2.f) - kStepSize : s.z - 2.f;
+    const ZTrace t = TraceZ(s.z, to, HullH(s, p), FloorFace(w.floorEff), false);
+    if (!t.hit) { SetGround(s, false); return; }
+    // StayOnGround subsumed (:2440): grounded, 0 < fraction < 1, delta > 0.5 * COORD_RESOLUTION.
+    // Inside the skin the fraction is 0: grounded where it is, no snap
+    if (moveToEnd && t.frac > 0.f && t.frac < 1.f && std::fabs(s.z - t.end) > 0.015625f)
+        s.z = t.end;
+    SetGround(s, true);
 }
 
 inline bool CanUnduck(const State& s, const World& w, const Params& p)
 {
     if (w.ceil && s.z + StandH(p) > w.ceilEff + kDistEps) return false;   // standing hull startsolid
     if (s.ground) return true;
-    const float to = s.z + -DuckShift(p);
-    return !(OverFloor(s, w) && to < w.floorEff);
+    // in the air: the STANDING hull (m_bDucked cleared for the trace) swept 20 down, any hit refuses
+    if (!OverFloor(s, w)) return true;
+    return !TraceZ(s.z, s.z + -DuckShift(p), StandH(p), FloorFace(w.floorEff), false).hit;
 }
 
 inline void FinishDuck(State& s, const World& w, const Params& p, TickInfo& ti)
@@ -197,7 +247,7 @@ inline void FinishDuck(State& s, const World& w, const Params& p, TickInfo& ti)
     s.fDuck = true; s.ducked = true; s.ducking = false;
     if (!s.ground) { s.z = s.z + DuckShift(p); ti.stanceDz += DuckShift(p); }
     ti.duckedNow = true;
-    Categorize(s, w);
+    Categorize(s, w, p);
 }
 
 inline void FinishUnDuck(State& s, const World& w, const Params& p, TickInfo& ti)
@@ -205,7 +255,7 @@ inline void FinishUnDuck(State& s, const World& w, const Params& p, TickInfo& ti
     if (!s.ground) { s.z = s.z + -DuckShift(p); ti.stanceDz += -DuckShift(p); }
     s.ducked = false; s.fDuck = false; s.ducking = false; s.duckTime = 0.f;
     ti.unducked = true;
-    Categorize(s, w);
+    Categorize(s, w, p);
 }
 
 inline void OnDuck(State& s, bool pressed, const World& w, const Params& p, TickInfo& ti)
@@ -300,22 +350,26 @@ inline bool CheckJump(State& s, const Params& p, TickInfo& ti)
     return true;
 }
 
+// TryPlayerMove's first bump, z only (gamemovement.cpp:2611): the floor face going down, the
+// ceiling face going up (a head under it), else the free move -- all one TraceZ. pm.fraction > 0
+// moves (TF2 has no MINIMUM_MOVE_FRACTION), a hit clips vz to 0 (ClipVelocity, axial face,
+// overbounce 1); the rest of the tick and bumps 2-4 go sideways
 inline void AirMove(State& s, const World& w, const Params& p, TickInfo& ti)
 {
     ti.moveVz = s.vz;
-    const float zEnd = s.z + p.dt * s.vz;      // VectorMA
-    if (s.vz < 0.f && OverFloor(s, w) && zEnd < w.floorEff)
-    {
-        s.z = w.floorEff; s.vz = 0.f; ti.landHit = true;      // ClipVelocity on the floor plane
-        return;
-    }
+    const float zEnd = s.z + p.dt * s.vz;      // VectorMA(origin, time_left, velocity)
     const float H = HullH(s, p);
-    if (s.vz > 0.f && w.ceil && s.z + H <= w.ceilEff + 0.001f && zEnd + H > w.ceilEff)
+    const bool down = s.vz < 0.f && OverFloor(s, w);
+    const bool up   = s.vz > 0.f && w.ceil;
+    if (!down && !up) { s.z = FreeZ(s.z, zEnd, H); return; }
+    const ZTrace t = down ? TraceZ(s.z, zEnd, H, FloorFace(w.floorEff), false)
+                          : TraceZ(s.z, zEnd, H, w.ceilEff + kDistEps, true);
+    if (!t.hit || t.frac > 0.f) s.z = t.end;
+    if (t.hit)
     {
-        s.z = w.ceilEff - H; s.vz = 0.f; ti.ceilHit = true;
-        return;
+        s.vz = 0.f;
+        if (down) ti.landHit = true; else ti.ceilHit = true;
     }
-    s.z = zEnd;
 }
 
 // one CTFGameMovement::ProcessMovement, z only
@@ -332,9 +386,11 @@ inline void Tick(State& s, Cmd c, const World& w, const Params& p, TickInfo* pti
     else
         s.oldJump = false;
     CheckVelocity(s, p);
-    if (s.ground) s.vz = 0.f;                            // WalkMove: z stays
+    // WalkMove (tf_gamemovement.cpp:1899): a moving hull (the route assumes you run the approach)
+    // traces to dest.z = origin.z, so z only takes the hull-centre round trip
+    if (s.ground) { s.vz = 0.f; s.z = FreeZ(s.z, s.z, HullH(s, p)); }
     else          AirMove(s, w, p, ti);
-    Categorize(s, w);
+    Categorize(s, w, p);
     FinishGravity(s, p);
     if (s.ground) s.vz = 0.f;
     CheckVelocity(s, p);
@@ -350,8 +406,8 @@ inline void Tick(State& s, Cmd c, const World& w, const Params& p, TickInfo* pti
 //  MOVES -- only what a bind replays the same way every time. Each is dih's own feature, button
 //  for button, so a printed name is a thing you can press:
 //    jump             one press. Off a landing it is Bunnyhop's press on the first grounded tick
-//    minijump         MiniJump (movement.cpp:1202): duck on the takeoff cmd, nothing on cmd B,
-//                     hold until the -20 drop has room
+//    minijump         MiniJump (movement.cpp): duck on the takeoff cmd only (heroin); the engine
+//                     takes the -20 itself once it has 20u under the hull
 //    longjump         LongJump (movement.cpp:1111): jump + duck on the takeoff cmd and the next
 //    jumpbug          AutoJumpbug (movement.cpp:868), jump held while falling: floor inside
 //                     22 + max(3 ticks of fall, 8) -> hold duck; ducked, floor 20..22 under ->
@@ -398,28 +454,8 @@ inline int ScriptBit(int sc)
     }
 }
 
-struct ScriptMem { bool mjHold = false; };
-
-// dih MiniJump release (movement.cpp:1238): hold duck until the -20 drop has room
-inline float ClearBelow(const State& s, const World& w)
-{
-    if (!OverFloor(s, w) || w.floorPlayer) return 48.f;   // MJ_ClearBelow looks through a head
-    return std::min(std::max(s.z - w.floorEff, 0.f), 48.f);
-}
-
-// MiniJump's hold after cmd A (movement.cpp:1238): true = press IN_DUCK this cmd. hold drops to
-// false for good on a touch, once the engine has dropped the duck, or when the -20 has room
-inline bool MiniHold(const State& s, const World& w, const Params& p, bool& hold)
-{
-    if (s.ground || (!s.fDuck && !s.ducking)) { hold = false; return false; }
-    if (s.ducking) return false;                                    // cmd B: say nothing
-    const float fall = s.vz < 0.f ? -s.vz * p.dt : 0.f;
-    const float raw  = ClearBelow(s, w);
-    const bool  room = raw - fall >= (s.vz > 0.f ? 26.f : 21.f);
-    const bool  land = raw <= fall + 2.f;
-    if (land || room) { hold = false; return false; }
-    return true;
-}
+// per-flight script memory. Empty since MiniJump lost its hold (heroin: one duck cmd, no memory)
+struct ScriptMem {};
 
 inline Cmd ScriptCmd(int sc, int i, const State& s, ScriptMem& m, const World& w, const Params& p)
 {
@@ -429,11 +465,7 @@ inline Cmd ScriptCmd(int sc, int i, const State& s, ScriptMem& m, const World& w
     case SC_JUMP:
     case SC_DELAY: c.jump = i == 0; break;                         // RunLeg already waited
     case SC_LONG: c.jump = i == 0; c.duck = i <= 1; break;          // LongJump: 2 duck ticks
-    case SC_MINI:
-        if (i == 0) { c.jump = true; c.duck = true; m.mjHold = true; break; }
-        if (!m.mjHold) break;
-        c.duck = MiniHold(s, w, p, m.mjHold);
-        break;
+    case SC_MINI: c.jump = c.duck = i == 0; break;                 // MiniJump: duck on cmd A only
     case SC_WALKOFF:     break;
     case SC_WALKOFFDUCK: c.duck = true; break;
     case SC_FALL:        c.duck = (s.hold & 1) != 0; break;   // the player's own key; feature holds are post
@@ -1209,7 +1241,7 @@ private:
             {
                 Tick(s, Cmd(), g, m_p); m_res.ticks++; Rec(s);
                 if (!s.ground || s.edgy) return;
-                s.hold &= ~6; s.psAge = 17; s.psRiding = false; s.psPrevSurf = false;
+                s.hold &= ~2; s.psAge = 17; s.psRiding = false; s.psPrevSurf = false;
             }
         }
         const bool press = pl.sc == SC_JUMP || pl.sc == SC_MINI || pl.sc == SC_LONG;
@@ -1274,8 +1306,30 @@ private:
     // PixelSurf's hunt (movement.cpp:3665): the cmd as it stands flown psHorizon ticks ahead, duck
     // cleared (standing pass), then duck held (duck pass) -- a held ride duck skips the standing
     // pass. The first tick that clips into the seam's window is the pin; a standing pin wins
+    // SPEED: can any of the hunt's ticks reach the window at all? Gravity alone moves the feet,
+    // each tick at most its own vz*dt (a floor only stops a fall, there is no ceiling on a surf
+    // leg), plus ONE stance teleport (cmd duck is fixed for the whole hunt: one FinishDuck +20 or
+    // one FinishUnDuck -20). Outside that band the 2 x psHorizon sims find nothing -- most hunts:
+    // they run every airborne tick of a surf leg, 77% of all sim ticks on a mixed 12-marker route.
+    // Exact: no pin is ever skipped (routesim_test's brute force hunts without it)
+    static bool HuntCanReach(const State& s, float seam, const Params& p)
+    {
+        double vz = s.vz, lo = s.z, hi = s.z;
+        const double hg = 0.5 * (double)p.gravity * (double)p.dt;
+        for (int k = 0; k < p.psHorizon; k++)
+        {
+            vz -= hg;                                        // StartGravity: the move flies this
+            const double dz = vz * (double)p.dt;
+            if (dz < 0.0) lo += dz; else hi += dz;
+            vz -= hg;                                        // FinishGravity
+        }
+        const double slack = (double)DuckShift(p) + 0.25;    // the teleport + float rounding, generous
+        return lo - slack < (double)(seam - kSurfLo) && hi + slack > (double)(seam - kSurfHi);
+    }
+
     void Hunt(Fs& f, const Cmd& c, const World& w, const Params& p, const Point& T)
     {
+        if (!HuntCanReach(f.s, T.z, p)) return;
         const bool held = (f.s.hold & 2) != 0;
         for (int pass = 0; pass < 2; pass++)
         {
@@ -1310,7 +1364,7 @@ private:
         // a ground marker the feet start UNDER is a box top you come up onto: its landing tick is
         // the player's crossing, not one deterministic tick. A floor at or under the feet (a bhop
         // on one floor, a drop) is under the hull already; a jumpbug is AutoJumpbug's own trace
-        else if (L.T->type == PT_GROUND && !pl.jb && f.s.z < L.T->z - 0.001f) { FlyCross(L, pl, f, p, dep, cost); return; }
+        else if (L.T->type == PT_GROUND && !pl.jb && !(f.s.z > FloorFace(L.T->z))) { FlyCross(L, pl, f, p, dep, cost); return; }
         for (; f.i < m_o.maxLegTicks; f.i++)
             if (FlyTick(L, pl, f, p, dep, cost)) return;
     }
@@ -1318,7 +1372,7 @@ private:
     static bool SameFs(const Fs& a, const Fs& b)
     {
         return SameButClock(a.s, b.s) && a.s.tick == b.s.tick && a.s.releaseTick == b.s.releaseTick
-            && Bits(a.s.duckTime) == Bits(b.s.duckTime) && a.mem.mjHold == b.mem.mjHold
+            && Bits(a.s.duckTime) == Bits(b.s.duckTime)
             && a.leftDep == b.leftDep && a.falling == b.falling && a.aboveT == b.aboveT && a.psDuck == b.psDuck
             && a.psPinI == b.psPinI && a.creep == b.creep && a.lipIn == b.lipIn;
     }
@@ -1333,7 +1387,9 @@ private:
     // whole fork. Each fork's share = the crossing ticks that end on it / all of them.
     void FlyCross(const Leg& L, const Plan& pl, const Fs& f0, const Params& p, const std::string& dep, int cost)
     {
-        const float top = L.T->z - 0.001f;
+        // over the box = feet over its TRUE face (OverFloor): a hull falling through the 1/32 skin
+        // can still slide in over the edge, and lands in the skin
+        const float face = FloorFace(L.T->z);
         std::vector<Fs> snap;
         const bool noEdge = m_noEdge;
         m_noEdge = true;
@@ -1341,7 +1397,7 @@ private:
             Fs fr = f0; fr.crossAt = kNoCross;
             for (; fr.i < m_o.maxLegTicks; fr.i++)
             {
-                if (!fr.s.ground && fr.s.z >= top) snap.push_back(fr);
+                if (!fr.s.ground && fr.s.z > face) snap.push_back(fr);
                 if (FlyTick(L, pl, fr, p, dep, cost)) break;
             }
         }
@@ -1385,7 +1441,7 @@ private:
         const int li = L.layer;
         const int i = f.i;
         State& s = f.s;
-        if (tFloor && s.z >= T.z - 0.001f) f.aboveT = true;
+        if (tFloor && s.z > FloorFace(T.z)) f.aboveT = true;
         // ---- PIXELJUMP: the lip is a floor only once the hull is over it -----------------
         // botox route_engine.cpp point_step: a tick that STARTS with the feet at or over the
         // lip (- DIST_EPSILON) is one tick of pressing in over it; kPjCreepTicks of them and it
@@ -1412,7 +1468,6 @@ private:
 
         // ---- the player's keys, then AutoJumpbug (idle while PixelSurf's ride is latched) ----
         Cmd c = ScriptCmd(pl.sc, i, s, f.mem, w, p);
-        if (pl.sc == SC_MINI && i > 0) c.duck = false;   // MiniJump past cmd A = hold bit 4 below
         const bool scriptPost = (pl.sc == SC_LONG || pl.sc == SC_MINI) && c.duck;
         if (scriptPost) c.duck = false;                      // LongJump / MiniJump: after prediction
         const bool latched = s.psAge < 17;
@@ -1425,12 +1480,6 @@ private:
         State pr = s;
         Tick(pr, c, w, p); m_res.ticks++;
         if (scriptPost) c.duck = true;
-        if (s.hold & 4)
-        {
-            bool h = true;
-            if (MiniHold(s, w, p, h)) c.duck = true;
-            if (!h) s.hold &= ~4;
-        }
         bool psClear = false;
         const bool sv = SurfVel(s.vz, p) && (!s.ground || latched);
         if (p.pixelSurf)
@@ -1466,8 +1515,7 @@ private:
         s.psPrevSurf = sv;
         if (psClear) s.psAge = 17;
         else if (s.psAge < 17) s.psAge = std::min(s.psAge + 1, 16);
-        if (pl.sc == SC_MINI && i == 0) s.hold |= 4;        // MiniJump holds from cmd B on
-        if (s.ground) s.hold &= ~6;                          // PixelSurf / MiniJump let go on a touch
+        if (s.ground) s.hold &= ~2;                          // PixelSurf lets go on a touch
 
         if (band && ti.jumped)
         {
@@ -1509,7 +1557,7 @@ private:
             // a texturebug is the head crossing B, so the band only closes once the
             // STANDING head (the tallest it could become) is under the seam
             if (T.type == PT_TEXTUREBUG && s.z + StandH(p) < T.z - 1.f) return true;
-            if (tFloor && s.z < T.z - 0.001f) return true;
+            if (tFloor && !(s.z > FloorFace(T.z))) return true;   // at/under the true face: beside it
         }
         if (s.z < T.z - 8192.f) return true;
         return false;
@@ -1531,10 +1579,8 @@ private:
                 const float d = T.z - s.z;
                 if (d > kSurfLo && d < kSurfHi)
                 {
-                    // the first clip latches the ride. A duck only MiniJump holds is let go on the
-                    // next cmd (room under a ride), the -20 drops the hull off the seam: no ride
-                    const bool miniOnly = s.fDuck && (s.hold & 4) && !(s.hold & 3);
-                    if (stanceOk && !miniOnly)
+                    // the first clip latches the ride
+                    if (stanceOk)
                     {
                         State a = s;
                         a.vz = HalfGrav(p);                          // a clipped tick ends on -halfgrav

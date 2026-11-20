@@ -421,6 +421,10 @@ static RcCheck RcEngineCheck(void* pLocal, UserCmd_t* pCmd, const Vec3& at, rs::
     static const bool  kJumpbug[] = { false, false, false, true };
     static const char* kNames[]   = { "jump", "longjump", "minijump", "jump + jumpbug" };
     RcClockGrab();
+    // the check is the solve's whole game-thread bill (~250 Pred_Simulate ticks): logged, not guessed
+    LARGE_INTEGER qf{}, q0{}, q1{};
+    QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+    int simTicks = 0;
 
     char buf[256];
     std::string parts;
@@ -443,10 +447,10 @@ static RcCheck RcEngineCheck(void* pLocal, UserCmd_t* pCmd, const Vec3& at, rs::
         {
             rs::Cmd c = rs::ScriptCmd(kScripts[k], t, s, mem, w, still);
             bool band = false; float margin = 0.f;
-            if (kJumpbug[k] && rs::JumpbugCmd(s, w, still, c, band, margin)) mem.mjHold = false;
+            if (kJumpbug[k]) rs::JumpbugCmd(s, w, still, c, band, margin);
             pCmd->buttons = (iBtn & ~(IN_JUMP | IN_DUCK)) | (c.jump ? IN_JUMP : 0) | (c.duck ? IN_DUCK : 0);
             pCmd->forwardmove = pCmd->sidemove = pCmd->upmove = 0.f;
-            RcSimTick(pLocal, pCmd);
+            RcSimTick(pLocal, pCmd); simTicks++;
             const float zEng  = EntV3(pLocal, g_offOrigin).z;
             const bool  gEng  = (EntI(pLocal, g_offFlags) & FL_ONGROUND) != 0;
 
@@ -483,10 +487,15 @@ static RcCheck RcEngineCheck(void* pLocal, UserCmd_t* pCmd, const Vec3& at, rs::
     RestoreToFrame(nBase - 1);
     RcClockRelease();
     pCmd->buttons = iBtn; pCmd->forwardmove = fwd; pCmd->sidemove = side; pCmd->upmove = up;
+    QueryPerformanceCounter(&q1);
     if (out.ran)
     {
-        snprintf(buf, sizeof(buf), "worst |dz| at z %.2f: ", out.floorZ);
+        // rc34: the port now lands in the 1/32 skin like the engine -- every arc should read 0.0000
+        snprintf(buf, sizeof(buf), "worst |dz| at z %.4f: ", out.floorZ);
         out.line = buf + parts;
+        snprintf(buf, sizeof(buf), " | %d check tick(s) + settles, %.2f ms on the game thread", simTicks,
+                 double(q1.QuadPart - q0.QuadPart) * 1000.0 / double(qf.QuadPart));
+        out.line += buf;
     }
     return out;
 }
@@ -669,7 +678,7 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         start.s = RcReadState(pLocal, tb);
         start.s.oldJump = s_prevCmdJump;
         // dih's feature memory, live: who holds duck, PixelSurf's ride latch and ride detect
-        start.s.hold = ((s_rawButtons & IN_DUCK) ? 1 : 0) | (s_psAirDuckHeld ? 2 : 0) | (s_mjHoldDuck ? 4 : 0);
+        start.s.hold = ((s_rawButtons & IN_DUCK) ? 1 : 0) | (s_psAirDuckHeld ? 2 : 0);
         if (s_shouldPixelSurf && g_globalVars)
             start.s.psAge = std::clamp(g_globalVars->tickcount - (s_pixelSurfTicks - 16) - 1, -32, 16);
         start.s.psRiding = s_psRidingNow;
@@ -716,6 +725,11 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
         // a standing start is the settled floor: the check just measured it
         float z = bHere ? vLive.z : pts[0].pos.z;
         if (s_rcCheck.ran && fabsf(s_rcCheck.floorZ - z) < 4.f) z = s_rcCheck.floorZ;
+        // ...but the FEET stay where they are when that is inside the floor's 1/32 skin (a landing
+        // that ended there: no snap ever lifts them, rs::TraceZ) or a sub-1/64 hover StayOnGround
+        // leaves alone. The floor is still the settled z; the press leaves from the real feet
+        float feet = z;
+        if (bHere && bLiveGround && s_pcBld == 0 && fabsf(vLive.z - z) <= rs::kDistEps) feet = vLive.z;
         // building pass: the same settled feet, lifted onto the top (a top is a floor like any other)
         if (s_pcBld > 0)
         {
@@ -736,7 +750,7 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
             // arc, not a key you can let go of.
             const int tb = g_offTickBase > 0 ? EntI(pLocal, g_offTickBase) : 0;
             start.s = RcReadState(pLocal, tb);
-            start.s.z = z; start.s.vz = 0.f; start.s.ground = true;
+            start.s.z = feet; start.s.vz = 0.f; start.s.ground = true;
             start.s.oldJump = s_prevCmdJump;
             start.s.fDuck = start.s.ducking = start.s.ducked = false;
             start.s.duckTime = 0.f;
@@ -821,11 +835,12 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
     s_rcJob = job;
     s_rcBusy = true;
 
-    DebugLog("RC: solve (dihrc33) -- %d marker(s), start %s%s%s z %.3f vz %.1f%s, moves 0x%X start 0x%X, "
+    DebugLog("RC: solve (dihrc34) -- %d marker(s), start %s%s%s z %.4f%s vz %.1f%s, moves 0x%X start 0x%X, "
              "delay hop %dt, gravity %.0f, tick %.4f, scale %.2f, jump mod %.4f, bhop crop %.4f",
              (int)route.size(), start.air ? "IN AIR" : (bHere ? "where you stand" : "marker 1"),
-             s_pcBld > 0 ? " on a " : "", k_pcBld[s_pcBld].name,
-             start.s.z, start.s.vz, start.s.fDuck ? " ducked" : "", opt.moves, start.moves,
+             s_pcBld > 0 ? " on a " : "", k_pcBld[s_pcBld].name, start.s.z,
+             !start.air && start.s.z < start.floorEff ? " (in the floor's 1/32 skin)" : "",
+             start.s.vz, start.s.fDuck ? " ducked" : "", opt.moves, start.moves,
              params.delayTicks, params.gravity, params.dt, params.scale, params.jumpMod, params.cropFrac);
     for (size_t i = 0; i < route.size(); i++)
         DebugLog("RC: marker %d  %-11s z %.4f  moves 0x%X  stand %d duck %d%s", s_rcMarkerNo[i],
@@ -1520,6 +1535,47 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
         }
     }
 
+    // ---- WHERE THE HULL STANDS, NOT WHERE THE RAY HIT (botox proj-rc-acc-1003) -------------
+    // The ray stops 1/32 over the plane right under the crosshair, but a 48-wide hull on a slope
+    // rests on its uphill corner: its feet stop half-width * (|nx| + |ny|) / nz higher than that
+    // point (8.7u on a 20 degree slope, 13.9u on 30). The marker kept the ray's z, so every arc
+    // onto a sloped floor was solved against a floor that low. A hull trace down from 2u + that
+    // rise: a flat floor is unchanged, a slope (or a lip within 2u of the feet) gives the z the
+    // feet really stop at. Over 2u up it must be the plane you aimed at (a wall top over the slope
+    // is not your marker). The solve is z only: a sloped landing slides, later legs approximate
+    float flStandUp = 0.f;
+    bool bSloped = false;
+    if (pt.type == rs::PT_GROUND && !pt.ent && !pt.player && !pt.building && !bHead && g_offMins > 0 && g_offMaxs > 0)
+    {
+        TraceFilterRcMarker filter; filter.Setup(pLocal);
+        Vec3 n = bClipTop ? Vec3(0.f, 0.f, 1.f) : Vec3(trace.plane.normal.x, trace.plane.normal.y, trace.plane.normal.z);
+        if (flSnapDist >= 0.f || bLipTop)
+        {
+            // the marker moved off the aimed hit: the plane under where it is now
+            GameTrace_t under{};
+            TraceLine(pt.pos + Vec3(0.f, 0.f, 4.f), pt.pos - Vec3(0.f, 0.f, 4.f), MASK_PLAYERSOLID, &filter, &under);
+            if (!under.startsolid && under.fraction < 1.f && under.plane.normal.z > 0.7f)
+                n = Vec3(under.plane.normal.x, under.plane.normal.y, under.plane.normal.z);
+        }
+        const Vec3 vMins = EntV3(pLocal, g_offMins), vMaxs = EntV3(pLocal, g_offMaxs);
+        const float halfW = 0.5f * (vMaxs.x - vMins.x);
+        const float rise  = n.z > 0.7f ? halfW * (fabsf(n.x) + fabsf(n.y)) / n.z : 0.f;
+        bSloped = n.z > 0.7f && n.z < 0.999f;
+        GameTrace_t stand{};
+        TraceHull(pt.pos + Vec3(0.f, 0.f, 2.f + rise), pt.pos - Vec3(0.f, 0.f, 0.5f), vMins, vMaxs,
+                  MASK_PLAYERSOLID, &filter, &stand);
+        const Vec3 sn(stand.plane.normal.x, stand.plane.normal.y, stand.plane.normal.z);
+        const bool onAimed = stand.endpos.z - pt.pos.z <= 2.f || sn.x * n.x + sn.y * n.y + sn.z * n.z > 0.99f;
+        if (!stand.startsolid && stand.fraction < 1.f && sn.z > 0.7f && stand.endpos.z > pt.pos.z + 0.001f && onAimed)
+        {
+            flStandUp = stand.endpos.z - pt.pos.z;
+            pt.pos.z = stand.endpos.z;
+        }
+        if (flStandUp > 0.f || bSloped)
+            DebugLog("RC: marker stand -- normal %.3f %.3f %.3f, hull rise %.2f, stands %.4fu over the ray hit%s",
+                     n.x, n.y, n.z, rise, flStandUp, bSloped ? " | SLOPED floor: landings slide there, later heights approximate" : "");
+    }
+
     char buf[128];
     {
         std::lock_guard<std::mutex> l(g_rcLock);
@@ -1544,6 +1600,12 @@ static void RcAddPoint(void* pLocal, UserCmd_t* pCmd)
                 snprintf(buf, sizeof(buf), " - snapped to the edge %.1fu away", flSnapDist);
                 s_rcMessage += buf;
             }
+            if (flStandUp > 0.f)
+            {
+                snprintf(buf, sizeof(buf), " - you stand %.2fu higher here", flStandUp);
+                s_rcMessage += buf;
+            }
+            if (bSloped) s_rcMessage += " - on a slope: landings slide there, combos after it may miss (a flat spot is exact)";
             if (pt.type == rs::PT_SURF) s_rcMessage += " - NOT a finder dot, unverified";
         }
         else

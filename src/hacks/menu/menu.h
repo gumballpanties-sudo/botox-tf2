@@ -14,10 +14,10 @@ int  Menu_SplitPopups(ImDrawList** lists, int& count, MenuFadedList* out, int ma
 void Menu_DropPopupGhosts();
 bool Menu_SearchTyping();   // sidebar search box has the keyboard (Binds_Blocked)
 
-// bold label + thin line to the right edge -- the SUB header inside a group box.
-// Shared so the ps point window heads its blocks the same way instead of with
-// TextDisabled + Separator.
-void MenuSectionHeader(const char* label);
+// botox panel_chrome: ImGui::Begin + the small side window look (ps point, route calc keys,
+// recorder panels) -- 25px band, centred bold title, faded accent line, 1px inner outline.
+// Always pair with ImGui::End(). flags = ImGuiWindowFlags.
+void MenuPanelBegin(const char* id, const char* title, int flags, float alpha = 1.f);
 
 // = ImGui::Keybind (botox), for callers that predate it.
 void MenuBindKey(const char* id, int* key, int* mode);
