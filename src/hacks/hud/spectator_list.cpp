@@ -2621,6 +2621,86 @@ static void DrawHotwheelsV1(ImDrawList* dl)
     }
 }
 
+// grimv5 menu chrome, donor call order: 56 ring out, 56 ring in (the fill covers it), fill 12, header fill 25, border 45
+static void GrimoireBox(ImDrawList* dl, float x, float y, float w, float h, float headerH)
+{
+    dl->AddRect(ImVec2(x - 1.f, y - 1.f), ImVec2(x + w + 1.f, y + h + 1.f), IM_COL32(56, 56, 56, 255));
+    dl->AddRect(ImVec2(x + 1.f, y + 1.f), ImVec2(x + w - 1.f, y + h - 1.f), IM_COL32(56, 56, 56, 255));
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(12, 12, 12, 255));
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + headerH), IM_COL32(25, 25, 25, 255));
+    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(45, 45, 45, 255));
+}
+
+// style 35: grimoire -- grimv5 misc::spectators_list_grimoire. header 24 (fill 25, line 45) "spectators" tahomabd 11
+// centred with 4 dir black a220 outline, rows verdana 11 (g_menuReg) at pad 10 / 6, row = size + 4, watcher of us =
+// accent else 180. avatar 14 + 6 gap, "?" when none. donor filter = every spectator + SourceTV, a dead local too.
+static void DrawGrimoire(ImDrawList* dl)
+{
+    ImFont* bold = Font(g_fontGrimoireBold11);
+    ImFont* thin = Font(g_menuReg);
+    const bool showTarget = g_specShowTarget;
+
+    std::vector<SpecEntry> entries;
+    Collect(entries, true, true);
+    entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const SpecEntry& e) { return !showTarget && !e.watchingLocal; }), entries.end());
+    SortByIndex(entries);
+
+    // menu open forces always show (RenderSpectatorList scope) = donor's menu::open || show_empty
+    if (entries.empty()) {
+        if (!g_specAlwaysShow) return;
+        entries.push_back({ "no spectators" });
+    }
+
+    constexpr float avatarSize = 14.f, avatarGap = 6.f, padX = 10.f, padY = 6.f, headerH = 24.f;
+    constexpr const char* header = "spectators"; constexpr const char* arrow = " -> ";
+
+    const float size = bold->FontSize, rowH = size + 4.f;
+    const bool avatars = g_specAvatar;
+    const float avatarW = avatars ? avatarSize + avatarGap : 0.f;
+    const auto targeted = [&](const SpecEntry& e) { return showTarget && !e.target.empty(); };
+
+    const float headerW = TextWs(bold, size, header);
+    float maxW = headerW + 30.f;
+    for (const SpecEntry& e : entries)
+        maxW = ImMax(maxW, TextWs(thin, size, e.name) + (targeted(e) ? TextWs(thin, size, arrow + e.target) : 0.f) + avatarW);
+
+    const float boxW = maxW + padX * 2.f;
+    const float totalH = headerH + padY * 2.f + (float)entries.size() * rowH;
+    float x, y; Place(boxW, totalH, x, y);
+
+    const ImVec4 acc = ImGui::GetStyleColorVec4(ImGuiCol_Accent);
+    const ImU32 accent = ImGui::ColorConvertFloat4ToU32(ImVec4(acc.x, acc.y, acc.z, 1.f)), text = IM_COL32(180, 180, 180, 255);
+
+    GrimoireBox(dl, x, y, boxW, totalH, headerH);
+    dl->AddLine(ImVec2(x, y + headerH), ImVec2(x + boxW, y + headerH), IM_COL32(45, 45, 45, 255));
+
+    const ImVec2 headerPos(x + (boxW - headerW) / 2.f, y + (headerH - size) / 2.f);
+    constexpr ImVec2 off[4] = { {-1,0},{1,0},{0,-1},{0,1} };
+    for (const ImVec2& o : off) dl->AddText(bold, size, ImVec2(headerPos.x + o.x, headerPos.y + o.y), IM_COL32(0, 0, 0, 220), header);
+    dl->AddText(bold, size, headerPos, text, header);
+
+    float rowY = y + headerH + padY;
+    for (const SpecEntry& e : entries) {
+        float cx = x + padX;
+        if (avatars) {
+            const float ay = rowY + (rowH - avatarSize) * 0.5f;
+            const ImVec2 amn(cx, ay), amx(cx + avatarSize, ay + avatarSize);
+            if (ImTextureID t = Avatar(e.sid)) dl->AddImage(t, amn, amx);
+            else {
+                const ImVec2 q = thin->CalcTextSizeA(size, FLT_MAX, 0.f, "?");
+                dl->AddText(thin, size, ImVec2(cx + (avatarSize - q.x) * 0.5f, ay + (avatarSize - q.y) * 0.5f), IM_COL32(200, 200, 200, 255), "?");
+            }
+            dl->AddRect(amn, amx, IM_COL32(90, 90, 90, 255));
+            cx += avatarW;
+        }
+
+        const ImU32 color = e.watchingLocal ? accent : text;
+        dl->AddText(thin, size, ImVec2(cx, rowY), color, e.name.c_str());
+        if (targeted(e)) dl->AddText(thin, size, ImVec2(cx + TextWs(thin, size, e.name), rowY), color, (arrow + e.target).c_str());
+        rowY += rowH;
+    }
+}
+
 // ==== drag + dispatch ==========================================================================
 // Styles that hardcode their x/y instead of calling Place(); SpecDrag shifts the vertices they added
 // (none of them push a clip rect or a BlurRect).
@@ -2730,6 +2810,7 @@ static void DrawStyle(ImDrawList* dl, ImGuiIO& io)
     case 32: DrawKamidere(dl, io);      break;
     case 33: DrawHeroin(dl, io);        break;
     case 34: DrawHotwheelsV1(dl);       break;
+    case 35: DrawGrimoire(dl);          break;
     default: break;
     }
 }

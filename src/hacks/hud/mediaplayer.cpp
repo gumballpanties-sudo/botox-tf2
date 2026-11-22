@@ -1359,6 +1359,7 @@ static void StyleFonts(int style, ImFont*& title, ImFont*& artist, float& size)
     case 21: pick(g_fontGamesenseSfBold15, g_fontGamesenseSfBold15); size = 13.f; break;
     case 22: pick(g_fontHeroinProggy13, g_fontHeroinProggy13); break;     // heroin wm face, proggyclean 13
     case 23: pick(g_fontLobotomyBold13, g_fontLobotomyBold13); break;     // lobotomy v2 wm face, sf pro bold 13
+    case 24: pick(g_fontGrimoireBold11, g_fontGrimoireBold11); break;     // grimoire wm face, tahoma bd 11
     default: break;
     }
     if (!title || !artist) {

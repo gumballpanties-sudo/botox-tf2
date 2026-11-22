@@ -18,6 +18,7 @@
 //  10 legendware verdana 12 mono   21 gamesense   sf pro bold 15 @ 13
 //  11 interium   droid bold 24 @ 16  22 heroin      proggy clean 13
 //                                    23 lobotomy v2 sf pro bold 13
+//                                    24 grimoire    tahoma bd 11 mono
 // Accent = the menu accent (ImGuiCol_Accent), as in botox. Sets g_wmBox.
 void Watermark_Draw();
 

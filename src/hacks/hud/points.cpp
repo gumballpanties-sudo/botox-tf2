@@ -78,6 +78,7 @@ namespace
             case 21: font = g_fontGamesenseSfBold15; size = 13.f; break;
             case 22: font = g_fontHeroinProggy13; break;
             case 23: font = g_fontLobotomyBold13; break;
+            case 24: font = g_fontGrimoireBold11; break;
             default: break;
             }
         }

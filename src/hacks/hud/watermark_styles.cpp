@@ -1387,6 +1387,50 @@ static void DrawLobotomyV2(ImDrawList* dl, ImGuiIO& io)
     }
 }
 
+// grimv5 menu chrome, donor call order: 56 ring out, 56 ring in (the fill covers it), fill 12, border 45
+static void GrimoireBox(ImDrawList* dl, float x, float y, float w, float h)
+{
+    dl->AddRect(ImVec2(x - 1.f, y - 1.f), ImVec2(x + w + 1.f, y + h + 1.f), IM_COL32(56, 56, 56, 255));
+    dl->AddRect(ImVec2(x + 1.f, y + 1.f), ImVec2(x + w - 1.f, y + h - 1.f), IM_COL32(56, 56, 56, 255));
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(12, 12, 12, 255));
+    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(45, 45, 45, 255));
+}
+
+// style 24: grimoire -- grimv5 visuals::watermark. tahomabd 11 box at (screen - w - 10, 10), w = text + 20,
+// h = line + 12. brand split at its last '.' ("grimoire.tk" = grimoire 180 + .tk accent), then " | " parts in 180.
+static void DrawGrimoire(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontGrimoireBold11);
+    constexpr ImU32 text = IM_COL32(180, 180, 180, 255);
+
+    const std::string brand = Brand();
+    const size_t dot = brand.rfind('.');
+    const std::string part1 = dot == std::string::npos ? brand : brand.substr(0, dot);
+    const std::string part2 = dot == std::string::npos ? std::string() : brand.substr(dot);
+
+    std::string part3;
+    if (g_wmUser) part3 += " | " + User();
+    if (g_wmShowTime) part3 += " | " + Clock("%H:%M:%S");
+    if (g_wmTickrate && TickLive()) part3 += " | " + std::to_string(Tickrate()) + " tick";
+    if (g_wmShowFPS) part3 += " | " + std::to_string((int)(io.Framerate + 0.5f)) + " fps";   // donor: imgui Framerate + 0.5
+
+    const float size = font->FontSize;
+    const float w1 = TextW(font, size, part1), w2 = TextW(font, size, part2), w3 = TextW(font, size, part3);
+
+    constexpr float padX = 10.f, padY = 6.f;
+    const float width  = w1 + w2 + w3 + padX * 2.f;
+    const float height = font->CalcTextSizeA(size, FLT_MAX, 0.f, "A").y + padY * 2.f;
+    const float x = io.DisplaySize.x - width - 10.f, y = 10.f;
+    SetBox(x - 1.f, y - 1.f, x + width + 1.f, y + height + 1.f);
+
+    GrimoireBox(dl, x, y, width, height);
+
+    const float tx = x + padX, ty = y + padY;
+    dl->AddText(font, size, ImVec2(tx, ty), text, part1.c_str());
+    dl->AddText(font, size, ImVec2(tx + w1, ty), AccentF(1.f), part2.c_str());
+    dl->AddText(font, size, ImVec2(tx + w1 + w2, ty), text, part3.c_str());
+}
+
 // botox misc.cpp draw_watermark(): clarity v2 (3) and cucumber (19) run before the m_watermark
 // check (they gate / fade on it themselves), every other style needs it on.
 void Watermark_Draw()
@@ -1429,6 +1473,7 @@ void Watermark_Draw()
     case 21: return DrawGamesense(dl, io);
     case 22: return DrawHeroin(dl, io);
     case 23: return DrawLobotomyV2(dl, io);
+    case 24: return DrawGrimoire(dl, io);
     default: return DrawDefault(dl, io);
     }
 }
@@ -1471,6 +1516,8 @@ MediaLook Watermark_MediaLook(int style)
         const float* t = g_wmLobotomyTitleColor;
         return { true, IM_COL32((int)(t[0] * 255.f + 0.5f), (int)(t[1] * 255.f + 0.5f), (int)(t[2] * 255.f + 0.5f), 255), IM_COL32(150, 150, 150, 255), 0 };
     }
+    // grimv5 display_spotify: no box, outlined text, track white, artist 150
+    case 24: return { false, white, IM_COL32(150, 150, 150, 255), 2 };
     default: return { true, white, accent, 0 };   // style 0: menu accent
     }
 }
