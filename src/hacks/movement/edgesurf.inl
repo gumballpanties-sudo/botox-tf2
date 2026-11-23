@@ -17,6 +17,7 @@
 //   - no duck speed / 0.4 s re-duck timer: tf_clamp_airducks 1 refuses IN_DUCK in air once m_nAirDucked >= 2
 //     (TF_AIRDUCKED_COUNT, counted per air RELEASE in OnUnDuck): w.relift / the eb lift read it (predicted field).
 //   - sv_wallbug 0 (Valve Oct 2026 ClipVelocity) ends every pin at -halfgrav + 0.03125: pin tolerance as::k_pinTol.
+//     Same clip lifts a ride 0.00047 a tick: the hold's closing window is 0.0013 face ulp wide: w.pin_res.
 //   - mv->m_flMaxSpeed = min(m_flMaxspeed, TF_MAX_SPEED 520) (ProcessMovement + CheckParameters), no stamina, sv_airaccelerate 10.
 //   - player movement passes tf_gamerules.cpp / gamerules.cpp ShouldCollide's groups (ESurf_MovesGroup). No ladders.
 // ============================================================================
@@ -128,6 +129,8 @@ struct World
     float dt = 0.015f, pin = -6.f, k_acc = 0.f, max_speed = 300.f;
     // engine knobs (edgesurf_core.h header)
     float crop = 1.f, pin_tol = as::k_pinTol, duck_dz = 20.f, scale = 1.f;
+    // wb0 ride window = 0.0013 face ulp a tick ( top hit at fraction 0.0026 ), halves when z ulp eats the 0.00047 lift
+    float pin_res = 2.5e-4f;
     bool  relift_ok = true;
     bool  debug = false;
     int   sims = 0;
@@ -416,6 +419,9 @@ static bool ESurf_Online(void* pLocal, UserCmd_t* cmd, bool& pinned, bool& held)
     w.pin       = pin;
     w.k_acc     = CvarFloat("sv_airaccelerate", 10.f) * w.dt * AsSurfaceFriction(pLocal);
     w.max_speed = MaxSpeed(pLocal);
+    /* check line: a wb0 pin START carries 0.25 ( server keeps it, Pred_Simulate now too ). 1.00 here = that theory is wrong */
+    if (debug && fresh)
+        DebugLog("ESURF: pin start fr=%.2f", AsSurfaceFriction(pLocal));
     w.debug     = debug;
     w.SetupHull();
     /* act Q's release now counts one air duck: the lift after its pin needs one more press */

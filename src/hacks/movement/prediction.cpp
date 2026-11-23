@@ -259,6 +259,8 @@ static void ResolveVAngle(void* pLocal)
 void Pred_Simulate(void* pLocal, UserCmd_t* pCmd)
 {
     g_simsThisCmd++;
+    // read before the dirty write: entity = untouched restore frame = an engine tick END (see SetupMove below)
+    const bool bFrameStart = !g_predDirty;
     g_predDirty = true;   // the entity no longer holds the restore frame
     const int oldTickBase = EntI(pLocal, g_offTickBase);
     // THE CLOCK IS THE ENTITY'S, like CPrediction::RunCommand (prediction.cpp:894/977):
@@ -309,6 +311,16 @@ void Pred_Simulate(void* pLocal, UserCmd_t* pCmd)
     ((SetLVA_t)predVt[kPred_SetLocalViewAngles])(g_prediction, pCmd->viewangles);
 
     ((SetupMove_t)predVt[kPred_SetupMove])(g_prediction, pLocal, pCmd, g_moveHelper, &s_moveData);
+    // SERVER PARITY. SetupMove flags m_bGameCodeMovedPlayer when m_vecPreviouslyPredictedOrigin != origin
+    // (prediction.cpp:617). FinishMove writes that field, it is NOT in the pred datamap, so no restore puts it
+    // back: every restore-then-sim read "moved" and PlayerMove ran CategorizePosition at START
+    // (gamemovement.cpp:4604), which resets m_surfaceFriction to 1. The server never does that on an untouched
+    // START: it keeps last END's value, and that is 0.25 on every sv_wallbug 0 pin tick (vz +1/32 when
+    // categorized, before FinishGravity: tf_gamemovement.cpp:2433). Sim air accel was 4x the server's there:
+    // edge surf ride presses pinned in the sim, landed on the server (debug.log 11-23, 103 of 106).
+    // Hand-placed hulls (EntSet*) and snapshot loads stay dirty: flag kept, they still categorize.
+    // ponytail: snapshot START still re-categorizes; track the loaded origin if a pinned snapshot ever matters
+    if (bFrameStart) s_moveData.m_bGameCodeMovedPlayer = false;
     void** gmVt = *(void***)g_gameMovement;
     g_predInSim = true;   // botox g_prediction.m_in_begin: the ProcessMovement hook knows our sims from engine replays
     ((ProcessMove_t)gmVt[kGM_ProcessMovement])(g_gameMovement, pLocal, &s_moveData);
