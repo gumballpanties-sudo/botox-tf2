@@ -1230,7 +1230,8 @@ static void PfScanSeams(void* pLocal)
 
 static void PixelFinder(void* pLocal, UserCmd_t* pCmd)
 {
-    const bool bHeld = On(g_psFinder, g_psFinderKey, g_psFinderMode);
+    // not On(): the finder measures + places points, a replay must not run it again (movement.cpp FeatKey)
+    const bool bHeld = g_psFinder && MovementKeyOK(g_psFinderKey, g_psFinderMode);
     const bool bRising = bHeld && !s_psFinderHeld;
     const bool bFalling = !bHeld && s_psFinderHeld;
     s_psFinderHeld = bHeld;

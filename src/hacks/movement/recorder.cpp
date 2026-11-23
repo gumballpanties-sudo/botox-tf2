@@ -139,6 +139,17 @@ static std::string s_activeName;
 static std::vector<RecFrame> s_playCapture;
 static float  s_playMaxDrift = 0.f;
 static int    s_playDriftTick = -1, s_playDriftSmallTick = -1, s_playFinalFixes = 0;
+// live replay (recorder.h). s_cmdLive: this cmd's frame went on raw at CmdStart, the features own its move
+static bool   s_cmdLive = false;
+static int    s_playLive = 0;               // live frames sent this playback (log)
+// the clip has live frames. None (REC2 / REC3, or nothing was ever armed) = the old replay untouched:
+// binds follow the keyboard, every cmd is re-laid over what the features did
+static bool   s_playHasLive = false;
+// what a feature bind answers under playback: RecBindAnswer's state + keys of the frame the NEXT lay
+// sends, force = s_playHasLive. Atomics: movement.cpp asks per On() without s_lock
+static std::atomic<int>      s_bindState{ -1 };
+static std::atomic<bool>     s_bindForce{ false };
+static std::atomic<uint64_t> s_bindKeys[4];
 
 static std::vector<RecClip> s_clips;
 static int    s_selected = -1;
@@ -164,6 +175,7 @@ static int    s_cmdFlags = -1, s_cmdMoveType = 2;
 // what playback sends, and a recording stores what really went out
 static int       s_finalCmd = -1;
 static bool      s_finalPlay = false, s_finalRec = false, s_finalClip = false;
+static bool      s_finalLive = false;       // s_finalPlay cmd went out as a live frame
 static UserCmd_t s_finalSent{};
 // render snapshot of the local hull, written per cmd
 static bool   s_localAlive = false;
@@ -178,6 +190,17 @@ static void Notify(const std::string& s)
 }
 
 static bool OwnsCmd() { return s_playing || s_wishStart; }
+
+// under s_lock, after anything that moves s_playing / s_playIdx (OnCreateMove's end, ForceStop). The
+// tick after the last frame is the player's again: -1
+static void SyncBinds()
+{
+    const bool frame = s_playing && s_playIdx < s_playFrames.size();
+    if (frame)
+        for (int i = 0; i < 4; ++i) s_bindKeys[i] = s_playFrames[s_playIdx].keys[i];
+    s_bindForce = s_playHasLive;
+    s_bindState = frame ? (s_playFrames[s_playIdx].live ? 1 : 0) : s_wishStart ? 0 : -1;
+}
 
 // playback yaw != original = camera follows the route too, just turned
 static bool CameraLocked() { return g_recLockVa || g_recYaw != 0; }
@@ -218,6 +241,27 @@ static void TakeCmd(RecFrame& f, const UserCmd_t* c)
     f.forward = c->forwardmove; f.side = c->sidemove; f.up = c->upmove;
     f.buttons = c->buttons;
     f.mouseDx = c->mousedx; f.mouseDy = c->mousedy;
+}
+
+// the live half of a recorded frame, at the pipeline's end (before the aimbot: its rewrite is no
+// movement feature). raw = the player's own cmd from CmdStart
+static void StampLive(RecFrame& f, const uint64_t keys[4], bool armed)
+{
+    f.rawPitch = s_userInput.pitch; f.rawYaw = s_userInput.yaw;
+    f.rawForward = s_userInput.forward; f.rawSide = s_userInput.side; f.rawUp = s_userInput.up;
+    f.rawButtons = s_userInput.buttons;
+    for (int i = 0; i < 4; ++i) f.keys[i] = keys[i];
+    f.live = armed || RecCmdChanged(f);
+}
+
+// a replayed tick keeps the route's own live half: a take over records on as the same route
+static void CopyLive(RecFrame& f, const RecFrame& from)
+{
+    f.live = from.live;
+    f.rawPitch = from.rawPitch; f.rawYaw = from.rawYaw;
+    f.rawForward = from.rawForward; f.rawSide = from.rawSide; f.rawUp = from.rawUp;
+    f.rawButtons = from.rawButtons;
+    for (int i = 0; i < 4; ++i) f.keys[i] = from.keys[i];
 }
 
 static float FrameSpeed(const RecFrame& f) { return std::sqrt(f.velX * f.velX + f.velY * f.velY + f.velZ * f.velZ); }
@@ -575,27 +619,40 @@ static void CaptureUserInput(UserCmd_t* c)
     s_userMask = c->buttons & kUserMoveMask;
 }
 
-// cmd-only: CmdStart/CmdPrePred lay it early too, so features + prediction see the replay
-static void ApplyPlayback(UserCmd_t* c)
+// the sent view: the route camera (locked) or the player's own. Movement fix keeps the cmd's world
+// wish dir under it; same view = untouched, bit exact replay
+static void PlaybackView(UserCmd_t* c, Vec3 view)
+{
+    if (CameraLocked()) view = CameraAt(s_playIdx, NowReal());
+    view.z = c->viewangles.z;
+    if (view.x == c->viewangles.x && view.y == c->viewangles.y) return;
+    CorrectMovement(c, c->viewangles, view);
+    c->viewangles = view;
+}
+
+// cmd-only: CmdStart/CmdPrePred lay it early too, so features + prediction see the replay.
+// raw (live frame, CmdStart only): the recorded input from before the features, under its own view.
+// They run on it again; the sent view goes on at the end (OnCreateMove)
+static void ApplyPlayback(UserCmd_t* c, bool raw = false)
 {
     if (!c || !s_playing || s_playIdx >= s_playFrames.size() || !g_recEnable) return;
     const Vec3 backupView = c->viewangles;
-    Replay(s_playFrames[s_playIdx], c);
+    const RecFrame& f = s_playFrames[s_playIdx];
+    Replay(f, c);
+    if (raw)
+    {
+        c->viewangles.x = f.rawPitch; c->viewangles.y = f.rawYaw;
+        c->forwardmove = f.rawForward; c->sidemove = f.rawSide; c->upmove = f.rawUp;
+        c->buttons = (c->buttons & ~kRecMoveMask) | (f.rawButtons & kRecMoveMask);
+    }
 
     if (g_recForceWeapon)
     {
         c->weaponselect = 0;
         c->weaponsubtype = 0;
-        SelectWeapon(s_cmdLocal, c, s_playFrames[s_playIdx]);
+        SelectWeapon(s_cmdLocal, c, f);
     }
-
-    // movement fix keeps the recorded world wish dir under any sent view; same view = untouched,
-    // bit exact replay
-    Vec3 view = CameraLocked() ? CameraAt(s_playIdx, NowReal()) : backupView;
-    view.z = c->viewangles.z;
-    if (view.x == c->viewangles.x && view.y == c->viewangles.y) return;
-    CorrectMovement(c, c->viewangles, view);
-    c->viewangles = view;
+    if (!raw) PlaybackView(c, backupView);
 }
 
 static void ForceStop(bool keepPlayed = false)
@@ -603,13 +660,15 @@ static void ForceStop(bool keepPlayed = false)
     const bool wasPlaying = s_playing;
     const size_t played = s_playIdx;
     if (wasPlaying)
-        DebugLog("REC: end idx=%d/%d drift max=%.3f first>0.1u=%d first>1u=%d final=%d take=%d", (int)played,
-                 (int)s_playFrames.size(), s_playMaxDrift, s_playDriftSmallTick, s_playDriftTick, s_playFinalFixes, keepPlayed ? 1 : 0);
+        DebugLog("REC: end idx=%d/%d drift max=%.3f first>0.1u=%d first>1u=%d final=%d take=%d live=%d", (int)played,
+                 (int)s_playFrames.size(), s_playMaxDrift, s_playDriftSmallTick, s_playDriftTick, s_playFinalFixes, keepPlayed ? 1 : 0,
+                 s_playLive);
     s_playing = false;
     s_wishStart = false;
     s_playIdx = 0;
     s_approachTicks = 0;
     s_finalPlay = false;
+    s_cmdLive = false;
 
     // take over: keep the ticks really sent and go on recording, clipper session too
     if (keepPlayed && wasPlaying && !s_playCapture.empty())
@@ -625,6 +684,7 @@ static void ForceStop(bool keepPlayed = false)
         Notify("took over at tick " + std::to_string(s_playCapture.size()) + ", recording");
     }
     s_playCapture.clear();
+    SyncBinds();   // render thread stop (map change) too: the next cmd's first On() asks the keyboard
 }
 
 // finished clips survive death / round reset, only the session in progress goes
@@ -660,28 +720,37 @@ static bool PlayClip(size_t index)
     s_playMaxDrift = 0.f;
     s_playDriftTick = s_playDriftSmallTick = -1;
     s_playFinalFixes = 0;
+    s_playLive = 0;
     s_playCapture.clear();
     s_playCapture.reserve(c.frames.size());
 
     // the approach stands still on frame 0: a moving start can't line up
     if (f0.hasVel && FrameSpeed(f0) >= 1.f)
         Notify("\"" + c.name + "\" starts moving: replay may drift");
-    DebugLog("REC: play %s ticks=%d dist=%.2f v0=%.1f fl0=%d yaw=%d in=%.2f out=%.2f", c.file.c_str(), (int)c.frames.size(),
-             dist, FrameSpeed(f0), f0.flags, g_recYaw, g_recSmoothStart, g_recSmoothEnd);
+    // live = frames the features fly again (0 on a REC2 / REC3 clip: raw replay, pins in it miss)
+    const int live = (int)std::count_if(c.frames.begin(), c.frames.end(), [](const RecFrame& f) { return f.live; });
+    s_playHasLive = live > 0;
+    DebugLog("REC: play %s ticks=%d live=%d dist=%.2f v0=%.1f fl0=%d yaw=%d in=%.2f out=%.2f", c.file.c_str(), (int)c.frames.size(),
+             live, dist, FrameSpeed(f0), f0.flags, g_recYaw, g_recSmoothStart, g_recSmoothEnd);
     return true;
 }
 
 // ---- game thread entry points -----------------------------------------------------------
-bool Recorder_OwnsCmd()
+int Recorder_PlayState() { return s_bindState.load(); }
+
+int Recorder_BindPlay(int key, int mode)
 {
-    std::lock_guard<std::recursive_mutex> l(s_lock);
-    return OwnsCmd();
+    const int state = s_bindState.load();
+    if (state < 0 || !s_bindForce.load()) return -1;
+    const uint64_t keys[4] = { s_bindKeys[0].load(), s_bindKeys[1].load(), s_bindKeys[2].load(), s_bindKeys[3].load() };
+    return RecBindAnswer(state, keys, key, mode);
 }
 
 void Recorder_CmdStart(void* pLocal, UserCmd_t* pCmd)
 {
     std::lock_guard<std::recursive_mutex> l(s_lock);
     s_cmdBegun = false;
+    s_cmdLive = false;
     s_localAlive = pLocal != nullptr;
     if (!pCmd) return;
     if (!g_recEnable || !pLocal)
@@ -700,17 +769,18 @@ void Recorder_CmdStart(void* pLocal, UserCmd_t* pCmd)
     s_cmdBegun = true;
 
     CaptureUserInput(pCmd);
-    ApplyPlayback(pCmd);
+    s_cmdLive = s_playing && s_playIdx < s_playFrames.size() && s_playFrames[s_playIdx].live;
+    ApplyPlayback(pCmd, s_cmdLive);
 }
 
 void Recorder_CmdPrePred(UserCmd_t* pCmd)
 {
     std::lock_guard<std::recursive_mutex> l(s_lock);
-    if (s_cmdBegun) ApplyPlayback(pCmd);
+    if (s_cmdBegun && !s_cmdLive) ApplyPlayback(pCmd);   // live: what the pre features made of the raw input stays
 }
 
 // botox on_create_move, minus the alive/enabled checks CmdStart already made
-static void OnCreateMove(UserCmd_t* c)
+static void OnCreateMove(UserCmd_t* c, const uint64_t featKeys[4], bool featArmed)
 {
     const unsigned requests = s_requests.exchange(0u);
 
@@ -739,10 +809,16 @@ static void OnCreateMove(UserCmd_t* c)
     const bool clear     = (kClear.Pressed() && !menu)     || (requests & REC_CLEAR);
     const bool clip      = (kClip.Pressed() && !menu)      || (requests & REC_CLIP);
 
+    // this cmd is the recorder's (approach steer / a frame went on): its stored frame is no feature's
+    const bool flown = s_wishStart || (s_playing && s_playIdx < s_playFrames.size());
+    int stopIdx = -1;   // stop key on a frame: the cmd going out still is that frame
+    s_finalLive = false;
+
     // fresh press only: still holding w from before play must not kill it
     const bool userMoved = g_recStopOnMove && (s_userMask & ~s_userMaskPrev) != 0;
     if ((stopPlay || userMoved) && OwnsCmd())
     {
+        if (!userMoved && s_playing && s_playIdx < s_playFrames.size()) stopIdx = (int)s_playIdx;
         DebugLog("REC: stop play idx=%d/%d moved=%d", (int)s_playIdx, (int)s_playFrames.size(), userMoved ? 1 : 0);
         ForceStop(true);
         if (userMoved) Replay(s_userInput, c);
@@ -889,7 +965,11 @@ static void OnCreateMove(UserCmd_t* c)
                          s_cmdVel.Length(), FrameSpeed(rf), s_cmdFlags, rf.flags);
                 Notify("replay desynced at tick " + std::to_string(s_playIdx));
             }
-            ApplyPlayback(c);
+            // live: the features flew the raw input off the real hull, their cmd goes out. Only the sent
+            // view goes on (same view = their float bits stay)
+            s_finalLive = s_cmdLive;
+            if (s_cmdLive) { PlaybackView(c, Vec3(s_userInput.pitch, s_userInput.yaw, 0.f)); ++s_playLive; }
+            else ApplyPlayback(c);
             ++s_playIdx;
             s_stepReal = NowReal();
         }
@@ -898,8 +978,16 @@ static void OnCreateMove(UserCmd_t* c)
     c->viewangles.x = std::clamp(c->viewangles.x, -89.f, 89.f);
     c->viewangles.y = std::remainder(c->viewangles.y, 360.f);
 
-    const RecFrame f = MakeFrame(s_cmdLocal, c, s_cmdPos, s_cmdVel);
-    if (s_playing && s_playIdx > 0) s_playCapture.push_back(f);
+    // live half: a replayed tick (stop key tick too) keeps the route's, your own tick gets this cmd's.
+    // Approach / your input laid over a taken over tick = raw frame, the default
+    RecFrame f = MakeFrame(s_cmdLocal, c, s_cmdPos, s_cmdVel);
+    if (s_playing && s_playIdx > 0)
+    {
+        CopyLive(f, s_playFrames[s_playIdx - 1]);
+        s_playCapture.push_back(f);
+    }
+    else if (stopIdx >= 0) CopyLive(f, s_playFrames[stopIdx]);
+    else if (!flown) StampLive(f, featKeys, featArmed);
 
     // approach / playback ticks are not yours; take over hands the played ticks to the session
     s_finalClip = false;
@@ -925,13 +1013,13 @@ static void OnCreateMove(UserCmd_t* c)
     s_finalSent = *c;
 }
 
-static bool OnCreateMoveSeh(UserCmd_t* c)
+static bool OnCreateMoveSeh(UserCmd_t* c, const uint64_t featKeys[4], bool featArmed)
 {
-    __try { OnCreateMove(c); return true; }
+    __try { OnCreateMove(c, featKeys, featArmed); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-void Recorder_CmdEnd(UserCmd_t* pCmd)
+void Recorder_CmdEnd(UserCmd_t* pCmd, const uint64_t featKeys[4], bool featArmed)
 {
     std::vector<std::string> msgs;
     {
@@ -939,8 +1027,9 @@ void Recorder_CmdEnd(UserCmd_t* pCmd)
         if (s_cmdBegun && pCmd)
         {
             s_cmdBegun = false;
-            if (!OnCreateMoveSeh(pCmd)) { DebugLog("REC: SEH in OnCreateMove"); ResetAll(); }
+            if (!OnCreateMoveSeh(pCmd, featKeys, featArmed)) { DebugLog("REC: SEH in OnCreateMove"); ResetAll(); }
         }
+        SyncBinds();   // the frame the next cmd sends: its binds answer from the cmd's first On()
         msgs.swap(s_msgs);
     }
     // detections.cpp chat look; ChatPrintf formats, so no '%' may reach it
@@ -954,18 +1043,20 @@ void Recorder_CmdEnd(UserCmd_t* pCmd)
     }
 }
 
-// Movement_AirStuckLastWriter's tail, both CreateMove paths: after air stuck's final stamp, the
-// aimbot (aim path) and lua. Any of them rewriting a replayed cmd = the run desyncs, so the replay
-// goes back on; while recording, the stored frame takes what really went out.
-void Recorder_CmdFinal(UserCmd_t* c)
+// Movement_AirStuckLastWriter, both CreateMove paths, after the aimbot (aim path), twice a cmd around
+// air stuck's final stamp. Replayed cmd: anything rewriting it = the run desyncs, so the replay goes
+// back on, before the stamp (play) and after it. Not after it on a live frame: there the stamp is the
+// frame's own air stuck pin. Recorded cmd, after the stamp (!play): the frame takes what really went out.
+void Recorder_CmdFinal(UserCmd_t* c, bool play)
 {
     if (!c) return;
     std::lock_guard<std::recursive_mutex> l(s_lock);
     if (s_finalCmd != c->command_number) return;
-    s_finalCmd = -1;
+    if (!play) s_finalCmd = -1;
 
     if (s_finalPlay)
     {
+        if (!play && s_finalLive) return;
         const UserCmd_t& s = s_finalSent;
         const bool same = c->viewangles.x == s.viewangles.x && c->viewangles.y == s.viewangles.y && c->viewangles.z == s.viewangles.z
                        && c->forwardmove == s.forwardmove && c->sidemove == s.sidemove && c->upmove == s.upmove
@@ -981,8 +1072,13 @@ void Recorder_CmdFinal(UserCmd_t* c)
         c->mousedx = s.mousedx; c->mousedy = s.mousedy;
         return;
     }
-    if (s_finalRec && !s_recFrames.empty()) TakeCmd(s_recFrames.back(), c);
-    if (s_finalClip && s_clipSession.active && !s_clipSession.frames.empty()) TakeCmd(s_clipSession.frames.back(), c);
+    if (play) return;
+    // jump / duck pressed after the pipeline (aim half: auto rocket jump, fan jump, pogo): no movement
+    // feature flies that again on the raw input, so the frame replays as sent
+    const bool late = ((c->buttons ^ s_finalSent.buttons) & kRecMoveMask) != 0;
+    const auto take = [&](RecFrame& f) { TakeCmd(f, c); if (late) f.live = false; };
+    if (s_finalRec && !s_recFrames.empty()) take(s_recFrames.back());
+    if (s_finalClip && s_clipSession.active && !s_clipSession.frames.empty()) take(s_clipSession.frames.back());
     s_finalRec = s_finalClip = false;
 }
 

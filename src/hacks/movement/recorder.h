@@ -6,6 +6,12 @@
 // Movement recorder: botox hacks/movement/movement_recorder.cpp 1:1 on this pipeline.
 // Record a route (or let the clipper cut one per move-from-standing), walk onto its start,
 // replay it tick for tick.
+// NOT botox, live replay: a frame also stores the player's raw input + the feature binds down.
+// Frames a movement feature was armed on / rewrote are "live": playback lays the raw input, feature
+// binds answer as recorded (movement.cpp FeatKey) and the features solve the tick again off the real
+// hull. Every other frame replays the sent cmd bit for bit with all bound features off. Needs the same
+// feature settings as the recording. A clip with no live frame (REC2 / REC3, or nothing was armed) =
+// the old replay untouched: binds follow the keyboard, every cmd re-laid.
 // Playback keeps the recorded WORLD wish dir under any sent view (CorrectMovement), so the
 // camera can be free, original, turned (left/right/back) or spinning.
 // Not ported: CS:GO jetpack replay, round freeze events (TF2 preround: the 3 s approach
@@ -47,14 +53,22 @@ enum RecAction : unsigned
 
 // ---- game thread (Movement_RunImpl / Movement_Run) ----
 // Start: pLocal null = dead (resets). Captures the player's own input, then lays the replay
-// frame on the cmd so every feature + prediction sees the recorded input.
+// frame on the cmd so every feature + prediction sees the recorded input (live frame: the raw one).
 void Recorder_CmdStart(void* pLocal, UserCmd_t* pCmd);
-void Recorder_CmdPrePred(UserCmd_t* pCmd);   // re-lay it: pre features may have rewritten it
-void Recorder_CmdEnd(UserCmd_t* pCmd);       // keys/actions, approach, step, record the final cmd
-// after the last writer (air stuck stamp, aimbot, lua): playing = put the replay back on,
-// recording = the stored frame takes what really went out
-void Recorder_CmdFinal(UserCmd_t* pCmd);
-bool Recorder_OwnsCmd();                     // playing or walking to the start
+void Recorder_CmdPrePred(UserCmd_t* pCmd);   // re-lay it: pre features may have rewritten it (raw frames)
+// keys/actions, approach, step, record the final cmd. featKeys / featArmed = the feature binds that
+// answered on this cmd (vk bitmap) / any On() at all (movement.cpp FeatKey)
+void Recorder_CmdEnd(UserCmd_t* pCmd, const uint64_t featKeys[4], bool featArmed);
+// Movement_AirStuckLastWriter, around air stuck's final stamp. play (before it): a replayed cmd the
+// aimbot rewrote goes back on. !play (after it): again, unless a live frame (its AS pin stays); a
+// recording's stored frame takes what really went out
+void Recorder_CmdFinal(UserCmd_t* pCmd, bool play);
+// lock free, this cmd: -1 no playback, 0 walking to the start / raw frame (replay owns the cmd),
+// 1 live frame (features own the move)
+int  Recorder_PlayState();
+// a feature bind's answer under playback, -1 = ask the keyboard (no playback, or a clip with no live
+// frame: the old replay)
+int  Recorder_BindPlay(int key, int mode);
 void Recorder_FrameStart();                  // FrameStageNotify FRAME_START: per-frame camera
 void Recorder_MouseInput(float* x, float* y);// OverrideMouseInput: mouse lock
 

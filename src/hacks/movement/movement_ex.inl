@@ -247,7 +247,7 @@ static void AutoGoomba(void* pLocal, UserCmd_t* pCmd)
     const float dtT = g_globalVars->interval_per_tick > 0.f ? g_globalVars->interval_per_tick : 0.015f;
     Gmb_TrackTick(pLocal, dtT);   // before the key gate: the outcome keeps playing after the key is let go
     s_gmbMyTick = g_offTickBase > 0 ? EntI(pLocal, g_offTickBase) : 0;
-    if (!MovementKeyOK(g_goombaKey, g_goombaMode)) { Gmb_ScanFlush(); return; }
+    if (!FeatKey(g_goombaKey, g_goombaMode)) { Gmb_ScanFlush(); return; }
 
     const float rt = g_globalVars->realtime;
     const float dt = g_globalVars->interval_per_tick > 0.f ? g_globalVars->interval_per_tick : 0.015f;

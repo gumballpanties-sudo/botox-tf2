@@ -2292,7 +2292,7 @@ static void TB_PreserveMove(void* pLocal, UserCmd_t* pCmd)
     const bool tb   = On(g_textureBug, g_textureBugKey, g_textureBugMode);
     if (!pCmd || !EntAlive(pLocal) || !g_tbWallstrafe || !(tb && g_tbStyle == 1))
         return;
-    if (Recorder_OwnsCmd() || On(g_airStuck, g_airStuckKey, g_airStuckMode) || s_wallClimbHit) {
+    if (Recorder_PlayState() == 0 || On(g_airStuck, g_airStuckKey, g_airStuckMode) || s_wallClimbHit) {
         tbx::s_tb.reset_command();
         return;
     }
