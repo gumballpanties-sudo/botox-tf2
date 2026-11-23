@@ -818,10 +818,13 @@ static void OnCreateMove(UserCmd_t* c, const uint64_t featKeys[4], bool featArme
     const bool userMoved = g_recStopOnMove && (s_userMask & ~s_userMaskPrev) != 0;
     if ((stopPlay || userMoved) && OwnsCmd())
     {
-        if (!userMoved && s_playing && s_playIdx < s_playFrames.size()) stopIdx = (int)s_playIdx;
+        // stop key, or your move on a live frame (its features already own this cmd, their stamps
+        // would put it back): the cmd going out still is that frame
+        const bool keep = !userMoved || s_cmdLive;
+        if (keep && s_playing && s_playIdx < s_playFrames.size()) stopIdx = (int)s_playIdx;
         DebugLog("REC: stop play idx=%d/%d moved=%d", (int)s_playIdx, (int)s_playFrames.size(), userMoved ? 1 : 0);
         ForceStop(true);
-        if (userMoved) Replay(s_userInput, c);
+        if (!keep) Replay(s_userInput, c);
     }
 
     if (startRec && !OwnsCmd() && !s_recording)
@@ -987,7 +990,7 @@ static void OnCreateMove(UserCmd_t* c, const uint64_t featKeys[4], bool featArme
         s_playCapture.push_back(f);
     }
     else if (stopIdx >= 0) CopyLive(f, s_playFrames[stopIdx]);
-    else if (!flown) StampLive(f, featKeys, featArmed);
+    else if (!flown && !OwnsCmd()) StampLive(f, featKeys, featArmed);   // play pressed this cmd: the approach steered it
 
     // approach / playback ticks are not yours; take over hands the played ticks to the session
     s_finalClip = false;
