@@ -667,6 +667,15 @@ static void __fastcall h_ProcessMovementSv(void* thisptr, void* player, CMoveDat
 
 static void __fastcall h_ProcessMovementCl(void* thisptr, void* player, CMoveData* mv)
 {
+    // SERVER PARITY, engine's own run (first predict + every re-predict), pin feature armed. Same rule as Pred_Simulate.
+    // SetupMove sets m_bGameCodeMovedPlayer when m_vecPreviouslyPredictedOrigin != origin (prediction.cpp:617). Wrong 2 ways:
+    //   1. our sims' FinishMove left that field on a sim END (not in datamap, no restore) -> first predict of the new cmd
+    //   2. vanilla: first cmd of a re-predict (field = newest END, origin = server's older one)
+    // Flag -> CategorizePosition at START -> pin START friction 0.25 -> 1.0 -> air accel 4x server's -> a ride press falls
+    // in client pred, pins on server. Next START wrong 1 tick -> edge surf hands off -> raw keys break the server pin.
+    // debug.log 11-23 badwater: 10 press ticks, 10 lost; listen 8, 0. Before FM_Pre: fakemove / tung set it true on purpose.
+    // ponytail: teleport while armed = no START categorize for 1 cmd (ground + water are networked, friction stale 1 tick)
+    if (mv && !g_predInSim && s_predSyncArmed) mv->m_bGameCodeMovedPlayer = false;
     FmCtx c;
     const bool on = FM_PreSafe(player, mv, false, c);
     if (!c.skip) o_ProcessMovementCl(thisptr, player, mv);

@@ -93,6 +93,7 @@ static void AS_SyncArm(const bool on)
 {
     static int saved = -1;
     static bool armed = false;
+    s_predSyncArmed = on;   // engine's own run drops the moved flag too (h_ProcessMovementCl)
     if (!g_cvar) return;
     ConVar* cv = g_cvar->FindVar("cl_pred_optimize");
     if (!cv) return;

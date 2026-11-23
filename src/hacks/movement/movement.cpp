@@ -1675,6 +1675,7 @@ static bool s_airStuckHit = false;
 static bool s_pixelHopHit = false;   // pixeljump's pixel hop wrote this cmd (land / hop): the air movers after it yield
 static bool s_pixelHopOn  = false;   // PH key active this cmd: pixel surf stands down (webz 18000c0b0 skips wall stuck)
 static bool s_phSyncWant  = false;   // ph key held: a pin landing is exact-float, START must be the server END too
+static bool s_predSyncArmed = false; // AS_SyncArm state: a pin feature armed. client ProcessMovement hook reads it (fakemove.inl)
 // ---- edge surf state (edgesurf.inl owns it; up here because edgebug / auto align / tb / as read it first) ----
 static bool s_esurfActive   = false;  // botox g_edge_surf_active: edge surf holds / guides this cmd (indicator)
 static int  s_esurfLatchCmd = -1;     // edge_surf.cpp g_edge_surf_latch_cmd: last cmd an owned approach went out
@@ -2969,6 +2970,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s_psShouldSurf = s_psShouldUnduck = false;
         s_ab.ownsCmd = false;   // botox movement.cpp:1260: stale true on a skipped tick
         s_esurfSyncWant = false;   // edge surf did not run: no sync arm, no latch carried
+        s_predSyncArmed = false;   // AS_Sync did not run: no sims, engine's run stays vanilla
         s_esurfLatchCmd = -1;
         // PixelFinder is the only owner of its key edge, and it did not run this cmd. Left alone,
         // s_psFinderHeld stays stuck true for good: needPred never drops, and the NEXT real press
