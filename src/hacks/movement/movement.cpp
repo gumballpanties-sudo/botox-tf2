@@ -1496,7 +1496,7 @@ static void LongJump(void* pLocal, UserCmd_t* pCmd)
 // tick, and letting go of that hold spent the second: no crouch until landing ("can't crouch
 // after mj"). Cost of letting the engine pick: from a launch >= ~0.6u over the floor (bhop
 // landings sit ~0.7u up) its drop tick leaves the feet < 2u up at vz < 250 and CategorizePosition
-// grounds the hop at ~19u (routesim_test). heroin takes the same deal.
+// grounds the hop at ~19u (routesim_test). MiniJumpWaitTimer waits 1 cmd for the floor snap.
 // The +20 is never paid, so this can never be a crouch jump, and lj stays lj.
 //
 // TWO ENGINE REFUSALS THE HOP CAN STILL LOSE TO, logged by name rather than guessed at:
@@ -1603,17 +1603,50 @@ static void MiniJump(void* pLocal, UserCmd_t* pCmd)
 // wait is free, and the strip is the release a held space needs to fire again.
 // After DelayHop, before AutoGoomba (its press is the last word). EdgeJump's post-pred press can't
 // wait (the lip is now), so it still goes out plain and MiniJump logs it
+//
+// BHOP AFTER A REGULAR JUMP, MJ = NO JUMP. A landing tick leaves the feet up to 2u over the floor
+// (regular jump: 0.705), and a mini pressed from that hover is grounded by the engine's own unduck
+// on tick 5 (rs::MiniHopDies) -- then the timer above ate 8 more presses. One grounded cmd snaps
+// the hover to the floor, so the press waits that ONE cmd and is owed back on the next: AutoJump
+// re-presses a held space only every other grounded tick, and a mwheel press is gone by then.
+// Cost: 1 tick of ground friction. Never two waits in a row, so it cannot hold a jump back
 static void MiniJumpWaitTimer(void* pLocal, UserCmd_t* pCmd)
 {
-    if (!(pCmd->buttons & IN_JUMP) || !On(g_miniJump, g_miniJumpKey, g_miniJumpMode)
-        || g_offFlags <= 0 || g_offDuckTimer <= 0 || g_offTickBase <= 0)
+    static bool s_snapAte = false;   // last cmd's press was eaten for the floor snap
+    const bool bOwed = s_snapAte;
+    s_snapAte = false;
+    if (g_offFlags <= 0 || !(EntI(pLocal, g_offFlags) & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK)
         return;
-    if (!(EntI(pLocal, g_offFlags) & FL_ONGROUND) || EntMoveType(pLocal) != MOVETYPE_WALK)
+    if (bOwed) pCmd->buttons |= IN_JUMP;
+    if (!(pCmd->buttons & IN_JUMP) || !On(g_miniJump, g_miniJumpKey, g_miniJumpMode)
+        || g_offDuckTimer <= 0 || g_offTickBase <= 0)
         return;
     // the curtime this cmd runs at; one tick of margin so a tickbase off-by-one waits, never strips
-    const float flNow = EntI(pLocal, g_offTickBase) * TickInterval();
+    const int   iTick = EntI(pLocal, g_offTickBase);
+    const float flNow = iTick * TickInterval();
     if (EntF(pLocal, g_offDuckTimer) > flNow - TickInterval())
+    {
         pCmd->buttons &= ~IN_JUMP;
+        return;
+    }
+    if (bOwed || g_offOrigin <= 0 || g_offMins <= 0 || g_offMaxs <= 0 || !g_engineTrace)
+        return;
+    // endpos = plane + 1/32 = routesim's floorEff (same read as AutoJumpbug's arm trace)
+    const Vec3 vOrg = EntV3(pLocal, g_offOrigin);
+    TraceFilterWorldProps filter; filter.Setup(pLocal);
+    GameTrace_t tr{};
+    TraceHull(vOrg, vOrg - Vec3(0, 0, 4.f), EntV3(pLocal, g_offMins), EntV3(pLocal, g_offMaxs),
+              MASK_PLAYERSOLID, &filter, &tr);
+    if (!tr.DidHit()) return;
+    rs::World w;
+    w.floor = true;
+    w.floorEff = tr.endpos.z;
+    if (rs::MiniHopDies(MV_ReadSimState(pLocal, iTick), w, MV_SimParams(pLocal)))
+    {
+        pCmd->buttons &= ~IN_JUMP;
+        s_snapAte = true;
+        DebugLog("MJ: hover %.3fu over floor -- press held 1 cmd for the floor snap", vOrg.z - tr.endpos.z);
+    }
 }
 
 // Fast stop / fast accelerate (Aletherium FastMovement; duck speed + kart +

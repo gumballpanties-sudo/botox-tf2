@@ -527,6 +527,25 @@ inline Cmd ScriptCmd(int sc, int i, const State& s, ScriptMem& m, const World& w
     return c;
 }
 
+// MINI JUMP OFF A BHOP HOVER DIES. A landing tick grounds the feet up to 2u OVER the floor
+// (CategorizePosition, no snap until a grounded tick ENDS: jump 0.705, next 1.41, recorded). From
+// >= ~0.6u the engine's own unduck has its 20u one tick early (tick 5, vz 229 < 250), drops the
+// feet inside the 2u ground check and grounds the hop. true = a mini press on this cmd dies so.
+// One grounded cmd snaps the hover away; MiniJumpWaitTimer (movement.cpp) waits that cmd
+inline bool MiniHopDies(State s, const World& w, const Params& p)
+{
+    ScriptMem m;
+    for (int i = 0; i < 32; i++)
+    {
+        TickInfo ti;
+        Tick(s, ScriptCmd(SC_MINI, i, s, m, w, p), w, p, &ti);
+        if (i == 0 && !ti.jumped) return false;   // press refused: no hop to lose
+        if (ti.unducked) return s.ground;         // the -20 tick: still flying = a real mini
+        if (s.ground) return false;
+    }
+    return false;
+}
+
 // dih AutoJumpbug off the state the cmd starts on (pre-prediction: live flags, velocity, a hull
 // trace down). false = not armed, the cmd is left alone. true = it owns IN_DUCK and IN_JUMP this
 // cmd; band = this is the unduck + jump cmd, margin = distance to the nearer band edge.
