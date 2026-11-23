@@ -2169,6 +2169,8 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on)
     s_tb.assist = false;
     s_tb.reset_command();
     s_tb.hb_hit = false;
+    /* early returns below skip edge surf: its indicator flag must not stay lit */
+    s_esurfActive = false;
     s_sims = 0;
     s_restores = 0;
     s_budget_live = true;
@@ -2179,6 +2181,7 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on)
         return;
 
     if ((s_prePredFlags & FL_ONGROUND) && JumpTrickKey()) {
+        ESurf_Skip(cmd, "jump");
         s_tb.hit = s_tb.hs_hit = s_tb.owns_cmd = false;
         s_budget_live = false;
         return;
@@ -2197,8 +2200,9 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on)
        move re-proven pinned. Kept only when it pinned; texture_bug's 'R' then keeps it (it tests
        the incoming cmd first), else the ladder takes over as before. A held key align could not
        steer (no wall down its axis) stays the player's: 'R' tests their own move */
+    // an edge surf latched cmd: edge surf below rewrites the move, the ride align's sims would be thrown away
     if (tb_on && g_tbcAlign && EntAlive(pLocal) && !(s_prePredFlags & FL_ONGROUND)
-        && EntMoveType(pLocal) == MOVETYPE_WALK) {
+        && EntMoveType(pLocal) == MOVETYPE_WALK && !ESurf_Latched(cmd)) {
         static int s_ride_diag = -1000;
         const int base = PredCommandsPredicted();
         Restore(base - 1);
@@ -2219,8 +2223,16 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on)
     const float align_forward = cmd->forwardmove;
     const float align_side    = cmd->sidemove;
     const int   align_buttons = cmd->buttons;
-    TextureBugImpl(pLocal, cmd, tb_on);
-    HeadBounceImpl(pLocal, cmd, tb_on);
+    /* edge surf first ( botox texturebug.cpp:173 ): when it owns the cmd tb + head bounce stay out, the resim below covers it */
+    bool es_pin = false, es_held = false;
+    if (ESurf_Online(pLocal, cmd, es_pin, es_held)) {
+        /* its pin is a head pin: wall climb / pixel surf / edgebug read it off these like tb's own */
+        s_tb.hit = s_tb.hs_hit = es_pin;
+        s_tb.owns_cmd = true;
+    } else {
+        TextureBugImpl(pLocal, cmd, tb_on);
+        HeadBounceImpl(pLocal, cmd, tb_on);
+    }
     const bool caught = s_tb.hit || s_tb.hb_hit;
 
     const long long used_us = TbBudgetUsedUs();
@@ -2296,11 +2308,8 @@ static void TB_PreserveMove(void* pLocal, UserCmd_t* pCmd)
 // ============================================================================
 // the botox tbx tick + the movement.cpp yield flags. Also pixel hop's landing fallback (pixelhop.inl calls it
 // forced on, no TB key: webz runs its TB when nothing lands)
-static void TextureBugBotox(void* pLocal, UserCmd_t* pCmd, const bool bTbOn)
+static void TextureBugPublish(const bool bTbOn)
 {
-    s_textureBugHit = false;
-    s_tbOwnsCmd     = false;
-    tbx::OnCreateMove(pLocal, pCmd, bTbOn);
     const auto& t = tbx::s_tb;
     s_textureBugHit = t.hit;
     s_tbOwnsCmd     = t.owns_cmd || (t.acted && !t.assist && !t.hit);
@@ -2313,11 +2322,28 @@ static void TextureBugBotox(void* pLocal, UserCmd_t* pCmd, const bool bTbOn)
                 : bTbOn ? TBP_SCAN : TBP_OFF;
 }
 
+static void TextureBugBotox(void* pLocal, UserCmd_t* pCmd, const bool bTbOn)
+{
+    s_textureBugHit = false;
+    s_tbOwnsCmd     = false;
+    tbx::OnCreateMove(pLocal, pCmd, bTbOn);
+    TextureBugPublish(bTbOn);
+}
+
 static void TextureBug(void* pLocal, UserCmd_t* pCmd)
 {
     const bool bTbOn   = On(g_textureBug, g_textureBugKey, g_textureBugMode);
     if (bTbOn && g_tbStyle == 0)
     {
+        // edge surf lives in the botox tick (tbx, its sims + resim): run that with tb off first, a cmd it owns stays its.
+        // Flags are published only when it owns: cumidere + HeadSurf read LAST cmd's s_textureBugHit / s_headSurfHit
+        if (ESurf_Armed() || ESurf_EbArmed() || ESurf_Latched(pCmd))
+        {
+            tbx::OnCreateMove(pLocal, pCmd, false);
+            if (s_esurfActive) { TextureBugPublish(false); return; }
+        }
+        else
+            ESurf_Idle();   // edge_surf_online's off( "key" ): no sync arm, a new fall next time
         tbx::Off();
         TextureBugCumidere(pLocal, pCmd);
         return;

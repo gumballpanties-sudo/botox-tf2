@@ -22,7 +22,7 @@ namespace EspPreview
 	// visuals/esp_preview_tex.cpp: IDirect3DTexture9* of the preview target, read on the render thread
 	void QueueTextureCapture();   // game thread, while the preview target is bound
 	void* Texture();
-	void DropTexture();           // render.cpp h_Reset: the target is remade
+	void DropTexture();           // render thread (h_Reset) or eject after the drain: releases the held ref
 
 	// lua model:animate / entity:animate (lua/lua_api.cpp): a fake ent per animation model, built like the preview's,
 	// on a reserved model index the GetModel hook answers. Game thread only, never inside a draw for Create / Bind.

@@ -81,6 +81,10 @@ static LPDIRECT3DTEXTURE9 g_LayerTexture = nullptr;
 static UINT g_LayerWidth = 0, g_LayerHeight = 0;
 static bool g_LayerPass = false;
 
+// botox: per vertex depth 0..1 (every list in order, TotalVtxCount long) + z test against the bound z buffer,
+// for a draw mid frame (clipart precipitation, killeffects_world.cpp). Null = flat z 0, no z test
+const float* GBotoxVtxDepth = nullptr;
+
 // Functions
 static void ImGui_ImplDX9_SetupRenderState(ImDrawData* draw_data)
 {
@@ -103,7 +107,8 @@ static void ImGui_ImplDX9_SetupRenderState(ImDrawData* draw_data)
     bd->pd3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
     bd->pd3dDevice->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
     bd->pd3dDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-    bd->pd3dDevice->SetRenderState(D3DRS_ZENABLE, FALSE);
+    bd->pd3dDevice->SetRenderState(D3DRS_ZENABLE, GBotoxVtxDepth ? TRUE : FALSE);
+    if (GBotoxVtxDepth) bd->pd3dDevice->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
     bd->pd3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
     bd->pd3dDevice->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
     bd->pd3dDevice->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
@@ -229,6 +234,7 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
     // FIXME-OPT: This is a minor waste of resource, the ideal is to use imconfig.h and
     //  1) to avoid repacking colors:   #define IMGUI_USE_BGRA_PACKED_COLOR
     //  2) to avoid repacking vertices: #define IMGUI_OVERRIDE_DRAWVERT_STRUCT_LAYOUT struct ImDrawVert { ImVec2 pos; float z; ImU32 col; ImVec2 uv; }
+    const float* botox_depth = GBotoxVtxDepth;
     for (int n = 0; n < draw_data->CmdListsCount; n++)
     {
         const ImDrawList* cmd_list = draw_data->CmdLists[n];
@@ -237,7 +243,7 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
         {
             vtx_dst->pos[0] = vtx_src->pos.x;
             vtx_dst->pos[1] = vtx_src->pos.y;
-            vtx_dst->pos[2] = 0.0f;
+            vtx_dst->pos[2] = botox_depth ? *botox_depth++ * 2.0f - 1.0f : 0.0f;   // botox: the ortho below maps z -> z * 0.5 + 0.5
             vtx_dst->col = IMGUI_COL_TO_DX9_ARGB(vtx_src->col);
             vtx_dst->uv[0] = vtx_src->uv.x;
             vtx_dst->uv[1] = vtx_src->uv.y;

@@ -111,6 +111,7 @@
     { "kiLabel_hsw",  CfgEntry::STR, g_kiLabels[LBL_HSW],  sizeof(g_kiLabels[0]) },
     { "kiLabel_gmb",  CfgEntry::STR, g_kiLabels[LBL_GOOMBA], sizeof(g_kiLabels[0]) },
     { "kiLabel_pj",   CfgEntry::STR, g_kiLabels[LBL_PJ],   sizeof(g_kiLabels[0]) },
+    { "kiLabel_esurf", CfgEntry::STR, g_kiLabels[LBL_ESURF], sizeof(g_kiLabels[0]) },
 
     { "ksEnable",         CfgEntry::BOOL,   &g_kpEnable, 0 },
     { "ksLayout",         CfgEntry::INT,    &g_kpLayout, 0 },

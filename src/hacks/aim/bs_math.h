@@ -707,6 +707,25 @@ namespace BsMath
 		return floor + 0.5f * speed * extrap + 1500.f * extrap * extrap;
 	}
 
+	// BEARING TIMING (dih-bs20). The bearing the server reads is between OUR post-move centre (a
+	// client prediction: a body-block on his live box, which our prediction collides with a stale
+	// copy of, moves it) and his rewound one. Off by a few ms of relative motion it is the same
+	// geometry a little earlier or later, so the line to him is priced |its turn rate| x
+	// k_bearTime on top of the position term, in quadrature. Nothing at range: a side-on pass at
+	// 18u turns the line ~2000 deg/s, at 65u ~500. bs19 log: the one front of 19 swings was that
+	// 18u pass, margin 3.8 at p=0.999; with this it is p=0.67 (refused, next tick is deeper behind).
+	// ponytail: k_bearTime fit to ONE front (0.25 tick lets it through, 0.4 refuses a good stab) --
+	// recalibrate on bear= / brate= of STAB lines vs NOT A BACKSTAB as fronts come in.
+	constexpr float k_bearTime = 0.3f * k_tick;
+	// rel = his centre - ours (2D used), vRel = his velocity - ours, posErr = PositionError's
+	inline float BearingSigma(V3 rel, V3 vRel, float posErr)
+	{
+		const float d2 = std::max(rel.x * rel.x + rel.y * rel.y, 1.f);
+		const float pos = Deg(std::atan2(posErr, std::sqrt(d2)));
+		const float turn = Deg((rel.x * vRel.y - rel.y * vRel.x) / d2) * k_bearTime;   // deg/s x s
+		return std::sqrt(pos * pos + turn * turn);
+	}
+
 	// ---- THE REWIND WINDOW (dih-bs18, knife backtrack) ---------------------------------------------
 	// Lag compensation puts every player where OUR tick_count says (targettick = tick_count -
 	// lerpTicks), but his yaw stays LIVE. So asking for an older tick moves his box (reach, bearing)

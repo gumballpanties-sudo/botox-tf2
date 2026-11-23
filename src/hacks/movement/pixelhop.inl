@@ -222,6 +222,9 @@ static void PixelHop(void* pLocal, UserCmd_t* cmd)
     s_pixelHopOn = true;
     // pixeljump's own hop / pending launch / ride hold (PS_AssistTick, this cmd) proved its cmd: hands off
     if (s_psAssistHopActive) return;
+    // edge surf owns this cmd (tbx ran it, TextureBug): a land here rewrites its proven move, and the tb fallback below would run
+    // edge surf a second time on a chain this cmd already spent
+    if (s_esurfActive) return;
     const int  nBase    = PredCommandsPredicted();
     const bool grounded = (s_prePredFlags & FL_ONGROUND) != 0;
     // grounded START + IN_JUMP without your space = another feature's sim-proven takeoff (edge jump,

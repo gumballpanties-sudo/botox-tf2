@@ -161,6 +161,8 @@ void Movement_RunGuarded(UserCmd_t* pCmd);
 // botox air_stuck_final_stamp + air_stuck_shot_proof: call AFTER every other writer of the cmd
 // (the aim hook calls it after its aimbot / prediction end). No-op unless air stuck sent a pin.
 void Movement_AirStuckLastWriter(UserCmd_t* pCmd);
+// botox edge_surf_final_stamp: call after lua's create_move (the very last writer). No-op unless edge surf owned the cmd
+void Movement_EdgeSurfFinalStamp(UserCmd_t* pCmd);
 float MV_CvarFloat(const char* name, float def);   // movement.cpp CvarFloat (cached ConVar read)
 float MV_SurfaceFriction(void* pLocal);           // m_surfaceFriction datamap field, 1 when missing
 
@@ -210,6 +212,7 @@ struct MvInd_t
     // botox keybind indicator rows with no landing state (plain labels), and the two that have one
     bool  dhOn = false, acOn = false, abOn = false, hswOn = false;
     bool  esOn = false, esHit = false;       // edge skip: hit = a plan is flying (botox g_edge_skip.active())
+    bool  esfOn = false, esfHit = false;     // edge surf: hit = its pin (tb's m_hit) or it holds / guides the cmd (botox label_esurf)
     bool  gmbOn = false, gmbHit = false;     // auto goomba: hit = it fired in the last 0.2 s
     bool  onGround = false;
     float speed = 0.f;
@@ -245,6 +248,24 @@ struct AbDrawData
     bool active = false;
 };
 void AB_GetDrawData(AbDrawData& out);
+
+// ==== edge surf visualize (movement thread -> render thread), botox edge_surf_render ====
+// every ledge the scan found (dim), the pick (your color while edge surf owns the cmd, green on a pin, grey once it let go),
+// the arrival point, the act. A hull wide stretch of each edge, not the ledge's real length. ms = GetTickCount64 of the tick
+// that ran it: botox draws for 0.15 s after
+struct ESurfDrawData
+{
+    static constexpr int k_max = 10;
+    struct Edge { Vec3 a, b; };   // the top's stretch; ticks run 8u down from both ends
+    Edge cand[k_max];
+    int  nCand = 0;
+    Edge pick;
+    Vec3 arrive, label;
+    bool pickOk = false, arriveOk = false, pinned = false, own = false;
+    char act = 'N';
+    unsigned long long ms = 0;
+};
+void ESurf_GetDrawData(ESurfDrawData& out);
 
 // ==== wall climb visualize (movement thread -> render thread), botox wall_climb viz_t + spot job ====
 // last wall tick: the face wc read, where the sent cmd takes you ( lands = over your jump floor ), on ground the spot scan

@@ -33,6 +33,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "pjseam.h"   // pjs::SeamFace / InSkin: the catch window, shared with ps assist
 
 namespace rs
 {
@@ -43,11 +44,32 @@ constexpr float  kDuckMs      = 1000.f;    // GAMEMOVEMENT_DUCK_TIME
 constexpr double kTimeToDuck  = 0.2;       // TIME_TO_DUCK (TF), double literal
 constexpr double kTimeToUnduck = 0.2;      // TIME_TO_UNDUCK
 constexpr int    kAirDuckMax  = 2;         // TF_AIRDUCKED_COUNT
-// pixel surf catch, pixelsurf_assist check(): d = seam - z on a falling tick, d in (-0.01, 0.03).
-// Recorded: catches at d -0.003 / +0.012, misses at 0.10+ (routesim_test).
+// pixel surf catch, OLD rule (pixelsurf_assist check()): d = seam - z on a falling tick, d in
+// (-0.01, 0.03). Only for a seam z that is not a finder placement -- see SurfIn
 constexpr float  kSurfLo      = -0.01f;
 constexpr float  kSurfHi      = 0.03f;
 constexpr float  kInf         = 1e9f;
+
+// THE CATCH WINDOW: does a falling tick that ENDS at z pin on this seam next tick?
+// Finder seam (pjs::SeamFace): z in the brush top's 1/32 skin, the engine's own rule. The old
+// window around the marker was 0.04 wide and reached 0.007 over the skin and 0.002 under the top:
+// ~22% of its catches were ticks the engine falls straight past ("impossible combos").
+// margin = distance to the nearer edge. off = how far outside, signed: > 0 the hull ended ABOVE
+// the window (the seam wanted to be higher), < 0 under it.
+// lift = Params::clipEps * dt, sv_wallbug 0: the pin tick itself lifts the feet that far, and a
+// pin that does not hold a SECOND tick is not a surf to anything that reads one (PixelSurf's hunt
+// wants run == 2, the finder's hold proof, ps assist's confirm) -- the skin's top `lift` is out
+inline bool SurfIn(float z, float seam, float* margin = nullptr, float* off = nullptr, float lift = 0.f)
+{
+    float lo, hi;                       // window in z: (lo, hi]
+    float face;
+    if (pjs::SeamFace(seam, face)) { lo = face; hi = face + kDistEps - lift; }
+    else                           { lo = seam - kSurfHi; hi = seam - kSurfLo; }
+    const bool in = z > lo && z <= hi;
+    if (margin) *margin = std::min(z - lo, hi - z);
+    if (off)    *off = in ? 0.f : z > hi ? z - hi : -(lo - z);
+    return in;
+}
 // LANDING SET (botox route_engine.cpp proj-rc-landing-set-1010). A ground marker over the feet is a
 // box top: the hull lands on it on whatever tick it crosses the box's EDGE, and that is the
 // player's horizontal, not a press. Crossing near the apex lands on a rising tick inside the 2u
@@ -67,6 +89,13 @@ struct Params
     float cropFrac  = 1.f;      // PreventBunnyJumping on a bhop press, 1 = under 1.2x maxspeed
     bool  clampAirDucks = true; // tf_clamp_airducks
     int   duckTimerTicks = 20;  // TF_TIME_TO_DUCK 0.3s in ticks
+    // sv_wallbug 0 (Valve Oct 2026 ClipVelocity: backoff = min(backoff, 0) - DIST_EPSILON): every
+    // clip leaves the hull 1/32 u/s OFF the plane and the rest of the tick flies it. kDistEps on
+    // those servers, 0 = the old clip (sv_wallbug 1). Recorded 11-20 (routesim_test 43): landings
+    // end up to 0.00047 over the floor, an edgebug leaves at -5.96875, a pixel surf ride climbs
+    // 0.00047 a tick and falls off at -5.96875 -- 40 ticks of fall later that is 0.019u, over
+    // half the 1/32 catch window
+    float clipEps   = 0.f;
     // dih features the route leans on (routecalc.inl reads them live)
     bool  pixelSurf   = true;   // PixelSurf on: its duck pass, its hold, its latch
     bool  jbYieldSurf = true;   // g_jbYieldSurf: AutoJumpbug idles while a ride is latched
@@ -367,9 +396,32 @@ inline void AirMove(State& s, const World& w, const Params& p, TickInfo& ti)
     if (!t.hit || t.frac > 0.f) s.z = t.end;
     if (t.hit)
     {
-        s.vz = 0.f;
+        s.vz = down ? p.clipEps : -p.clipEps;
         if (down) ti.landHit = true; else ti.ceilHit = true;
+        // bump 2: time_left -= time_left * fraction, then VectorMA(origin, time_left, velocity) off
+        // the plane -- nothing in the way (the clip points away from the face it hit)
+        if (p.clipEps > 0.f)
+        {
+            const float left = p.dt - p.dt * t.frac;
+            s.z = FreeZ(s.z, s.z + left * s.vz, H);
+        }
     }
+}
+
+// the NEXT tick's move goes down (StartGravity takes vz under 0). A pin needs that move to START in
+// the skin; how the feet got there does not matter -- a fall, the apex tick (5.6% of a jump's
+// pinnable heights end a RISING tick in the skin), a duck's +20 (the 11-20 recorded catch)
+inline bool NextMoveDown(const State& s, const Params& p) { State t = s; StartGravity(t, p); return t.vz < 0.f; }
+
+// vz a clipped tick ends on while nothing grounds it: the clip's own vz, then FinishGravity.
+// -halfgrav on the old clip, -halfgrav + 1/32 on sv_wallbug 0 (-5.96875, every recorded pin)
+inline float PinVz(const Params& p) { State t; t.vz = p.clipEps; FinishGravity(t, p); return t.vz; }
+
+// one tick pinned on a seam's top plane: the fall is stopped at fraction 0, the clip's vz flies the
+// whole tick. z climbs clipEps * dt (recorded 192.006714, 192.007187, ...); 0 on the old clip
+inline void PinLift(State& s, const Params& p)
+{
+    if (p.clipEps > 0.f) s.z = FreeZ(s.z, s.z + p.dt * p.clipEps, HullH(s, p));
 }
 
 // one CTFGameMovement::ProcessMovement, z only
@@ -1124,11 +1176,12 @@ private:
         // to one that outlives the latch; an outcome only some lengths reach prints the shortest
         std::vector<Pending> got;
         m_collect = &got;
+        const Point* src = layer > 0 ? &m_pts[layer - 1] : nullptr;
         for (int r = 0; r <= kMaxRide; r++)
         {
             State s = s0;
             s.onSeam = false;
-            Ride(s, r);
+            if (!Ride(s, r, src)) break;        // sv_wallbug 0: the pin has lifted out of the skin
             m_ride = r;
             plans(s);
         }
@@ -1173,11 +1226,19 @@ private:
         }
     }
 
-    // the player's ride on the seam: z and vz held by the clip, dih's features tick along
-    void Ride(State& s, int ticks) const
+    // the player's ride on the seam: z and vz held by the clip, dih's features tick along.
+    // sv_wallbug 0, a pixelsurf: every ride tick lifts the feet clipEps * dt, and a tick that
+    // starts over the skin is no pin (11-11 log: z 288.027 -> 288.031 in 9 ticks, then it fell).
+    // The ride's life is set by how low the catch landed. false = it cannot last `ticks`
+    bool Ride(State& s, int ticks, const Point* src) const
     {
+        const bool lift = m_p.clipEps > 0.f && src && src->type == PT_SURF;
+        float face = 0.f;
+        const bool skin = lift && pjs::SeamFace(src->z, face);
         for (int k = 0; k < ticks; k++)
         {
+            if (skin && !pjs::InSkin(s.z, face)) return false;
+            if (lift) PinLift(s, m_p);
             s.tick++;
             if (s.duckTime > 0.f) s.duckTime = std::max(0.f, s.duckTime - 1000.f * m_p.dt);   // ReduceTimers
             s.psRiding = s.psPrevSurf;          // pre vz sits on -halfgrav: s_prevSurfVel && now
@@ -1186,6 +1247,7 @@ private:
             s.oldJump = false;
             s.oldDuck = s.hold != 0;
         }
+        return true;
     }
     static bool SameButClock(const State& a, const State& b)
     {
@@ -1324,7 +1386,7 @@ private:
             vz -= hg;                                        // FinishGravity
         }
         const double slack = (double)DuckShift(p) + 0.25;    // the teleport + float rounding, generous
-        return lo - slack < (double)(seam - kSurfLo) && hi + slack > (double)(seam - kSurfHi);
+        return lo - slack < (double)seam + 0.05 && hi + slack > (double)seam - 0.05;   // either window, with room
     }
 
     void Hunt(Fs& f, const Cmd& c, const World& w, const Params& p, const Point& T)
@@ -1341,8 +1403,7 @@ private:
                 TickInfo qt;
                 Tick(q, qc, w, p, &qt); m_res.ticks++;
                 if (q.ground) break;                              // touching down is a fall
-                const float d = T.z - q.z;
-                if (qt.moveVz < 0.f && d > kSurfLo && d < kSurfHi)
+                if (NextMoveDown(q, p) && SurfIn(q.z, T.z, nullptr, nullptr, p.dt * p.clipEps))
                 {
                     f.s.psAge = -z - 1;                           // the pin cmd will be age 0
                     f.psDuck = duckPass;
@@ -1574,30 +1635,30 @@ private:
         switch (T.type)
         {
         case PT_SURF:
-            if (!s.ground && ti.moveVz < 0.f)
+            if (!s.ground && NextMoveDown(s, p))
             {
-                const float d = T.z - s.z;
-                if (d > kSurfLo && d < kSurfHi)
+                float margin = 0.f, off = 0.f;
+                if (SurfIn(s.z, T.z, &margin, &off, p.dt * p.clipEps))
                 {
-                    // the first clip latches the ride
+                    // the next tick starts in the skin: its fall clips at fraction 0 and latches
+                    // the ride. That pin tick is folded in here (its vz, its lift)
                     if (stanceOk)
                     {
                         State a = s;
-                        a.vz = HalfGrav(p);                          // a clipped tick ends on -halfgrav
+                        a.vz = PinVz(p);                             // a clipped tick ends on the pin
+                        PinLift(a, p);
                         a.onSeam = true;
-                        AddEdge(L, a, dep, "pixelsurf" + Stance(s.ducked), cost + (f.psDuck ? 1 : 0),
-                                std::min(d - kSurfLo, kSurfHi - d));
+                        AddEdge(L, a, dep, "pixelsurf" + Stance(s.ducked), cost + (f.psDuck ? 1 : 0), margin);
                     }
                     return true;
                 }
-                const float off = d <= kSurfLo ? kSurfLo - d : d - kSurfHi;
-                if (off < m_res.closest[L.layer])
+                if (std::fabs(off) < m_res.closest[L.layer])
                 {
-                    m_res.closest[L.layer] = off;
-                    // the seam is UNDER the window -> it wanted to be higher, and the other way
-                    // round. The shift lands the tick on the window's edge, so a caller offering
+                    m_res.closest[L.layer] = std::fabs(off);
+                    // the hull ended OVER the window -> the seam wanted to be higher, and the other
+                    // way round. The shift lands the tick on the window's edge, so a caller offering
                     // it as a spot to aim at adds its own margin to get inside
-                    m_res.closestDz[L.layer] = d <= kSurfLo ? off : -off;
+                    m_res.closestDz[L.layer] = off;
                 }
             }
             return false;
@@ -1627,7 +1688,9 @@ private:
             if (ti.moveVz >= 0.f || !stanceOk) return true;
             State a = s;
             a.ground = false;
-            a.vz = HalfGrav(p);                              // walks off: FinishGravity from 0
+            // slid off: the landing clip's vz (0, or 1/32 on sv_wallbug 0), then FinishGravity.
+            // A hover never clipped: it walks off from 0. z keeps the clip's lift (AirMove)
+            a.vz = ti.landHit ? PinVz(p) : HalfGrav(p);
             a.airDucked = pre.airDucked;                      // slide-off: count never reset
             if (!ti.landHit) a.tick += 1;                    // hover: one grounded tick first
             AddEdge(L, a, dep, "edgebug" + Stance(s.ducked), cost, kInf);
@@ -1660,7 +1723,7 @@ private:
             const bool ride = phi >= lo && phi < period - 1e-4f;
             State a = s;
             a.z = ride ? T.z + phi - hull : pre.z;              // ride: head held phi over B
-            a.vz = HalfGrav(p);                                  // the pin's -g*dt/2
+            a.vz = PinVz(p);                                     // the pin's -g*dt/2 (+ 1/32, sv_wallbug 0)
             a.ground = false;
             a.onSeam = ride;                                     // out of band: one pin, then it falls
             // botox tiers: an unread brush top is a guess at lo, a pin with no ride is one tick
@@ -1852,8 +1915,9 @@ public:
             if (s.onSeam)
             {
                 s.onSeam = false;
-                Ride(s, h.ride);
-                // the ride holds z still -- and the player, pinned on the seam, goes nowhere
+                Ride(s, h.ride, h.layer > 0 ? &m_pts[h.layer - 1] : nullptr);
+                // the ride holds z (a 0.0005 lift a tick at most) -- and the player, pinned on the
+                // seam, goes nowhere
                 for (int k = 0; k < h.ride; k++) { z.push_back(s.z); a.push_back({ false, 0.f }); }
             }
             const Leg L = MakeLeg(h.layer, h.from);

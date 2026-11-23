@@ -65,6 +65,7 @@ extern ImFont* g_fontChillware13;        // verdana bd 13  NoHinting
 extern ImFont* g_fontLobotomy13;         // sf_pro_display_semibold 13  Bitmap
 extern ImFont* g_fontLobotomyBold13;     // sf_pro_display_bold 13  Bitmap
 extern ImFont* g_fontGrimoireBold11;     // tahoma bd 11  Monochrome|MonoHinting (grimoire wm / spec header; rows = g_menuReg)
+extern ImFont* g_fontDatashellBold12;    // verdana bd 12 Monochrome|MonoHinting (datashell wm / spec / media)
 extern ImFont* g_fontKamibebra13;        // rubik_regular 13  Bitmap
 extern ImFont* g_fontKamibebraBold13;    // rubik_medium 13  Bitmap|LightHinting
 extern ImFont* g_fontKamibebra22;        // rubik_regular 22  Bitmap
@@ -703,6 +704,7 @@ extern float g_edgeBugVizPadColor[4];
 extern bool g_pixelSurf;   extern int g_pixelSurfKey;   extern int g_pixelSurfMode;
 extern int  g_pixelSurfPredictTicks; // seam look-ahead horizon, ticks (def 8, 1-32)
 extern int  g_psWallStrafe;   // ride gain: 0 off / 1 when your keys press into the wall (botox) / 2 always
+extern float g_psWb0Force;    // sv_wallbug 0 ride press = force * (speed / tickrate) (as::Wb0RidePress); 0 = off
 extern bool g_psParkAtEnd;    // sim the runout, brake so the ride stops on the seam, hold the hang
 // approach aids for the pixel surf FEATURE (both off by default)
 // -- park at the end of a surf (measure the runout, brake the tangent into it)
@@ -760,6 +762,14 @@ extern bool  g_abCrouch;      // air duck while armed + crouch jump
 extern bool  g_abAlign;       // landing spot by a wall slides flush along it
 extern bool  g_abViz;         // draw the armed plan's flight + landing ring
 extern float g_abVizColor[4];
+// edge surf (botox edge_surf.cpp -> edgesurf.inl): surf a ledge's top edge from beside it
+extern bool  g_edgeSurf;  extern int g_edgeSurfKey;  extern int g_edgeSurfMode;
+extern float g_edgeSurfRange;        // lead range: ledges scanned under the fall (def 96, 8-512)
+extern float g_edgeSurfReach;        // reach: a beside approach owned inside this gap (def 6, 0.1-32)
+extern float g_edgeSurfDeltaStrafe;  // 0 = straight press into the face, else air strafe turning this many deg a tick (0-15)
+extern bool  g_edgeSurfViz;          // draw scanned ledges, the pick, the arrival, the act
+extern float g_edgeSurfVizColor[4];
+extern bool  g_edgeBugEdgeSurf;      // edgebug "edgesurf on eb": the eb key arms edge surf's takeover at an eb's pin end
 extern bool g_psFinderHeadbounce; // PixelFinder: also probe for ceiling (ascent) pins
 extern bool g_psFinderPixeljump;  // PixelFinder: pixel jump LIPS (botox pf_pixel_jump), yellow
 extern bool g_psFinderJumpSurf;   // PixelFinder: keep jump-only (no-fall) pins, own list, orange
@@ -1008,6 +1018,7 @@ extern int  g_offAirDash;       // m_iAirDash -- scout double jump budget
 extern int  g_offItemDefIndex;  // m_iItemDefinitionIndex (DT_EconEntity) -- Atomizer detect
 extern int  g_offTeamNum;       // m_iTeamNum -- friendly team brushes are not solid to us
 extern int  g_offCollGroup;     // m_CollisionGroup -- solid-to-player-movement objects still are
+extern int  g_offSolidType;     // m_nSolidType (byte, m_Collision) -- SOLID_BSP 1 / SOLID_VPHYSICS 6
 extern int  g_offSkyArea;       // m_Local.m_skybox3d.area -- 3D skybox BSP area, 255 = none
 // The interp-removal netvars that used to sit here (m_flSimulationTime, m_flOldSimulationTime,
 // m_iObserverMode, m_hObserverTarget, m_PlayerAnimState, m_flTauntYaw, m_bAllowMoveDuringTaunt,

@@ -12,6 +12,7 @@
 
 void DebugLog(const char* fmt, ...);   // dllmain.cpp
 bool Chams_SoundStamp(int entindex, float& ms, float* origin);   // aim/chams.cpp, botox g_sound_esp store
+bool ClassIcons_Have(int cls);   // hud/class_icons.cpp, game thread: decodes the scoreboard icons once
 
 // ============================================================================================
 // botox hacks/visuals/players/players.cpp, line for line where TF2 allows. TF2 departures:
@@ -304,6 +305,16 @@ namespace
 		EspQ::Stack _s(StackKey(p, STK_BOTTOM), false, p.prio);
 		EspQ::Text(p.box.l + p.box.w * 0.5f, p.box.b + 2 + p.pad[PAD_BOTTOM], s, col, Black(p.a), 0.5f);
 		p.pad[PAD_BOTTOM] += FontH() + 1.f;
+	}
+
+	// below-the-box class icon row, same stack as the text rows
+	void PartBottomIcon(Part& p, int cls, float size, uint32_t col)
+	{
+		EspQ::Stack _s(StackKey(p, STK_BOTTOM), false, p.prio);
+		size = roundf(size);
+		const float x = floorf(p.box.l + p.box.w * 0.5f - size * 0.5f), y = p.box.b + 2 + p.pad[PAD_BOTTOM];
+		EspQ::ClassIcon(x, y, x + size, y + size, cls, col);
+		p.pad[PAD_BOTTOM] += size + 1.f;
 	}
 
 	void PartDistance(Part& p, float dist)   // :1077-1105
@@ -662,6 +673,7 @@ void CEsp::DrawPlayers(CTFPlayer* pLocal)
 		player.m_name = std::move(sName);
 
 		player.m_steamId = g_espAvatar ? SteamId(iIndex) : 0;
+		player.m_class = pPlayer->m_iClass();
 
 		if (auto pWeapon = pPlayer->m_hActiveWeapon()->As<CTFWeaponBase>())
 		{
@@ -775,6 +787,15 @@ void CEsp::DrawPlayer(const EspPlayer& player)
 	if (g_espWeaponName)
 		if (const char* w = WeaponName(player.m_weaponId))
 			PartBottomText(p, w, EspCol(g_espWeaponNameColor, a));
+
+	if (g_espClass && player.m_class >= TF_CLASS_SCOUT && player.m_class <= TF_CLASS_CIVILIAN)
+	{
+		static const char* const kClass[] = { "", "scout", "sniper", "soldier", "demoman", "medic", "heavy", "pyro", "spy", "engineer", "civilian" };
+		if (g_espClassStyle == 1 && ClassIcons_Have(player.m_class))   // no icon (civilian / bad hud file) -> label
+			PartBottomIcon(p, player.m_class, g_espClassIconSize, EspCol(g_espClassColor, a));
+		else
+			PartBottomText(p, kClass[player.m_class], EspCol(g_espClassColor, a));
+	}
 
 	if (g_espDistance)
 		PartDistance(p, player.m_distance);

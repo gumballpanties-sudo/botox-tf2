@@ -26,6 +26,7 @@ enum EspCmdType : uint8_t
     ESPC_CIRCLE,     // centre x0,y0 radius x1, col, thick
     ESPC_TEXT,       // top-left x0,y0 after x -= w*ax, y -= h*ay; col, col2 shadow (ESPF_SHADOW)
     ESPC_AVATAR,     // steam avatar sid: min x0,y0 max x1,y1, round, alpha in col; ESPF_LEFT_OF_TEXT
+    ESPC_ICON,       // scoreboard class icon (hud/class_icons.cpp): TF_CLASS_* in p0, min x0,y0 max x1,y1, tint col
 };
 
 enum : uint8_t
@@ -177,6 +178,10 @@ namespace EspQ
         if (!sid) return;
         EspCmd& c = Push(ESPC_AVATAR); c.x0 = x0; c.y0 = y0; c.x1 = x1; c.y1 = y1; c.sid = sid; c.round = round;
         c.col = EspColRGBA(1.f, 1.f, 1.f, alpha); c.flags = leftOfText ? ESPF_LEFT_OF_TEXT : 0;
+    }
+    inline void ClassIcon(float x0, float y0, float x1, float y1, int cls, uint32_t col)
+    {
+        EspCmd& c = Push(ESPC_ICON); c.x0 = x0; c.y0 = y0; c.x1 = x1; c.y1 = y1; c.p0 = cls; c.col = col;
     }
 
     inline void Begin() { g_espQBuild.Clear(); }

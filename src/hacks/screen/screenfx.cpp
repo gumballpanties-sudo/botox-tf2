@@ -11,6 +11,7 @@
 #include "shaders/fx_quad_vs.h"   // k_fxQuadVsBytes   -- compiled from fx_quad_vs.hlsl by fxc
 #include "../visuals/reflections.h"  // Reflections_Draw -- same depth source, same draw point
 #include "../visuals/mc_world.h"      // MCWorld_UpdateView -- cloud drift off this view setup
+#include "../misc/killeffects.h"      // PrecipClipart_ViewTick -- clipart precipitation traces off this view setup
 #include "screenfx_passes.h" // ScreenFxPasses_DepthView -- emphasize/show depth, same draw point
 #include "bloom.h"           // Bloom_Frame -- tail of the gun pass (botox: after motion blur, before hud)
 
@@ -1936,6 +1937,9 @@ static void FxReadViewSetup(const void* setup)
     // the sky/clouds pass's world-space cloud drift -- same thread, same reason
     // (g_globalVars->curtime and the player's own origin are main-thread only).
     MCWorld_UpdateView(fbOrigin);
+
+    // clipart precipitation: spawn / sky / landing / sight traces, same thread, same reason
+    PrecipClipart_ViewTick(fbOrigin, fbAngles);
 
     // reflections' nearest env_cubemap pick + file loads (botox pick_cubemap, main thread)
     Reflections_UpdateView(fbOrigin, fbAngles);

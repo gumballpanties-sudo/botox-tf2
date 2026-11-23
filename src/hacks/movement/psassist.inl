@@ -1719,7 +1719,7 @@ static PsHop_t PsSimHop(void* pLocal, UserCmd_t* pCmd, int iType, const Vec3& vT
 
         // heroin "unsafe pixeljump" (FUN_18007dd70): the seam's height while falling, within 200u
         // 2D of the point, IS the catch -- no pin vz, no hold proof, no moved check
-        if (bUnsafe && !bAnySeam && bAir && flVz < 0.f && pjs::SeamHit(flZ, vTarget.z)
+        if (bUnsafe && !bAnySeam && bAir && flVz < 0.f && pjs::SeamHit(flZ, vTarget.z, 0.f)
             && flFlatNow < 200.f)
         {
             r.caught = true;
@@ -2704,6 +2704,12 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
 
         int iPick = JT_NONE;
         const PsHop_t* pPick = nullptr;
+        // sv_wallbug 0: THE CATCH'S DEPTH IS THE RIDE (pjs::SkinRideTicks). The first catch used to win,
+        // even one pinned 3 ticks under the skin's top ("catches, then falls off") while another type
+        // lands 20 ticks deep. Catches keep flying the list until one rides pjs::k_rideEnough; the longest
+        // wins. Old clip / a pin z that is no skin z: nothing to rank, first catch as before (pjseam.h)
+        int iPickLife = -1;
+        const bool bRankLife = CvarFloat("sv_wallbug", 0.f) < 0.5f;
         if (bWorthSimming)
         {
             for (int o = 0; o < k_nCands; o++)
@@ -2736,8 +2742,8 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
 
                 // ---- THE ONLY ADMISSION TEST IN THIS FILE ----------------------------------
                 // The engine flew the exact commands the live tail is about to send and the hull
-                // ended up pinned at this seam for k_psConfirm ticks. There is nothing to rank,
-                // nothing to cap and nothing to extrapolate: take it
+                // ended up pinned at this seam for k_psConfirm ticks. Nothing to cap and nothing to
+                // extrapolate: every pick is a flown catch, the only rank is how long it rides
                 const PsHop_t& c = aCands[k].res;
                 // the dash is an AIR press with no ground contact to arm against, so a dash plan
                 // that cannot fire on this very cmd is not a plan -- re-planned next cmd instead
@@ -2748,10 +2754,17 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
                 if (c.caught && !c.truncated && !bDashLate
                     && c.launchDelay >= 0 && (bIsDash || c.apexGain >= k_psMinApex))
                 {
-                    iPick = aCands[k].type;
-                    pPick = &aCands[k].res;
-                    nCaught++;
-                    break;
+                    const int iLife = pjs::CatchLife(c.catchZ, TickInterval(), bRankLife);
+                    if (!pPick)
+                        nCaught++;
+                    if (pjs::TakeCatch(pPick != nullptr, iPickLife, iLife))
+                    {
+                        iPick = aCands[k].type;
+                        pPick = &aCands[k].res;
+                        iPickLife = iLife;
+                    }
+                    if (pjs::CatchEnough(iPickLife))
+                        break;
                 }
             }
         }
@@ -2801,11 +2814,12 @@ static void PS_AssistTick(void* pLocal, UserCmd_t* pCmd, bool bPredicted)
 
             if (iPick != JT_NONE && pPick)
                 DebugLog("%s: pick=%s pt=%d/%d i%d dist=%.0f used=%d need=%.2f apex=%.1f "
-                         "catch=t%d z%+.3f flat=%.1f zf=%.3f gnd=%d spd=%.0f rad=%.0f mask=%d%s "
+                         "catch=t%d z%+.3f life=%d flat=%.1f zf=%.3f gnd=%d spd=%.0f rad=%.0f mask=%d%s "
                          "worth=%d [%s] sims=%d",
                          bPjOn ? "PJ" : "PS", PsTypeName(iPick), iT, nTargets, iTargetIdx,
                          aTargets[iT].dist, s_psUsedIdx, vTarget.z - pPick->launchZ, pPick->apexGain,
-                         pPick->catchSince, pPick->catchZ - vTarget.z, pPick->catchFlat,
+                         pPick->catchSince, pPick->catchZ - vTarget.z, iPickLife,
+                         pPick->catchFlat,
                          vTarget.z - truncf(vTarget.z), (int)bOnGround, s_prePredVel.Length2D(), flEngage,
                          iTargetMask, szOff, (int)bWorthSimming, szCands,
                          k_cmdSimCap - SimsLeft());

@@ -529,8 +529,7 @@ namespace
 			Fail("model draw faulted, preview off");
 			s_ready = false;
 			s_ent = nullptr;   // leaked on purpose: its state is unknown
-			EspPreview::DropTexture();
-			return;
+			return;            // s_failed hides the image (DrawBody); the ref is the render thread's to drop
 		}
 
 		RenderEsp(worldToProjection, pHdr);
@@ -565,7 +564,7 @@ void EspPreview::Paint()
 void EspPreview::OnEject()
 {
 	// the ent is leaked, never freed: nothing may hold it, but a free under a late engine read is a crash
-	EspPreview::DropTexture();
+	// texture ref: thread.cpp eject drops it after the drain (Present may still bind it here)
 	s_ready = false;
 	s_failed = true;
 }
@@ -676,6 +675,7 @@ namespace
 			p.m_index = 1;   // any non-zero: labels get stacks, so the preview shows the declutter too
 			p.m_steamId = g_espAvatar ? LocalSteamId() : 0;   // TF2 bots have no portrait: your own avatar
 			p.m_weaponId = TF_WEAPON_SHOTGUN_SOLDIER;   // the held gun
+			p.m_class = TF_CLASS_SOLDIER;
 			p.m_hasAmmo = g_espAmmoBar;
 			p.m_ammoFactor = 4.f / 6.f;   // shotgun clip
 			if (g_espFlags)
@@ -735,7 +735,7 @@ void EspPreview::DrawBody()
 	const float rounding = std::max(ImGui::GetStyle().WindowRounding - 2.f, 0.f);
 	dl->AddRectFilled(pos, end, background, rounding);
 
-	if (void* tex = EspPreview::Texture())
+	if (void* tex = s_failed ? nullptr : EspPreview::Texture())
 	{
 		dl->AddCallback(ImageAlphaOpaque, nullptr);
 		dl->AddImageRounded((ImTextureID)tex, pos, end, ImVec2(0.f, 0.f), ImVec2(1.f, 1.f), IM_COL32_WHITE, rounding);

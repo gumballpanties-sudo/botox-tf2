@@ -261,11 +261,16 @@ static void PixelSurfImpl(void* pLocal, UserCmd_t* cmd)
         if (keeps_pin())
             return 1;
         const float yaws[2]    = { RAD2DEGF(atan2f(wish.y, wish.x)), RAD2DEGF(atan2f(-n.y, -n.x)) };
-        const float presses[2] = { 450.f, 45.f };   // hardest first: push harder once caught
+        // sv_wallbug 0 ride tick (START pinned, never the catch): force * (speed / tickrate) first (as::Wb0RidePress)
+        const float want = CvarFloat("sv_wallbug", 0.f) < 0.5f && pinned(s_prePredVel)
+                               ? as::Wb0RidePress(g_psWb0Force, s_prePredVel.Length2D(), ipt) : 0.f;
+        const float presses[3] = { want, 450.f, 45.f };   // then hardest first: push harder once caught
         for (int i = 0; i < 2; i++) {
             if (i == 0 && len <= 0.01f)
                 continue;
             for (const float f : presses) {
+                if (f <= 0.f)
+                    continue;
                 as::MoveTowardYaw(cmd->viewangles.y, yaws[i], f, cmd->forwardmove, cmd->sidemove);
                 if (!keeps_pin())
                     continue;

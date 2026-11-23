@@ -38,7 +38,7 @@ ImFont* g_fontClarityIcon  = nullptr;
 ImFont* g_menuReg      = nullptr;
 ImFont* g_menuBold     = nullptr;
 ImFont* g_fontTahoma12 = nullptr, *g_fontTahomaBd12 = nullptr, *g_fontChillware13 = nullptr;
-ImFont* g_fontLobotomy13 = nullptr, *g_fontLobotomyBold13 = nullptr, *g_fontGrimoireBold11 = nullptr;
+ImFont* g_fontLobotomy13 = nullptr, *g_fontLobotomyBold13 = nullptr, *g_fontGrimoireBold11 = nullptr, *g_fontDatashellBold12 = nullptr;
 ImFont* g_fontKamibebra13 = nullptr, *g_fontKamibebraBold13 = nullptr, *g_fontKamibebra22 = nullptr;
 ImFont* g_fontPrimordialRoboto13 = nullptr, *g_fontPrimordialRobotoMedium13 = nullptr;
 ImFont* g_fontCumhacck35 = nullptr, *g_fontAirplaneTitle = nullptr, *g_fontAirplaneRows = nullptr;
@@ -654,6 +654,7 @@ float g_edgeBugVizPadColor[4] = { 1.f, 1.f, 1.f, 1.f };
 bool g_pixelSurf = false;   int g_pixelSurfKey = 0;   int g_pixelSurfMode = 1;
 int  g_pixelSurfPredictTicks = 8;
 int  g_psWallStrafe = 1;     // 0 off / 1 keys into wall (botox) / 2 always on a ride
+float g_psWb0Force = 10.f;   // sv_wallbug 0 RIDE press = force * (speed / tickrate), approach untouched; 0 = off
 bool g_psParkAtEnd  = false; // brake to a stop where the ride runs out, hang there
 // approach aids (both OFF by default -- see the memory note on the guide/speed fix)
 bool g_autoAlign = false;   // plain on/off, no bind
@@ -708,6 +709,14 @@ bool  g_abCrouch = false;
 bool  g_abAlign = false;
 bool  g_abViz = false;
 float g_abVizColor[4] = { 120 / 255.f, 200 / 255.f, 1.f, 1.f };
+// edge surf = botox edge_surf.cpp (edgesurf.inl), defaults = botox variables.h:1386 + 1440-1446
+bool  g_edgeSurf = false; int g_edgeSurfKey = 0; int g_edgeSurfMode = 1;
+float g_edgeSurfRange = 96.f;
+float g_edgeSurfReach = 6.f;
+float g_edgeSurfDeltaStrafe = 0.f;
+bool  g_edgeSurfViz = false;
+float g_edgeSurfVizColor[4] = { 120 / 255.f, 230 / 255.f, 1.f, 1.f };
+bool  g_edgeBugEdgeSurf = false;
 bool g_psFinderHeadbounce = false;
 bool g_psFinderPixeljump = true;    // botox m_pixel_finder_pixeljumps default
 bool g_psFinderJumpSurf = false;
@@ -897,6 +906,10 @@ bool  g_espHealthTextCustomColor = false;
 float g_espHealthTextColor[4] = { 1.f, 1.f, 1.f, 1.f };
 bool  g_espWeaponName = false;
 float g_espWeaponNameColor[4] = { 1.f, 1.f, 1.f, 1.f };
+bool  g_espClass = false;
+float g_espClassColor[4] = { 1.f, 1.f, 1.f, 1.f };
+int   g_espClassStyle = 0;
+float g_espClassIconSize = 18.f;
 bool  g_espAmmoBar = false;
 float g_espAmmoBarColor[4] = { 1.f, 1.f, 1.f, 1.f };
 bool  g_espDistance = false;

@@ -1431,6 +1431,93 @@ static void DrawGrimoire(ImDrawList* dl, ImGuiIO& io)
     dl->AddText(font, size, ImVec2(tx + w1 + w2, ty), text, part3.c_str());
 }
 
+static ImU32 DatashellAccent(float a = 1.f) { return AccentF(a); }
+
+// donor accent line: 3 strips over [x0, x1], each fading out from the middle (peaks 1 / peak2 / peak3, last 1 px taller)
+static void DatashellLine(ImDrawList* dl, float x0, float x1, float y, float h, float peak2, float peak3)
+{
+    const float mid = x0 + (x1 - x0) * 0.5f;
+    const ImU32 none = DatashellAccent(0.f);
+    const float peaks[3] = { 1.f, peak2, peak3 };
+    for (int i = 0; i < 3; i++) {
+        const ImU32 peak = DatashellAccent(peaks[i]);
+        const float bottom = y + h + (i == 2 ? 1.f : 0.f);
+        dl->AddRectFilledMultiColor(ImVec2(x0, y), ImVec2(mid, bottom), none, peak, peak, none);
+        dl->AddRectFilledMultiColor(ImVec2(mid, y), ImVec2(x1, bottom), peak, none, none, peak);
+    }
+}
+
+// donor bg: black, 9 a205 outline, 9 a205 fill
+static void DatashellFill(ImDrawList* dl, ImVec2 min, ImVec2 max)
+{
+    dl->AddRectFilled(min, max, IM_COL32(0, 0, 0, 255));
+    dl->AddRect(min, max, IM_COL32(9, 9, 9, 205));
+    dl->AddRectFilled(min, max, IM_COL32(9, 9, 9, 205));
+}
+
+// wm / media chrome: fill, accent line from 1 px above (2.5 in left, 6.5 in right), accent a.5 fading up from the bottom
+static void DatashellBox(ImDrawList* dl, ImVec2 min, ImVec2 max)
+{
+    DatashellFill(dl, min, max);
+    DatashellLine(dl, min.x + 2.5f, max.x - 6.5f, min.y - 1.f, 4.f, 0.65f, 0.5f);
+    const ImU32 fade = DatashellAccent(0.5f);
+    dl->AddRectFilledMultiColor(min, max, IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0), fade, fade);
+}
+
+// style 25: datashell -- Datashell-main visuals::watermark, donor fixed slots (tw = brand width): box x = screen - tw - 92.5,
+// y 5, w tw + 84, h 15. brand at box + 2.5 split in half ("datashell" = data white + shell accent right-aligned to tw). fps slot
+// tw + 4 ("|", value +5, "fps" accent +2 after), tick slot tw + 51 ("|", value +6, "T" accent +2 after), box ends tw + 84. a knob
+// off drops its slot (47 / 33). fps = donor 0.7 s ema of 1 / abs frametime, tick = cl_cmdrate like the donor.
+static void DrawDatashell(ImDrawList* dl, ImGuiIO& io)
+{
+    ImFont* font = Or(g_fontDatashellBold12);
+    if (!g_globalVars) return;
+
+    static float fps = 0.f, lastUpdate = 0.f;
+    const float now = g_globalVars->realtime;
+    if (now - lastUpdate >= 0.7f || now < lastUpdate) {
+        fps = 0.7f * fps + 0.3f * (1.f / ImMax(0.0001f, g_globalVars->absoluteframetime));
+        lastUpdate = now;
+    }
+
+    static ConVar* cmdrate = nullptr;
+    if (!cmdrate && g_cvar) cmdrate = g_cvar->FindVar("cl_cmdrate");
+
+    const bool showFps = g_wmShowFPS, showTick = g_wmTickrate && cmdrate;
+
+    const std::string brand = Brand();
+    const size_t cut = GamesenseSplit(brand);
+    const std::string head = brand.substr(0, cut), tail = brand.substr(cut);
+
+    const float size = font->FontSize;
+    const float tw = TextW(font, size, brand);
+    const float boxW = tw + 4.f + (showFps ? 47.f : 0.f) + (showTick ? 33.f : 0.f);
+    const float x = io.DisplaySize.x - 8.5f - boxW;
+    constexpr float y = 5.f, boxH = 15.f;
+    SetBox(x, y - 1.f, x + boxW, y + boxH);
+
+    DatashellBox(dl, ImVec2(x, y), ImVec2(x + boxW, y + boxH));
+
+    const ImU32 white = IM_COL32(255, 255, 255, 255), accent = DatashellAccent();
+    const float gx = x + 2.5f, ty = y + 2.f;
+
+    dl->AddText(font, size, ImVec2(gx, ty), white, head.c_str());
+    dl->AddText(font, size, ImVec2(gx + tw - TextW(font, size, tail), ty), accent, tail.c_str());
+
+    const auto slot = [&](float at, float valueGap, const std::string& value, const char* suffix) {
+        dl->AddText(font, size, ImVec2(at, ty), white, "|");
+        dl->AddText(font, size, ImVec2(at + valueGap, ty), white, value.c_str());
+        dl->AddText(font, size, ImVec2(at + valueGap + 2.f + TextW(font, size, value), ty), accent, suffix);
+    };
+
+    float at = gx + tw + 4.f;
+    if (showFps) {
+        slot(at, 5.f, std::to_string((int)fps), "fps");
+        at += 47.f;
+    }
+    if (showTick) slot(at, 6.f, std::to_string((int)cmdrate->GetFloat()), "T");
+}
+
 // botox misc.cpp draw_watermark(): clarity v2 (3) and cucumber (19) run before the m_watermark
 // check (they gate / fade on it themselves), every other style needs it on.
 void Watermark_Draw()
@@ -1474,6 +1561,7 @@ void Watermark_Draw()
     case 22: return DrawHeroin(dl, io);
     case 23: return DrawLobotomyV2(dl, io);
     case 24: return DrawGrimoire(dl, io);
+    case 25: return DrawDatashell(dl, io);
     default: return DrawDefault(dl, io);
     }
 }
@@ -1517,7 +1605,8 @@ MediaLook Watermark_MediaLook(int style)
         return { true, IM_COL32((int)(t[0] * 255.f + 0.5f), (int)(t[1] * 255.f + 0.5f), (int)(t[2] * 255.f + 0.5f), 255), IM_COL32(150, 150, 150, 255), 0 };
     }
     // grimv5 display_spotify: no box, outlined text, track white, artist 150
-    case 24: return { false, white, IM_COL32(150, 150, 150, 255), 2 };
+    case 24: return { true, white, IM_COL32(150, 150, 150, 255), 0 };   // grimoire: wm chrome box, donor spotify white / 150
+    case 25: return { true, white, white, 1 };   // datashell: wm chrome box, donor display_spotify white + black 1 px shadow
     default: return { true, white, accent, 0 };   // style 0: menu accent
     }
 }
@@ -1601,6 +1690,8 @@ void Watermark_MediaFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, int style)
         dl->AddRect(ImVec2(min.x - 1.f, min.y - 1.f), ImVec2(max.x + 1.f, max.y + 1.f), IM_COL32(0, 0, 0, 255), 4.f, 0, 1.f);
         dl->AddRect(min, max, IM_COL32(50, 50, 50, 255), 4.f, 0, 1.f);
         break;
+    case 24: GrimoireBox(dl, min.x, min.y, max.x - min.x, max.y - min.y); break;
+    case 25: DatashellBox(dl, min, max); break;
     default: break;
     }
 }

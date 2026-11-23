@@ -63,6 +63,10 @@ extern float g_espHealthTextColor[4];
 
 extern bool  g_espWeaponName;
 extern float g_espWeaponNameColor[4];
+extern bool  g_espClass;               // TF2 extra: class name below box (real class, ignores disguise)
+extern float g_espClassColor[4];       // label colour / icon tint (white = stock icon)
+extern int   g_espClassStyle;          // 0 label, 1 scoreboard icon (hud/class_icons.cpp; label if it failed to load)
+extern float g_espClassIconSize;       // px, square
 extern bool  g_espAmmoBar;
 extern float g_espAmmoBarColor[4];
 

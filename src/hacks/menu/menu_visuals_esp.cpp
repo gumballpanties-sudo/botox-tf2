@@ -128,6 +128,15 @@ void Menu_Visuals_Esp()
             ImGui::ColorRow("##weapon name color", g_espWeaponNameColor, kPickerAlpha);
         }
 
+        ImGui::Checkbox("class##player", &g_espClass);
+        if (g_espClass)
+            ImGui::OptionPopup("class settings##player class settings", [&]() {
+                ImGui::Combo("style##player class", &g_espClassStyle, "label\0icon\0");
+                if (g_espClassStyle == 1)
+                    ImGui::SliderFloat("icon size##player class", &g_espClassIconSize, 8.f, 48.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+                ImGui::ColorRow("color##player class color", g_espClassColor, kPickerAlpha);
+            }, ImVec2(220.f, -1));
+
         ImGui::Checkbox("weapon ammo bar##player", &g_espAmmoBar);
         if (g_espAmmoBar) {
             ImGui::SameLine();

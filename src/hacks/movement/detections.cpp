@@ -121,7 +121,8 @@ void Detections_Tick(const DetTick& t)
     // botox run_detections prev_ok / prev_vz, read before DetEbStep rolls them (points: jb / head)
     const bool prevOk = eb.prevAir && eb.prevTick == t.tick - 1;
     const float prevVz = eb.prevVz;
-    if (DetEbStep(eb, st, g, t.tb, t.ps))
+    // botox: "an edge surf pin prints edgesurfed below, never an edgebug too"
+    if (DetEbStep(eb, st, g, t.tb || t.esVeto, t.ps))
     {
         ++chain;
         if (!g_detectionStackEb) PrintEb(chain, chain > 1);
@@ -137,8 +138,19 @@ void Detections_Tick(const DetTick& t)
     };
     if (det(t.tb, tbOff, PTS_TEXTURE_BUG)) Print(DET_TB, "texturebugged");
     if (det(t.as, asOff, PTS_AIR_STUCK)) Print(DET_AS, "airstucked");
-    if (det(t.ps && !t.as && !t.tb, psOff, PTS_PIXEL_SURF)) { Print(DET_PS, "pixelsurfed"); Healthshot_Trigger(2); }
+    if (det(t.ps && !t.as && !t.tb && !t.esVeto, psOff, PTS_PIXEL_SURF)) { Print(DET_PS, "pixelsurfed"); Healthshot_Trigger(2); }
     if (DetFresh(t.wc, wcOff)) { Print(DET_WC, "wallclimbed"); Points_OnTrick(PTS_WALL_CLIMB); }
+    // botox es_phys: 125 + "edgesurfed" on the catch, 25 a ride tick while it keeps pinning
+    static DetEs es;
+    switch (DetEsStep(es, t.esPhys, t.esHeld)) {
+    case 1:
+        Points_OnTrick(PTS_EDGE_SURF);
+        Print(DET_ESURF, "edgesurfed");
+        DebugLog("TBC: es xy=%.1f vz=%.3f tick=%d", t.speed, t.vz, t.tick);
+        break;
+    case 2: Points_OnTrick(PTS_EDGE_SURF_RIDE); break;
+    default: break;
+    }
     // botox jump bug / head ceiling points (fireman needs a ladder, TF2 has none)
     if (prevOk && prevVz < 0.f && st.air && t.vz > 250.f) Points_OnTrick(PTS_JUMP_BUG);
     if (prevOk && prevVz > g * 2.f + 1.f && st.air && fabsf(t.vz + g) < 1.f) Points_OnTrick(PTS_HEAD_CEILING);

@@ -36,6 +36,8 @@ DWORD Render_PresentTid();        // the render thread, 0 until the first Presen
 // released only once a later frame rebuilt them (Present). Flush = Reset / device change / eject.
 void  Render_DeferRelease(IUnknown* p);
 void  Render_FlushDeferred();
+// RENDER THREAD (or eject after the drain): owned ImGui texture slot, deferred_release.h SwapOwned
+void  Render_SwapTexture(std::atomic<IDirect3DTexture9*>& slot, IDirect3DTexture9* tex);
 
 // -- Performance / latency ---------------------------------------------------------
 void Perf_Tick();          // applies g_hiTimerRes on change (100ms tick)

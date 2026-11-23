@@ -499,6 +499,7 @@ MAKE_HOOK(CClientState_ProcessFixAngle, S::CClientState_ProcessFixAngle(), bool,
 struct UserCmd_t;
 void Movement_RunGuarded(UserCmd_t* pCmd);
 void Movement_AirStuckLastWriter(UserCmd_t* pCmd);   // botox air_stuck_final_stamp + shot_proof, after the aimbot
+void Movement_EdgeSurfFinalStamp(UserCmd_t* pCmd);   // botox edge_surf_final_stamp, after lua
 void AutoFaNJump_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd);   // autofanjump.cpp
 // the movement half's air stuck (airstuck.inl AS_Sync) reads the server's ack to diff its pins
 int Aim_LastCommandAck() { return I::ClientState ? I::ClientState->last_command_ack : -1; }
@@ -765,6 +766,8 @@ MAKE_HOOK(CHLClient_CreateMove, U::Memory.GetVirtual(I::Client, 21), void,
 	// botox: lua create_move after every feature, before the cmd is sent
 	if (!G::Unload)
 		g_lua.on_create_move(pCmd, pSendPacket, false);
+	// botox create_move_proxy.cpp:586: edge surf's owned cmd leaves with its own move, after lua
+	Movement_EdgeSurfFinalStamp(reinterpret_cast<UserCmd_t*>(pCmd));
 
 	AntiCheatCompatibility(pCmd, pSendPacket);
 	LocalAnimations(pLocal, pCmd, *pSendPacket);

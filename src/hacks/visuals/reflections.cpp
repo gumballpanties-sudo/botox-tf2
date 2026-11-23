@@ -262,6 +262,9 @@ void AngleBasis(const float ang[3], float fwd[3], float right[3], float up[3])
 
 } // namespace
 
+// hud/class_icons.cpp reads its .vtf files through this same GAME path reader
+bool Game_ReadFile(const char* path, std::vector<unsigned char>& out) { return ReadGameFile(path, out); }
+
 // botox on_post_screen_space_effects + pick_cubemap. Main thread (screenfx.cpp FxReadViewSetup).
 void Reflections_UpdateView(const float origin[3], const float angles[3])
 {

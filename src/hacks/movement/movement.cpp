@@ -1073,6 +1073,7 @@ static rs::Params MV_SimParams(void* pLocal)
     p.maxVel  = CvarFloat("sv_maxvelocity", 3500.f);
     p.clampAirDucks  = CvarFloat("tf_clamp_airducks", 1.f) != 0.f;
     p.duckTimerTicks = (int)lroundf(0.3f / p.dt);
+    p.clipEps = CvarFloat("sv_wallbug", 0.f) < 0.5f ? rs::kDistEps : 0.f;   // Valve's clip: 1/32 off every plane
     if (g_offModelScale > 0)
     {
         const float sc = EntF(pLocal, g_offModelScale);
@@ -1674,6 +1675,34 @@ static bool s_airStuckHit = false;
 static bool s_pixelHopHit = false;   // pixeljump's pixel hop wrote this cmd (land / hop): the air movers after it yield
 static bool s_pixelHopOn  = false;   // PH key active this cmd: pixel surf stands down (webz 18000c0b0 skips wall stuck)
 static bool s_phSyncWant  = false;   // ph key held: a pin landing is exact-float, START must be the server END too
+// ---- edge surf state (edgesurf.inl owns it; up here because edgebug / auto align / tb / as read it first) ----
+static bool s_esurfActive   = false;  // botox g_edge_surf_active: edge surf holds / guides this cmd (indicator)
+static int  s_esurfLatchCmd = -1;     // edge_surf.cpp g_edge_surf_latch_cmd: last cmd an owned approach went out
+static int  s_esurfPinCmd   = -1;     // g_edge_surf_pin_cmd: last cmd a proven pin went out
+static bool s_esurfSyncWant = false;  // armed: botox sync_arm owner k_sync_es (AS_SyncArm)
+static bool s_esurfPinPrev  = false;  // cmd START: the last cmd sent a proven pin (detections, eb veto)
+static bool s_esurfLatchPrev = false; // cmd START: the last cmd an owned approach went out (detections)
+// edge_surf_latched: an edge surf feet approach owned the last cmd
+static bool ESurf_Latched(const UserCmd_t* cmd)
+{
+    return cmd && s_esurfLatchCmd >= 0 && s_esurfLatchCmd == cmd->command_number - 1;
+}
+// edge_surf_armed (TF2 has no air align: the key alone)
+static bool ESurf_Armed() { return On(g_edgeSurf, g_edgeSurfKey, g_edgeSurfMode); }
+// edge_surf_eb_armed: "edgesurf on eb" -- the eb key arms only the takeover at an eb's pin END + the chain after it
+static bool ESurf_EbArmed()
+{
+    return g_edgeBugEdgeSurf && g_edgeBugStyle == 0 && On(g_edgeBug, g_edgeBugKey, g_edgeBugMode);
+}
+// edge_surf_skip: logs the gate when an approach edge surf owned is skipped
+static void ESurf_Skip(const UserCmd_t* cmd, const char* why)
+{
+    if (ESurf_Latched(cmd) && g_debugLogEnable)
+        DebugLog("ESURF: skip why=%s cmd=%d", why, cmd->command_number);
+}
+static bool ESurf_Online(void* pLocal, UserCmd_t* cmd, bool& pinned, bool& held);   // edgesurf.inl
+static bool ESurf_EbEnd(void* pLocal, bool& lift);                                  // edgesurf.inl
+static void ESurf_Idle();                                                           // edgesurf.inl
 // s_shouldPixelSurf / s_psRidingNow / s_psAssistHopActive moved ABOVE AutoJumpbug --
 // jumpbug is a PRE-prediction feature and has to read the ride state too
 // indicator snapshot, written once per cmd at the end of Movement_RunImpl
@@ -2060,7 +2089,8 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     // were never flown on exactly the ride that needed them. No-tangent is the slow-ride save: under ~30
     // u/s along the face your strafe keys really accelerate the hull and bend the across velocity, at
     // ride speed they add nothing (addspeed <= 0). 144 = both passes, every press, 8 ticks
-    constexpr int k_stickPressCap = 144;
+    // + 16 = the wb0 ride press (as::Wb0RidePress) flown first in each pass
+    constexpr int k_stickPressCap = 160;
     int simsUsed = 0, pressSims = 0;
     bool cut = false;   // sim pool / cmd clock ended the press search early: a 0 then proves nothing
 
@@ -2113,6 +2143,10 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
     // airaccel * press * dt up to 30 u/s, so 200 already = the cap and 450 only matters with a
     // tangent eating the cap. 0 last: a press is what keeps the hull on the face
     static constexpr float k_press[] = { 10.f, 20.f, 30.f, 50.f, 75.f, 100.f, 200.f, 450.f, 0.f };
+    // sv_wallbug 0 ride: force * (speed / tickrate) flies first and wins ties (as::Wb0RidePress). A longer
+    // hold still beats it, so it never shortens a ride. Stick ticks are ride ticks (latch = pinned START)
+    const float flWant = CvarFloat("sv_wallbug", 0.f) < 0.5f
+        ? as::Wb0RidePress(g_psWb0Force, s_prePredVel.Length2D(), TickInterval()) : 0.f;
     int   best = 0;
     float bestPress = s_aaStickPress;
     // no proof = repeat last tick's move: a pinned START is that move's own proof. Not press + your
@@ -2126,8 +2160,9 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
         const float t = pass == 0 ? flTan : 0.f;
         if (pass == 0 && fabsf(t) < 10.f)
             continue;
-        for (const float m : k_press)
+        for (int i = flWant > 0.f ? -1 : 0; i < (int)std::size(k_press); i++)
         {
+            const float m = i < 0 ? flWant : k_press[i];
             if (SimsLeft() < k_stickHorizon) { cut = true; break; }
             if (pressSims + k_stickHorizon > k_stickPressCap)
                 break;
@@ -2135,7 +2170,8 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
             const int s0 = simsUsed;
             const int h = proof(mv);
             pressSims += simsUsed - s0;
-            if (h > best || (h > 0 && h == best && m > bestPress)) { best = h; bestMove = mv; bestPress = m; }   // tie = harder press
+            // tie = harder press, or the one nearest the wb0 ride press
+            if (h > best || (h > 0 && h == best && as::RidePressBetter(m, bestPress, flWant))) { best = h; bestMove = mv; bestPress = m; }
             if (best >= k_stickHorizon) break;
         }
     }
@@ -2264,6 +2300,14 @@ static void AutoAlignImpl(void* pLocal, UserCmd_t* pCmd)
     {
         s_aaWallDetected = false;
         AutoAlignStickDrop("off");
+        return;
+    }
+    // botox auto_align.cpp:568: edge surf runs its own align on the ledge it owns (arrival gap in ulps): a flush park / pin
+    // search / bounce here only moves it
+    if (ESurf_Latched(pCmd))
+    {
+        s_aaWallDetected = false;
+        AutoAlignStickDrop("esurf");
         return;
     }
 
@@ -2526,8 +2570,12 @@ static void AutoAlignImpl(void* pLocal, UserCmd_t* pCmd)
         // ride ticks: hardest first, first pin wins (botox went 0 -> 90 = softest pin, and 90 is only
         // 13.5 of the 30 u/s air accel cap; 200 / 450 reach it)
         static constexpr float k_ridePress[] = { 450.f, 200.f, 90.f, 80.f, 70.f, 60.f, 50.f, 40.f, 30.f, 20.f, 10.f, 0.f };
-        for (const float flMultiplier : k_ridePress)
+        // sv_wallbug 0 only gets here with START pinned (catch ticks took bCatch): a ride tick, so
+        // force * (speed / tickrate) is tried first (as::Wb0RidePress)
+        const float flWant = bWb0 ? as::Wb0RidePress(g_psWb0Force, s_prePredVel.Length2D(), TickInterval()) : 0.f;
+        for (int i = flWant > 0.f ? -1 : 0; i < (int)std::size(k_ridePress); i++)
         {
+            const float flMultiplier = i < 0 ? flWant : k_ridePress[i];
             RestoreOriginal();
 
             const Vec3 vMove = vInto * flMultiplier + vTangentDir * flTangent;
@@ -2634,6 +2682,9 @@ static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
 // TB_WallSupportDistance + TB_SteeringAwayFromWall deliberately stay above: AutoAlign
 // and WallClimb call them, and both run before this include point.
 #include "texturebug.inl"
+
+// ---- Edge surf: botox edge_surf.cpp 1:1 on tbx's sims (edgesurf.inl, core edgesurf_core.h). tbx::OnCreateMove calls it first ----
+#include "edgesurf.inl"
 
 
 // ---- Air stuck: botox air_stuck.cpp 1:1 (airstuck.inl) ----
@@ -2779,6 +2830,9 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     s_prePredOrigin  = g_offOrigin > 0 ? EntV3(pLocal, g_offOrigin) : Vec3();
     s_prePredDucking = g_offDucking > 0 && EntB(pLocal, g_offDucking) != 0;
     s_prePredTick    = g_globalVars->tickcount;   // before Pred_Start moves it
+    // edge surf's last cmd, read before this cmd's edge surf rolls them (botox run_detections reads them at the cmd start)
+    s_esurfPinPrev   = s_esurfPinCmd >= 0 && s_esurfPinCmd == pCmd->command_number - 1;
+    s_esurfLatchPrev = ESurf_Latched(pCmd);
     PsCmdStart(pLocal);   // botox ps_cmd_start: a duck key flipped on a live ride bails pixel surf
     const bool probesOK = g_frameReady && g_offVelocity > 0 && g_offOrigin > 0
                        && g_offMins > 0 && g_offMaxs > 0 && g_offFlags > 0;
@@ -2796,7 +2850,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
                                       // auto bounce runs in the probe block: no prediction = never called
                                       || On(g_autoBounce, g_autoBounceKey, g_autoBounceMode)
                                       || On(g_psAssist, g_psAssistKey, g_psAssistMode)
-                                      || On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode))));
+                                      || On(g_pixelJump, g_pixelJumpKey, g_pixelJumpMode)
+                                      || ESurf_Armed() || ESurf_EbArmed())));
     const bool needPred = needPredMove
                        || (probesOK && (
                                      // finder: held OR just released (release tick runs the scan),
@@ -2850,6 +2905,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
 
     // probe features: need working prediction + frame-restore sigs (Aletherium RunPost order:
     // PixelSurf ducks first, AutoAlign steers with the crouch active, then TB -> HS -> WC -> AS)
+    s_esurfActive = false;   // per cmd: only edge surf owning this cmd (tbx::OnCreateMove) lights it
     if (s_predicted && probesOK)
     {
         if (!bMoveBlocked)   // these MOVE you. The finder below only measures
@@ -2876,7 +2932,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             AutoAlignStickAfterTb(pLocal, pCmd);   // TB bind on only; off = it ran inside AutoAlign
             // cumidere style only: the botox style runs its own head_bounce inside TextureBug
             // and has no head surf (botox csgo texturebug.cpp has none)
-            if (g_tbStyle == 0)
+            if (g_tbStyle == 0 && !s_esurfActive)   // an edge surf owned cmd (it ran in the botox tick) stays its
             {
                 HeadSurf(pLocal, pCmd);
                 // after HS on purpose (coldtires texturebug.cpp:212): a ceiling RIDE always beats a
@@ -2912,6 +2968,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s_shouldPixelSurf = false;
         s_psShouldSurf = s_psShouldUnduck = false;
         s_ab.ownsCmd = false;   // botox movement.cpp:1260: stale true on a skipped tick
+        s_esurfSyncWant = false;   // edge surf did not run: no sync arm, no latch carried
+        s_esurfLatchCmd = -1;
         // PixelFinder is the only owner of its key edge, and it did not run this cmd. Left alone,
         // s_psFinderHeld stays stuck true for good: needPred never drops, and the NEXT real press
         // reads as "already held" so no column is ever anchored again
@@ -3023,6 +3081,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s.hswOn    = On(g_hsw, g_hswKey, g_hswMode);
         s.esOn     = On(g_edgeSkip, g_edgeSkipKey, g_edgeSkipMode);
         s.esHit    = s_esActive;
+        s.esfOn    = ESurf_Armed();
+        s.esfHit   = s_textureBugHit || s_esurfActive;   // botox: m_texture_bug_now || g_edge_surf_active
         s.gmbOn    = On(g_goomba, g_goombaKey, g_goombaMode);
         // one-tick fire, held 0.2 s like jb so the frame sampling sees it
         static unsigned long long s_gmbHitMs = 0;
@@ -3044,7 +3104,13 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         d.gravity     = CvarFloat("sv_gravity", 800.f);
         d.interval    = TickInterval();
         d.tick        = s_prePredTick;
-        d.tb = s_textureBugHit; d.as = s_airStuckHit; d.ps = s.psHit; d.wc = s_wcLanded;
+        // an edge surf pin sets tb's hit (its pin is a head pin): edgesurfed, never texturebugged too
+        d.tb = s_textureBugHit && !s_esurfActive; d.as = s_airStuckHit; d.ps = s.psHit && !s_esurfActive; d.wc = s_wcLanded;
+        d.esPhys = d.walk && !d.onGround && fabsf(s_prePredVel.z - TargetPredictZVel()) < as::k_pinTol && s_esurfPinPrev;
+        d.esHeld = s_esurfLatchPrev;
+        // veto = an edge surf PIN (this cmd: tb's hit on an owned cmd, or the last cmd's), never a mere owned tick: the eb end
+        // edge surf takes over ( U lift / H / E ) still prints edgebugged first, as botox ( m_texture_bug_now = m_hit )
+        d.esVeto = (s_esurfActive && s_textureBugHit) || s_esurfPinPrev;
         Detections_Tick(d);
 
         // botox jump_stats: same cmd start state; trick flags = botox get_trick_states set
@@ -3058,7 +3124,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         jc.tick    = pCmd->tick_count;
         jc.duck    = (pCmd->buttons & IN_DUCK) != 0;
         jc.mouseDx = pCmd->mousedx;
-        jc.trick   = s_ebDetected || s_textureBugHit || s_airStuckHit || s_wcLanded || s.psHit;
+        jc.trick   = s_ebDetected || s_textureBugHit || s_airStuckHit || s_wcLanded || s.psHit || s_esurfActive;
         Jumpstats_Tick(jf, jc, g_offMaxspeed > 0 ? EntF(pLocal, g_offMaxspeed) : 0.f);
     }
 }
@@ -3256,6 +3322,7 @@ static void __fastcall h_CreateMove_impl(void* rcx, int seq, float frametime, bo
         if (IsLocalPlayerAlive()) g_lua.on_create_move(pCmd, nullptr, true);
         Movement_AirStuckLastWriter(pCmd);   // nothing runs after us on this path
         g_lua.on_create_move(pCmd, nullptr, false);
+        Movement_EdgeSurfFinalStamp(pCmd);   // botox: after lua
     }
 }
 
@@ -3296,6 +3363,19 @@ void Movement_AirStuckLastWriter(UserCmd_t* pCmd)
     AS_LastWriterSeh(pCmd);
     // after the stamp: a replay goes back on whatever rewrote it, a recording stores the sent cmd
     RecorderFinalSeh(pCmd);
+}
+
+// __try and the guard object cannot share a function (C2712)
+static void ESurf_FinalStampSeh(UserCmd_t* pCmd)
+{
+    __try { ESurf_FinalStamp(pCmd); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+// botox create_move_proxy.cpp:586 edge_surf_final_stamp: after lua's create_move ( :578 ), the cmd's last writer
+void Movement_EdgeSurfFinalStamp(UserCmd_t* pCmd)
+{
+    if (g_eject || !pCmd || !g_predReady) return;
+    MiscHookGuard _g;
+    ESurf_FinalStampSeh(pCmd);
 }
 
 void Movement_RunGuarded(UserCmd_t* pCmd)

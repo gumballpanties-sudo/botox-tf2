@@ -21,6 +21,7 @@
 #include "../../dependencies/imgui/imgui_internal.h"
 #include "menu_chrome.h"  // the panels, the group box flow and every metric they use
 #include "../misc/minesweeper.h"
+#include "../misc/particle_shapes.h"   // clipart precipitation shape combo (botox n_particle_shape::k_names)
 #include "../visuals/esp_preview.h"   // g_espPreview, EspPreview::DrawBody/kWidth/kHeight
 
 #include <cmath>   // isfinite -- SliderF refuses a NaN/inf value as a range bound
@@ -580,7 +581,7 @@ static void Page_VisualsWorld()
             ImGui::SliderFloat("fov##world", &g_wdWorldFov, -30.f, 60.f, "%.1f");
 
         ImGui::Checkbox("precipitation", &g_weatherEnable);
-        if (g_weatherEnable)
+        if (g_weatherEnable && g_weatherMode != k_weatherClipart)
             ImGui::OptionPopup("precipitation settings", [&]() {   // ours: TF2's r_rain* knobs
                 if (g_weatherMode != 2)
                 {
@@ -610,10 +611,47 @@ static void Page_VisualsWorld()
             // botox "rain\0ash\0rain storm\0snow\0": TF2's C_Precipitation only spawns ash where a
             // trace hits the func_precipitation brush (c_effects.cpp:886 UTIL_TraceModel), which the
             // entity this DLL injects has none of, and has no storm type (precipitation_shared.h).
-            // combo index 0/1 = g_weatherMode 1/2 (0 is "off").
-            int type = (g_weatherMode == 2) ? 1 : 0;
-            if (ImGui::Combo("type##precipitation", &type, "rain\0" "snow\0"))
+            // combo index 0/1/2 = g_weatherMode 1/2/3 (0 is "off"); clipart = botox type 4.
+            int type = (g_weatherMode == 2) ? 1 : (g_weatherMode == k_weatherClipart) ? 2 : 0;
+            if (ImGui::Combo("type##precipitation", &type, "rain\0" "snow\0" "clipart\0"))
                 g_weatherMode = type + 1;
+        }
+        if (g_weatherEnable && g_weatherMode == k_weatherClipart)
+        {
+            // botox menu_tab_visuals.cpp clipart rows, verbatim labels / ranges / order
+            constexpr ImGuiColorEditFlags alphaFlags = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
+                ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs |
+                ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar |
+                ImGuiColorEditFlags_NoBorder;   // botox color_picker_alpha_flags
+            ImGui::Combo("shape##clipart", &g_clipShape, n_particle_shape::k_names);
+            ImGui::Combo("color mode##clipart", &g_clipColorMode, "single\0multicolor\0rainbow\0");
+            if (!g_clipColorMode)
+                ImGui::ColorEdit4("color##clipart", g_clipColor, alphaFlags);
+            else
+            {
+                // hue comes from the mode, picker alpha still applies
+                int alpha = (int)(g_clipColor[3] * 255.f + 0.5f);
+                if (ImGui::SliderInt("alpha##clipart", &alpha, 0, 255, "%d", ImGuiSliderFlags_AlwaysClamp))
+                    g_clipColor[3] = (float)alpha / 255.f;
+                ImGui::SliderFloat("saturation##clipart", &g_clipSaturation, 0.f, 1.f, "%.2f");
+            }
+            if (g_clipColorMode == 2)
+                ImGui::SliderFloat("rainbow speed##clipart", &g_clipRainbowSpeed, 0.01f, 2.f, "%.2f");
+            ImGui::Combo("glow##clipart", &g_clipGlow, "off\0glyph color\0custom\0");
+            if (g_clipGlow == 2)
+                ImGui::ColorEdit4("glow color##clipart", g_clipGlowColor, alphaFlags);
+            ImGui::SliderInt("density##clipart", &g_clipDensity, 10, 3000);
+            ImGui::SliderFloat("fall speed##clipart", &g_clipSpeed, 10.f, 600.f, "%.0f u/s");
+            ImGui::SliderFloat("size##clipart", &g_clipSize, 0.5f, 16.f, "%.1f");
+            ImGui::SliderFloat("spin##clipart", &g_clipSpin, 0.f, 3.f, "%.2f rev/s");
+            // spin = tumble speed here: glyphs are flat planes turning in 3d, they settle flat on what they land on
+            ImGui::Checkbox("3d rotation##clipart", &g_clip3d);
+            ImGui::SliderFloat("sway##clipart", &g_clipSway, 0.f, 48.f, "%.0f u");
+            ImGui::SliderFloat("wind##clipart", &g_clipWind, 0.f, 400.f, "%.0f u/s");
+            if (g_clipWind > 0.f)
+                ImGui::SliderFloat("wind direction##clipart", &g_clipWindYaw, 0.f, 360.f, "%.0f deg");
+            ImGui::SliderFloat("area##clipart", &g_clipRadius, 200.f, 4000.f, "%.0f u");
+            ImGui::SliderFloat("ground time##clipart", &g_clipGroundTime, 0.f, 20.f, "%.1f s");
         }
 
         SkyboxCombo();
@@ -1505,6 +1543,7 @@ static void Page_MovementMain()
                 if (style == 0)
                 {
                     SliderF("edge bug predict time", &g_edgeBugPredictTime, 0.02f, 2.f, "%.2f s");
+                    ImGui::Checkbox("edgesurf on eb##ebesurf", &g_edgeBugEdgeSurf);
                     ImGui::Checkbox("autostrafe to edge", &g_edgeBugToEdge);
                     if (g_edgeBugToEdge)
                     {
@@ -1584,6 +1623,23 @@ static void Page_MovementMain()
                 ImGui::Checkbox("stick to pixel surf##aa", &g_aaSurfStick);
             }, ImVec2(220.f, -1));
 
+        // botox menu_tab_movement.cpp:652. real movement, any server: surf a ledge's top edge from beside it
+        ImGui::Checkbox("edge surf", &g_edgeSurf);
+        if (g_edgeSurf)
+            ImGui::OptionPopup("edge surf settings", [&]() {
+                ImGui::Label("edge surf keybind");
+                ImGui::Keybind("edge surf key", &g_edgeSurfKey, &g_edgeSurfMode);
+                SliderF("reach##esurfreach", &g_edgeSurfReach, 0.1f, 32.f, "%.1f u");
+                SliderF("lead range##esurfrange", &g_edgeSurfRange, 8.f, 512.f, "%.0f u");
+                // 0 = straight press into the wall, else air strafe toward it turning this many degrees a tick
+                SliderF("delta strafe##esurfdelta", &g_edgeSurfDeltaStrafe, 0.f, 15.f, "%.2f");
+                ImGui::Checkbox("visualize##esurfviz", &g_edgeSurfViz);
+                ImGui::ColorEdit4("visualize color##esurfvizcolor", g_edgeSurfVizColor,
+                    ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_NoOptions |
+                    ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip |
+                    ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoBorder);
+            }, ImVec2(220.f, -1));
+
         ImGui::Checkbox("pixel surf", &g_pixelSurf);
         if (g_pixelSurf)
             ImGui::OptionPopup("pixel surf settings", [&]() {
@@ -1593,6 +1649,8 @@ static void Page_MovementMain()
                 SliderI("route predict ticks", &g_pixelSurfPredictTicks, 1, 32);
                 ImGui::Combo("wall strafe gain##ps", &g_psWallStrafe,
                              "off\0" "when pressing into wall\0" "always\0");
+                // sv_wallbug 0 ride press = force * (speed / tickrate), approach stays flat 10; 0 = off (A/B)
+                SliderF("wallbug 0 ride press force##ps", &g_psWb0Force, 0.f, 30.f, "%.1f");
                 ImGui::Checkbox("park at end of surf##ps", &g_psParkAtEnd);
             }, ImVec2(220.f, -1));
 
@@ -2364,11 +2422,11 @@ static void Page_MiscMain()
                 void GifTex_PathInput(const char*, const char*, char*, size_t);   // hud/gif_tex.cpp
 
                 int& style = g_wmStyle;
-                if (style < 0 || style > 24) style = 0;
+                if (style < 0 || style > 25) style = 0;
                 ImGui::Combo("style##watermark style", &style,
                     "default\0kamibebra\0clarity\0clarity v2\0delusional\0interwebz\0havoc\0onetap\0airflow\0ev0lve\0legendware\0"
                     "interium\0skebob\0cumidere\0illusory\0lumi\0billware\0dna\0dna clarity\0cucumber\0howeweware\0gamesense\0heroin\0"
-                    "lobotomy v2\0grimoire\0");
+                    "lobotomy v2\0grimoire\0datashell\0");
 
                 ImGui::InputTextWithHint("name##watermark text", "botox", g_wmLabel, 25);
 
@@ -2417,6 +2475,10 @@ static void Page_MiscMain()
                     ImGui::Checkbox("tickrate##watermark grimoire", &g_wmTickrate);
                     ImGui::Checkbox("fps##watermark grimoire", &g_wmShowFPS);
                     ImGui::Checkbox("time##watermark grimoire", &g_wmShowTime);
+                }
+                if (style == 25) {
+                    ImGui::Checkbox("fps##watermark datashell", &g_wmShowFPS);
+                    ImGui::Checkbox("tickrate##watermark datashell", &g_wmTickrate);
                 }
 
                 if (style == 12)
@@ -2537,7 +2599,7 @@ static void Page_MiscMain()
                 const int cs = g_specStyle;
                 const int lumiType = cs == 25 ? g_specLumiType : -1;
 
-                if (cs == 0 || cs == 5 || cs == 6 || cs == 8 || cs == 10 || cs == 23 || cs == 24 || cs == 25 || cs == 26 || cs == 29 || cs == 31 || cs == 32)
+                if (cs == 0 || cs == 5 || cs == 6 || cs == 8 || cs == 10 || cs == 23 || cs == 24 || cs == 25 || cs == 26 || cs == 29 || cs == 31 || cs == 32 || cs == 36)
                     ImGui::ColorRow("spectating local color##spectator list text color one", g_specColorOne, kA);
                 if (cs == 9)
                     ImGui::ColorRow("list color##spectator list text color one", g_specColorOne, kA);
@@ -2551,15 +2613,15 @@ static void Page_MiscMain()
                 if (cs == 0 || cs == 5 || cs == 8 || cs == 23 || cs == 24 || cs == 26 || cs == 29 || cs == 30 || cs == 31 || cs == 32 || lumiType == 2)
                     ImGui::ColorRow("spectating other color##spectator list text color two", g_specColorTwo, kA);
                 if (cs != 9 && cs != 12 && cs != 13 && cs != 14 && cs != 16 && cs != 18 && cs != 19 && cs != 20 && cs != 21 && cs != 24 &&
-                    cs != 26 && cs != 28 && cs != 29 && cs != 30 && cs != 31 && cs != 34 && cs != 35 && (cs != 25 || lumiType == 1))
+                    cs != 26 && cs != 28 && cs != 29 && cs != 30 && cs != 31 && cs != 34 && cs != 35 && cs != 36 && (cs != 25 || lumiType == 1))
                     ImGui::Combo("listed players##spectatorlist player", &g_specListType, "all spectators\0local spectators\0");
 
-                if (g_specStyle > 35 || g_specStyle < 0) g_specStyle = 0;
+                if (g_specStyle > 36 || g_specStyle < 0) g_specStyle = 0;
                 ImGui::Combo("style##spectatorlist style", &g_specStyle,
                     "default\0delusional\0interwebz\0windows xp\0clarity\0chillware\0lobotomy v2\0kamibebra\0eyes\0cumhacck\0clarity v2\0"
                     "airplane\0bhop cheat\0millionware\0aimware\0havoc\0onetap\0airflow\0ev0lve\0legendware\0interium\0chillware v2\0"
                     "skebob\0cumidere\0illusory\0lumi\0billware\0inkabanium\0dna\0cucumber\0howeweware\0gamesense\0kamidere\0heroin\0hotwheels v1\0"
-                    "grimoire\0");
+                    "grimoire\0datashell\0");
                 const int style = g_specStyle;
 
                 if (style == 33) {   // heroin-new "speclist mode"
@@ -2571,7 +2633,7 @@ static void Page_MiscMain()
                     ImGui::Combo("type##spectatorlist lumi type", &g_specLumiType, "default\0new\0interwebz\0");
                 }
                 if (style == 1 || style == 2 || style == 3 || style == 15 || style == 22 || style == 23 || style == 24 || style == 26 || style == 28 ||
-                    style == 29 || style == 30 || style == 31 || style == 32 || style == 34 || style == 35 || (style == 25 && g_specLumiType != 1))
+                    style == 29 || style == 30 || style == 31 || style == 32 || style == 34 || style == 35 || style == 36 || (style == 25 && g_specLumiType != 1))
                     ImGui::Checkbox("show targets##spectatorlist targets", &g_specShowTarget);
                 if (style == 22) {
                     ImGui::Checkbox("draw background##spectatorlist skebob", &g_specSkebobBg);
@@ -2579,10 +2641,12 @@ static void Page_MiscMain()
                 }
                 if ((style == 0 && g_specListType == 0) || style == 4 || style == 5 || style == 6 || style == 11 || style == 15 || style == 17 ||
                     style == 18 || style == 21 || style == 22 || style == 23 || style == 25 || style == 26 || style == 27 || style == 28 ||
-                    style == 29 || style == 30 || style == 31 || style == 32 || style == 34 || style == 35)
+                    style == 29 || style == 30 || style == 31 || style == 32 || style == 34 || style == 35 || style == 36)
                     ImGui::Checkbox("always show##spectatorlist always show", &g_specAlwaysShow);
                 if (style == 34)
                     ImGui::SliderFloat("gap##spectatorlist hotwheels", &g_specHotwheelsGap, 0.f, 20.f, "%.0f px");
+                if (style == 36)
+                    ImGui::SliderFloat("separator distance##spectatorlist datashell", &g_specDatashellGap, 5.f, 25.f, "%.0f");
                 if (style == 31)
                     ImGui::Checkbox("gradient bar##spectatorlist gamesense", &g_specGamesenseBar);
                 if (style == 32) {
@@ -2783,7 +2847,7 @@ static void Page_MiscMain()
                     ImGui::Combo("drops##deathparticles", &g_dpMcMode, "only x\0both x and xp\0only xp\0");
 
                 if (type == 5)
-                    ImGui::Combo("soul##deathparticles", &g_dpSoulStyle, "energy\0heavy electrical\0light electrical\0core\0");
+                    ImGui::Combo("soul##deathparticles", &g_dpSoulStyle, "energy\0heavy electrical\0light electrical\0core\0explode\0");
 
                 if (type != 3 && type != 8) {
                     // colour of the body part each particle comes from; colour below = fallback when that part is off screen / behind a wall
@@ -3917,6 +3981,7 @@ struct MenuStyleRow
     ImFont* (*boldFont)();
     bool gamesense = false;  // skeet frame + gradient bar over the window (GamesenseFrame), layout untouched
     bool primordial = false; // black 180 outer line + solid accent line (PrimordialFrame), scrollbar colours
+    bool clarity = false;    // scrollbar grab 31, no track
 };
 
 static const MenuStyleRow k_menuStyles[] = {
@@ -3926,9 +3991,12 @@ static const MenuStyleRow k_menuStyles[] = {
     { "kamibebra", IM_COL32(13, 13, 13, 255), IM_COL32(16, 16, 16, 255), IM_COL32(13, 13, 13, 255), IM_COL32(16, 16, 16, 255),
       IM_COL32(33, 33, 33, 255), IM_COL32(11, 11, 11, 255), IM_COL32(13, 13, 13, 255), IM_COL32(200, 200, 200, 255),
       IM_COL32(150, 150, 150, 255), 6.f, 4.f, 6.f, []() -> ImFont* { return g_fontKamibebra13; }, []() -> ImFont* { return g_fontKamibebraBold13; } },
-    { "clarity v2", IM_COL32(23, 23, 23, 255), IM_COL32(28, 28, 28, 255), IM_COL32(23, 23, 23, 255), IM_COL32(28, 28, 28, 255),
-      IM_COL32(55, 55, 55, 255), IM_COL32(7, 7, 7, 255), IM_COL32(23, 23, 23, 255), IM_COL32(255, 255, 255, 255),
-      IM_COL32(100, 100, 100, 255), 5.f, 5.f, 5.f, []() -> ImFont* { return g_fontClarityInter; }, []() -> ImFont* { return g_fontInterBold15; } },
+    // csgo menu.cpp "clarity v2" row: screenshot px window 9 r5, group 13 + 31 line r3 (band = child), checkbox 23 + 31 r2,
+    // text 221 (unchecked label 221 @ .5 on 13 = 117)
+    { "clarity v2", IM_COL32(9, 9, 9, 255), IM_COL32(13, 13, 13, 255), IM_COL32(13, 13, 13, 255), IM_COL32(23, 23, 23, 255),
+      IM_COL32(31, 31, 31, 255), IM_COL32(31, 31, 31, 255), IM_COL32(13, 13, 13, 255), IM_COL32(221, 221, 221, 255),
+      IM_COL32(117, 117, 117, 255), 5.f, 2.f, 3.f, []() -> ImFont* { return g_fontClarityInter; }, []() -> ImFont* { return g_fontInterBold15; },
+      false, false, true },
     { "lobotomy v1", IM_COL32(15, 15, 15, 255), IM_COL32(13, 13, 13, 255), IM_COL32(15, 15, 15, 255), IM_COL32(13, 13, 13, 255),
       IM_COL32(30, 30, 30, 255), IM_COL32(30, 30, 30, 255), IM_COL32(15, 15, 15, 255), IM_COL32(255, 255, 255, 255),
       IM_COL32(200, 200, 200, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontMenuTahoma9; }, []() -> ImFont* { return g_fontMenuTahomaBd9; } },
@@ -4020,6 +4088,14 @@ static void MenuStyleApply(const MenuStyleRow& s)
         style.Colors[ImGuiCol_ScrollbarGrabActive]  = style.Colors[ImGuiCol_Accent];
         style.ScrollbarRounding = 9.f;
     }
+    // clarity scrollbar: grab 31 idle + hover, held accent, track alpha 1 = themed path on, nothing visible
+    if (s.clarity)
+    {
+        style.Colors[ImGuiCol_ScrollbarBg]          = ImGui::ColorConvertU32ToFloat4(IM_COL32(0, 0, 0, 1));
+        style.Colors[ImGuiCol_ScrollbarGrab]        = ImGui::ColorConvertU32ToFloat4(IM_COL32(31, 31, 31, 255));
+        style.Colors[ImGuiCol_ScrollbarGrabHovered] = style.Colors[ImGuiCol_ScrollbarGrab];
+        style.Colors[ImGuiCol_ScrollbarGrabActive]  = style.Colors[ImGuiCol_Accent];
+    }
 }
 
 // botox tab_settings: col1 "config" + "system", col2 "visuals config" + "menu". Left out, no
@@ -4069,6 +4145,9 @@ static void Tab_Settings()
         ImGui::Combo("theme", &g_menuStyle, styleName, nullptr, k_menuStyleCount);
 
         ImGui::ColorRow("accent color##accent color", g_accentColor, kPickerNoAlpha);
+
+        ImGui::SliderInt("menu opacity", &g_menuOpacity, 50, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+        g_menuOpacity = ImClamp((g_menuOpacity + 2) / 5 * 5, 50, 100);
 
         // botox menu_tab_settings: edits a copy, commits while not held -- the whole menu
         // rescales under the cursor otherwise (render/dpi.cpp)
@@ -4281,7 +4360,7 @@ static void SearchPage()
 // PE timestamp of this module, via localtime_s, falling back to __DATE__ if that read
 // fails. Format "<d> <mon> <yyyy>", lowercase 3-letter month -- NOT the day name (botox
 // has no weekday in the title, that was this fork's own embellishment).
-static const char* BuildDateText()
+const char* BuildDateText()
 {
     static char s_text[20] = { 0 };
     if (s_text[0]) return s_text;
@@ -4343,6 +4422,7 @@ static void EjectPopup()
 // band, title, tab and border, so the chrome popped while the widgets faded.
 static float s_animProgress = 0.f;
 float Menu_FadeAlpha() { return ImSaturate(s_animProgress); }
+float Menu_LayerAlpha() { return Menu_FadeAlpha() * (ImClamp(g_menuOpacity, 50, 100) / 100.f); }
 
 static bool OwnsWindow(ImGuiWindow* w, ImGuiWindow* root)
 {
@@ -4389,7 +4469,7 @@ int Menu_SplitPopups(ImDrawList** lists, int& count, MenuFadedList* out, int max
 
     int n = 0;
     if (!shown) return 0;   // !shown emptied s_popups above
-    const float menu_fade = ImSaturate(s_animProgress);
+    const float menu_fade = Menu_LayerAlpha();
 
     ImGuiContext& g = *GImGui;
     int keep = 0;

@@ -23,6 +23,8 @@
 #include "../hacks/visuals/hats.h"
 #include "../hacks/visuals/flipworld.h"
 #include "../hacks/visuals/rear_mirror.h"
+#include "../hacks/visuals/esp_preview.h"   // EspPreview::DropTexture at eject
+#include "../hacks/hud/class_icons.h"        // ClassIcons_ReleaseAll at eject
 #include "../hacks/hud/mediaplayer.h"
 #include "../hacks/misc/misc_overlays.h"   // ConsoleTint_Install
 #include "../hacks/lua/lua.h"             // eject: wait for the FSN lua shutdown
@@ -639,6 +641,9 @@ static void MainThread()
         Bloom_Destroy();
         ScreenFx_Destroy();
         ResSpoof_Destroy();       // resolution spoofer capture / target / chain, DEFAULT pool
+        EspPreview::DropTexture();   // held RT refs: a leaked DEFAULT-pool ref fails the next Reset
+        RearMirror_DropTexture();
+        ClassIcons_ReleaseAll();  // esp class icons, DEFAULT pool
         Render_FlushDeferred();   // textures still waiting out a frame (render.cpp graveyard)
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();

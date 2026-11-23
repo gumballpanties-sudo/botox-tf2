@@ -11,8 +11,53 @@
 
 namespace pjs
 {
-inline bool SeamHit(float z, float pz)
+// ---- WHERE A PIXEL SURF REALLY CATCHES: the brush top's 1/32 trace skin --------------------------
+// A seam pins a hull whose move STARTS with the feet in (top, top + DIST_EPSILON]: the top plane
+// enters at fraction 0 (CM_ClipBoxToBrush, f = d1 - eps clamped) and wins the trace. Over the skin
+// the wall wins at fraction 0 and the hull falls past; at/under the top the plane is behind it.
+// Measured: 5 recorded catches end their tick 0.0162..0.03124 over the top (routesim_test 5),
+// 11-20 clip pinned at 192.00624, 11-11 log "the pin ends when the feet reach 0.03125 over the plane".
+// The finder saves a seam at top + 0.0287 (z >= 0) / top + 0.0279 (z < 0), tops are integers there.
+// false = pz is not such a placement (hand typed, non-integer brush top): caller keeps its old rule
+constexpr float k_skin = 0.03125f;
+inline bool SeamFace(float pz, float& face)
 {
+    face = std::floor(pz);
+    return pz > face && pz - face <= k_skin + 0.001f;
+}
+
+// lift = how far over the skin still counts: 0 for a tick END that will pin, a hair for a hull
+// already pinned (sv_wallbug 0 lifts it 0.03125 * dt a tick)
+inline bool InSkin(float z, float face, float lift = 0.f) { return z > face && z - face <= k_skin + lift; }
+
+// sv_wallbug 0: ticks a hull pinned at z keeps its pin. Each pinned tick lifts it k_skin * dt (Valve's
+// clip leaves 1/32 u/s off the top plane) and a tick that starts over the skin falls. 11-11 log:
+// 0.027 over the top rode 9 ticks, 0.021 -> 22, 0.017 -> 30 (pjseam_test). The catch's depth IS the ride
+inline int SkinRideTicks(float z, float face, float dt)
+{
+    const float room = face + k_skin - z;      // every tick that STARTS at or under the skin's top pins
+    return room >= 0.f && dt > 0.f ? (int)(room / (k_skin * dt)) + 1 : 0;
+}
+
+// ps assist's catch rank. life = ride ticks a flown catch has left, -1 = cannot tell (old clip, or the
+// pin z is no skin z: an off-grid brush top). First catch is taken; after that only a KNOWN longer ride
+// replaces it -- an unknown never beats a known one. enough = stop flying the list
+constexpr int k_rideEnough = 12;   // past ~10 ticks the across-face drift ends a ride first (11-11 log)
+inline int CatchLife(float catchZ, float dt, bool wallbug0)
+{
+    float face;
+    return wallbug0 && SeamFace(catchZ, face) ? SkinRideTicks(catchZ, face, dt) : -1;
+}
+inline bool TakeCatch(bool have, int bestLife, int life) { return !have || (life >= 0 && bestLife >= 0 && life > bestLife); }
+inline bool CatchEnough(int bestLife) { return bestLife < 0 || bestLife >= k_rideEnough; }
+
+// lift: 0.001 for a hull that may already be pinned, 0 for a free-fall tick END (it must be IN the skin)
+inline bool SeamHit(float z, float pz, float lift = 0.001f)
+{
+    // not heroin: its hundredths buckets drop the skin's top 4% (the recorded catch at top + 0.03124)
+    float face;
+    if (SeamFace(pz, face))
+        return InSkin(z, face, lift);
     const int iz = (int)z, ip = (int)pz;
     if (iz != ip)
         return false;

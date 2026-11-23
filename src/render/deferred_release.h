@@ -5,6 +5,7 @@
 // lists: left = 2 built frames (the one it died in may still bind it, the next one does not).
 // Tested by tests/deferred_release_test.cpp. T = anything with Release() (IUnknown).
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 template <class T>
@@ -33,3 +34,15 @@ struct DeferredReleaseQ
         q.clear();
     }
 };
+
+// A slot shown by ImGui that owns ONE ref on what it holds. tex comes with a ref (GetContainer's):
+// it moves into the slot, the one held before goes to q. Same tex again = drop the extra ref.
+// Why owned: the engine frees + remakes every RT on a release/reacquire (map load RT alloc, a new
+// RT mid match) with no device Reset, and a raw pointer then dangles under ImGui (esp preview crash).
+template <class T, class Q>
+void SwapOwned(std::atomic<T*>& slot, T* tex, Q& q)
+{
+    T* const old = slot.exchange(tex);
+    if (old != tex) q.Push(old);
+    else if (tex) tex->Release();
+}

@@ -523,6 +523,7 @@ static const CfgEntry kEntries[] = {
     { "pixelSurfMode",    CfgEntry::INT,    &g_pixelSurfMode, 0 },
 { "pixelSurfPredictTicks", CfgEntry::INT, &g_pixelSurfPredictTicks, 0 },
     { "psWallStrafe",     CfgEntry::INT,    &g_psWallStrafe, 0 },
+    { "psWb0Force",       CfgEntry::FLOAT,  &g_psWb0Force, 0 },
     { "psParkAtEnd",      CfgEntry::BOOL,   &g_psParkAtEnd, 0 },
     { "autoAlign",        CfgEntry::BOOL,   &g_autoAlign, 0 },
     { "aaSurfStick",      CfgEntry::BOOL,   &g_aaSurfStick, 0 },
@@ -606,6 +607,15 @@ static const CfgEntry kEntries[] = {
     { "abAlign",           CfgEntry::BOOL,  &g_abAlign, 0 },
     { "abViz",             CfgEntry::BOOL,  &g_abViz, 0 },
     { "abVizColor",        CfgEntry::FLOAT4, g_abVizColor, 0 },
+    { "edgeSurf",          CfgEntry::BOOL,  &g_edgeSurf, 0 },
+    { "edgeSurfKey",       CfgEntry::INT,   &g_edgeSurfKey, 0 },
+    { "edgeSurfMode",      CfgEntry::INT,   &g_edgeSurfMode, 0 },
+    { "edgeSurfRange",     CfgEntry::FLOAT, &g_edgeSurfRange, 0 },
+    { "edgeSurfReach",     CfgEntry::FLOAT, &g_edgeSurfReach, 0 },
+    { "edgeSurfDelta",     CfgEntry::FLOAT, &g_edgeSurfDeltaStrafe, 0 },
+    { "edgeSurfViz",       CfgEntry::BOOL,  &g_edgeSurfViz, 0 },
+    { "edgeSurfVizColor",  CfgEntry::FLOAT4, g_edgeSurfVizColor, 0 },
+    { "edgeBugEdgeSurf",   CfgEntry::BOOL,  &g_edgeBugEdgeSurf, 0 },
     { "psFinderHeadbounce",CfgEntry::BOOL,  &g_psFinderHeadbounce, 0 },
     { "psFinderPixeljump", CfgEntry::BOOL,  &g_psFinderPixeljump, 0 },
     { "psFinderJumpSurf",  CfgEntry::BOOL,  &g_psFinderJumpSurf, 0 },
@@ -799,6 +809,10 @@ static const CfgEntry kEntries[] = {
     { "espHealthTextColor",      CfgEntry::FLOAT4, g_espHealthTextColor, 0 },
     { "espWeaponName",           CfgEntry::BOOL,   &g_espWeaponName, 0 },
     { "espWeaponNameColor",      CfgEntry::FLOAT4, g_espWeaponNameColor, 0 },
+    { "espClass",                CfgEntry::BOOL,   &g_espClass, 0 },
+    { "espClassColor",           CfgEntry::FLOAT4, g_espClassColor, 0 },
+    { "espClassStyle",           CfgEntry::INT,    &g_espClassStyle, 0 },
+    { "espClassIconSize",        CfgEntry::FLOAT,  &g_espClassIconSize, 0 },
     { "espAmmoBar",              CfgEntry::BOOL,   &g_espAmmoBar, 0 },
     { "espAmmoBarColor",         CfgEntry::FLOAT4, g_espAmmoBarColor, 0 },
     { "espDistance",             CfgEntry::BOOL,   &g_espDistance, 0 },
@@ -1366,6 +1380,7 @@ void LoadConfig(const char* path, bool visuals)
     struct FloatClamp { float* p; float lo, hi; const char* name; const char* whyLo; const char* whyHi; };
     static const FloatClamp kFloatClamps[] = {
         { &g_tbReach,      0.f,   48.f,   "tbbReach",     nullptr, nullptr },   // botox clamps 0-48 in the feature too
+        { &g_psWb0Force,   0.f,   50.f,   "psWb0Force",   nullptr, nullptr },   // 0 = off
         { &g_rcPathThick,  1.f,   8.f,    "rcPathThick",  nullptr, nullptr },
         { &g_tbScanStep,   1.f,   kNoHi,  "tbScanStep",   nullptr, nullptr },
         // botox air_stuck: the scan reach is clamped 0-32 in the feature too; the clock is a

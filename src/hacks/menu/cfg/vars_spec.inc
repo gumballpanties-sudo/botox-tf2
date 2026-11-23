@@ -53,5 +53,6 @@
     { "specSkebobTitle",       CfgEntry::BOOL,   &g_specSkebobTitle, 0 },
     { "specHeroinType",        CfgEntry::INT,    &g_specHeroinType, 0 },
     { "specHotwheelsGap",      CfgEntry::FLOAT,  &g_specHotwheelsGap, 0 },
+    { "specDatashellGap",      CfgEntry::FLOAT,  &g_specDatashellGap, 0 },
     { "specCv2X",              CfgEntry::FLOAT,  &g_specCv2X, 0 },
     { "specCv2Y",              CfgEntry::FLOAT,  &g_specCv2Y, 0 },

@@ -4,17 +4,21 @@
 // and takes that surface's container. Same call queue as player_stencil.cpp.
 #include "esp_preview.h"
 #include "../screen/screenfx.h"
+#include "../../render/render.h"   // Render_SwapTexture, Render_PresentTid
 #include <atomic>
 
 namespace
 {
+	// owns one ref (Render_SwapTexture): a map load / new RT remakes the target's d3d texture with no
+	// Reset, and the raw pointer this used to keep was freed under ImGui (crash.log 11-22 21:09, d3d9 DIP)
 	std::atomic<IDirect3DTexture9*> s_tex{ nullptr };
 
 	void Capture()
 	{
 		IDirect3DDevice9* dev = g_d3dDev;
 		IDirect3DSurface9* surf = nullptr;
-		if (!dev || FAILED(dev->GetRenderTarget(0, &surf)) || !surf)
+		// the graveyard is the Present thread's (a failed queue off it falls back here)
+		if (!dev || GetCurrentThreadId() != Render_PresentTid() || FAILED(dev->GetRenderTarget(0, &surf)) || !surf)
 			return;
 		IDirect3DTexture9* tex = nullptr;
 		D3DSURFACE_DESC d{};
@@ -22,10 +26,7 @@ namespace
 		if (SUCCEEDED(surf->GetDesc(&d)) && d.Width == UINT(EspPreview::kWidth * EspPreview::kRtScale)
 			&& d.Height == UINT(EspPreview::kHeight * EspPreview::kRtScale)
 			&& SUCCEEDED(surf->GetContainer(__uuidof(IDirect3DTexture9), reinterpret_cast<void**>(&tex))) && tex)
-		{
-			s_tex = tex;   // the engine owns it: no ref kept, dropped on device reset
-			tex->Release();
-		}
+			Render_SwapTexture(s_tex, tex);   // GetContainer's ref moves in
 		surf->Release();
 	}
 
@@ -48,4 +49,4 @@ void EspPreview::QueueTextureCapture()
 
 void* EspPreview::Texture() { return s_tex.load(); }
 
-void EspPreview::DropTexture() { s_tex = nullptr; }
+void EspPreview::DropTexture() { Render_SwapTexture(s_tex, nullptr); }

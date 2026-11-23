@@ -106,6 +106,20 @@ inline bool StickLost(int heldDrift, int best, int simsUsed, bool cut, bool pinn
     return !(cut && pinnedNow);
 }
 
+// sv_wallbug 0 RIDE press into the face = force * (speed / tickrate) = force * xy * dt (force 10 at 300 u/s,
+// 66.67 tick = 45). Ride ticks only: on the approach a press this hard kills the catch (11-22 log, same
+// wall: flat 10 caught first try, 45..138 caught 0 of 5). 0 = off (force <= 0). Capped at the 450 cmd max
+inline float Wb0RidePress(float force, float xy, float dt)
+{
+    return force > 0.f ? std::min(force * xy * dt, 450.f) : 0.f;
+}
+
+// press search tie (same hold): want > 0 = the press nearest the ride press wins, else the harder one
+inline bool RidePressBetter(float m, float best, float want)
+{
+    return want > 0.f ? std::fabs(m - want) < std::fabs(best - want) : m > best;
+}
+
 // sv_wallbug 0 lip hang: the wish whose AirAccelerate (gamemovement.cpp:1705) takes the pre-move xy
 // velocity (vx, vy) to `closing` u/s INTO the face (n = unit face normal, out of the wall) and 0 along it.
 // k = airaccel * dt * friction (u/s per unit wish), wmax = m_flMaxSpeed (AirMove clamps the wish to it).

@@ -32,6 +32,7 @@ struct EspPlayer
 
 	uint64_t m_steamId = 0;                // 0 = no avatar (bot / lookup failed)
 	int m_weaponId = 0;                    // ETFWeaponType; 0 = no active weapon -> WeaponName() returns null
+	int m_class = 0;                       // m_iClass (TF_CLASS_*); 0 / out of range = no class row
 	bool m_hasAmmo = false;                // active weapon has a clip and the ammo bar is on (bakes in g_espAmmoBar: it also gates the m_flAmmo animation, a shared mutable state update, not just a draw toggle)
 	float m_ammoFactor = 0.f;              // animated clip / max clip, clamped 0..1
 

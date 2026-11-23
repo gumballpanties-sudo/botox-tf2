@@ -9,6 +9,7 @@
 #include "../dependencies/fonts/icon_font.h"   // botox icon_font_compressed_data (cog glyph)
 #include "../hacks/hud/mediaplayer.h"
 #include "../hacks/hud/avatar_cache.h"   // steam avatar textures
+#include "../hacks/hud/class_icons.h"    // esp class icons (ESPC_ICON)
 #include "../hacks/hud/gif_tex.h"        // embedded gif cache
 #include "../hacks/screen/blur_rect.h"      // panel background blur
 #include "../hacks/hud/indicators.h"   // botox indicators.cpp: velocity, graph, keybinds, keystrokes
@@ -833,6 +834,65 @@ static void RenderWallClimbOverlay()
     }
 }
 
+// ==== edge surf overlay (botox edge_surf_render) =================================================
+// every ledge the scan found (dim), the pick (your color while edge surf owns the cmd, green on a pin, grey once it let go),
+// the arrival point on the crossing tick, the act. A hull wide stretch of the edge, not the ledge's real length
+static void RenderEdgeSurfOverlay()
+{
+    if (!g_edgeSurfViz) return;   // botox gates on the viz var alone: "edgesurf on eb" draws too
+    if (!g_engine || !IsInGame()) return;
+
+    static ESurfDrawData d;
+    ESurf_GetDrawData(d);
+    if (!d.ms || GetTickCount64() - d.ms > 150ull) return;   // botox: 0.15 s after the last tick edge surf ran
+
+    const float(*m)[4] = PsW2SMatrix();
+    if (!m) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    auto W2S = [&](const Vec3& v, ImVec2& out) -> bool
+    {
+        const float w = m[3][0] * v.x + m[3][1] * v.y + m[3][2] * v.z + m[3][3];
+        if (w <= 0.001f) return false;
+        const float inv = 1.f / w;
+        out.x = W * 0.5f + (m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z + m[0][3]) * inv * W * 0.5f;
+        out.y = H * 0.5f - (m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z + m[1][3]) * inv * H * 0.5f;
+        return true;
+    };
+    auto line = [&](const Vec3& a, const Vec3& b, ImU32 col, float w) {
+        ImVec2 sa, sb;
+        if (W2S(a, sa) && W2S(b, sb)) dl->AddLine(sa, sb, col, w);
+    };
+    const Vec3 drop(0.f, 0.f, 8.f);
+    auto edge = [&](const ESurfDrawData::Edge& e, ImU32 col, float w) {
+        line(e.a, e.b, col, w);
+        line(e.a, e.a - drop, col, 1.f);
+        line(e.b, e.b - drop, col, 1.f);
+    };
+
+    const float* c = g_edgeSurfVizColor;
+    const ImU32 dim = ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3] * 0.35f));
+    for (int i = 0; i < d.nCand; i++) edge(d.cand[i], dim, 1.f);
+    if (!d.pickOk) return;
+    const ImU32 pick = d.pinned ? IM_COL32(90, 255, 120, 255)
+                     : d.own    ? ImGui::ColorConvertFloat4ToU32(ImVec4(c[0], c[1], c[2], c[3]))
+                                : IM_COL32(160, 160, 160, 200);
+    edge(d.pick, pick, 2.f);
+    if (ImVec2 sp; d.arriveOk && W2S(d.arrive, sp)) dl->AddCircleFilled(sp, 3.f, pick, 12);
+
+    ImFont* font = g_menuReg ? g_menuReg : ImGui::GetFont();   // botox verdana 11
+    ImVec2 sm;
+    if (!font || !W2S(d.label, sm)) return;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "esurf %c%s", d.act, d.pinned ? " pin" : "");
+    const float fs = font->FontSize;
+    const ImVec2 at(floorf(sm.x - font->CalcTextSizeA(fs, FLT_MAX, 0.f, buf).x * 0.5f), floorf(sm.y - fs));
+    dl->AddText(font, fs, ImVec2(at.x + 1.f, at.y + 1.f), IM_COL32(0, 0, 0, 200), buf);   // botox text_flag_dropshadow
+    dl->AddText(font, fs, at, pick, buf);
+}
+
 // ==== route + pixel calculator overlay ===========================================================
 // Same contract as the ps overlay above: the movement thread owns the markers and the solve, this
 // draws a per-frame copy. Monochrome like everything else -- a marker is a ring with its number
@@ -1628,6 +1688,8 @@ static void BuildFontAtlas()
     orElse(g_fontLobotomy13, g_fontBold); orElse(g_fontLobotomyBold13, g_fontLobotomy13);
     // grimoire menu_font_bold: tahomabd 11 mono ( its Bitmap flag is a no-op, tahomabd has no EBDT )
     g_fontGrimoireBold11 = sys("tahomabd.ttf", 11.f, mono);                orElse(g_fontGrimoireBold11, g_fontBold);
+    // datashell watermark_font: verdanab 12, flags mono hinting + no antialiasing
+    g_fontDatashellBold12 = sys("verdanab.ttf", 12.f, mono);               orElse(g_fontDatashellBold12, g_fontBold);
     orElse(g_fontKamibebra13, g_fontBold); orElse(g_fontKamibebraBold13, g_fontKamibebra13);
     g_fontKamibebra22 = donor(rubik_regular, sizeof(rubik_regular), 22.f, ImGuiFreeTypeBuilderFlags_Bitmap); orElse(g_fontKamibebra22, g_fontKamibebra13);
     // botox font_name_primordial_roboto_13 pair: primordial.bin's own roboto, antialiased, px = guess
@@ -1860,6 +1922,10 @@ void EspQ_ReplayFrame(ImDrawList* dl, const EspFrame& f)
             dl->AddImageRounded(tex, ImVec2(c.x0 + dx, c.y0), ImVec2(c.x1 + dx, c.y1), ImVec2(0, 0), ImVec2(1, 1), c.col, c.round, ImDrawFlags_RoundCornersAll);
             break;
         }
+        case ESPC_ICON:
+            if (const ImTextureID tex = ClassIcon_Get(c.p0))
+                dl->AddImage(tex, ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), ImVec2(0, 0), ImVec2(1, 1), c.col);
+            break;
         }
     }
 }
@@ -1893,7 +1959,7 @@ void EspQ_Declutter(EspFrame& f, bool ease)
             const float l = floorf(c.x0 - sz.x * c.ax), t = floorf(c.y0 - sz.y * c.ay);
             b = { l - 1.f, t, l + sz.x + 1.f, t + sz.y + 1.f };   // + shadow px
         }
-        else if (c.type == ESPC_AVATAR && c.stack && !(c.flags & ESPF_LEFT_OF_TEXT))
+        else if (c.stack && ((c.type == ESPC_AVATAR && !(c.flags & ESPF_LEFT_OF_TEXT)) || c.type == ESPC_ICON))
             b = { c.x0, c.y0, c.x1, c.y1 };
         else
             continue;
@@ -1928,7 +1994,7 @@ void EspQ_Declutter(EspFrame& f, bool ease)
         const auto it = s_dy.find(c.stack);
         const float dy = roundf(s_rowDy[i] + (it != s_dy.end() ? it->second : 0.f));
         if (c.type == ESPC_TEXT) c.y0 += dy;
-        else if (c.type == ESPC_AVATAR) { c.y0 += dy; c.y1 += dy; }
+        else if (c.type == ESPC_AVATAR || c.type == ESPC_ICON) { c.y0 += dy; c.y1 += dy; }
     }
 }
 
@@ -2144,6 +2210,7 @@ static void BuildImGuiFrame()
         RenderEdgeBugOverlay();
         RenderAutoBounceOverlay();
         RenderWallClimbOverlay();
+        RenderEdgeSurfOverlay();
     }
     {
         CrashSpan _s("ov/hud");
@@ -2208,6 +2275,7 @@ static DeferredReleaseQ<IUnknown> s_deferred;
 
 void Render_DeferRelease(IUnknown* p) { s_deferred.Push(p); }
 void Render_FlushDeferred()           { s_deferred.Flush(); }
+void Render_SwapTexture(std::atomic<IDirect3DTexture9*>& slot, IDirect3DTexture9* tex) { SwapOwned(slot, tex, s_deferred); }
 static void Render_AgeDeferred(bool built) { s_deferred.Age(built); }
 
 void* VGui_GetPanelInterface()
@@ -2450,6 +2518,7 @@ static void Render_ReleaseDeviceObjects()
     MediaPlayer_ReleaseTexture();      // cover art is DEFAULT-pool too; the decoded pixels rebuild it
     Indicators_ReleaseTextures();      // mitosis morph texture; rebuilt on the next split
     Avatar_ReleaseAll();               // avatar textures are DEFAULT-pool too
+    ClassIcons_ReleaseAll();           // esp class icons, DEFAULT-pool; decoded pixels rebuild them
     PlayerStencil_ReleaseTargets();    // esp: player stencil mask/blur targets, DEFAULT-pool
     GlassChams_ReleaseTargets();       // glass chams rt copies, DEFAULT-pool, remade at the next glass layer
     EspPreview::DropTexture();         // esp preview: its target is remade, the d3d texture with it
@@ -2676,7 +2745,7 @@ chain:
             const float rest  = 1.f - Menu_FadeAlpha();
             const float slide = floorf(12.f * rest * rest * rest + 0.5f);
             RenderSubset(s_ovLists, s_ovCount);
-            RenderSubset(s_fadeLists, s_fadeCount, Menu_FadeAlpha(), slide);
+            RenderSubset(s_fadeLists, s_fadeCount, Menu_LayerAlpha(), slide);
             for (int i = 0; i < s_popCount; ++i)   // botox: popups on top of the menu, each at its own alpha
                 RenderSubset(&s_popLists[i].list, 1, s_popLists[i].alpha, slide);
             RenderSubset(s_menuLists, s_menuCount);

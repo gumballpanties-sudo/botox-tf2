@@ -544,13 +544,15 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 	auto fPosErr = [&](int b) { return BsMath::PositionError(m_aBoxSpeed[b], m_aBoxExtrap[b], k_posFloor); };
 	// turn-guarded (bs_math.h TurnGuarded): the swing is decided on .p, the smaller of the odds on
 	// his predicted yaw and at the guard point (seen + 40% of the turn). flSeenLead > 0 for a later tick.
+	// Bearing priced with relative motion (bs_math.h BearingSigma): close side-on passes turn the line fast.
+	const BsMath::V3 vMyVel = ToBs(pLocal->m_vecVelocity());
 	auto fOdds = [&](int b, BsMath::V3 vFrom, BsMath::V3 vLo, BsMath::V3 vHi, float flYaw, float flDue, float flSeenLead = 0.f) -> BsMath::GuardedOdds
 	{
 		const BsMath::V3 c = (vLo + vHi) * 0.5f;
-		const float flDist = std::max(BsMath::Len2D(c - vFrom), 1.f);
-		const BsMath::YawEstimate e = BsMath::Estimate(g_aTrack[m_aBoxes[b].id], flDue);
+		const BsMath::Track& tr = g_aTrack[m_aBoxes[b].id];
+		const BsMath::YawEstimate e = BsMath::Estimate(tr, flDue);
 		return BsMath::TurnGuarded(BsMath::Deg(atan2f(c.y - vFrom.y, c.x - vFrom.x)), flYaw, e,
-			BsMath::Deg(atan2f(fPosErr(b), flDist)), flSeenLead);
+			BsMath::BearingSigma(c - vFrom, BsMath::Velocity(tr) - vMyVel, fPosErr(b)), flSeenLead);
 	};
 	for (int i = 0; i < nCand; i++)
 	{
@@ -694,7 +696,7 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 		tOut.m_flGuardMargin = g.guardMargin; tOut.m_flSigCore = e.sigmaCore;
 		tOut.m_flMargin = o.margin; tOut.m_flFacing = o.facing;
 		tOut.m_flSigma = e.sigma;
-		tOut.m_flSigBear = BsMath::Deg(atan2f(flPos, std::max(BsMath::Len2D(vHC - vEye), 1.f)));
+		tOut.m_flSigBear = BsMath::BearingSigma(vHC - vEye, vRel, flPos);
 		tOut.m_flRate = e.rate; tOut.m_flHorizon = e.horizon; tOut.m_flExtrap = m_aBoxExtrap[iRes];
 		tOut.m_flSlack = flSlack; tOut.m_flPad = flPad;
 		tOut.m_flDist = BsMath::Len2D(vHC - vEye);
@@ -991,7 +993,9 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	// bs17 thin hold verified: first log 52 swings, 0 whiffs, thin= gated 8 commands. bs17b added
 	// front-stab forensics (sm= rb= brate= lat= exp=). bs18 = knife backtrack (bt=), see RewindBackTicks.
 	// bs18 log: 24 fires, 22 stabs, 0 whiffs; both fronts = first-passing bt tick (see bs19 below).
-	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs19 (bs18 + best bt tick, not first; bt0= live gate/p). Best-tick UNVERIFIED IN GAME."); }
+	// bs19 log: 19 fires, 18 stabs, 0 whiffs, bt never used; the front = 18u side pass, brate -1940,
+	// margin 3.8 at p=0.999 -> bs20 prices the bearing's turn rate (bs_math.h BearingSigma).
+	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs20 (bs19 + bearing timing: bear= now has |brate| x 0.3 tick). UNVERIFIED IN GAME."); }
 	m_bBackstabLegit = Vars::Aimbot::Melee::BackstabAimType.Value == Vars::Aimbot::Melee::BackstabAimTypeEnum::Legit;
 	const int iAimType = GetAimType(pWeapon);
 	// Wall clock for everything that has to line up with player_hurt: inside engine prediction

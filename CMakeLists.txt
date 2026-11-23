@@ -114,6 +114,7 @@ add_library(botox SHARED
     src/hacks/screen/res_spoof.cpp      # resolution spoofer (botox resolution_spoof.cpp)
     src/hacks/hud/gif_tex.cpp
     src/hacks/hud/avatar_cache.cpp
+    src/hacks/hud/class_icons.cpp # esp class icons: scoreboard .vtf -> d3d texture
     src/hacks/screen/blur_rect.cpp
     src/hacks/hud/hud_extra.cpp   # fov circle, net graph, hud fonts
     src/hacks/hud/radar.cpp       # csgo radar (game thread half: aim/radar_aim.cpp, globbed)
@@ -318,6 +319,10 @@ add_executable(names_test tests/names_test.cpp)
 # with variable per-frame delays and infinite loop wrap.
 # Build + run: cmake --build build --config Release --target giftex_test && build\Release\giftex_test.exe
 add_executable(giftex_test tests/giftex_test.cpp)
+
+# Gate test for the VTF top mip decoder (src/hacks/hud/vtf_decode.h) the esp class icons load with.
+# Build + run: cmake --build build --config Release --target vtfdecode_test && build\Release\vtfdecode_test.exe
+add_executable(vtfdecode_test tests/vtfdecode_test.cpp)
 
 # Gate test for hud's pure logic (src/hacks/hud/hud_math.h): net graph warn grades + stock
 # position, interwebz sniper crosshair band.
@@ -645,6 +650,9 @@ add_executable(recorder_test tests/recorder_test.cpp)
 # Gate test for the detection core (src/hacks/movement/detections_core.h): physical edgebug + fresh gate.
 # Build + run: cmake --build build --config Release --target detections_test && build\Release\detections_test.exe
 add_executable(detections_test tests/detections_test.cpp)
+# Gate test for the edge surf core (src/hacks/movement/edgesurf_core.h): the TF2 engine knobs (wb0 pin tolerance, no air duck crop).
+# Build + run: cmake --build build --config Release --target esurf_test && build\Release\esurf_test.exe
+add_executable(esurf_test tests/esurf_test.cpp)
 # Gate test for the jumpstats core (src/hacks/movement/jumpstats_core.h): botox jump_stats types/gates.
 # Build + run: cmake --build build --config Release --target jumpstats_test && build\Release\jumpstats_test.exe
 add_executable(jumpstats_test tests/jumpstats_test.cpp)

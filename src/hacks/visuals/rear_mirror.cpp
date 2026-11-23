@@ -2,6 +2,7 @@
 #include "../movement/prediction.h"   // g_globalVars
 #include "../screen/screenfx.h"       // ScreenFx_FlushRenderContext / ScreenFx_QueueFunctor
 #include "../../render/dpi.h"         // Dpi_PanelScale
+#include "../../render/render.h"      // Render_SwapTexture, Render_PresentTid
 #include "rear_mirror.h"
 
 using namespace rmslot;
@@ -39,16 +40,14 @@ namespace
 		const auto* f = static_cast<const CaptureFunctor*>(p);
 		IDirect3DDevice9* dev = g_d3dDev;
 		IDirect3DSurface9* surf = nullptr;
-		if (!dev || FAILED(dev->GetRenderTarget(0, &surf)) || !surf)
+		// graveyard = Present thread's (a failed queue off it falls back here)
+		if (!dev || GetCurrentThreadId() != Render_PresentTid() || FAILED(dev->GetRenderTarget(0, &surf)) || !surf)
 			return;
 		D3DSURFACE_DESC d{};
 		IDirect3DTexture9* tex = nullptr;
 		if (SUCCEEDED(surf->GetDesc(&d)) && d.Width == f->w && d.Height == f->h
 			&& SUCCEEDED(surf->GetContainer(__uuidof(IDirect3DTexture9), reinterpret_cast<void**>(&tex))) && tex)
-		{
-			s_shown = tex;
-			tex->Release();
-		}
+			Render_SwapTexture(s_shown, tex);   // owned ref: a map load remakes the RT with no Reset (esp_preview_tex.cpp)
 		surf->Release();
 	}
 	void* s_vt[4] = { (void*)&Fn_AddRef, (void*)&Fn_Release, (void*)&Fn_Dtor, (void*)&Fn_Call };
@@ -186,7 +185,7 @@ void RearMirror_Install()
 
 bool RearMirror_Drawing() { return s_drawing.load(std::memory_order_relaxed); }
 
-void RearMirror_DropTexture() { s_shown = nullptr; }
+void RearMirror_DropTexture() { Render_SwapTexture(s_shown, nullptr); }
 
 void RearMirror_Draw()
 {

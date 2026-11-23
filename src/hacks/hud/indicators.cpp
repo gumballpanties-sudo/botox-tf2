@@ -829,6 +829,7 @@ static int part_fired(const int id)
     case LBL_AIR:  return trick(PTS_AIR_STUCK);
     case LBL_WC:   return trick(PTS_WALL_CLIMB);
     case LBL_ES:   return g_esFired.load();
+    case LBL_ESURF: return trick(PTS_EDGE_SURF);
     default:       return -1;
     }
 }
@@ -1687,6 +1688,9 @@ static void keybind_indicators(const MvInd_t& s)
         add(LBL_AC, s.acOn);
     if (g_autoBounce && shown(KI_AB))
         add(LBL_AB, s.abOn);
+    // botox indicators.cpp:2181, right before edge skip
+    if (g_edgeSurf && shown(KI_ESURF))
+        add_hit(LBL_ESURF, s.esfHit, s.esfOn);
     if (g_edgeSkip && shown(KI_ES))
         add_hit(LBL_ES, s.esHit, s.esOn, true);
     if (g_hsw && shown(KI_HSW)) {

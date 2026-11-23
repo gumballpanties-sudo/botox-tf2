@@ -835,17 +835,22 @@ static void RcSolveBegin(void* pLocal, UserCmd_t* pCmd, bool bPixel = false, int
     s_rcJob = job;
     s_rcBusy = true;
 
-    DebugLog("RC: solve (dihrc34) -- %d marker(s), start %s%s%s z %.4f%s vz %.1f%s, moves 0x%X start 0x%X, "
-             "delay hop %dt, gravity %.0f, tick %.4f, scale %.2f, jump mod %.4f, bhop crop %.4f",
+    DebugLog("RC: solve (dihrc35) -- %d marker(s), start %s%s%s z %.4f%s vz %.1f%s, moves 0x%X start 0x%X, "
+             "delay hop %dt, gravity %.0f, tick %.4f, scale %.2f, jump mod %.4f, bhop crop %.4f, clip eps %.5f",
              (int)route.size(), start.air ? "IN AIR" : (bHere ? "where you stand" : "marker 1"),
              s_pcBld > 0 ? " on a " : "", k_pcBld[s_pcBld].name, start.s.z,
              !start.air && start.s.z < start.floorEff ? " (in the floor's 1/32 skin)" : "",
              start.s.vz, start.s.fDuck ? " ducked" : "", opt.moves, start.moves,
-             params.delayTicks, params.gravity, params.dt, params.scale, params.jumpMod, params.cropFrac);
+             params.delayTicks, params.gravity, params.dt, params.scale, params.jumpMod, params.cropFrac, params.clipEps);
     for (size_t i = 0; i < route.size(); i++)
-        DebugLog("RC: marker %d  %-11s z %.4f  moves 0x%X  stand %d duck %d%s", s_rcMarkerNo[i],
+    {
+        // a pixelsurf's window: the brush top's 1/32 skin, or the old +-marker rule when z is no finder placement
+        float face = 0.f;
+        const char* win = route[i].type != rs::PT_SURF ? "" : pjs::SeamFace(route[i].z, face) ? "  (skin window)" : "  (old window: z is no finder seam)";
+        DebugLog("RC: marker %d  %-11s z %.4f  moves 0x%X  stand %d duck %d%s%s", s_rcMarkerNo[i],
                  rs::PointTypeName(route[i].type), route[i].z, route[i].moves, (int)route[i].allowStand,
-                 (int)route[i].allowDuck, route[i].player ? "  (player head)" : route[i].building ? "  (building)" : "");
+                 (int)route[i].allowDuck, route[i].player ? "  (player head)" : route[i].building ? "  (building)" : "", win);
+    }
     for (size_t i = 0; i < route.size(); i++)
         if (route[i].type == rs::PT_TEXTUREBUG)
             DebugLog("RC: marker %d  tb B %.4f  ulp %.3g  brush %.3f tall%s  band floor at D=82: %.4f", s_rcMarkerNo[i],
