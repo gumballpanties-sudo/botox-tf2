@@ -706,6 +706,7 @@ extern int  g_pixelSurfPredictTicks; // seam look-ahead horizon, ticks (def 8, 1
 extern int  g_psWallStrafe;   // ride gain: 0 off / 1 when your keys press into the wall (botox) / 2 always
 extern float g_psWb0Force;    // sv_wallbug 0 ride press = force * (speed / tickrate) (as::Wb0RidePress); 0 = off
 extern bool g_psParkAtEnd;    // sim the runout, brake so the ride stops on the seam, hold the hang
+extern bool g_psCornerTie;    // sv_wallbug 0: corner tie ride (cornertie.inl), pixel surf or texture bug key on
 // approach aids for the pixel surf FEATURE (both off by default)
 // -- park at the end of a surf (measure the runout, brake the tangent into it)
 extern bool g_autoAlign;   // plain on/off, no bind
@@ -767,6 +768,7 @@ extern bool  g_edgeSurf;  extern int g_edgeSurfKey;  extern int g_edgeSurfMode;
 extern float g_edgeSurfRange;        // lead range: ledges scanned under the fall (def 96, 8-512)
 extern float g_edgeSurfReach;        // reach: a beside approach owned inside this gap (def 6, 0.1-32)
 extern float g_edgeSurfDeltaStrafe;  // 0 = straight press into the face, else air strafe turning this many deg a tick (0-15)
+extern bool  g_edgeSurfAutoStrafe;   // mid-ride: movement keys > 15 deg off the ride = edge surf lets go, AutoStrafe steers toward them while held
 extern bool  g_edgeSurfViz;          // draw scanned ledges, the pick, the arrival, the act
 extern float g_edgeSurfVizColor[4];
 extern bool  g_edgeBugEdgeSurf;      // edgebug "edgesurf on eb": the eb key arms edge surf's takeover at an eb's pin end
@@ -815,8 +817,7 @@ extern bool g_fmRampBoost;  extern int g_fmRampBoostKey;  extern int g_fmRampBoo
 extern float g_fmRampBoostMult;
 extern bool g_fmHeadSurf;   extern int g_fmHeadSurfKey;   extern int g_fmHeadSurfMode;
 extern float g_fmHeadSurfSnap;    // how far up a ledge top still catches you
-extern bool g_fmHeadSurfLedgeOnly;
-extern bool g_fmHeadSurfBottoms;    // also ride brush bottom EDGES at the hull top (never full ceilings)
+extern bool g_fmHeadSurfLedgeOnly;extern bool g_fmHeadSurfBottoms;    // also ride brush bottom EDGES at the hull top (never full ceilings)
 void FakeMove_DemoTick();   // FrameStageNotify stage 3: replays fake jump anim/sound in demo playback
 // botox air_stuck knobs (m_air_stuck_extra_reach / m_air_stuck_budget)
 extern float g_asExtraReach;       // wall scan reach past the hull, units (def 4, 0-32; > 2 arms the wide B scan)

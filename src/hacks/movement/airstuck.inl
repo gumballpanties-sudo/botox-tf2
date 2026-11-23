@@ -114,7 +114,7 @@ static void AS_SyncArm(const bool on)
 
 static void AS_Sync(void* pLocal, UserCmd_t* cmd, const bool armed)
 {
-    AS_SyncArm(armed || s_wcSyncWant || s_tbSyncWant || s_phSyncWant || s_esurfSyncWant);   // botox sync_arm owners: as + tb + wc + es (+ ph) ( all sub-ulp: pins are exact floats )
+    AS_SyncArm(armed || s_wcSyncWant || s_tbSyncWant || s_phSyncWant || s_esurfSyncWant || s_ctSyncWant);   // botox sync_arm owners: as + tb + wc + es (+ ph) ( all sub-ulp: pins are exact floats )
 
     struct rec_t {
         int cmd = -1, tick_base = 0;

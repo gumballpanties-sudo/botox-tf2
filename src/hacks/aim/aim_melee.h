@@ -78,6 +78,7 @@ private:
 		// bet turns him deeper in), rb = seen yaw - bearing (0 = dead behind), brate = how fast the
 		// bearing swings as we pass (deg/s), the term sigBear does not price
 		float m_flSeenMargin = 0.f, m_flRelYaw = 0.f, m_flBearRate = 0.f;
+		float m_flSeenYaw = 0.f;     // bs21 log only: his last seen yaw, for yd= on the outcome line
 		bool  m_bReachNext = true;
 		bool  m_bHold = false;       // decided to wait for the next tick (m_flPNext is what it waits for)
 	};
@@ -138,6 +139,7 @@ private:
 		float m_flSeenMargin = 0.f, m_flRelYaw = 0.f, m_flBearRate = 0.f, m_flRel = 0.f;
 		float m_flLat = 0.f;        // AimLatency at the fire: outcome dt well past it = ping spiked mid-swing
 		int   m_iBack = 0;          // bs18: ticks the rewind was moved back (0 = default tick)
+		float m_flSeenYaw = 0.f;    // bs21: his last seen yaw at the fire
 	};
 	int m_iBtFires = 0;            // swings that only existed on an older tick
 	// sum of (1 - p) over judged swings: the fronts the odds PROMISED, next to the fronts that came

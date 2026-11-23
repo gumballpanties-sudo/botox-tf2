@@ -652,8 +652,7 @@ add_executable(recorder_test tests/recorder_test.cpp)
 add_executable(detections_test tests/detections_test.cpp)
 # Gate test for the edge surf core (src/hacks/movement/edgesurf_core.h): the TF2 engine knobs (wb0 pin tolerance, no air duck crop).
 # Build + run: cmake --build build --config Release --target esurf_test && build\Release\esurf_test.exe
-add_executable(esurf_test tests/esurf_test.cpp)
-# Gate test for the jumpstats core (src/hacks/movement/jumpstats_core.h): botox jump_stats types/gates.
+add_executable(esurf_test tests/esurf_test.cpp)# Gate test for the jumpstats core (src/hacks/movement/jumpstats_core.h): botox jump_stats types/gates.
 # Build + run: cmake --build build --config Release --target jumpstats_test && build\Release\jumpstats_test.exe
 add_executable(jumpstats_test tests/jumpstats_test.cpp)
 # Gate test for ESP's ESP pure math (src/hacks/esp/esp_math.h): oof-arrow edge placement

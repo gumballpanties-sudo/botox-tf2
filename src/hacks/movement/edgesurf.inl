@@ -383,6 +383,14 @@ static bool ESurf_Online(void* pLocal, UserCmd_t* cmd, bool& pinned, bool& held)
         n_es::new_fall(s_mem);
         return off(!armed ? "key" : "ground");
     }
+    /* "auto strafe" mid-ride: your keys point off the ride, AutoStrafe flew this cmd ( pre-pred ). let go, keep the fall's memory */
+    if (s_esurfSteerCmd == cmd->command_number) {
+        static int s_steer_cmd = -1;
+        if (g_debugLogEnable && s_steer_cmd != cmd->command_number - 1)
+            DebugLog("ESURF: steer cmd=%d xy=%.1f vz=%.2f", cmd->command_number, s_prePredVel.Length2D(), s_prePredVel.z);
+        s_steer_cmd = cmd->command_number;
+        return off("steer");
+    }
     /* botox reads the START move type ( backup_data ): restore the frame first, the entity holds some sim's END here */
     tbx::Restore(PredCommandsPredicted() - 1);
     if (EntMoveType(pLocal) != MOVETYPE_WALK)

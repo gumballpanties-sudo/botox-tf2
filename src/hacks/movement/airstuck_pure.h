@@ -208,4 +208,44 @@ inline bool FzWish(int k, float q, double trueD, float v0n, float dt, float coef
     return ws <= maxSpeed && a <= std::min(ws, cap) - sg * v0n;
 }
 
+// ---- corner tie (cornertie.inl). Why: tests/push_tie_lab.cpp. sv_wallbug 0 pushes a pinned hull 0.00047u up AND
+// off the wall every tick. Feet height and wall gap bit equal + closing on the wall at the fall speed = top and face
+// enter at the same fraction, the top wins, the hull lands back on (eps, eps): no drift.
+// hull to plane on one axis, the engine's float order (FzEngDp): c = hull CENTRE on the axis, s = normal sign
+inline float TieD(float c, float s, float dist, float ext) { const float d = dist + ext; return c * s - d; }
+// vz the move flies: StartGravity is float -= double (gamemovement.cpp StartGravity)
+inline float TieFallVz(float vz, float gravity, float dt) { return (float)((double)vz - (double)gravity * 0.5 * (double)dt); }
+// wish whose AirAccelerate adds dv along itself: accel * wish * dt * friction (gamemovement.cpp:1734). 0 = none
+inline float TieWish(float dv, float accel, float dt, float fric)
+{
+    const float k = accel * dt * fric;
+    return dv > 0.f && k > 0.f ? dv / k : 0.f;
+}
+// same float binade = same ulp grid. The tie needs the across coordinate and the feet z on one
+inline bool SameBinade(float a, float b) { int ea = 0, eb = 0; std::frexp(a, &ea); std::frexp(b, &eb); return ea == eb; }
+// hull centre whose face distance is h bit for bit. false = no such float (coarser grid), c = the nearest
+inline bool TieSeat(float h, float s, float dist, float ext, float& c)
+{
+    c = s * (h + (dist + ext));
+    for (int i = 0; i < 4; ++i)
+    {
+        const float g = TieD(c, s, dist, ext);
+        if (g == h) return true;
+        c = std::nextafter(c, (g < h ? s : -s) * FLT_MAX);
+    }
+    return false;
+}
+// velocity whose free move lands exactly on `to`: fl(from + fl(v * dt)) == to (VectorMA order). false = none
+inline bool TieStepVel(float from, float to, float dt, float& v)
+{
+    v = (to - from) / dt;
+    for (int i = 0; i < 6; ++i)
+    {
+        const float e = from + v * dt;
+        if (e == to) return true;
+        v = std::nextafter(v, e < to ? FLT_MAX : -FLT_MAX);
+    }
+    return false;
+}
+
 }   // namespace as

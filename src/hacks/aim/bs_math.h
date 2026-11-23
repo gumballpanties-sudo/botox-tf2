@@ -759,7 +759,7 @@ namespace BsMath
 	}
 
 	// ---- when to swing ----------------------------------------------------------------------------
-	constexpr float k_pSure    = 0.90f;   // take it on the spot
+	constexpr float k_pSure    = 0.90f;   // bt search stops here; thin hold never asks more than this
 	constexpr float k_pTake    = 0.70f;   // take it unless the next tick is clearly better (a failed swing alerts him)
 	constexpr float k_pGain    = 0.03f;   // "clearly better"
 	constexpr int   k_patience = 4;       // ticks a better tick may be waited for (60 ms)
@@ -774,6 +774,10 @@ namespace BsMath
 	inline float ThinPad(float pad, float relSpeed2D) { return pad + k_relLead * relSpeed2D * k_tick; }
 
 	enum EDecision { DEC_FIRE, DEC_ODDS, DEC_HOLD };
+	// bs21: "p >= k_pSure -> swing on spot" gone. Live front (debug.log 11-23): p .922, next .973,
+	// full reach, we orbit into his back at 401 deg/s -- one tick more = 1/3 the front odds. Clearly
+	// better next tick now waited for at ANY p (still <= k_patience ticks). Orbit closed loop
+	// (TestRisingOddsWait): fronts 37 -> 29 of 1187 swings, +3 ms. Lower k_pGain buys ~nothing more.
 	// thin = this tick's slack is under ThinPad, solidNext = the next tick's is not
 	inline EDecision Decide(float p, float pNext, bool reachNext, int held, bool thin = false, bool solidNext = false)
 	{
@@ -783,8 +787,8 @@ namespace BsMath
 			return DEC_FIRE;   // waited on long enough
 		if (thin && solidNext && pNext >= std::min(p, k_pSure))
 			return DEC_HOLD;   // a solid swing one tick on, no worse odds: do not risk the whiff
-		if (p >= k_pSure || !reachNext || pNext < p + k_pGain)
-			return DEC_FIRE;   // sure, the window is closing, or flat
+		if (!reachNext || pNext < p + k_pGain)
+			return DEC_FIRE;   // the window is closing, or flat
 		return DEC_HOLD;
 	}
 }

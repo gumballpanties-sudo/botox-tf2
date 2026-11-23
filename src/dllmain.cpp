@@ -656,6 +656,7 @@ int  g_pixelSurfPredictTicks = 8;
 int  g_psWallStrafe = 1;     // 0 off / 1 keys into wall (botox) / 2 always on a ride
 float g_psWb0Force = 10.f;   // sv_wallbug 0 RIDE press = force * (speed / tickrate), approach untouched; 0 = off
 bool g_psParkAtEnd  = false; // brake to a stop where the ride runs out, hang there
+bool g_psCornerTie  = false; // sv_wallbug 0: seat the catch + tie press so a wall seam ride outlives the 1/32 push (cornertie.inl)
 // approach aids (both OFF by default -- see the memory note on the guide/speed fix)
 bool g_autoAlign = false;   // plain on/off, no bind
 bool g_aaSurfStick = true;  // auto align: a pin seen once = press into that face every tick (tb style)
@@ -714,6 +715,7 @@ bool  g_edgeSurf = false; int g_edgeSurfKey = 0; int g_edgeSurfMode = 1;
 float g_edgeSurfRange = 96.f;
 float g_edgeSurfReach = 6.f;
 float g_edgeSurfDeltaStrafe = 0.f;
+bool  g_edgeSurfAutoStrafe = false;
 bool  g_edgeSurfViz = false;
 float g_edgeSurfVizColor[4] = { 120 / 255.f, 230 / 255.f, 1.f, 1.f };
 bool  g_edgeBugEdgeSurf = false;
@@ -758,8 +760,7 @@ bool g_fmRampBoost = false;  int g_fmRampBoostKey = 0;  int g_fmRampBoostMode = 
 float g_fmRampBoostMult = 1.5f;
 bool g_fmHeadSurf = false;   int g_fmHeadSurfKey = 0;   int g_fmHeadSurfMode = 1;
 float g_fmHeadSurfSnap = 18.f;
-bool g_fmHeadSurfLedgeOnly = true;
-bool g_fmHeadSurfBottoms = true;
+bool g_fmHeadSurfLedgeOnly = true;bool g_fmHeadSurfBottoms = true;
 float g_asExtraReach = 4.f;  // botox m_air_stuck_extra_reach
 float g_asBudget = 50.f;     // botox m_air_stuck_budget (percent of a tick)
 bool g_asMovementFix = true;    // botox m_movement_fix (air_stuck.cpp:168 -- off forces view+move onto cmd)

@@ -1633,6 +1633,8 @@ static void Page_MovementMain()
                 SliderF("lead range##esurfrange", &g_edgeSurfRange, 8.f, 512.f, "%.0f u");
                 // 0 = straight press into the wall, else air strafe toward it turning this many degrees a tick
                 SliderF("delta strafe##esurfdelta", &g_edgeSurfDeltaStrafe, 0.f, 15.f, "%.2f");
+                // mid-ride only: movement keys pointing off the ride = edge surf lets go, auto strafe steers there (release = edge surf back)
+                ImGui::Checkbox("auto strafe##esurfas", &g_edgeSurfAutoStrafe);
                 ImGui::Checkbox("visualize##esurfviz", &g_edgeSurfViz);
                 ImGui::ColorEdit4("visualize color##esurfvizcolor", g_edgeSurfVizColor,
                     ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_NoOptions |
@@ -1652,6 +1654,8 @@ static void Page_MovementMain()
                 // sv_wallbug 0 ride press = force * (speed / tickrate), approach stays flat 10; 0 = off (A/B)
                 SliderF("wallbug 0 ride press force##ps", &g_psWb0Force, 0.f, 30.f, "%.1f");
                 ImGui::Checkbox("park at end of surf##ps", &g_psParkAtEnd);
+                // sv_wallbug 0 only: Scout / Medic / Spy, exact axis walls (cornertie.inl)
+                ImGui::Checkbox("corner tie (sv_wallbug 0)##ps", &g_psCornerTie);
             }, ImVec2(220.f, -1));
 
         ImGui::Checkbox("auto bounce", &g_autoBounce);

@@ -1185,10 +1185,34 @@ static void AutoJumpbug(void* pLocal, UserCmd_t* pCmd)
     s_jumpbugHit = bBand;
 }
 
+// ---- edge surf state (edgesurf.inl owns it; up here because AutoStrafe / edgebug / auto align / tb / as read it first) ----
+static bool s_esurfActive   = false;  // botox g_edge_surf_active: edge surf holds / guides this cmd (indicator)
+static int  s_esurfLatchCmd = -1;     // edge_surf.cpp g_edge_surf_latch_cmd: last cmd an owned approach went out
+static int  s_esurfPinCmd   = -1;     // g_edge_surf_pin_cmd: last cmd a proven pin went out
+static bool s_esurfSyncWant = false;  // armed: botox sync_arm owner k_sync_es (AS_SyncArm)
+static bool s_esurfPinPrev  = false;  // cmd START: the last cmd sent a proven pin (detections, eb veto)
+static bool s_esurfLatchPrev = false; // cmd START: the last cmd an owned approach went out (detections)
+static int  s_esurfSteerCmd = -1;     // edge surf's auto strafe flew this cmd (mid-ride steer): ESurf_Online lets it go
+
+// auto strafe flies this cmd: own bind, or edge surf's mid-ride steer (valid once AutoStrafe ran this cmd)
+static bool AutoStrafeLive(const UserCmd_t* c)
+{
+    return On(g_autoStrafe, g_autoStrafeKey, g_autoStrafeMode) || (c && s_esurfSteerCmd == c->command_number);
+}
+
 // Auto strafe -- steer-to-look perfect strafe, silent wish angle via CorrectMovement.
+// Edge surf "auto strafe" (no own bind): only MID-RIDE. Last cmd a proven pin + a movement key held whose
+// heading is off the ride = steer: this cmd is auto strafe's toward the keys, ESurf_Online lets go (a ride's
+// only free axis is across the ledge = the pin, so any steer leaves it). Held keys keep the steer on until
+// release / ground; then edge surf plans again. No keys / keys along the ride = ride untouched
 static void AutoStrafe(void* pLocal, UserCmd_t* pCmd)
 {
-    if (!On(g_autoStrafe, g_autoStrafeKey, g_autoStrafeMode)) return;
+    const bool bOwnBind = On(g_autoStrafe, g_autoStrafeKey, g_autoStrafeMode);
+    const bool bEsKeys  = !bOwnBind && On(g_edgeSurf && g_edgeSurfAutoStrafe, g_edgeSurfKey, g_edgeSurfMode)
+                       && (pCmd->buttons & (IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT));
+    const bool bEsSteer = bEsKeys && s_esurfSteerCmd == pCmd->command_number - 1;   // steer already running
+    const bool bEsRide  = bEsKeys && s_esurfPinCmd >= 0 && s_esurfPinCmd == pCmd->command_number - 1;
+    if (!bOwnBind && !bEsSteer && !bEsRide) return;
     if (g_offVelocity <= 0 || g_offFlags <= 0) return;
 
     const int mt = EntMoveType(pLocal);
@@ -1197,7 +1221,12 @@ static void AutoStrafe(void* pLocal, UserCmd_t* pCmd)
 
     const Vec3 vVelocity = EntV3(pLocal, g_offVelocity);
     const float flSpeed = vVelocity.Length2D();
-    if (flSpeed <= 1.f) return;
+    if (flSpeed <= 1.f)
+    {
+        // parked ride (xy 0): no heading to strafe off, your raw keys fly it
+        if (!bOwnBind) s_esurfSteerCmd = pCmd->command_number;
+        return;
+    }
 
     const bool bBack    = (pCmd->buttons & IN_BACK) != 0;
     const bool bForward = (pCmd->buttons & IN_FORWARD) != 0;
@@ -1211,7 +1240,8 @@ static void AutoStrafe(void* pLocal, UserCmd_t* pCmd)
 
     // avoid wall collisions -- flip the strafe side if the heading it's about
     // to weave into is blocked within g_autoStrafeAvoidDist (botox movement.cpp avoid_walls).
-    if (g_autoStrafeAvoidWalls && g_offOrigin > 0 && g_offMins > 0 && g_offMaxs > 0 && g_engineTrace)
+    // Own bind only: edge surf steers you INTO ledge faces, a flip there throws the approach away
+    if (g_autoStrafeAvoidWalls && bOwnBind && g_offOrigin > 0 && g_offMins > 0 && g_offMaxs > 0 && g_engineTrace)
     {
         const float flHeadYaw = NormalizeAngle(pCmd->viewangles.y + flAngleOffset);
         const float flHeadRad = DEG2RADF(flHeadYaw);
@@ -1229,6 +1259,11 @@ static void AutoStrafe(void* pLocal, UserCmd_t* pCmd)
     const float flDesiredYaw = NormalizeAngle(vOldAngles.y + flAngleOffset);
     const float flVelYaw = RAD2DEGF(atan2f(vVelocity.y, vVelocity.x));
     const float flErr = NormalizeAngle(flVelYaw - flDesiredYaw);
+
+    // ride already heading where the keys point: nothing to steer, edge surf keeps it.
+    // ponytail: fixed 15 deg dead zone, make it a slider if W + mouse drift breaks rides too easily
+    if (!bOwnBind && !bEsSteer && fabsf(flErr) < 15.f) return;
+    if (!bOwnBind) s_esurfSteerCmd = pCmd->command_number;
 
     s_strafeWeaveLeft = flErr < 0.f;
     const bool bTurnLeft = s_strafeWeaveLeft;
@@ -1295,7 +1330,7 @@ static void StrafeOptimizer(void* pLocal, UserCmd_t* pCmd)
     auto Disengage = [&]() { s_soResidual = 0.f; s_soCap = 0.f; s_soActive = false; };
 
     if (!g_strafeOpt) { Disengage(); return; }                          // plain on/off, no bind (user pick)
-    if (On(g_autoStrafe, g_autoStrafeKey, g_autoStrafeMode)) { Disengage(); return; }  // AutoStrafe wins
+    if (AutoStrafeLive(pCmd)) { Disengage(); return; }  // AutoStrafe wins
     if (g_offVelocity <= 0 || g_offFlags <= 0) { Disengage(); return; }
 
     const int mt = EntMoveType(pLocal);
@@ -1721,6 +1756,7 @@ static bool s_wallClimbActive = false; // botox g_wall_climb.active(): wc ran an
 static bool s_wcLanded = false;        // botox g_wall_climb.m_hit: a land went out (indicator + detection)
 static bool s_wcSyncWant = false;      // wc key held: AS_Sync keeps cl_pred_optimize armed for it too
 static bool s_tbSyncWant = false;      // botox-style tb armed: same (botox sync_arm owner k_sync_tb)
+static bool s_ctSyncWant = false;      // corner tie beside a wall last cmd: same (cornertie.inl)
 // cmd right before TextureBug. botox runs wc BEFORE tb and tb keeps only a real catch on a wc tick
 // (texturebug.cpp:159); here tb runs first, so wc starts its air wall ticks from this instead
 static float s_wcPreTbFwd = 0.f, s_wcPreTbSide = 0.f;
@@ -1730,13 +1766,7 @@ static bool s_pixelHopHit = false;   // pixeljump's pixel hop wrote this cmd (la
 static bool s_pixelHopOn  = false;   // PH key active this cmd: pixel surf stands down (webz 18000c0b0 skips wall stuck)
 static bool s_phSyncWant  = false;   // ph key held: a pin landing is exact-float, START must be the server END too
 static bool s_predSyncArmed = false; // AS_SyncArm state: a pin feature armed. client ProcessMovement hook reads it (fakemove.inl)
-// ---- edge surf state (edgesurf.inl owns it; up here because edgebug / auto align / tb / as read it first) ----
-static bool s_esurfActive   = false;  // botox g_edge_surf_active: edge surf holds / guides this cmd (indicator)
-static int  s_esurfLatchCmd = -1;     // edge_surf.cpp g_edge_surf_latch_cmd: last cmd an owned approach went out
-static int  s_esurfPinCmd   = -1;     // g_edge_surf_pin_cmd: last cmd a proven pin went out
-static bool s_esurfSyncWant = false;  // armed: botox sync_arm owner k_sync_es (AS_SyncArm)
-static bool s_esurfPinPrev  = false;  // cmd START: the last cmd sent a proven pin (detections, eb veto)
-static bool s_esurfLatchPrev = false; // cmd START: the last cmd an owned approach went out (detections)
+// (edge surf state block moved above AutoStrafe: its mid-ride steer reads s_esurfPinCmd)
 // edge_surf_latched: an edge surf feet approach owned the last cmd
 static bool ESurf_Latched(const UserCmd_t* cmd)
 {
@@ -2791,6 +2821,8 @@ static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
 // edge skip + blockbot. After movement_ex.inl -- reuses its AutoCrouch-shaped
 // trace helpers conceptually but shares nothing directly, just the file's own statics.
 #include "movement_edge.inl"
+// corner tie: rides a wall seam past the sv_wallbug 0 push. Last: it reads every owner's hit flag
+#include "cornertie.inl"
 
 // ==== per-cmd pipeline (Aletherium RunPre -> prediction -> RunPost -> restore) ====
 static void Movement_RunImpl(UserCmd_t* pCmd)
@@ -3006,6 +3038,8 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
             // botox on_create_move_post:1267 -- pixel_surf is the last mover: it yields to this
             // cmd's AS / TB / WC flags (not last tick's) and its hold re-proves the final move
             PixelSurf(pLocal, pCmd);
+            // after the last mover: takes the cmd only where the one they left stops pinning (or steers a catch)
+            CornerTie(pLocal, pCmd);
         }
         PixelFinder(pLocal, pCmd);
         PixelMapScan(pLocal, pCmd);   // whole-map scan: same scanner, a queue of brush seams
@@ -3016,7 +3050,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         s_tbOwnsCmd = false;
         s_headSurfHit = false;
         s_headBounceHit = false;
-        s_wallClimbHit = s_wallClimbActive = s_wcLanded = s_wcSyncWant = s_phSyncWant = false;
+        s_wallClimbHit = s_wallClimbActive = s_wcLanded = s_wcSyncWant = s_phSyncWant = s_ctSyncWant = false;
         s_airStuckHit = false;
         s_pixelHopHit = s_pixelHopOn = false;
         s_asHolding = false;
@@ -3121,7 +3155,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         // ...and so is the plan the overlay draws. One publish point, so every early return and
         // every drop inside EdgeBugPost is reflected without hooking each of them
         EbVizPublish(s.ebOn && s_ebDetected, s_ebCurrentTick);
-        s.strafeOn = On(g_autoStrafe, g_autoStrafeKey, g_autoStrafeMode);
+        s.strafeOn = AutoStrafeLive(pCmd);
         s.ejOn     = On(g_edgeJump, g_edgeJumpKey, g_edgeJumpMode);
         s.ljOn     = On(g_longJump, g_longJumpKey, g_longJumpMode);
         s.mjOn     = On(g_miniJump, g_miniJumpKey, g_miniJumpMode);

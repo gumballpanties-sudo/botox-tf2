@@ -710,6 +710,7 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 			const float flBear = BsMath::Deg(atan2f(r.y, r.x));
 			tOut.m_flSeenMargin = BsMath::StabProbability(flBear, c.vAng.y, e.seen, 1.f, 1.f).margin;
 			tOut.m_flRelYaw = BsMath::Wrap(e.seen - flBear);
+			tOut.m_flSeenYaw = e.seen;
 			tOut.m_flBearRate = BsMath::Deg((r.x * vRel.y - r.y * vRel.x) / std::max(r.x * r.x + r.y * r.y, 1.f));
 		}
 
@@ -995,7 +996,9 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	// bs18 log: 24 fires, 22 stabs, 0 whiffs; both fronts = first-passing bt tick (see bs19 below).
 	// bs19 log: 19 fires, 18 stabs, 0 whiffs, bt never used; the front = 18u side pass, brate -1940,
 	// margin 3.8 at p=0.999 -> bs20 prices the bearing's turn rate (bs_math.h BearingSigma).
-	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs20 (bs19 + bearing timing: bear= now has |brate| x 0.3 tick). UNVERIFIED IN GAME."); }
+	// bs20 log: 40 fires, 39 stabs, 0 whiffs; the front = p .922 swung with next .973 on a 401 deg/s
+	// orbit into his back -> bs21 waits for a clearly better tick at any p (bs_math.h Decide) + yd=.
+	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs21 (bs20 + rising odds wait past p .90, yd= on outcome). UNVERIFIED IN GAME."); }
 	m_bBackstabLegit = Vars::Aimbot::Melee::BackstabAimType.Value == Vars::Aimbot::Melee::BackstabAimTypeEnum::Legit;
 	const int iAimType = GetAimType(pWeapon);
 	// Wall clock for everything that has to line up with player_hurt: inside engine prediction
@@ -1212,7 +1215,7 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 		m_tLastFire = { flNow, tBest.m_iIndex, tBest.m_flP, tBest.m_flSigma, tBest.m_flMargin,
 			tBest.m_flSlack, tBest.m_flPad, tBest.m_flHorizon, tBest.m_flExtrap, tBest.m_flDist, tBest.m_flSpeed, tBest.m_iK,
 			tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flRate, tBest.m_flGuardMargin, tBest.m_flSigCore,
-			tBest.m_flSeenMargin, tBest.m_flRelYaw, tBest.m_flBearRate, tBest.m_flRel, AimLatency(), iBack };
+			tBest.m_flSeenMargin, tBest.m_flRelYaw, tBest.m_flBearRate, tBest.m_flRel, AimLatency(), iBack, tBest.m_flSeenYaw };
 		m_iQuietTick = I::GlobalVars->tickcount;
 		m_flPendTime = flNow;
 		m_flPendNext = pWeapon->m_flNextPrimaryAttack();
@@ -1391,15 +1394,21 @@ void CAimbotMelee::Event(IGameEvent* pEvent, uint32_t uHash, CTFPlayer* pLocal)
 	else
 		++m_iFrontStabs;
 	m_flExpFront += 1.0 - m_tLastFire.m_flP;
+	// bs21 forensics: yd = his yaw now (newest snapshot, ~the server's read) - yaw seen at fire.
+	// Front with |rb + yd| < 90 = he did NOT turn out -> our line to him was off (bear= too small).
+	// Front with |rb + yd| >= 90 = his turn (sig= too small).
+	const BsMath::Track& trVictim = g_aTrack[std::clamp(iVictim, 0, k_maxPlayers - 1)];
+	const float flYawDelta = trVictim.bLive && trVictim.iCount
+		? BsMath::Wrap(trVictim.aY[BsMath::Idx(trVictim, 0)] - m_tLastFire.m_flSeenYaw) : 0.f;
 	DebugLog("BS: outcome idx=%d(fired %d) dmg=%d custom=%d %s | p=%.3f pb=%.3f pg=%.3f gm=%.1f sc=%.1f rate=%.0f sig=%.1f margin=%.1f k=%d hor=%.3f "
-		"slack=%.1f pad=%.2f ext=%.3f d=%.1f spd=%.0f dt=%.0fms sm=%.1f rb=%.1f brate=%.0f rel=%.0f lat=%.0f bt=%d | %d/%d front=%d exp=%.2f",
+		"slack=%.1f pad=%.2f ext=%.3f d=%.1f spd=%.0f dt=%.0fms sm=%.1f rb=%.1f yd=%.1f brate=%.0f rel=%.0f lat=%.0f bt=%d | %d/%d front=%d exp=%.2f",
 		iVictim, m_tLastFire.m_iIndex, pEvent->GetInt("damageamount"), iCustom,
 		bBackstab ? "BACKSTAB" : "NOT A BACKSTAB", m_tLastFire.m_flP, m_tLastFire.m_flPBest, m_tLastFire.m_flPGuard,
 		m_tLastFire.m_flGuardMargin, m_tLastFire.m_flSigCore,
 		m_tLastFire.m_flRate, m_tLastFire.m_flSigma,
 		m_tLastFire.m_flMargin, m_tLastFire.m_iK, m_tLastFire.m_flHorizon, m_tLastFire.m_flSlack,
 		m_tLastFire.m_flPad, m_tLastFire.m_flExtrap, m_tLastFire.m_flDist, m_tLastFire.m_flSpeed,
-		flSince * 1000.f, m_tLastFire.m_flSeenMargin, m_tLastFire.m_flRelYaw, m_tLastFire.m_flBearRate,
+		flSince * 1000.f, m_tLastFire.m_flSeenMargin, m_tLastFire.m_flRelYaw, flYawDelta, m_tLastFire.m_flBearRate,
 		m_tLastFire.m_flRel, m_tLastFire.m_flLat * 1000.f, m_tLastFire.m_iBack, m_iStabs, m_iStabs + m_iFrontStabs, m_iFrontStabs, m_flExpFront);
 	m_tLastFire.m_flTime = -1000.f;       // one outcome per fire
 	m_flPendTime = m_flWhiffTime = -1.f;  // it swung and it landed
