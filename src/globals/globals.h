@@ -506,7 +506,7 @@ extern bool g_revealScoreboard;   // enemy class icons in the scoreboard
 extern bool g_revealTeamHud;      // enemy health bars in the match hud player panels
 extern bool g_steamHistory;       // "Steam History" item in the scoreboard right-click menu
 
-// -- Crosshair (simplified) --------------------------------------------------------------------
+// -- Crosshair (botox custom_crosshair.cpp, css 1:1) --------------------------------------------------------------------
 extern bool  g_chEnable;
 extern bool  g_chAntialias;
 extern bool  g_chAdditive;
@@ -522,6 +522,29 @@ extern bool  g_chDotCircle;
 extern bool  g_chOutline;
 extern float g_chOutlineColor[4];
 extern float g_chOutlineThick;
+extern bool  g_chSidesOnly;
+extern bool  g_chSideL, g_chSideR, g_chSideT, g_chSideB;      // L R T B, botox order
+extern bool  g_chOutlineOnLines;
+extern bool  g_chOutlineOnDot;
+extern bool  g_chOutlineSidesOnly;
+extern bool  g_chOutlineSideL, g_chOutlineSideR, g_chOutlineSideT, g_chOutlineSideB;
+extern bool  g_chOutlineBlur;        // soft outline / drop shadow
+extern float g_chOutlineBlurRadius;
+extern bool  g_chDynamic;            // dynamic gap, driven by local player 2D speed (CsGetPlayerState)
+extern float g_chDynamicMin;         // speed below this adds nothing
+extern float g_chDynamicMax;         // max extra gap, in the same units as g_chGap
+extern float g_chDynamicRef;         // speed at which the extra gap is maxed out
+extern bool  g_chGradient;
+extern float g_chGradCenter[4];
+extern float g_chGradOuter[4];
+extern float g_chGradStart;          // 0..1 along the arm, inner->outer
+extern float g_chGradEnd;
+extern bool  g_chTaper;
+extern float g_chTaperNear;          // arm half-thickness scale at the inner end
+extern float g_chTaperFar;           // arm half-thickness scale at the outer end
+extern bool  g_chDotCustomColor;
+extern float g_chDotColor[4];
+extern float g_chRotation;           // degrees, whole crosshair about its centre
 extern bool  g_staticAmbyCrosshair;
 
 // -- CS:GO sniper scope (scope_csgo.inl, cs_hud_scope.cpp port) --------------------------------

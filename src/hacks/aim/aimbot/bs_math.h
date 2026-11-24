@@ -99,9 +99,19 @@ namespace BsMath
 	//   behind:   |wrap(targetYaw - bearing)| < 90
 	//   facing:   |wrap(ownerYaw  - bearing)| < 60
 	//   facestab: |wrap(targetYaw - ownerYaw)| < 107.4576
-	// Behind and facestab both constrain HIS yaw, so together they are one arc [lo, hi]. His live
-	// yaw is ~ N(centre, sigYaw); the bearing is ~ N(bearing, sigBear) and moves the behind edges and
-	// the facing test. Facestab's edges hang off our own yaw, which we write, so they only pay sigYaw.
+	// His live yaw is ~ N(centre, sigYaw), the bearing ~ N(bearing, sigBear), independent; our own yaw
+	// we write. Relative to the bearing estimate (y = his yaw, d = the bearing's error) the windows are
+	// three strips in the (y, d) plane:
+	//   facing |dOwn - d| < 60,   behind |y - d| < 90,   facestab |y - dOwn| < 107.46
+	// p = the Gaussian mass inside all three (StabJoint). margin / lo / hi stay the centre geometry --
+	// behind and facestab as one arc of his yaw -- for the turn guard and the log.
+	//
+	// dih-bs22: p WAS pYaw(the tighter edge per side only) x pFacing. Dropping the looser edge is wrong
+	// once the two sit close and the bearing is wide, and so is the product when facing and behind
+	// both lean on the same bearing error. bs21 log L506, a front: d 7.7, brate -3469 (bear 15.7), aim
+	// offset 30 -- read .972, the server's test says .821. And the error PICKED that offset: the
+	// candidates are sorted by p, and offset 0 was an honest .849. The other way round, facing + behind
+	// on the same side read .47 for .65 -- a stab refused that was there (TestOddsJoint).
 	struct StabOdds
 	{
 		float p = 0.f;        // chance the server calls it a backstab
@@ -109,6 +119,53 @@ namespace BsMath
 		float facing = 0.f;   // degrees inside the facing window
 		float lo = 0.f, hi = 0.f;
 	};
+
+	// The mass of N(r, sigYaw) x N(0, sigBear) inside the three strips (dOwn = our yaw - bearing, r = his
+	// yaw - bearing, unwrapped next to the window). The outer integral runs over the NARROWER of the two,
+	// clipped by its own strip: 6-point Gauss-Legendre over +-5 sigma, pieces split at the mean and at the
+	// two kinks where the inner window's edge changes test. The inner one is a Phi difference. Worst error
+	// 4.4e-4 against an exact reference over random geometry; ~0.5 us a call (the old product ~0.15).
+	// ponytail: both Gaussians on a line, not a circle -- past sigma ~40 the wrap copies are lost (p low,
+	// e.g. .51 for .55 at sigYaw 130). Errs safe and never above k_pTake; sum the +-360 copies if it matters.
+	inline float StabJoint(float dOwn, float r, float sigYaw, float sigBear)
+	{
+		constexpr float x[3] = { 0.2386191861f, 0.6612093865f, 0.9324695142f };
+		constexpr float w[3] = { 0.4679139346f, 0.3607615730f, 0.1713244924f };
+		const bool bYaw = sigYaw <= sigBear;   // outer = his yaw (clipped by facestab), else the bearing (by facing)
+		const float mu = bYaw ? r : 0.f, s = bYaw ? sigYaw : sigBear;
+		const float half = bYaw ? k_facestabHalf : k_facingHalf;
+		const float a = std::max(mu - 5.f * s, dOwn - half), b = std::min(mu + 5.f * s, dOwn + half);
+		if (b <= a)
+			return 0.f;
+		const float kink = bYaw ? k_behindHalf - k_facingHalf : k_facestabHalf - k_behindHalf;
+		float cut[5] = { a, dOwn - kink, mu, dOwn + kink, b };
+		std::sort(cut + 1, cut + 4);
+		float p = 0.f;
+		for (int i = 0; i < 4; i++)
+		{
+			const float lo = std::clamp(cut[i], a, b), hi = std::clamp(cut[i + 1], a, b);
+			if (hi <= lo)
+				continue;
+			const float m = 0.5f * (lo + hi), h = 0.5f * (hi - lo);
+			for (int j = 0; j < 6; j++)
+			{
+				const float v = m + (j & 1 ? h : -h) * x[j >> 1], z = (v - mu) / s;
+				float in = 0.f;
+				if (bYaw)
+				{	// his yaw is v: the bearing error must keep facing and behind
+					const float l = std::max(dOwn - k_facingHalf, v - k_behindHalf), u = std::min(dOwn + k_facingHalf, v + k_behindHalf);
+					if (u > l) in = Phi(u / sigBear) - Phi(l / sigBear);
+				}
+				else
+				{	// the bearing error is v: his yaw must keep behind and facestab
+					const float l = std::max(dOwn - k_facestabHalf, v - k_behindHalf), u = std::min(dOwn + k_facestabHalf, v + k_behindHalf);
+					if (u > l) in = Phi((u - r) / sigYaw) - Phi((l - r) / sigYaw);
+				}
+				p += h * w[j >> 1] * std::exp(-0.5f * z * z) * in;
+			}
+		}
+		return std::clamp(p * (0.39894228f / s), 0.f, 1.f);   // 1/sqrt(2 pi)
+	}
 
 	inline StabOdds StabProbability(float bearing, float ownerYaw, float yawCentre, float sigYaw, float sigBear)
 	{
@@ -118,17 +175,12 @@ namespace BsMath
 
 		const float dOwn = Wrap(ownerYaw - bearing);
 		o.facing = k_facingHalf - std::fabs(dOwn);
-		const float pFacing = Phi((k_facingHalf - dOwn) / sigBear) - Phi((-k_facingHalf - dOwn) / sigBear);
 		if (std::fabs(dOwn) >= 90.f)
-			return o;   // pointed away from him: nothing below is a single arc any more, and it is 0 anyway
+			return o;   // pointed away from him: nothing below is a single arc any more, and it is ~0 anyway
 
 		const float ownU = bearing + dOwn;   // our yaw, unwrapped next to the bearing
-		const float sigEdge = std::sqrt(sigYaw * sigYaw + sigBear * sigBear);
-
-		float lo = bearing - k_behindHalf, sigLo = sigEdge;
-		if (ownU - k_facestabHalf > lo) { lo = ownU - k_facestabHalf; sigLo = sigYaw; }
-		float hi = bearing + k_behindHalf, sigHi = sigEdge;
-		if (ownU + k_facestabHalf < hi) { hi = ownU + k_facestabHalf; sigHi = sigYaw; }
+		const float lo = std::max(bearing - k_behindHalf, ownU - k_facestabHalf);
+		const float hi = std::min(bearing + k_behindHalf, ownU + k_facestabHalf);
 		o.lo = lo; o.hi = hi;
 
 		const float mid = 0.5f * (lo + hi);
@@ -137,8 +189,7 @@ namespace BsMath
 		if (hi <= lo)
 			return o;
 
-		const float pYaw = Phi((hi - c) / sigHi) - Phi((lo - c) / sigLo);
-		o.p = std::clamp(pYaw, 0.f, 1.f) * std::clamp(pFacing, 0.f, 1.f);
+		o.p = StabJoint(dOwn, c - bearing, sigYaw, sigBear);
 		return o;
 	}
 

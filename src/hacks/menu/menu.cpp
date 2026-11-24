@@ -1176,6 +1176,20 @@ static void Page_VisualsScreen()
         if (g_chEnable)
         {
             ImGui::OptionPopup("crosshair settings", [&]() {
+                static bool  s_testRunning = false;
+                static float s_testSpeed   = 0.f;
+                static double s_testT0     = 0.0;
+                static bool  s_previewBg   = false;
+
+                const auto sides = [](const char* id, bool* left, bool* right, bool* top, bool* bottom) {
+                    ImGui::PushID(id);
+                    ImGui::Checkbox("left", left);
+                    ImGui::Checkbox("right", right);
+                    ImGui::Checkbox("top", top);
+                    ImGui::Checkbox("bottom", bottom);
+                    ImGui::PopID();
+                };
+
                 ImGui::Checkbox("antialias", &g_chAntialias);
                 if (Crosshair_BlendCombo("blend##chblend"))
                     MenuTooltip("how the arms + dot mix with the frame under them. additive adds in\n"
@@ -1195,15 +1209,81 @@ static void Page_VisualsScreen()
                     MenuTooltip("width : height of the gap. above 1 pushes the left/right arms\n"
                                 "out, below 1 the top/bottom -- the close pair keeps the gap\n"
                                 "above, so nothing pulls in");
+                ImGui::Checkbox("only some sides##ch", &g_chSidesOnly);
+                if (g_chSidesOnly)
+                    sides("ch sides", &g_chSideL, &g_chSideR, &g_chSideT, &g_chSideB);
+
+                ImGui::Checkbox("taper##ch", &g_chTaper);
+                if (g_chTaper)
+                {
+                    SliderF("near width##ch", &g_chTaperNear, 0.f, 3.f, "%.2f");
+                    SliderF("far width##ch", &g_chTaperFar, 0.f, 3.f, "%.2f");
+                }
+
+                ImGui::Checkbox("gradient##ch", &g_chGradient);
+                if (g_chGradient)
+                {
+                    ImGui::ColorRow("center##chgradcenter", g_chGradCenter);
+                    ImGui::ColorRow("outer##chgradouter", g_chGradOuter);
+                    SliderF("gradient start##ch", &g_chGradStart, 0.f, 1.f, "%.2f");
+                    SliderF("gradient end##ch", &g_chGradEnd, 0.f, 1.f, "%.2f");
+                    g_chGradEnd = ImMax(g_chGradEnd, g_chGradStart);
+                }
+
+                ImGui::Checkbox("dynamic gap##ch", &g_chDynamic);
+                if (g_chDynamic)
+                {
+                    SliderF("min speed##ch", &g_chDynamicMin, 0.f, 500.f, "%.0f");
+                    g_chDynamicRef = ImMax(g_chDynamicRef, g_chDynamicMin + 1.f);
+                    SliderF("max speed##ch", &g_chDynamicRef, g_chDynamicMin + 1.f, 600.f, "%.0f");
+                    SliderF("max extra gap##ch", &g_chDynamicMax, 0.f, 20.f, "%.1f");
+                }
+
+                SliderF("rotation##ch", &g_chRotation, 0.f, 360.f, "%.0f");
+
                 ImGui::Checkbox("dot##ch", &g_chDot);
-                ImGui::Checkbox("dot circle##ch", &g_chDotCircle);
+                if (g_chDot)
+                {
+                    ImGui::Checkbox("round dot##ch", &g_chDotCircle);
+                    ImGui::Checkbox("custom dot color##ch", &g_chDotCustomColor);
+                    if (g_chDotCustomColor)
+                        ImGui::ColorRow("##chdotcolor", g_chDotColor);
+                }
+
                 ImGui::Checkbox("outline##ch", &g_chOutline);
                 if (g_chOutline)
                 {
+                    ImGui::Checkbox("outline on lines##ch", &g_chOutlineOnLines);
+                    ImGui::Checkbox("outline on dot##ch", &g_chOutlineOnDot);
                     ImGui::ColorRow("outline color##choutcol", g_chOutlineColor);
                     SliderF("outline thickness##ch", &g_chOutlineThick, 0.f, 10.f, "%.1f");
+                    ImGui::Checkbox("soft outline (drop shadow)##ch", &g_chOutlineBlur);
+                    if (g_chOutlineBlur)
+                        SliderF("softness##ch", &g_chOutlineBlurRadius, 0.1f, 10.f, "%.1f");
+                    ImGui::Checkbox("outline only some sides##ch", &g_chOutlineSidesOnly);
+                    if (g_chOutlineSidesOnly)
+                        sides("ch outline sides", &g_chOutlineSideL, &g_chOutlineSideR, &g_chOutlineSideT, &g_chOutlineSideB);
                 }
-            }, ImVec2(210.f, -1));
+
+                ImGui::Separator();
+                ImGui::Checkbox("moving preview background##ch", &s_previewBg);
+                ImGui::Checkbox("test speed##ch", &s_testRunning);
+                if (s_testRunning)
+                {
+                    const double now = ImGui::GetTime();
+                    if (s_testT0 == 0.0) s_testT0 = now;
+                    s_testSpeed = 250.f + 250.f * sinf((float)(now - s_testT0) * 0.5f);
+                }
+                else s_testT0 = 0.0;
+
+                const ImVec2 p0 = ImGui::GetCursorScreenPos();
+                const float side = 90.f;
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                if (s_previewBg) CustomCrosshair_DrawPreviewScene(dl, p0, side);
+                else dl->AddRectFilled(p0, ImVec2(p0.x + side, p0.y + side), IM_COL32(40, 40, 40, 255));
+                CustomCrosshair_DrawPreview(dl, p0, ImVec2(p0.x + side, p0.y + side), s_testRunning ? s_testSpeed : -1.f);
+                ImGui::Dummy(ImVec2(side, side));
+            }, ImVec2(230.f, -1));
             ImGui::SameLine();
             ImGui::ColorRow("##chcol", g_chColor, 0, 1);
         }

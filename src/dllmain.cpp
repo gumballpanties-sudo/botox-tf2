@@ -443,6 +443,30 @@ bool  g_chDotCircle     = false;
 bool  g_chOutline       = true;
 float g_chOutlineColor[4] = { 0.f, 0.f, 0.f, 1.f };
 float g_chOutlineThick  = 0.5f;
+// botox custom_crosshair.cpp full-port fields (css 1:1) -- defaults = old simplified look
+bool  g_chSidesOnly     = false;
+bool  g_chSideL = true, g_chSideR = true, g_chSideT = true, g_chSideB = true;
+bool  g_chOutlineOnLines = true;
+bool  g_chOutlineOnDot   = true;
+bool  g_chOutlineSidesOnly = false;
+bool  g_chOutlineSideL = true, g_chOutlineSideR = true, g_chOutlineSideT = true, g_chOutlineSideB = true;
+bool  g_chOutlineBlur       = false;
+float g_chOutlineBlurRadius = 2.f;
+bool  g_chDynamic    = false;
+float g_chDynamicMin = 0.f;
+float g_chDynamicMax = 2.f;
+float g_chDynamicRef = 300.f;
+bool  g_chGradient    = false;
+float g_chGradCenter[4] = { 1.f, 1.f, 1.f, 1.f };
+float g_chGradOuter[4]  = { 1.f, 1.f, 1.f, 1.f };
+float g_chGradStart   = 0.f;
+float g_chGradEnd     = 1.f;
+bool  g_chTaper     = false;
+float g_chTaperNear = 1.f;
+float g_chTaperFar  = 1.f;
+bool  g_chDotCustomColor = false;
+float g_chDotColor[4]    = { 1.f, 1.f, 1.f, 1.f };
+float g_chRotation = 0.f;
 bool  g_staticAmbyCrosshair = false;
 
 // CS:GO sniper scope (scope_csgo.inl) -- csgo defaults

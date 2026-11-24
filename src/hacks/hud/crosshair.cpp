@@ -4,14 +4,15 @@
 #include "../screen/shaders/fx_chblend_ps.h"   // k_fxChBlendPs[]    -- one ps_3_0 per blend mode
 #include "hud_snap.h"   // sniper crosshair gate from the game thread
 #include "hud_math.h"
+#include "../../dependencies/imgui/imgui_internal.h"   // ImClamp/ImLerp/ImMin/IM_PI -- botox custom_crosshair.cpp uses the same header
 #include <algorithm>
 #include <vector>
 
 #define SCSGO_COND_OFF g_offCond
 #include "../visuals/scope_csgo.inl"    // ScopeCsgo_* -- csgo sniper scope
 
-// Simplified crosshair: lines + dot + antialias + outline. No dynamic gap,
-// no blur, no gradient/taper/rotation.
+// Custom crosshair = botox custom_crosshair.cpp full port, 1:1 from botox-css crosshair.cpp:
+// sides/outline sides/taper/gradient/dynamic gap/soft outline(blur)/dot colour/rotation/menu preview.
 
 // ==== Static amby crosshair ==========================================================
 GetWeaponCrosshairScale_t o_GetWeaponCrosshairScale = nullptr;
@@ -31,6 +32,22 @@ static inline ImU32 ChScaleAlpha(ImU32 col, float t)
     if (t >= 1.f) return col;
     int a = (int)(((col >> 24) & 0xFF) * t + 0.5f);
     return (col & 0x00FFFFFFu) | ((ImU32)a << 24);
+}
+
+// botox custom_crosshair.cpp lerp_color -- per-channel lerp for the gradient arm.
+static inline ImU32 ChLerpColor(ImU32 c0, ImU32 c1, float t)
+{
+    if (t <= 0.f) return c0;
+    if (t >= 1.f) return c1;
+    auto l = [](int a, int b, float t) { return (int)(a + (b - a) * t + 0.5f); };
+    return IM_COL32(l((c0 >> 0) & 0xFF, (c1 >> 0) & 0xFF, t), l((c0 >> 8) & 0xFF, (c1 >> 8) & 0xFF, t),
+                    l((c0 >> 16) & 0xFF, (c1 >> 16) & 0xFF, t), l((c0 >> 24) & 0xFF, (c1 >> 24) & 0xFF, t));
+}
+
+// botox custom_crosshair.cpp pack_rgba -- shared by the live crosshair and its menu preview.
+static inline ImU32 ChPackRGBA(const float c[4])
+{
+    return IM_COL32((int)(c[0] * 255.f), (int)(c[1] * 255.f), (int)(c[2] * 255.f), (int)(c[3] * 255.f));
 }
 
 // One pixel-aligned band of a span, covered by fraction cov.
@@ -86,12 +103,92 @@ static void ChDrawRect(ImDrawList* dl, float x1, float y1, float x2, float y2, I
         }
 }
 
+// sideL/R/T/B let the outline grow on only some edges of the rect (botox custom_crosshair.cpp
+// outline_sides_only) -- the disabled edges draw with 0 expansion, same as botox's draw_outline.
 static void ChDrawOutline(ImDrawList* dl,
-    float ax1, float ay1, float ax2, float ay2, float otUnits, ImU32 col)
+    float ax1, float ay1, float ax2, float ay2, float otUnits, ImU32 col,
+    bool sideL = true, bool sideR = true, bool sideT = true, bool sideB = true)
 {
     float px = otUnits * kChUnitToPx;
     if (!g_chAntialias && px < 1.f) px = 1.f;   // keep outline visible when snapped
-    ChDrawRect(dl, ax1 - px, ay1 - px, ax2 + px, ay2 + px, col);
+    ChDrawRect(dl, ax1 - (sideL ? px : 0.f), ay1 - (sideT ? px : 0.f),
+                   ax2 + (sideR ? px : 0.f), ay2 + (sideB ? px : 0.f), col);
+}
+
+// Soft outline / drop shadow (botox custom_crosshair.cpp draw_outline_blur). Builds the glow as
+// a stack of OVER-composited rings, each ring's alpha picked so the CUMULATIVE alpha at radius r
+// follows a gaussian falloff -- same inverted-compositing trick botox uses, so n blended rings
+// read as one smooth glow instead of n visible bands.
+static void ChDrawOutlineBlur(ImDrawList* dl,
+    float ax1, float ay1, float ax2, float ay2, float otUnits, ImU32 col, float blurRadius,
+    bool sideL = true, bool sideR = true, bool sideT = true, bool sideB = true)
+{
+    const float baseA     = ((col >> 24) & 0xFF) / 255.f;
+    const ImU32 rgb        = col & 0x00FFFFFFu;
+    const float maxExpand  = blurRadius * kChUnitToPx;
+    const float sigma      = maxExpand * 0.4f + 0.5f;
+    const int   n          = 16;
+    float baseThick        = otUnits * kChUnitToPx;
+    if (!g_chAntialias && baseThick < 1.f) baseThick = 1.f;
+
+    float cumTransp = 1.f;
+    for (int i = n - 1; i >= 0; --i)
+    {
+        const float br     = ((float)(i + 1) / n) * maxExpand;
+        const float target = baseA * expf(-0.5f * (br / sigma) * (br / sigma));
+        if (cumTransp < 1e-4f) break;
+        const float layerA = 1.f - (1.f - target) / cumTransp;
+        if (layerA <= 0.f) continue;
+        const int ai = (int)(layerA * 255.f + 0.5f);
+        if (ai <= 0) continue;
+        cumTransp *= (1.f - layerA);
+        const float px = baseThick + br;
+        ChDrawRect(dl, ax1 - (sideL ? px : 0.f), ay1 - (sideT ? px : 0.f),
+                       ax2 + (sideR ? px : 0.f), ay2 + (sideB ? px : 0.f),
+                       rgb | ((ImU32)ai << 24));
+    }
+    ChDrawOutline(dl, ax1, ay1, ax2, ay2, otUnits, col, sideL, sideR, sideT, sideB);
+}
+
+// One arm, sliced into 1px columns along its length so taper (half-thickness lerp) and
+// gradient (colour lerp) both read smoothly -- botox custom_crosshair.cpp draw_arm_fancy.
+// dir: 0=L, 1=R, 2=B, 3=T (ChMakeArm's own convention).
+static void ChDrawArmFancy(ImDrawList* dl, const ChArm& a, int dir, ImU32 centerCol, ImU32 outerCol,
+    float gradStart, float gradEnd, float nearScale, float farScale)
+{
+    gradStart = ImClamp(gradStart, 0.f, 1.f);
+    gradEnd   = ImClamp(gradEnd, gradStart, 1.f);
+
+    const bool  hz         = (dir <= 1);
+    const float baseHalf   = hz ? (a.y2 - a.y1) * 0.5f : (a.x2 - a.x1) * 0.5f;
+    const float innerHalf  = baseHalf * nearScale;
+    const float outerHalf  = baseHalf * farScale;
+    const float centerLine = hz ? (a.y1 + a.y2) * 0.5f : (a.x1 + a.x2) * 0.5f;
+    const float gRange     = gradEnd - gradStart;
+
+    float axStart, axEnd;
+    switch (dir) {
+        case 0:  axStart = a.x2; axEnd = a.x1; break;   // L: inner edge -> outer edge
+        case 1:  axStart = a.x1; axEnd = a.x2; break;   // R
+        case 2:  axStart = a.y1; axEnd = a.y2; break;   // B
+        default: axStart = a.y2; axEnd = a.y1; break;   // T
+    }
+    const float xMin  = fminf(axStart, axEnd), xMax = fmaxf(axStart, axEnd);
+    const float axSpan = axEnd - axStart;
+
+    for (float x = floorf(xMin); x < xMax - 1e-4f; x += 1.f)
+    {
+        const float rx1 = fmaxf(x, xMin), rx2 = fminf(x + 1.f, xMax);
+        const float xMid = (rx1 + rx2) * 0.5f;
+
+        const float t = (fabsf(axSpan) > 1e-5f) ? ImClamp((xMid - axStart) / axSpan, 0.f, 1.f) : 0.5f;
+        const float h = innerHalf + t * (outerHalf - innerHalf);
+        const float g = (gRange > 0.001f) ? ImClamp((t - gradStart) / gRange, 0.f, 1.f) : (t >= gradStart ? 1.f : 0.f);
+        const ImU32 col = ChLerpColor(centerCol, outerCol, g);
+
+        if (hz) ChDrawRect(dl, rx1, centerLine - h, rx2, centerLine + h, col);
+        else    ChDrawRect(dl, centerLine - h, rx1, centerLine + h, rx2, col);
+    }
 }
 
 // dir: 0=L, 1=R, 2=B, 3=T. Band is centered on the exact center, so arms stay
@@ -442,16 +539,72 @@ bool Crosshair_BlendCombo(const char* id)
     return false;
 }
 
-static void RenderCustomCrosshair()
+// Local player flags/velocity, read off the verified g_offFlags/g_offVelocity/g_offMaxspeed
+// offsets RenderCsgoPanorama/RenderCsgoClassic already use below -- moved up here so the
+// custom crosshair's dynamic gap (botox custom_crosshair.cpp s.dynamic) can read speed2D too.
+static constexpr float kCsMaxSpeedFallback = 215.0f;   // CS_PLAYER_SPEED_RUN fallback
+
+struct CsPlayerState
 {
-    ImGuiIO& io  = ImGui::GetIO();
-    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    bool  valid    = false;
+    bool  onGround = true;
+    bool  ducking  = false;
+    float speed2D  = 0.f;
+    float velZ     = 0.f;
+    float maxSpeed = kCsMaxSpeedFallback;
+};
+
+static CsPlayerState CsGetPlayerState()
+{
+    CsPlayerState s;
+    if (g_offFlags <= 0 || g_offVelocity <= 0) return s;
+    const int idx = GetLocalPlayerIndex();
+    if (idx <= 0) return s;
+    void* pEnt = GetClientEntity(idx);
+    if (!pEnt) return s;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(pEnt);
+    if (base < 0x10000) return s;
+    __try {
+        const int flags = *reinterpret_cast<int*>(base + g_offFlags);
+        const float* v  = reinterpret_cast<const float*>(base + g_offVelocity);
+        s.onGround = (flags & (1 << 0)) != 0;   // FL_ONGROUND
+        s.ducking  = (flags & (1 << 1)) != 0;   // FL_DUCKING
+        s.speed2D  = sqrtf(v[0]*v[0] + v[1]*v[1]);
+        s.velZ     = v[2];
+        if (g_offMaxspeed > 0) {
+            const float ms = *reinterpret_cast<const float*>(base + g_offMaxspeed);
+            if (ms > 1.f) s.maxSpeed = ms;      // class run speed stands in for GetMaxSpeed
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return s; }
+    s.valid = true;
+    return s;
+}
+
+// The real renderer, shared by the live overlay and the menu preview (botox custom_crosshair.cpp
+// draw_custom). speed < 0 = standing (botox convention) -- dynamic gap only grows for speed >= 0.
+static void ChDrawCustomCrosshairCore(ImDrawList* dl, float cx, float cy, float scale, float speed)
+{
+    const int vtxStart = dl->VtxBuffer.Size;
 
     // Thickness under 1 unit stays exact: AA thins the line by coverage,
     // non-AA clamps it to 1px in ChDrawRect.
-    const float thPx = g_chThickness * kChUnitToPx;
-    const float len  = g_chLength    * kChUnitToPx;
-    const float gap  = g_chGap       * kChUnitToPx;
+    const float thPx = g_chThickness * kChUnitToPx * scale;
+    const float len  = g_chLength    * kChUnitToPx * scale;
+    const float gap  = g_chGap       * kChUnitToPx * scale;
+
+    // Dynamic gap (botox custom_crosshair.cpp s.dynamic): extra gap that grows with the local
+    // player's 2D speed, from 0 at dynamicMin up to dynamicMax at dynamicRef. Movement speed
+    // is what botox's own on_paint_traverse/draw_preview feed draw_custom's `speed` parameter,
+    // so this is a 1:1 port of what botox draws.
+    float dynGapPx = 0.f;
+    if (g_chDynamic && g_chDynamicRef > 0.f && speed >= 0.f && speed > g_chDynamicMin)
+    {
+        const float range = g_chDynamicRef - g_chDynamicMin;
+        float t = (range > 0.f) ? (speed - g_chDynamicMin) / range : 1.f;
+        if (t > 1.f) t = 1.f;
+        dynGapPx = t * g_chDynamicMax * kChUnitToPx * scale;
+    }
+    const float effGap = gap + dynGapPx;
 
     // Arm aspect = w:h of the arm pair. The SHORT axis keeps `length`, the long one is
     // stretched, so the slider never shrinks an arm out from under you: >1 grows the
@@ -462,46 +615,121 @@ static void RenderCustomCrosshair()
     // same rule on the gap, on its own knob -- a wide arm pair and a wide gap are
     // separate looks, and one aspect driving both can't make either
     const float gAsp = g_chGapAspect > 0.01f ? g_chGapAspect : 0.01f;
-    const float hGap = gap * (gAsp >= 1.f ? gAsp : 1.f);
-    const float vGap = gap * (gAsp <= 1.f ? (1.f / gAsp) : 1.f);
+    const float hGap = effGap * (gAsp >= 1.f ? gAsp : 1.f);
+    const float vGap = effGap * (gAsp <= 1.f ? (1.f / gAsp) : 1.f);
     // dir: 0=L, 1=R, 2=B, 3=T -- 0/1 are the horizontal pair
     auto armLen = [&](int dir) { return (dir <= 1) ? hLen : vLen; };
     auto armGap = [&](int dir) { return (dir <= 1) ? hGap : vGap; };
-
-    const float cx = ChSnapCenter(io.DisplaySize.x * 0.5f, thPx);
-    const float cy = ChSnapCenter(io.DisplaySize.y * 0.5f, thPx);
-
-    auto packRGBA = [](const float c[4]) -> ImU32 {
-        return IM_COL32((int)(c[0]*255.f),(int)(c[1]*255.f),
-                        (int)(c[2]*255.f),(int)(c[3]*255.f));
+    // only some sides (botox s.sides_only) -- dir indices line up 1:1 with the named bools
+    // (ChMakeArm's own L/R/B/T order), no remap needed.
+    auto armEnabled = [&](int dir) {
+        if (!g_chSidesOnly) return true;
+        switch (dir) { case 0: return g_chSideL; case 1: return g_chSideR;
+                       case 2: return g_chSideB; default: return g_chSideT; }
     };
+
+    const float cx2 = (scale == 1.f) ? ChSnapCenter(cx, thPx) : cx;   // only snap the live overlay
+    const float cy2 = (scale == 1.f) ? ChSnapCenter(cy, thPx) : cy;
+
     // Only the additive pass blends in linear light, so only its colour is decoded. The
     // outline goes down before ChAddOn and stays a plain sRGB alpha blend.
     const int  blend  = ChBlendMode();
     const bool addLin = blend == 1 && ChSrgbBlendOk();
-    ImU32 col  = addLin ? IM_COL32(ChCsToLinear8(g_chColor[0]), ChCsToLinear8(g_chColor[1]),
-                                   ChCsToLinear8(g_chColor[2]), (int)(g_chColor[3]*255.f))
-                        : packRGBA(g_chColor);
-    ImU32 outl = packRGBA(g_chOutlineColor);
+    auto toDrawCol = [&](const float c[4]) -> ImU32 {
+        return addLin ? IM_COL32(ChCsToLinear8(c[0]), ChCsToLinear8(c[1]), ChCsToLinear8(c[2]), (int)(c[3]*255.f))
+                      : ChPackRGBA(c);
+    };
+    const ImU32 col  = toDrawCol(g_chColor);
+    const ImU32 outl = ChPackRGBA(g_chOutlineColor);
+
+    // Taper (half-thickness lerp) and gradient (colour lerp) both ride the fancy-arm path;
+    // sub-pixel thickness (<1 unit) skips it, same as botox's fancy_arm = !sub_pixel && (...).
+    const bool  subPixel  = g_chThickness < 1.0f;
+    const bool  fancyArm  = !subPixel && (g_chGradient || g_chTaper);
+    ImU32 gradCenterCol = col, gradOuterCol = col;
+    float gradStart = 0.f, gradEnd = 1.f, taperNear = 1.f, taperFar = 1.f;
+    if (fancyArm)
+    {
+        if (g_chGradient)
+        {
+            gradCenterCol = toDrawCol(g_chGradCenter);
+            gradOuterCol  = toDrawCol(g_chGradOuter);
+            gradStart     = g_chGradStart;
+            gradEnd       = g_chGradEnd;
+        }
+        taperNear = g_chTaper ? g_chTaperNear : 1.f;
+        taperFar  = g_chTaper ? g_chTaperFar  : 1.f;
+    }
+
+    const bool sl = !g_chOutlineSidesOnly || g_chOutlineSideL;
+    const bool sr = !g_chOutlineSidesOnly || g_chOutlineSideR;
+    const bool st = !g_chOutlineSidesOnly || g_chOutlineSideT;
+    const bool sb = !g_chOutlineSidesOnly || g_chOutlineSideB;
 
     if (g_chOutline)
     {
         const float ot = g_chOutlineThick < 0.1f ? 0.1f : g_chOutlineThick;
-        for (int i = 0; i < 4; ++i)
+        const float armBaseHalf = thPx * 0.5f;
+        if (g_chOutlineOnLines)
         {
-            ChArm a = ChMakeArm(cx, cy, thPx, armLen(i), armGap(i), i);
-            ChDrawOutline(dl, a.x1, a.y1, a.x2, a.y2, ot, outl);
+            for (int i = 0; i < 4; ++i)
+            {
+                if (!armEnabled(i)) continue;
+                ChArm a = ChMakeArm(cx2, cy2, thPx, armLen(i), armGap(i), i);
+                if (fancyArm && !g_chOutlineBlur)
+                {
+                    // outline rides the same taper/gradient shape as the arm, just expanded by
+                    // the outline thickness -- botox custom_crosshair.cpp draw_custom (outline_on_lines).
+                    ChArm outA = a;
+                    const float otPx = g_chAntialias ? (ot * kChUnitToPx) : ((ot < 1.f) ? 1.f : floorf(ot * kChUnitToPx));
+                    if (i <= 1) { outA.x1 -= otPx; outA.x2 += otPx; } else { outA.y1 -= otPx; outA.y2 += otPx; }
+                    const float addScale = armBaseHalf > 0.f ? otPx / armBaseHalf : 0.f;
+                    ChDrawArmFancy(dl, outA, i, outl, outl, 0.f, 0.f, taperNear + addScale, taperFar + addScale);
+                }
+                else if (g_chOutlineBlur)
+                    ChDrawOutlineBlur(dl, a.x1, a.y1, a.x2, a.y2, ot, outl, g_chOutlineBlurRadius, sl, sr, st, sb);
+                else
+                    ChDrawOutline(dl, a.x1, a.y1, a.x2, a.y2, ot, outl, sl, sr, st, sb);
+            }
         }
-        if (g_chDot)
+        if (g_chDot && g_chOutlineOnDot)
         {
             const float r = thPx * 0.5f;
-            if (g_chDotCircle) {
+            if (g_chDotCircle && g_chOutlineBlur)
+            {
+                // concentric fading rings around the dot, same inverted-compositing gaussian
+                // falloff as ChDrawOutlineBlur -- botox draws the circle case separately because
+                // AddCircleFilled has no rect-expansion equivalent.
+                const float baseA  = ((outl >> 24) & 0xFF) / 255.f;
+                const ImU32 oRgb   = outl & 0x00FFFFFFu;
+                const float maxExp = g_chOutlineBlurRadius * kChUnitToPx;
+                const float sigma  = maxExp * 0.4f + 0.5f;
+                const float otPx   = g_chAntialias ? (ot * kChUnitToPx) : ((ot < 1.f) ? 1.f : floorf(ot * kChUnitToPx));
+                float cumT = 1.f;
+                for (int i = 15; i >= 0; --i)
+                {
+                    const float br  = ((float)(i + 1) / 16) * maxExp;
+                    const float tgt = baseA * expf(-0.5f * (br / sigma) * (br / sigma));
+                    if (cumT < 1e-4f) break;
+                    const float la = 1.f - (1.f - tgt) / cumT;
+                    if (la <= 0.f) continue;
+                    const int ai = (int)(la * 255.f + 0.5f);
+                    if (ai <= 0) continue;
+                    cumT *= (1.f - la);
+                    dl->AddCircleFilled(ImVec2(cx2, cy2), r + otPx + br, oRgb | ((ImU32)ai << 24));
+                }
+                dl->AddCircleFilled(ImVec2(cx2, cy2), r + otPx, outl);
+            }
+            else if (g_chDotCircle)
+            {
                 float px = ot * kChUnitToPx;
                 if (!g_chAntialias && px < 1.f) px = 1.f;
-                dl->AddCircleFilled(ImVec2(cx, cy), r + px, outl);
-            } else {
-                ChDrawOutline(dl, cx-r, cy-r, cx+r, cy+r, ot, outl);
+                dl->AddCircleFilled(ImVec2(cx2, cy2), r + px, outl);
             }
+            else if (g_chOutlineBlur)
+                ChDrawOutlineBlur(dl, cx2-r, cy2-r, cx2+r, cy2+r, ot, outl, g_chOutlineBlurRadius, sl, sr, st, sb);
+            else
+                ChDrawOutline(dl, cx2-r, cy2-r, cx2+r, cy2+r, ot, outl, sl, sr, st, sb);
         }
     }
 
@@ -515,21 +743,126 @@ static void RenderCustomCrosshair()
 
     for (int i = 0; i < 4; ++i)
     {
-        ChArm a = ChMakeArm(cx, cy, thPx, armLen(i), armGap(i), i);
-        ChDrawRect(dl, a.x1, a.y1, a.x2, a.y2, col);
+        if (!armEnabled(i)) continue;
+        ChArm a = ChMakeArm(cx2, cy2, thPx, armLen(i), armGap(i), i);
+        if (fancyArm) ChDrawArmFancy(dl, a, i, gradCenterCol, gradOuterCol, gradStart, gradEnd, taperNear, taperFar);
+        else          ChDrawRect(dl, a.x1, a.y1, a.x2, a.y2, col);
     }
 
     if (g_chDot)
     {
         const float r = thPx * 0.5f;
+        const ImU32 dotCol = g_chDotCustomColor ? toDrawCol(g_chDotColor)
+                            : ((g_chGradient && fancyArm) ? gradCenterCol : col);
         if (g_chDotCircle)
-            dl->AddCircleFilled(ImVec2(cx, cy), r, col);
+            dl->AddCircleFilled(ImVec2(cx2, cy2), r, dotCol);
         else
-            ChDrawRect(dl, cx-r, cy-r, cx+r, cy+r, col);
+            ChDrawRect(dl, cx2-r, cy2-r, cx2+r, cy2+r, dotCol);
+    }
+
+    // Whole-crosshair rotation (botox custom_crosshair.cpp): spin every vertex this draw just
+    // emitted about the centre. Done last so taper/gradient/outline math above stays axis-aligned.
+    if (fabsf(g_chRotation) > 0.01f)
+    {
+        const float rad = g_chRotation * IM_PI / 180.f;
+        const float ca = cosf(rad), sa = sinf(rad);
+        for (int vi = vtxStart; vi < dl->VtxBuffer.Size; ++vi)
+        {
+            const float dx = dl->VtxBuffer[vi].pos.x - cx2;
+            const float dy = dl->VtxBuffer[vi].pos.y - cy2;
+            dl->VtxBuffer[vi].pos.x = cx2 + dx * ca - dy * sa;
+            dl->VtxBuffer[vi].pos.y = cy2 + dx * sa + dy * ca;
+        }
     }
 
     if (blend == 1)      dl->AddCallback(ChAddOff, nullptr);
     else if (blend >= 2) dl->AddCallback(ChBlendOff, nullptr);
+}
+
+static void RenderCustomCrosshair()
+{
+    ImGuiIO& io = ImGui::GetIO();
+    const float speed = CsGetPlayerState().speed2D;
+    ChDrawCustomCrosshairCore(ImGui::GetBackgroundDrawList(), io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f, 1.f, speed);
+}
+
+// Menu preview: shrinks the crosshair to fit [min,max] the same way botox's draw_preview does
+// (shrink until the widest arm fits the box), then draws through the same core as the live
+// overlay -- so the preview is never allowed to drift from what actually renders in-game.
+void CustomCrosshair_DrawPreview(ImDrawList* dl, ImVec2 min, ImVec2 max, float testSpeed)
+{
+    const float w = max.x - min.x, h = max.y - min.y;
+    if (w < 4.f || h < 4.f) return;
+
+    const float asp         = g_chAspect > 0.01f ? g_chAspect : 0.01f;
+    const float longerScale = asp >= 1.f ? asp : 1.f / asp;
+    const float extentPx    = fmaxf(0.f, floorf(g_chGap * kChUnitToPx)) + floorf(g_chLength * kChUnitToPx * longerScale) +
+                               floorf(g_chThickness * kChUnitToPx * 0.5f);
+    const float maxExtent = (w < h ? w : h) * 0.45f;
+    const float scale     = (extentPx > maxExtent && extentPx > 0.f) ? maxExtent / extentPx : 1.f;
+
+    dl->PushClipRect(min, max, true);
+    ChDrawCustomCrosshairCore(dl, min.x + w * 0.5f, min.y + h * 0.5f, scale, testSpeed);
+    dl->PopClipRect();
+}
+
+// Animated preview background (botox custom_crosshair.cpp draw_preview_scene): iq gradient
+// noise shaded into a soft rotating blob, purely cosmetic -- lets the colour/blend pickers be
+// judged against a moving, non-uniform background instead of the menu's flat one.
+void CustomCrosshair_DrawPreviewScene(ImDrawList* dl, ImVec2 p0, float side)
+{
+    static float s_t = 0.f;
+    s_t += ImMin(ImGui::GetIO().DeltaTime, 0.1f);
+
+    auto fract = [](double x) { return (float)(x - floor(x)); };
+    auto smooth = [](float a, float b, float x) {
+        const float t = ImClamp((x - a) / (b - a), 0.f, 1.f);
+        return t * t * (3.f - 2.f * t);
+    };
+    auto noise = [&](float px, float py) {
+        const float ix = floorf(px), iy = floorf(py), fx = px - ix, fy = py - iy;
+        const float ux = fx * fx * (3.f - 2.f * fx), uy = fy * fy * (3.f - 2.f * fy);
+        auto g = [&](float ox, float oy) {
+            const double hx = (ix + ox) * 2127.1 + (iy + oy) * 81.17;
+            const double hy = (ix + ox) * 1269.5 + (iy + oy) * 283.37;
+            return (fract(sin(hx) * 43758.5453) * 2.f - 1.f) * (fx - ox) + (fract(sin(hy) * 43758.5453) * 2.f - 1.f) * (fy - oy);
+        };
+        const float n = ImLerp(ImLerp(g(0.f, 0.f), g(1.f, 0.f), ux), ImLerp(g(0.f, 1.f), g(1.f, 1.f), ux), uy);
+        return 0.5f + 0.5f * n;
+    };
+
+    const float c5 = cosf(-5.f * IM_PI / 180.f), s5 = sinf(-5.f * IM_PI / 180.f);
+    auto shade = [&](float u, float v) {
+        float x = u - 0.5f, y = v - 0.5f;
+        const float deg = noise(s_t * 0.1f, x * y);
+        const float a = ((deg - 0.5f) * 720.f + 180.f) * IM_PI / 180.f;
+        const float c = cosf(a), s = sinf(a);
+        const float rx = x * c - y * s, ry = x * s + y * c;
+        x = rx; y = ry;
+
+        const float speed = s_t * 2.f;
+        x += sinf(y * 5.f + speed) / 30.f;
+        y += sinf(x * 7.5f + speed) / 15.f;
+
+        const float k = smooth(-0.3f, 0.2f, x * c5 - y * s5);
+        const float m = smooth(0.5f, -0.3f, y);
+        const float l1[3] = { ImLerp(0.800f, 0.550f, k), ImLerp(0.660f, 0.700f, k), ImLerp(0.470f, 0.820f, k) };
+        const float l2[3] = { ImLerp(0.660f, 0.330f, k), ImLerp(0.250f, 0.450f, k), ImLerp(0.220f, 0.550f, k) };
+        return IM_COL32((int)(ImLerp(l1[0], l2[0], m) * 255.f), (int)(ImLerp(l1[1], l2[1], m) * 255.f),
+                        (int)(ImLerp(l1[2], l2[2], m) * 255.f), 255);
+    };
+
+    constexpr int n = 32;
+    static ImU32 col[n + 1][n + 1];
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i)
+            col[j][i] = shade((float)i / n, 1.f - (float)j / n);
+
+    const float cell = side / n;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i)
+            dl->AddRectFilledMultiColor(ImVec2(p0.x + i * cell, p0.y + j * cell), ImVec2(p0.x + (i + 1) * cell, p0.y + (j + 1) * cell),
+                                        col[j][i], col[j][i + 1], col[j + 1][i + 1], col[j + 1][i]);
 }
 
 // ==== CSGO default crosshair (styles 0 / 1) ==========================================
@@ -625,46 +958,9 @@ static constexpr float kCsInaccLand        = 0.000242f;
 static constexpr float kCsSpread           = 0.00060f;
 static constexpr float kCsRecoveryStand    = 0.368f;
 static constexpr float kCsRecoveryCrouch   = 0.305257f;
-static constexpr float kCsMaxSpeedFallback = 215.0f;
 static constexpr float kCsDuckSpeedMod     = 0.34f;      // CS_PLAYER_SPEED_DUCK_MODIFIER
 static constexpr float kCsMoveCurveExp     = 0.25f;      // MOVEMENT_CURVE01_EXPONENT
 static constexpr float kCsJumpImpulse      = 301.993377f;// sv_jump_impulse
-
-struct CsPlayerState
-{
-    bool  valid    = false;
-    bool  onGround = true;
-    bool  ducking  = false;
-    float speed2D  = 0.f;
-    float velZ     = 0.f;
-    float maxSpeed = kCsMaxSpeedFallback;
-};
-
-static CsPlayerState CsGetPlayerState()
-{
-    CsPlayerState s;
-    if (g_offFlags <= 0 || g_offVelocity <= 0) return s;
-    const int idx = GetLocalPlayerIndex();
-    if (idx <= 0) return s;
-    void* pEnt = GetClientEntity(idx);
-    if (!pEnt) return s;
-    const uintptr_t base = reinterpret_cast<uintptr_t>(pEnt);
-    if (base < 0x10000) return s;
-    __try {
-        const int flags = *reinterpret_cast<int*>(base + g_offFlags);
-        const float* v  = reinterpret_cast<const float*>(base + g_offVelocity);
-        s.onGround = (flags & (1 << 0)) != 0;   // FL_ONGROUND
-        s.ducking  = (flags & (1 << 1)) != 0;   // FL_DUCKING
-        s.speed2D  = sqrtf(v[0]*v[0] + v[1]*v[1]);
-        s.velZ     = v[2];
-        if (g_offMaxspeed > 0) {
-            const float ms = *reinterpret_cast<const float*>(base + g_offMaxspeed);
-            if (ms > 1.f) s.maxSpeed = ms;      // class run speed stands in for GetMaxSpeed
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return s; }
-    s.valid = true;
-    return s;
-}
 
 static float CsRemapClamped(float v, float a, float b, float ra, float rb)
 {

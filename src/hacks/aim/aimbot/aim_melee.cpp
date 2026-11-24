@@ -1012,7 +1012,10 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	// margin 3.8 at p=0.999 -> bs20 prices the bearing's turn rate (bs_math.h BearingSigma).
 	// bs20 log: 40 fires, 39 stabs, 0 whiffs; the front = p .922 swung with next .973 on a 401 deg/s
 	// orbit into his back -> bs21 waits for a clearly better tick at any p (bs_math.h Decide) + yd=.
-	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs21 (bs20 + rising odds wait past p .90, yd= on outcome). UNVERIFIED IN GAME."); }
+	// bs21 log: 35 fires, 32 stabs, 0 whiffs. Fronts: a 7.7u pass read .972 where the server's test is
+	// .821 (single-edge odds hid the bearing under facestab, and sorted offset 30 first for it), plus
+	// two real-ping turns (yd 10, 13) -> bs22 exact joint odds (bs_math.h StabJoint).
+	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs22 (bs21 + exact joint odds, StabJoint). UNVERIFIED IN GAME."); }
 	m_bBackstabLegit = Vars::Aimbot::Melee::BackstabAimType.Value == Vars::Aimbot::Melee::BackstabAimTypeEnum::Legit;
 	const int iAimType = GetAimType(pWeapon);
 	// Wall clock for everything that has to line up with player_hurt: inside engine prediction

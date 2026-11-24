@@ -25,6 +25,11 @@ bool Crosshair_BlendCombo(const char* id);
 // Put the game's "crosshair" convar back to the player's value (eject).
 void Crosshair_Restore();
 
+// Menu preview of the custom crosshair (botox custom_crosshair.cpp draw_preview/draw_preview_scene).
+// testSpeed < 0 = standing, matching the dynamic-gap convention RenderCustomCrosshair itself uses.
+void CustomCrosshair_DrawPreview(ImDrawList* dl, ImVec2 min, ImVec2 max, float testSpeed);
+void CustomCrosshair_DrawPreviewScene(ImDrawList* dl, ImVec2 p0, float side);
+
 // Static amby crosshair: hook CTFRevolver::GetWeaponCrosshairScale, skip original
 // when enabled so the Ambassador crosshair stays a fixed size instead of expanding.
 using GetWeaponCrosshairScale_t = void(__fastcall*)(void*, float&);
