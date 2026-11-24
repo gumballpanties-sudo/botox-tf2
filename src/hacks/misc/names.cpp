@@ -17,7 +17,7 @@ namespace
         "medic",   "heavy", "pyro",   "spy",     "engineer"
     };
 
-    // TF2 x64 player_info_t (aim/defs.h player_info_s; game_extras.cpp uses the same offsets)
+    // TF2 x64 player_info_t (aim/sdk/defs.h player_info_s; game_extras.cpp uses the same offsets)
     constexpr int kPiName = 0x00, kPiNameSize = 32, kPiFriendsId = 0x48, kPiSize = 0x84;
 
     // ---- aliases: fpsoverlay g_aliases, keyed by account id (steam64 low half) ----

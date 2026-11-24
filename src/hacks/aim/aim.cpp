@@ -1,12 +1,12 @@
 #include "aim.h"
-#include "backtrack.h"
+#include "aimbot/backtrack.h"
 
-#include "sdk.h"
-#include "events.h"
-#include "core.h"
-#include "aimbot.h"
-#include "menu.h"
-#include "hud_aim.h"   // HudAim_Restore on unload
+#include "sdk/sdk.h"
+#include "sdk/events.h"
+#include "sdk/core.h"
+#include "aimbot/aimbot.h"
+#include "sdk/menu.h"
+#include "visuals/hud_aim.h"   // HudAim_Restore on unload
 #include "../visuals/esp_preview.h"   // EspPreview::OnEject
 
 #include "../../dependencies/imgui/imgui.h"
@@ -27,6 +27,7 @@ void DebugLog(const char* fmt, ...);
 
 static bool s_bActive = false;
 static bool s_bTried  = false;
+static bool s_bOwnsCreateMove = false;
 
 bool Aim_Active() { return s_bActive; }
 
@@ -48,105 +49,35 @@ void Aim_ChatPrint(const char* text)
 		I::ClientModeShared->m_pChatElement->ChatPrintf(0, text);
 }
 
-// The hooks the aim half installs. Every other MAKE_HOOK in hooks.cpp is compiled (so it
-// registers) but never initialised. Rules used to pick this list:
-//   - it feeds the aimbot (entity cache, bone/anim fidelity, prediction), or
-//   - it is what makes silent/psilent aim actually silent (the cmd encode + input read path), or
-//   - it is the clean-POV-demo fix the user asked for (CPrediction::GetLocalViewAngles), and
-//   - it is NOT a target dih already hooks (CreateMove is the exception: it moved here whole,
-//     see CHLClient_CreateMove in hooks.cpp).
-static const std::vector<std::string> s_vHookWhitelist =
-{
-	// command path -- the aimbot pipeline itself, and the tick manipulation it rides on
-	"CHLClient_CreateMove",
-	"CBasePlayer_ItemPostFrame",
+// Every MAKE_HOOK in the binary is installed (hooks.cpp, esp_preview.cpp). What is NOT hooked
+// here, on purpose -- dih owns the target and MinHook allows one hook per target:
+//   - CInput::GetUserCmd / ValidateUserCmd: movement.cpp h_GetUserCmd / h_ValidateUserCmd.
+//   - CHLClient::DispatchUserMessage: visuals.cpp h_DispatchUserMessage calls Aim_OnUserMessage.
+//   - CBaseAnimating::SetSequence is the reverse: ours, and it calls skins' Skins_RemapSequence.
 
-	// silent aim: keep the engine from writing our aim angle back into the real view, and
-	// keep the encoded command carrying the aim angle while the view keeps the real one.
-	//
-	// CInput_GetUserCmd and CInput_ValidateUserCmd are gone from this tree entirely: dih hooks
-	// both itself, off the same signatures and with the same bodies (movement.cpp, h_GetUserCmd
-	// / h_ValidateUserCmd -- they are what makes dih's own post-CreateMove button edits survive).
-	// MinHook allows one hook per target, so installing them from both halves would just make
-	// one of the two fail.
-	//
-	// IEngineTrace_TraceRay / IEngineTrace_SetTraceEntity are gone too. The TraceRay hook only
-	// ever existed inside "#ifdef DEBUG_TRACES" (never defined), so whitelisting it installed
-	// nothing, and SetTraceEntity's CONTENTS_NOSTARTSOLID restore read a mask that only the
-	// never-whitelisted CM_BoxTrace hook ever wrote -- it was a pure passthrough.
-	"CHLClient_EncodeUserCmdToBuffer",
-	"CClientState_ProcessFixAngle",
-
-	// clean POV demos -- the demo cmdinfo's local view angle
-	"CPrediction_GetLocalViewAngles",
-
-	// entity data the target selection and the projectile lead read. RecvProxy_SimulationTime
-	// is what makes a choking player's simulation time correct, and H::Entities::Store builds
-	// the per-target velocity history off that delta -- the projectile aimbot leads on it.
-	"CHLClient_FrameStageNotify",
-	"RecvProxy_SimulationTime",
-	"CL_ProcessPacketEntities",
-
-	// bone + animation fidelity for hitbox aiming
-	"CBaseAnimating_UpdateClientSideAnimation",
-	"CBaseAnimating_MaintainSequenceTransitions",
-	"CBaseAnimating_Interpolate",
-	"CBaseViewModel_Interpolate",   // remove interp: viewmodel cycle steps per tick
-	"CBaseAnimating_SetSequence",
-	"CBaseEntity_BaseInterpolatePart1",
-	"CBaseEntity_ResetLatched",
-	"CTFPlayer_BuildTransformations",
-
-	// movement simulation (projectile lead) + engine prediction
-	"CBaseEntity_SetAbsVelocity",
-	"CBaseEntity_EstimateAbsVelocity",
-	"CPrediction_RunSimulation",
-
-	// weapon state the aimbot gates on
-	"CTFPlayerShared_InCond",
-	"CTFWeaponBase_CalcIsAttackCritical",
-	"CTFWeaponBase_CanFireRandomCriticalShot",
-	"CTFRocketLauncher_CheckReloadMisfire",
-
-	// the aimbot's own on-screen overlays (tick indicator, crit / no-spread readout)
-	"IEngineVGui_Paint",
-
-	// esp preview fake entity out of a map (esp_preview.cpp): our model_t*, neutral light state
-	"CModelInfoClient_GetModel",
-	"R_LightcacheGetDynamic",
-
-	// silences the datatable spam the netvar walk provokes
-	"DataTable_Warning",
-
-	// eats the server's "playerperf" TextMsg reply no spread asks for -- without it the reply
-	// is never parsed (no spread cannot sync) and every one prints to the console.
-	"CHLClient_DispatchUserMessage",
-};
-
+// Nothing here is all-or-nothing any more. A game update that breaks one sig used to stop the
+// WHOLE aim layer (aimbot, chams, glow, csgo killfeed, lua api) -- 11-24: KeyValues ctor. Now:
+//   - a missed sig is logged by name and a hook on it is skipped. Call() through it returns T{},
+//     and every wrapper where T{} would be WRONG has its own fallback or turns its feature off
+//     (defs.h CalcNearestPoint / CalculateMaxSpeed / GetEffectiveInvisibilityLevel /
+//     GetSpreadAngles / CEntitySphereQuery, AttribHookValue, TransferData -> no prediction or
+//     move sim, InvalidateBoneCache -> no backtrack, surface StartDrawing -> no aim draws);
+//   - only a missing INTERFACE stops it, since every feature dereferences them unchecked.
+//     Most come from CreateInterface version strings; FIVE come from sigs (ClientModeShared,
+//     ClientState, GlobalVars, MoveHelper, Input) -- a miss there still stops Aim_Init, by name.
 bool Aim_Init()
 {
 	if (s_bTried)
 		return s_bActive;
 	s_bTried = true;
 
-	if (!U::Signatures.Initialize())
-	{
-		DebugLog("aim: signature init failed");
-		return false;
-	}
+	const int nSigsMissed = U::Signatures.Initialize();
 	if (!U::Interfaces.Initialize())
 	{
-		DebugLog("aim: interface init failed");
+		DebugLog("aim: interface init FAILED -- aimbot, chams, glow off (names above)");
 		return false;
 	}
-	if (!H::Interfaces.Initialize())
-		DebugLog("aim: null-interface init incomplete (steam side), continuing");
-
-	if (!U::Hooks.Initialize(s_vHookWhitelist))
-	{
-		DebugLog("aim: hook init failed");
-		return false;
-	}
+	const int nHooksMissed = U::Hooks.Initialize();
 	if (!H::Events.Initialize())
 		DebugLog("aim: event listener init incomplete, continuing");
 
@@ -156,9 +87,14 @@ bool Aim_Init()
 	// it carries our vars now -- see the config section below.
 
 	s_bActive = true;
-	DebugLog("aim: aimbot subsystem loaded (%d hooks)", int(s_vHookWhitelist.size()));
+	auto itCM = U::Hooks.m_mHooks.find("CHLClient_CreateMove");
+	s_bOwnsCreateMove = itCM != U::Hooks.m_mHooks.end() && itCM->second->m_pTarget;
+	DebugLog("aim: loaded, %d/%d hooks, %d sig(s) missed%s", int(U::Hooks.m_mHooks.size()) - nHooksMissed,
+		int(U::Hooks.m_mHooks.size()), nSigsMissed, nSigsMissed || nHooksMissed ? " (see lines above)" : "");
 	return true;
 }
+
+bool Aim_OwnsCreateMove() { return s_bOwnsCreateMove; }
 
 void Aim_Unload()
 {
@@ -314,7 +250,7 @@ bool Aim_LoadVar(const char* szKey, const char* szValue)
 #include "../menu/menu_chrome.h"
 
 // Can't include src/hacks/menu/menu.h here: it pulls in dih's own SDK (src/globals.h), which
-// redefines type names (ConVar, RecvProp, ...) that aim/defs.h already defines differently --
+// redefines type names (ConVar, RecvProp, ...) that aim/sdk/defs.h already defines differently --
 // same wall as the MenuSection decls above used to work around. Signatures copied from there.
 namespace ImGui
 {
@@ -450,12 +386,7 @@ void Aim_RenderMenuTab()
 {
 	using namespace Vars;
 
-	if (!Aim_Active())
-	{
-		ImGui::TextDisabled("aimbot subsystem not loaded -- see C:\\botox-tf2\\debug.log");
-		return;
-	}
-
+	// No load gate: the vars are static data, editable (and saved) whether or not Aim_Init ran.
 	menu_columns_begin();
 
 	// ---- main -------------------------------------------------------------------------

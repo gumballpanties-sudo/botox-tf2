@@ -470,10 +470,10 @@ static void UpdateHide(int localIdx, int cls)
 //   AddCarriedItem    drops the real hat one of ours displaced (Hats_SkipDraw's, same as the world)
 //   HoldItemInSlot    adds each live hat of ours first, so the re-equip puts them on
 // and the panel is rebuilt when our live set changes (hats spawn a frame after the spawn event the
-// game rebuilds it on). x64 client.dll 11-12, read off UpdateModelPanel: +0x2C8 m_bUsePlayerModel,
-// +0x278 m_pPlayerModelPanel; AddCarriedItem = the call after `mov rcx,[rdi+278h]; mov rdx,rbx`,
-// HoldItemInSlot = the one after `mov rcx,[rdi+278h]; mov edx,r13d`, which tests the panel's
-// m_iCurrentClassIndex first (`cmp dword [rcx+0ECCh],0`).
+// game rebuilds it on). x64 client.dll 11-24, read off UpdateModelPanel: +0x2E8 m_bUsePlayerModel,
+// +0x298 m_pPlayerModelPanel (11-12: 0x2C8 / 0x278); AddCarriedItem = the call after
+// `mov rcx,[rdi+298h]; mov rdx,rbx`, HoldItemInSlot = the one after `mov rcx,[rdi+298h]; mov edx,r13d`,
+// which tests the panel's m_iCurrentClassIndex first (`cmp dword [rcx+0EECh],0`, 11-12: 0ECCh).
 using HudUpdate_t  = void(__fastcall*)(void*);
 using AddCarried_t = int(__fastcall*)(void*, void*);
 using HoldSlot_t   = bool(__fastcall*)(void*, int);
@@ -547,9 +547,10 @@ void Hats_HudInstall()
 {
     HMODULE client = GetModuleHandleA("client.dll");
     if (!client) return;
-    uint8_t* fn   = PatternScan(client, "40 57 48 83 EC 60 80 B9 C8 02 00 00 00 48 8B F9 0F 84");
-    uint8_t* add  = PatternScan(client, "48 8B 8F 78 02 00 00 48 8B D3 E8 ? ? ? ? 41 8B 86");
-    uint8_t* hold = PatternScan(client, "48 8B 8F 78 02 00 00 41 8B D5 E8");
+    // 11-24 build: members +0x20 (0x2C8 -> 0x2E8, 0x278 -> 0x298) -- disps wildcarded, still unique
+    uint8_t* fn   = PatternScan(client, "40 57 48 83 EC 60 80 B9 ? ? 00 00 00 48 8B F9 0F 84");
+    uint8_t* add  = PatternScan(client, "48 8B 8F ? ? 00 00 48 8B D3 E8 ? ? ? ? 41 8B 86");
+    uint8_t* hold = PatternScan(client, "48 8B 8F ? ? 00 00 41 8B D5 E8");
     // Both call sites must sit inside UpdateModelPanel (~0x370 bytes), or it is not that function.
     auto inside = [&](uint8_t* p) { return fn && p && p > fn && p < fn + 0x400; };
     const uint8_t* addFn  = inside(add)  ? CallTarget(add + 10)  : nullptr;

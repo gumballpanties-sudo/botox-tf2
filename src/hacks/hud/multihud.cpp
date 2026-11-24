@@ -64,11 +64,11 @@ bool Hats_IsOurs(int entIdx);   // hats.cpp: our own hat entities (prop diag ski
 //  ISurface                            6 GetEmbeddedPanel 79 GetPopupCount 80 GetPopup
 //                                     29 DrawGetTextureFile 30 DrawSetTextureFile (x64: filter + force
 //                                      ignored, rebinds only on a NEW name -> size cached per id)
-//  client EditablePanel +0x1f8 BuildGroup* (vt 213 LoadControlSettings, 95c3fe);
+//  client EditablePanel +0x1f8 BuildGroup* (vt 213 LoadControlSettings, 95c3fe; 11-24 build: +0x218);
 //  BuildGroup +0x70 m_pResourceName, +0x78 path id (new[] + strcpy in LoadControlSettings, 97a7c6)
 //  IMaterialSystem 73 FirstMaterial 74 NextMaterial 75 InvalidMaterial 76 GetMaterial (u16 handles)
 
-// aim/helpers.cpp: KeyValues "<name>" { ka a kb b } for IVGui::PostMessage, null without the aim half
+// aim/sdk/helpers.cpp: KeyValues "<name>" { ka a kb b } for IVGui::PostMessage, null without the aim half
 void* Aim_NewVguiMsg2i(const char* name, const char* ka, int a, const char* kb, int b);
 
 namespace {
@@ -84,7 +84,7 @@ constexpr int kPnlSetSize = 4, kPnlSetZPos = 8, kPnlSetVisible = 14, kPnlIsVisib
 constexpr int kSurfDrawGetTextureFile = 29, kSurfDrawSetTextureFile = 30;
 constexpr int kMsFirstMaterial = 73, kMsNextMaterial = 74, kMsInvalidMaterial = 75, kMsGetMaterial = 76;
 constexpr int kBfsFileExists = 10;                              // IBaseFileSystem (fs+8)
-constexpr size_t kEditableBuildGroup = 0x1f8, kBuildGroupResName = 0x70;
+constexpr size_t kEditableBuildGroup = 0x218, kBuildGroupResName = 0x70;   // 11-24 build: Panel +0x20 (was 0x1f8; LoadControlSettings 95c93e)
 constexpr int kMsFindMaterial = 71, kMsIsMaterialLoaded = 72, kMsFindTexture = 79, kMsIsTextureLoaded = 80;
 constexpr int kMsLock = 102, kMsUnlock = 103;
 constexpr int kTexDownload = 13, kTexIsError = 15, kMatRefresh = 37, kMatIsError = 42;
@@ -1951,7 +1951,8 @@ void RecreateStatsSummary()
 // (GameUI console, options, server browser, client dialogs), gets alpha 255 = how it starts at boot.
 // vgui_controls Panel::m_flAlpha = +0x1BC (x64 11-15: GetAlpha = cvttss2si eax,[rcx+1BCh] in client
 // and gameui; gameui SetAlpha a0d40 movss [rcx+1BCh]). VPanel vt 38 = Client() (vguimatsurface 10e68).
-constexpr size_t kPanelAlpha = 0x1bc;
+// 11-24 build: +0x20 in every module (GetAlpha [rcx+1DCh] client 943d30, gameui 96790, engine 2b1460)
+constexpr size_t kPanelAlpha = 0x1dc;   // was 0x1bc
 constexpr int kVPanelClient = 38;
 bool FixAlphaRaw(void* panel, float& was)
 {

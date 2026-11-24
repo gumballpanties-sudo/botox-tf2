@@ -1,7 +1,7 @@
 #pragma once
 // Plain-type bridge between dih's DrawModelExecute hook (visuals.cpp) and the chams/glow
-// implementation in aim/chams.cpp (which needs the aim SDK: IMaterial, KeyValues, CTFPlayer).
-// Same split as aim/esp.h: no aim or windows types cross this header.
+// implementation in aim/visuals/chams.cpp (which needs the aim SDK: IMaterial, KeyValues, CTFPlayer).
+// Same split as aim/visuals/esp.h: no aim or windows types cross this header.
 
 using ChamsDrawFn = void(__fastcall*)(void*, const void*, const void*, const void*);
 
@@ -14,7 +14,7 @@ bool Chams_DrawModel(ChamsDrawFn fnOriginal, void* rcx, const void* pState, cons
 // Fast gate for the hook's cheap path: any chams/glow option that can draw anything.
 bool Chams_AnyActive();
 
-// enemy chams on + a backtrack material picked: aim/backtrack.cpp builds records (full bones) for it
+// enemy chams on + a backtrack material picked: aim/aimbot/backtrack.cpp builds records (full bones) for it
 bool Chams_BacktrackActive();
 
 // CSoundEmitterSystem::EmitSound peek (visuals.cpp h_EmitSound): sound chams timestamps.
@@ -29,7 +29,7 @@ void Chams_RenderCloaked();
 // Chams_LevelUnload (flipworld.cpp's CViewRender::LevelInit/LevelShutdown hook).
 void Chams_ReleaseMaterials();
 
-// ---- player glow (aim/chams.cpp, Amalgam Features/Visuals/Glow on fpsoverlay vmglow's slots) ----
+// ---- player glow (aim/visuals/chams.cpp, Amalgam Features/Visuals/Glow on fpsoverlay vmglow's slots) ----
 void Glow_LevelInit();     // flipworld.cpp CViewRender::LevelInit hook: render targets + materials
 void Glow_LevelUnload();   // no-op: RTs live across maps, remade only on a backbuffer size change
 void Glow_Render();        // screenfx.cpp DoPostScreenSpaceEffects, before the original: stencil + halo pass
@@ -41,7 +41,7 @@ bool Glow_Rendering();     // true inside Glow_Render's model draws: h_DrawModel
 void Glow_PreviewInit();   // esp preview: make its targets if no Glow_LevelInit did yet (game thread)
 void* Glow_PreviewTarget();
 // Glow_Render for one item -- the preview entity -- on the preview target: call right after the
-// preview's chams draw, still inside Push3DView with the preview RT bound (aim/chams.cpp has the
+// preview's chams draw, still inside Push3DView with the preview RT bound (aim/visuals/chams.cpp has the
 // ordering proof). worldToProjection is EspPreview's own camera (float[4][4], row-major); pBones is
 // a matrix3x4 array of nBones entries off the drawn model; pHdr is its studiohdr_t*.
 void Glow_RenderPreview(void* pEnt, void* pGun /*held weapon ent, may be null*/, const float (*worldToProjection)[4], const void* pBones, int nBones, const void* pHdr);

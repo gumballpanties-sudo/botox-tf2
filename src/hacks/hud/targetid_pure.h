@@ -2,7 +2,7 @@
 // csgo target id, the pure half: which entity the crosshair is "on" and when. Drives the
 // panorama crosshair's enemy colour (.crosshair--enemy, #c93121) -- csgo_hudreticle.cpp:1026
 // takes it from GetIDTarget(), so the red obeys the same timers the name text does.
-//   C_CSPlayer::UpdateIDTarget  c_cs_player.cpp:6537  (the traces live in aim/hud_aim.cpp)
+//   C_CSPlayer::UpdateIDTarget  c_cs_player.cpp:6537  (the traces live in aim/visuals/hud_aim.cpp)
 //   C_CSPlayer::GetIDTarget     c_cs_player.cpp:4495
 //   CountdownTimer              util_shared.h:745
 //   mp_playerid_delay 0.4 / mp_playerid_hold 0.2  cs_gamerules.cpp:2119

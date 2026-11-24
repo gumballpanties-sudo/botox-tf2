@@ -1173,7 +1173,7 @@ static void RenderCsgoPanorama(bool bStatic)
     // the two black washes below need no branch.
     // .crosshair--enemy (crosshair.css:140) swaps the dot/arc background and the green pip
     // wash to crosshairEnemyColor #c93121 while GetIDTarget() is an enemy player -- the trace +
-    // 0.4 s delay / 0.2 s hold run on the game thread (aim/hud_aim.cpp, hud/targetid_pure.h).
+    // 0.4 s delay / 0.2 s hold run on the game thread (aim/visuals/hud_aim.cpp, hud/targetid_pure.h).
     // The black parts keep their washes; the class only names those two selectors.
     float rgb[3] = { g_chCsgoColor[0], g_chCsgoColor[1], g_chCsgoColor[2] };
     if (g_chCsgoEnemyRed)

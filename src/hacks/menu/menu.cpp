@@ -1302,7 +1302,7 @@ static void Page_VisualsScreen()
                 ImGui::SliderFloat("x offset##wsel", &g_wselOffX, -1000.f, 200.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SliderFloat("y offset##wsel", &g_wselOffY, -800.f, 200.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
             }, ImVec2(220.f, -1.f));
-        ImGui::Checkbox("csgo team hud", &g_tcEnable);   // aim/teamcounter.cpp, replaces tf2's match + team hud
+        ImGui::Checkbox("csgo team hud", &g_tcEnable);   // aim/visuals/teamcounter.cpp, replaces tf2's match + team hud
         if (g_tcEnable)
             ImGui::OptionPopup("csgo team hud settings", []() {
                 ImGui::SliderFloat("scale##tc", &g_tcScale, 0.5f, 2.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
@@ -3831,7 +3831,7 @@ static void Tab_InventoryRoot()
 // botox tab_fonts: one page per face, "<face> font" settings | "font list". botox pages
 // indicators / esp map to TF2 (fonts.h); its chud hud / default hud pages rewrite CS:GO's
 // panorama fonts.conf and have no TF2 equivalent. Applies live: render.cpp rebuilds the atlas
-// (indicators) and aim/helpers.cpp recreates the vgui face (esp) once the pick settles.
+// (indicators) and aim/sdk/helpers.cpp recreates the vgui face (esp) once the pick settles.
 static const char* kFontsSub[4] = { "indicators", "esp", "net graph", "killfeed" };   // botox case 4 = net graph (hud)
 static int s_fontsSub = 0;
 static const char* const kFontFlagNames[FF_COUNT] = { "no antialias", "dropshadow", "outline", "monospace", "bold" };
@@ -3877,7 +3877,7 @@ static void Tab_Fonts()
         FontPage("esp font", g_fontEspName, sizeof(g_fontEspName), &g_fontEspSize, &g_fontEspFlags,
                  Fonts_ResetEsp, Fonts_Families(), s_espFilter);
     }
-    else if (s_fontsSub == 3)   // csgo killfeed vgui face (aim/killfeed_csgo.cpp rebuilds on change)
+    else if (s_fontsSub == 3)   // csgo killfeed vgui face (aim/visuals/killfeed_csgo.cpp rebuilds on change)
     {
         static ImGuiTextFilter s_kfFilter;
         FontPage("killfeed font", g_fontKfName, sizeof(g_fontKfName), &g_fontKfSize, &g_fontKfFlags,

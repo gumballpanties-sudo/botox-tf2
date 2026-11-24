@@ -209,11 +209,12 @@ void Movement_Install()
         }
         if (!g_fnSetAbsOrigin) {
             // Aletherium CBaseEntity_SetAbsOrigin sig (direct fn: this, const Vec3&)
-            uint8_t* a = PatternScan(hClient, "48 89 5C 24 ? 57 48 83 EC ? 48 8B FA 48 8B D9 E8 ? ? ? ? F3 0F 10 83");
+            // 11-24 build: old sig 2 hits (2nd = rva 0x444db0, other fn); + "? ? ? ? 0F 2E 07" = 1 hit
+            uint8_t* a = PatternScan(hClient, "48 89 5C 24 ? 57 48 83 EC ? 48 8B FA 48 8B D9 E8 ? ? ? ? F3 0F 10 83 ? ? ? ? 0F 2E 07");
             if (a) g_fnSetAbsOrigin = reinterpret_cast<SetAbsOrigin_t>(a);
         }
         if (!g_fnSetAbsVelocity) {
-            // Amalgam CBaseEntity_SetAbsVelocity sig (aim/defs.h), unique in client.dll on disk 11-03
+            // Amalgam CBaseEntity_SetAbsVelocity sig (aim/sdk/defs.h), unique in client.dll on disk 11-03
             uint8_t* a = PatternScan(hClient, "48 89 5C 24 ? 57 48 83 EC ? F3 0F 10 81 ? ? ? ? 48 8B DA 0F 2E 02");
             if (a) g_fnSetAbsVelocity = reinterpret_cast<SetAbsOrigin_t>(a);
         }

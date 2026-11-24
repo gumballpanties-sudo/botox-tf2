@@ -2,7 +2,7 @@
 #include <cstdint>
 
 // HUD extras, render side of botox's "hud" group. Data comes from the game thread through
-// hud_snap.h (aim/hud_aim.cpp); everything here only draws.
+// hud_snap.h (aim/visuals/hud_aim.cpp); everything here only draws.
 struct ImFont;
 
 void RenderHudExtras();          // BuildImGuiFrame: aimbot fov circle + custom net graph

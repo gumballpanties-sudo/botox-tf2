@@ -1,6 +1,6 @@
-// lua bindings, TF2 x64. An aim TU (CMake: /FI aim/prefix.h): the Amalgam SDK gives the verified
+// lua bindings, TF2 x64. An aim TU (CMake: /FI aim/sdk/prefix.h): the Amalgam SDK gives the verified
 // interfaces and entity layout. dih-side things come through lua_bridge.h.
-#include "../aim/sdk.h"
+#include "../aim/sdk/sdk.h"
 #include "../aim/aim.h"
 #include "../../dependencies/imgui/imgui.h"
 
@@ -2330,7 +2330,7 @@ namespace
 		return out;
 	}
 
-	/* mstudiobone_t ( SDK public/studio.h, same x86 / x64, aim/esp_preview.cpp kBone* ): name +0, parent +4, pos +0x20,
+	/* mstudiobone_t ( SDK public/studio.h, same x86 / x64, aim/visuals/esp_preview.cpp kBone* ): name +0, parent +4, pos +0x20,
 	   quat +0x2C ( x y z w ), flags +0xA0, 0xD8 bytes */
 	const std::uint8_t* bone_at( const studiohdr_t* hdr, const int i )
 	{

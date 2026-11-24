@@ -637,7 +637,7 @@ extern char g_convCmd[kConvButtons][160];
 
 // -- fpsopt.cpp REMOVED: the nine perf convar groups were a console-command mirror ---------
 
-// -- Auto backstab: the LIVE feature is the aim tree's (src/hacks/aim/aim_melee.cpp,
+// -- Auto backstab: the LIVE feature is the aim tree's (src/hacks/aim/aimbot/aim_melee.cpp,
 // Vars::Aimbot::Melee::*). dih's own g_backstab* globals are gone -- backstab.cpp was
 // dropped from the build at bs11 and nothing had read them since.
 
@@ -742,9 +742,9 @@ extern int  g_delayHopTicks;    // air ticks to wait before pressing jump (def 6
 extern bool g_goomba;      extern int g_goombaKey;      extern int g_goombaMode;
 extern int  g_goombaHow;       // auto goomba type: 0 sticky jump, 1 rocket jump, 2 regular jump
 extern int  g_goombaLead;      // auto goomba extra lead ticks (ping/rocket flight are automatic)
-extern bool g_autoPogo;    extern int g_autoPogoKey;    extern int g_autoPogoMode;   // demo sticky pogo (aim/autopogo.cpp)
-extern bool g_autoRJ;      extern int g_autoRJKey;      extern int g_autoRJMode;     // unibox auto rocket jump (aim/autorocketjump.cpp)
-extern bool g_autoFaN;     extern int g_autoFaNKey;     extern int g_autoFaNMode;    // unibox auto FaN jump (aim/autofanjump.cpp)
+extern bool g_autoPogo;    extern int g_autoPogoKey;    extern int g_autoPogoMode;   // demo sticky pogo (aim/movement/autopogo.cpp)
+extern bool g_autoRJ;      extern int g_autoRJKey;      extern int g_autoRJMode;     // unibox auto rocket jump (aim/movement/autorocketjump.cpp)
+extern bool g_autoFaN;     extern int g_autoFaNKey;     extern int g_autoFaNMode;    // unibox auto FaN jump (aim/movement/autofanjump.cpp)
 extern bool g_autoCrouch;  extern int g_autoCrouchKey;  extern int g_autoCrouchMode;
 extern int  g_autoCrouchTicks;  // look-ahead ticks for the landing trace (def 6)
 extern bool g_djStrafe;    extern int g_djStrafeKey;    extern int g_djStrafeMode;   // scout double jump keeps velocity dir
@@ -1031,7 +1031,7 @@ void Movement_ResolveExtraNetvars();
 
 extern bool g_netvarsReady;
 
-// -- ESP (src/hacks/aim/esp.cpp draws these; values read via plain extern, same
+// -- ESP (src/hacks/aim/visuals/esp.cpp draws these; values read via plain extern, same
 // primitive-only declarations duplicated there -- see esp.h's banner comment for why esp.cpp
 // does not include this header) ----------------------------------------------------------
 #include "../hacks/esp/esp_vars.h"
@@ -1060,7 +1060,7 @@ extern bool  g_glowBuildings;
 extern float g_glowBuildingColor[4];
 extern float g_glowAlpha;          // 0..1, multiplies every glow pass's alpha
 
-// -- 10-31 chams/glow rework: src/hacks/aim/chams.cpp draws, menu_visuals_esp.cpp edits. The
+// -- 10-31 chams/glow rework: src/hacks/aim/visuals/chams.cpp draws, menu_visuals_esp.cpp edits. The
 // C2/C4 enemy/team colours + glow enemy/team/buildings/alpha above are no longer read.
 // Layer lists = config strings (src/hacks/visuals/chams_layers.h, 160 = ChamsLayers::kCfgLen).
 extern bool  g_chamsLocalEnable;

@@ -2219,7 +2219,7 @@ __declspec(noinline) static bool WeaponHasExorcismAttr()
 // ==== killstreak count ==========================================================================
 // CTFPlayerResource, found by class name off the entity list. IClientEntityList slot 0 is
 // GetClientNetworkable and IClientNetworkable slot 2 is GetClientClass, both counted off the
-// interface declarations in src/hacks/aim/defs.h (that file's early slots match the ones
+// interface declarations in src/hacks/aim/sdk/defs.h (that file's early slots match the ones
 // GetClientEntity=3 already uses here). Cached, and re-found whenever the pointer goes stale.
 __declspec(noinline) static void* FindPlayerResource()
 {

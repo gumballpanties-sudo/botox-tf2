@@ -1,6 +1,6 @@
 // esp preview: the d3d texture behind the preview render target, for ImGui::AddImage. csgo read it off
 // CTexture+0x50 -> Texture_t+0xC; the x64 chain is unverified, so no offsets: a functor queued while the
-// preview target is bound (aim/esp_preview.cpp, inside Push3DView) asks the device for its render target
+// preview target is bound (aim/visuals/esp_preview.cpp, inside Push3DView) asks the device for its render target
 // and takes that surface's container. Same call queue as player_stencil.cpp.
 #include "esp_preview.h"
 #include "../screen/screenfx.h"

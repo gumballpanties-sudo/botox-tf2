@@ -1140,7 +1140,7 @@ static void Ragdoll_Hook(bool on)
 }
 
 // ==== remove hud elements ================================================================
-extern bool g_killfeedCsgo;   // dllmain.cpp, csgo killfeed (aim/killfeed_csgo.cpp) replaces this panel
+extern bool g_killfeedCsgo;   // dllmain.cpp, csgo killfeed (aim/visuals/killfeed_csgo.cpp) replaces this panel
 
 bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel)
 {
@@ -1151,9 +1151,9 @@ bool WorldFx3_SkipPanel(void* panels, uintptr_t vpanel)
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     // paint only: HudDeathNotice keeps handling events, its domination / revenge sounds stay
     if (g_killfeedCsgo && nm && strcmp(nm, "HudDeathNotice") == 0) return true;
-    // csgo weapon selection (aim/weaponsel.cpp) replaces this one; paint only, switching still works
+    // csgo weapon selection (aim/visuals/weaponsel.cpp) replaces this one; paint only, switching still works
     if (g_wselEnable && nm && strcmp(nm, "HudWeaponSelection") == 0) return true;
-    // csgo team counter (aim/teamcounter.cpp) replaces the match hud (timer, scores, TeamStatus
+    // csgo team counter (aim/visuals/teamcounter.cpp) replaces the match hud (timer, scores, TeamStatus
     // player panels: all children of HudMatchStatus), the tournament hud's timer and the koth timers
     if (g_tcEnable && nm && (strcmp(nm, "HudMatchStatus") == 0 || strcmp(nm, "TeamStatus") == 0 ||
                              strcmp(nm, "ObjectiveStatusTimePanel") == 0 || strcmp(nm, "HudKothTimeStatus") == 0))

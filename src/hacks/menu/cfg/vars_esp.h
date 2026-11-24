@@ -1,6 +1,6 @@
 #pragma once
 // esp vars: `inline bool g_x = false;` style, defaults = botox visual_variables.inc / variables.h.
-// Included by globals.h AND directly by the aim TU (aim/esp.cpp, aim/chams.cpp, aim/player_stencil.cpp).
+// Included by globals.h AND directly by the aim TU (aim/visuals/esp.cpp, aim/visuals/chams.cpp, aim/player_stencil.cpp).
 
 // ---- players group (botox variables.h :511-558) ----
 inline bool  g_esxStencil = false;                                      // m_players_stencil

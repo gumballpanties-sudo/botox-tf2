@@ -46,6 +46,7 @@
 //
 // so answering "local team" fills the bar, and +270 has to be poisoned on the toggle
 // edge or the cached-health compare skips the whole block before the team ever matters.
+// (11-24 build: these panel offsets are +0x20 -- 264 / 2d0 / 290, see constants below)
 
 // ---- resolved addresses (0 = not resolved, hook stands down) ------------------------
 static uintptr_t s_retIsDominated   = 0;
@@ -70,9 +71,10 @@ static bool  s_healthArmed   = false;    // GetTeam
 static bool  s_armStatic     = false;    // no RunFrame hook -> nothing can arm them, stay on
 
 // -- panel field offsets, all three read straight out of Update above ----------------
-static constexpr uintptr_t kPanelPlayerIndex = 0x244;
-static constexpr uintptr_t kPanelHealthBar   = 0x2b0;
-static constexpr uintptr_t kPanelHealthCache = 0x270;
+// 11-24 build: vgui::Panel grew 0x20 -> all +0x20 (Update 5d607d: [rdi+264], 5d64d4 [rdi+2d0], 5d64f6 [rdi+290])
+static constexpr uintptr_t kPanelPlayerIndex = 0x264;   // was 0x244
+static constexpr uintptr_t kPanelHealthBar   = 0x2d0;   // was 0x2b0
+static constexpr uintptr_t kPanelHealthCache = 0x290;   // was 0x270
 
 using PanelGetTeam_t       = int (__fastcall*)(void*);
 using IsPlayerDominated_t  = bool(__fastcall*)(void*, int);
@@ -428,8 +430,10 @@ static void SteamHistory_Install(HMODULE hClient)
         "8B C8 48 03 C9 39 44 CA ? 75 ? 39 44 CA ? 75 ? 48 8B 04 CA EB ? 33 C0 "
         "48 8B 5C 24 ? 48 8B 6C 24 ? 48 8B 74 24 ? 48 83 C4 ? 5F C3 CC CC CC CC 48 89 5C 24");
 
+    // CTFClientScoreBoardDialog::OnCommand ("report_player" stristr first). 11-24 build: stack
+    // alloc grew to imm32 (sub rsp, 0B0h), was imm8 -- client 66b030
     uint8_t* pOnCommand = PatternScan(hClient,
-        "48 89 5C 24 ? 57 48 83 EC ? 48 8B DA 48 8B F9 48 8B CB 48 8D 15 ? ? ? ? "
+        "48 89 5C 24 ? 57 48 81 EC ? ? ? ? 48 8B DA 48 8B F9 48 8B CB 48 8D 15 ? ? ? ? "
         "E8 ? ? ? ? 48 85 C0 74 ? 48 8B 0D");
 
     // call sites inside OnScoreBoardMouseRightRelease -- these patterns start AT the

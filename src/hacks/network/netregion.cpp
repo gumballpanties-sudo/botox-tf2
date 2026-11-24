@@ -766,8 +766,9 @@ void NetGraph_Install()
         { "netgraph: PaintLineArt",
           "48 8B C4 44 89 48 ? 44 89 40 ? 89 50 ? 55 56 41 55 41 57 48 8D 68",
           (void*)h_PaintLineArt,   (void**)&o_PaintLineArt,   0 },
+        // 11-24 build: push rsi -> rdi, mov r10,r8 gone -- regs wildcarded (rva 0x328a30)
         { "netgraph: DrawTimes",
-          "4C 8B DC 4D 89 43 ? 56 48 81 EC 80 00 00 00 48 8B 05 ? ? ? ? 4D 8B D0 48 8B F1",
+          "4C 8B DC 4D 89 43 ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 8B ? 83 78 ? 00 0F 84",
           (void*)h_DrawTimes,      (void**)&o_DrawTimes,      1 },
         { "netgraph: DrawTextFields",
           "89 54 24 ? 4C 8B DC 55 53 41 54 41 56 49 8D AB",

@@ -9,17 +9,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/src/dependencies/imgui)
 set(MH_DIR    ${CMAKE_SOURCE_DIR}/src/dependencies/minhook)
 
-# ==== aimbot subsystem =======================================================================
-# src/hacks/aim is the aim half of the DLL: its own engine SDK layer, hook plumbing and the aimbot
-# feature tree. It includes botox's single copy of ImGui and MinHook directly -- two ImGui
-# builds in one DLL would be an ODR violation.
+# ==== aimbot ==================================================================================
+# src/hacks/aim: aim.cpp/.h (init, config, menu tab), hooks.cpp (every aim engine hook), and
+#   sdk/ (its own engine SDK layer), aimbot/ (targeting, per-weapon aim, backtrack, crits, no
+#   spread), sim/ (prediction, movement + projectile sim, ticks), movement/ (rocket jump, pogo,
+#   fan jump), visuals/ (chams, esp, hud bits on that SDK). It includes botox's single copy of
+#   ImGui and MinHook directly -- two ImGui builds in one DLL would be an ODR violation.
 set(AIM_DIR ${CMAKE_SOURCE_DIR}/src/hacks/aim)
 
-# The whole subsystem: the engine layer (defs/sdk/helpers/utils), the aim features, every
-# engine hook (hooks.cpp) and the entry point. Each MAKE_HOOK in hooks.cpp registers itself at
-# static-init time; CHooks::Initialize's whitelist (aim.cpp) decides which ones are installed,
-# so none of them can collide with a hook botox already owns.
-file(GLOB AIM_SRC CONFIGURE_DEPENDS ${AIM_DIR}/*.cpp)
+# Each MAKE_HOOK registers itself at static-init time and Aim_Init installs all of them, so a
+# new one must not target anything botox already hooks (MinHook: one hook per target).
+file(GLOB_RECURSE AIM_SRC CONFIGURE_DEPENDS ${AIM_DIR}/*.cpp)
 # project-local core-only freetype (no png/brotli/bz2/zlib) -- global vcpkg untouched
 set(FREETYPE_STATIC_DIR "${CMAKE_SOURCE_DIR}/vcpkg_local/x64-windows-static")
 # .gitignore drops *.lib, so a fresh clone has the headers but not the lib: say so here, not at link time
@@ -117,7 +117,7 @@ add_library(botox SHARED
     src/hacks/hud/class_icons.cpp # esp class icons: scoreboard .vtf -> d3d texture
     src/hacks/screen/blur_rect.cpp
     src/hacks/hud/hud_extra.cpp   # fov circle, net graph, hud fonts
-    src/hacks/hud/radar.cpp       # csgo radar (game thread half: aim/radar_aim.cpp, globbed)
+    src/hacks/hud/radar.cpp       # csgo radar (game thread half: aim/visuals/radar_aim.cpp, globbed)
     src/hacks/menu/fonts.cpp
     src/hacks/visuals/lsd_chams.cpp
     src/hacks/visuals/player_stencil.cpp
@@ -178,7 +178,7 @@ target_compile_definitions(botox PRIVATE
 # /O1 /Os is a size choice for the visual features; build the aim tree for speed.
 # lua bindings sit on the aim SDK (I:: interfaces, entity layout): same forced prefix as the aim tree.
 set_source_files_properties(src/hacks/lua/lua_api.cpp PROPERTIES
-    COMPILE_OPTIONS "/FI${AIM_DIR}/prefix.h;/bigobj"
+    COMPILE_OPTIONS "/FI${AIM_DIR}/sdk/prefix.h;/bigobj"
 )
 # vendored lua 5.4.7 (onelua.c compiled as c++): warnings are upstream's
 set_source_files_properties(src/dependencies/lua/lua_unity.cpp PROPERTIES
@@ -186,7 +186,7 @@ set_source_files_properties(src/dependencies/lua/lua_unity.cpp PROPERTIES
 )
 
 set_source_files_properties(${AIM_SRC} PROPERTIES
-    COMPILE_OPTIONS "/FI${AIM_DIR}/prefix.h;/bigobj;$<$<CONFIG:Release>:/O2>"
+    COMPILE_OPTIONS "/FI${AIM_DIR}/sdk/prefix.h;/bigobj;$<$<CONFIG:Release>:/O2>"
 )
 
 # Size opt: /O1 favor size, /GL+LTCG whole-program, strip unused w/ /OPT:REF+ICF
@@ -233,12 +233,12 @@ add_executable(minesweeper_test tests/minesweeper_test.cpp)
 # Build + run: cmake --build build --config Release --target flipworld_test && build\Release\flipworld_test.exe
 add_executable(flipworld_test tests/flipworld_test.cpp)
 
-# Gate test for the auto backstab's engine-free math (src/hacks/aim/bs_math.h): the server's own
+# Gate test for the auto backstab's engine-free math (src/hacks/aim/aimbot/bs_math.h): the server's own
 # knife test as ground truth, Monte Carlo calibration of the odds, swing order, lerp, snapshot track.
 # Build + run: cmake --build build --config Release --target backstab_test && build\Release\backstab_test.exe
 add_executable(backstab_test tests/backstab_test.cpp)
 
-# Gate test for the backtrack window (src/hacks/aim/backtrack_math.h): every record botox's window calls
+# Gate test for the backtrack window (src/hacks/aim/aimbot/backtrack_math.h): every record botox's window calls
 # usable must pass the TF2 server's own lag comp tick check, over a ping / interp / tick rate sweep.
 # Build + run: cmake --build build --config Release --target backtrack_test && build\Release\backtrack_test.exe
 add_executable(backtrack_test tests/backtrack_test.cpp)
@@ -513,11 +513,17 @@ set_target_properties(migoo_test PROPERTIES
 # Build + run: cmake --build build --config Release --target buildplace_test && build\Release\buildplace_test.exe
 add_executable(buildplace_test tests/buildplace_test.cpp)
 
-# Gate test for the bounding-sphere FOV reject (src/hacks/aim/aim_fovreject.h), the cheap skip
+# Gate test for the bounding-sphere FOV reject (src/hacks/aim/aimbot/aim_fovreject.h), the cheap skip
 # in front of PlayerBoneInFOV's bone rebuild. Brute-forces the one direction it may not be wrong
 # in: a reject must mean no point of the sphere is inside the FOV cone.
 # Build + run: cmake --build build --config Release --target aimfov_test && build\Release\aimfov_test.exe
 add_executable(aimfov_test tests/aimfov_test.cpp)
+
+# Gate test for the aim signature scan (src/hacks/aim/sdk/sigscan.h): the memchr-anchored scan must
+# return the same first match as the byte-by-byte loop it replaced, on every input.
+# Build + run: cmake --build build --config Release --target sigscan_test && build\Release\sigscan_test.exe
+# After a TF2 update also run: py tests\aim_sigcheck.py  (every aim sig vs the installed dlls)
+add_executable(sigscan_test tests/sigscan_test.cpp)
 
 # Gate test for the festivizer table (src/dependencies/data/skindata.h k_festiveDefs, generated by
 # tools/gen_festivedefs.py): known yes/no defs, and k_wpnList's canFestivize flags vs the schema.
@@ -619,14 +625,14 @@ add_executable(netbuf_test tests/netbuf_test.cpp)
 # Build + run: cmake --build build --config Release --target multihud_test && build\Release\multihud_test.exe
 add_executable(multihud_test tests/multihud_test.cpp)
 
-# Gate test for the no spread playerperf request (src/hacks/aim/playerperf_pure.h): a bare
+# Gate test for the no spread playerperf request (src/hacks/aim/aimbot/playerperf_pure.h): a bare
 # "playerperf" dumped the whole 60-record history ~10x a second = ~30 KB/s of reliable incoming
 # data = incoming choke + packet loss with the aim half loaded (11-10). Asks for one record now.
 # Build + run: cmake --build build --config Release --target playerperf_test && build\Release\playerperf_test.exe
 add_executable(playerperf_test tests/playerperf_test.cpp)
 
 # Gate test for the csgo team counter layout (src/hacks/hud/teamcounter_layout.h, drawn by
-# src/hacks/aim/teamcounter.cpp): comp / casual pick, avatar boxes vs the panorama css, health bar,
+# src/hacks/aim/visuals/teamcounter.cpp): comp / casual pick, avatar boxes vs the panorama css, health bar,
 # timer text, borders, skulls.
 # Build + run: cmake --build build --config Release --target teamcounter_test && build\Release\teamcounter_test.exe
 add_executable(teamcounter_test tests/teamcounter_test.cpp)
@@ -712,7 +718,7 @@ add_executable(skins_test tests/skins_test.cpp)
 # Build + run: cmake --build build --config Release --target skinshare_test && build\Release\skinshare_test.exe
 add_executable(skinshare_test tests/skinshare_test.cpp)
 
-# Gate test for the csgo weapon selection (src/hacks/aim/weaponsel.cpp): the generated def table
+# Gate test for the csgo weapon selection (src/hacks/aim/visuals/weaponsel.cpp): the generated def table
 # (src/hacks/hud/weaponsel_table.h, tools/gen_weaponsel.py) and every botox-assets weaponsel/*.svg
 # through the DLL's nanosvg: parses, rasterises, fills its box.
 # Build + run: cmake --build build --config Release --target weaponsel_test && build\Release\weaponsel_test.exe

@@ -12,7 +12,7 @@
 //   NavParse     server/nav_file.cpp CNavArea::Load + tf_nav_area.cpp (bot nav mesh = map bounds)
 //   FitOverview  stands in for resource/overviews/<map>.txt (pos_x / pos_y / scale): TF2 ships none
 //   MakeView ..  UpdateRadarScalingValues / PositionRadarViewpoint / WorldToRadar / RadarToHud
-//   NavRaster / Shade   the overview image, baked from world traces (aim/radar_aim.cpp)
+//   NavRaster / Shade   the overview image, baked from world traces (aim/visuals/radar_aim.cpp)
 // ============================================================================================
 
 namespace rdr

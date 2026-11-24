@@ -13,6 +13,6 @@ void Avatar_Pump();                       // GAME THREAD: call every tick, inter
 void Avatar_Tick(IDirect3DDevice9* dev);  // RENDER THREAD: uploads pixels Pump fetched
 void Avatar_ReleaseAll();                 // RENDER THREAD: device Reset / eject -- drop every DEFAULT-pool texture
 void Avatar_OnMapChange();                // GAME THREAD (LevelInit): old map's steamids are stale, drop next Avatar_Tick
-// GAME THREAD: the 64x64 medium avatar as RGBA, for vgui surface textures (aim/teamcounter.cpp).
+// GAME THREAD: the 64x64 medium avatar as RGBA, for vgui surface textures (aim/visuals/teamcounter.cpp).
 // false = not downloaded yet (asks Steam for it); the caller retries later, rate-limited
 bool Avatar_FetchRGBA(uint64_t steamid64, std::vector<uint8_t>& rgba, int& w, int& h);

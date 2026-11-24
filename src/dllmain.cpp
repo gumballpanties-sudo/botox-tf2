@@ -419,7 +419,7 @@ float g_sheenNormalEnv   = 3.f;     // envmap strength (stock pass = 10, blown o
 
 // -- Killfeed ------------------------------------------------------------------------------------
 bool g_selfKillfeedOnly = false;
-bool g_killfeedCsgo     = false;   // csgo killfeed with tf2 icons (aim/killfeed_csgo.cpp)
+bool g_killfeedCsgo     = false;   // csgo killfeed with tf2 icons (aim/visuals/killfeed_csgo.cpp)
 
 // -- Scoreboard (Aletherium "reveal scoreboard") --------------------------------------------------
 bool g_revealScoreboard = false;
@@ -570,7 +570,7 @@ char g_convCmd[kConvButtons][160]   = { "tf_bot_kill all", "tf_bot_kick all" };
 // -- fpsopt.cpp DELETED: its nine convar groups only mirrored console commands the player can
 // set themselves, so the DLL was holding settings, not running a feature. cfg keys went too.
 
-// -- Auto backstab: lives in the aim tree now (src/hacks/aim/aim_melee.cpp, knobs under
+// -- Auto backstab: lives in the aim tree now (src/hacks/aim/aimbot/aim_melee.cpp, knobs under
 // Vars::Aimbot::Melee). dih's g_backstab* / g_cleanPovDemos globals are deleted -- their
 // last reader went with backstab.cpp at bs11, and their cfg keys with it.
 
@@ -843,7 +843,7 @@ int  g_prTeleporterKey = 0;
 std::atomic<int> g_prMenuReq{0};
 int  g_prBotClass = 5;        // index into k_prClassArg -- 5 = heavy (biggest dummy)
 
-// -- ESP (src/hacks/aim/esp.cpp, extern list hacks/esp/esp_vars.h) -- botox defaults --
+// -- ESP (src/hacks/aim/visuals/esp.cpp, extern list hacks/esp/esp_vars.h) -- botox defaults --
 bool  g_espEnable = false;
 int   g_espKey = 0;
 int   g_espKeyMode = 0;
@@ -989,7 +989,7 @@ bool  g_glowBuildings = false;
 float g_glowBuildingColor[4] = { 1.f, 0.8f, 0.05f, 0.6f };
 float g_glowAlpha = 1.f;
 
-// -- 10-31 chams/glow rework (src/hacks/aim/chams.cpp), botox variables.h defaults --------
+// -- 10-31 chams/glow rework (src/hacks/aim/visuals/chams.cpp), botox variables.h defaults --------
 // Layer lists are config strings "mat:RRGGBBAA,..." (src/hacks/visuals/chams_layers.h). g_chamsTeam
 // above is now the teammates group's own enable.
 bool  g_chamsLocalEnable = true;

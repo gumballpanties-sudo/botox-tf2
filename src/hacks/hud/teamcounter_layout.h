@@ -1,5 +1,5 @@
 #pragma once
-// csgo team counter (aim/teamcounter.cpp) layout math, pure: tests/teamcounter_test.cpp.
+// csgo team counter (aim/visuals/teamcounter.cpp) layout math, pure: tests/teamcounter_test.cpp.
 // Every number is CS:GO panorama: layout/hud/hudteamcounter.xml + styles/hud/hudteamcounter.css
 // (code.pbin), hud.css #HudTeamCounter, csgosrc2019 csgo_hudteamcounter.cpp. Layout px at a 1080
 // tall screen; x is relative to the screen centre, y to the screen top.

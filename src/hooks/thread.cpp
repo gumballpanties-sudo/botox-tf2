@@ -276,18 +276,17 @@ static void PollThread()
             for (const auto& h : kClientHooks)
                 InstallPatternHook(hClient, h.tag, h.sig, h.hook, h.orig);
 
-            // Ported aimbot subsystem. Brought up BEFORE dih's own CreateMove hook: when it
-            // succeeds it OWNS that hook (CHLClient_CreateMove, aim/hooks.cpp) and calls
-            // Movement_Run itself -- MinHook allows one hook per target, and that one needs
-            // the send-packet pointer off its own stack frame.
+            // Aimbot + its SDK layer (aim/aim.cpp). Brought up BEFORE dih's own CreateMove hook:
+            // the aim CreateMove hook (aim/hooks.cpp) OWNS that slot and calls Movement_Run
+            // itself -- MinHook allows one hook per target, and that one needs the send-packet
+            // pointer off its own stack frame. A broken aim sig only turns off what uses it.
             //
             // Bisect switch (11-10, incoming packet loss that only shows injected, while moving):
             // menu toggles do not remove hooks, so they cannot isolate a hook. A file named
-            // C:\botox-tf2\noaim skips the whole aim half (its ~28 hooks: CreateMove ownership,
-            // the extra Prediction::Update, RunSimulation, RecvProxy, ProcessPacketEntities).
-            // Same state as an aim sig failing to resolve: Aim_Active() stays false, dih's own
+            // C:\botox-tf2\noaim skips Aim_Init (its hooks: CreateMove ownership, the extra
+            // Prediction::Update, RunSimulation, RecvProxy, ProcessPacketEntities). dih's own
             // CreateMove below takes the slot, movement still runs, Aim_Unload is a no-op.
-            // Delete the file to get the aim half back.
+            // Delete the file to get the aimbot back.
             if (GetFileAttributesA((std::string(CONFIG_DIR) + "\\noaim").c_str()) != INVALID_FILE_ATTRIBUTES)
                 DebugLog("aim: SKIPPED (C:\\botox-tf2\\noaim present) -- aim half not loaded, bisect mode");
             else
@@ -305,7 +304,7 @@ static void PollThread()
                 s_bClientHooksDone = true;
                 static const char* const kVClientNames[] = {"VClient018","VClient017","VClient016",nullptr};
                 if (void* pClient = GetInterfaceAny("client.dll", kVClientNames)) {
-                    if (Aim_Active())
+                    if (Aim_OwnsCreateMove())
                         DebugLog("bhop: CreateMove owned by aim hook, Movement_Run called from there");
                     else
                         InstallVTableHook(pClient, 21, "bhop: CreateMove",

@@ -8,13 +8,14 @@
 #include "viewmodel_fps.h"          // g_vmFps.Apply -- low fps viewmodel, swaps the gun's bones
 #include "flipmath.h"     // flipslot:: -- IMaterialSystem FindMaterial/DecRef/IsErrorMaterial slots
 #include "../esp/esp_fx.h"   // sound-ping ring, written from h_EmitSound below
-#include "chams_api.h"    // 10-31: chams + glow passes (aim/chams.cpp)
+#include "chams_api.h"    // 10-31: chams + glow passes (aim/visuals/chams.cpp)
 #include "world_fx.h"     // WorldFx_Tick -- fullbright + disable interp pokes
 #include "../misc/killeffects.h"   // PrecipClipart_Reset -- out of game, from Rain_Tick
 #include "world_fx2.h"    // WorldFx2_Tick/_OnFindMaterial -- dlight, tints
 #include "mc_world.h"     // MCWorld_OnSkyBoxDrawn -- minecraft sky behind the 2D sky draw
 #include "rear_mirror.h"  // RearMirror_Drawing -- the mirror pass draws plain models, no sky pass
 #include "../misc/game_extras.h"   // ChatTranslator_OnUserMessage -- DispatchUserMessage
+#include "../aim/aim.h"            // Aim_OnUserMessage -- no spread's playerperf reply, same hook
 #include "../../hooks/crashlog.h"     // CrashSpan: stutter probe on DrawModelExecute (chams, frame blend bones)
 #include "../lua/lua.h"               // g_lua.on_draw_model -- lua draw_model callback
 #include "../hud/multihud.h"          // MultiHud_PropDiagEnt -- what stops drawing across a hud switch
@@ -244,7 +245,7 @@ void UpdateNetStats() {
 
         // 1 Hz netchannel trace. "loss when I start moving" (11-10): both flows + what the
         // player was doing, so the log says which direction drops and what it tracks.
-        // INetChannelInfo slots per aim/defs.h: 11 loss, 12 choke, 13 data, 14 packets.
+        // INetChannelInfo slots per aim/sdk/defs.h: 11 loss, 12 choke, 13 data, 14 packets.
         static DWORD s_netLogMs = 0;
         const DWORD nowMs = GetTickCount();
         if (nowMs - s_netLogMs >= 1000) {
@@ -1265,14 +1266,14 @@ void RestoreHatParticles()
 }
 
 // ==== Chams + glow (10-31 rework) ====================================================
-// The passes, materials and settings live in aim/chams.cpp (chams_api.h): botox chams
+// The passes, materials and settings live in aim/visuals/chams.cpp (chams_api.h): botox chams
 // structure + Amalgam material/override flow, materials created from KeyValues with one
 // IncrementReferenceCount each. The old FindMaterial'd botox_chams/botox_glow VMT files are gone
 // -- they were never IncRef'd but DecRef'd every map change ("bad reference count 0" spam).
 // Lifecycle still rides flipworld.cpp's CViewRender::LevelInit/LevelShutdown hook.
 void Chams_LevelUnload() { Chams_ReleaseMaterials(); }
 void Chams_LevelInit()   {}   // rebuilt lazily on the first chams draw of the map
-// Glow_LevelInit / Glow_LevelUnload: aim/chams.cpp (render targets for the Amalgam glow pass)
+// Glow_LevelInit / Glow_LevelUnload: aim/visuals/chams.cpp (render targets for the Amalgam glow pass)
 
 // ==== DrawModelExecute hook (no hats + transparent viewmodel) ======================
 DrawModelExecute_t o_DrawModelExecute = nullptr;
@@ -1307,7 +1308,7 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
     // exist: the gun's animation is invisible to a depth reprojection, which can only ever see
     // what the camera did. See hacks/screen/fbbones.h.
     const bool wantFbBones = g_fbEnable && g_fbViewmodel;
-    const bool wantChams   = Chams_AnyActive();   // chams or glow (aim/chams.cpp)
+    const bool wantChams   = Chams_AnyActive();   // chams or glow (aim/visuals/chams.cpp)
     // OnFrame: OverrideView fed this frame's camera (world_fx.cpp). Without it the hold would freeze.
     const bool wantVmLowFps = g_vmLowFps && g_globalVars != nullptr && g_vmFps.OnFrame(g_globalVars->framecount);
 
@@ -1364,7 +1365,7 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
         return;
     }
 
-    // Glow pass (aim/chams.cpp Glow_Render) drawing its silhouettes through CBaseEntity::DrawModel:
+    // Glow pass (aim/visuals/chams.cpp Glow_Render) drawing its silhouettes through CBaseEntity::DrawModel:
     // after no-hats (a hidden hat must not glow), before everything else -- the engine's own draw,
     // under the glow material override. Amalgam's RenderHandler does the same.
     if (Glow_Rendering()) {
@@ -1388,7 +1389,7 @@ static void __fastcall h_DrawModelExecute_impl(void* rcx, const void* pState, co
     if (wantVmLowFps && pState && pBones && pMdl && vmKind)
         pBones = VmLowFps_Bones(pState, pBones, pMdl);
 
-    // Chams + glow (aim/chams.cpp, chams_api.h): every pass goes through o_DrawModelExecute,
+    // Chams + glow (aim/visuals/chams.cpp, chams_api.h): every pass goes through o_DrawModelExecute,
     // never this hook, so there is no recursion. A viewmodel keeps the transparent-viewmodel
     // blend: chams reads the live blend as its alpha scale.
     if (wantChams)
@@ -1790,7 +1791,7 @@ EmitSound_t o_EmitSound = nullptr;
 
 static void __fastcall h_EmitSound_impl(void* rcx, void* filter, int entindex, const void* epRaw)
 {
-    // 10-31: sound chams (aim/chams.cpp) stamps the same peek; gated on its own list being set
+    // 10-31: sound chams (aim/visuals/chams.cpp) stamps the same peek; gated on its own list being set
     // esp "only on sound" and the sound arrows read the same stamps (botox sound_esp is one store)
     const bool wantChamsSound = entindex <= 64 && (g_chamsEnable && g_chamsSoundCfg[0]
         || g_espEnable && g_espSoundOnly || g_espEnable && g_espOofArrows && g_espOofType != 0);
@@ -1986,6 +1987,8 @@ void __fastcall h_ComputePropOpacity(void* rcx, void* pProp)
 // ==== Remove screen effects: swallow Shake/Fade/Rumble user messages ================================
 // CHLClient::DispatchUserMessage (VClient slot 36). Return true (msg handled) to drop it -> no screen
 // shake, no fullscreen fade/flash, no controller rumble. Enum: Shake=10, Fade=11, Rumble=13 (TF2 x64).
+// The ONLY slot-36 hook: the aim code's playerperf reader rides it (Aim_OnUserMessage). Before 11-24
+// aim hooked slot 36 itself first, and this one failed MH_CreateHook whenever aim loaded.
 DispatchUserMessage_t o_DispatchUserMessage = nullptr;
 
 bool __fastcall h_DispatchUserMessage(void* rcx, int type, void* msgData)
@@ -1995,6 +1998,8 @@ bool __fastcall h_DispatchUserMessage(void* rcx, int type, void* msgData)
     ChatTranslator_OnUserMessage(type, msgData);   // reads SayText/SayText2 before the original does
     if (g_removeScreenEffects && !g_eject && (type == 10 || type == 11 || type == 13))
         return true; // swallow -> effect never plays
+    if (!g_eject && Aim_OnUserMessage(type, msgData))
+        return true; // no spread's playerperf reply: parsed, kept out of the console
     return o_DispatchUserMessage(rcx, type, msgData);
 }
 

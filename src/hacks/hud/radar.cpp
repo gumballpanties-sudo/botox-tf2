@@ -16,7 +16,7 @@
 //           (cl_radar_rotate), zoomed by cl_radar_scale, player always centred, the 254 px
 //           radial vignette, north arrow; icons past the rim become off-map arrows
 //   square  280 px black box with the whole 1024 overview fitted to 290, no rotation
-// The overview is the per-map world bake from aim/radar_aim.cpp; every icon is CS:GO's own art
+// The overview is the per-map world bake from aim/visuals/radar_aim.cpp; every icon is CS:GO's own art
 // (pak01 materials/panorama/images, botox-assets radar/).
 // ============================================================================================
 

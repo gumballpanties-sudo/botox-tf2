@@ -4,7 +4,7 @@
 // the silhouette) and botox's own full-res "player glow" (gradient / wave / normal blending),
 // all off one stencil mask in d3d9.
 //
-// TF2 wiring: aim/chams.cpp Glow_Render (DoPostScreenSpaceEffects, main thread) marks the
+// TF2 wiring: aim/visuals/chams.cpp Glow_Render (DoPostScreenSpaceEffects, main thread) marks the
 // players into the engine stencil -- 2 where a pixel is visible, 1 where it is behind something
 // (botox's CS:GO glow values: red = stencil 2..127, green = 1) -- fills PlayerStencilSettings and
 // calls PlayerStencil_Submit, which queues the pass onto the render thread right behind those
@@ -39,7 +39,7 @@ struct PlayerStencilSettings
 
 // Main thread, after the stencil marking draws. Copies s. bPreview = false routes to the live,
 // screen-sized target set (unchanged default: every existing call site keeps drawing the live
-// instance); true routes to the second, 520x800-ish esp-preview target set (aim/chams.cpp
+// instance); true routes to the second, 520x800-ish esp-preview target set (aim/visuals/chams.cpp
 // Glow_RenderPreview) so the two never thrash rebuilding each other's D3DPOOL_DEFAULT textures
 // every frame over their differing sizes.
 void PlayerStencil_Submit(const PlayerStencilSettings& s, bool bPreview = false);

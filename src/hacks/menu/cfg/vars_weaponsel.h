@@ -1,5 +1,5 @@
 #pragma once
-// csgo weapon selection (aim/weaponsel.cpp)
+// csgo weapon selection (aim/visuals/weaponsel.cpp)
 inline bool  g_wselEnable    = false;
 inline bool  g_wselNeverFade = false;   // cl_showloadout 1
 inline bool  g_wselNameTags  = true;    // name tag of items found in the local inventory

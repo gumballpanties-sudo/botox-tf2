@@ -2023,7 +2023,7 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
     if (route == 1)      ScreenFx_FrameLate(g_d3dDev);
     else if (route == 2) FxQueueOnRenderThread(&s_fxFunctorLate);
 
-    // Player glow + stencil (aim/chams.cpp) over every pass above (botox: glow after the passes).
+    // Player glow + stencil (aim/visuals/chams.cpp) over every pass above (botox: glow after the passes).
     // The passes restore the depth-stencil, so the marks still z test vs the scene. Glow_Render stays
     // ahead of the original: the engine glow (cart, intel) leaves stencil 1/2 and the halo needs 0.
     if (!g_eject) Glow_Render();
@@ -2038,7 +2038,7 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
 }
 
 // g_pClientMode, off the same `mov rcx, [rip+x]` the aim tree uses to find it
-// (aim/defs.h:3251). The pattern is a call site, so the pointer it loads is the client
+// (aim/sdk/defs.h:3251). The pattern is a call site, so the pointer it loads is the client
 // mode singleton itself.
 void* ScreenFx_FindClientMode()
 {

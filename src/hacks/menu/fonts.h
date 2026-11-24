@@ -3,7 +3,7 @@
 // Two botox pages map to TF2:
 //   indicators -> g_fontMi, the ImGui atlas face every movement indicator draws with
 //                 (render.cpp BuildFontAtlas; re-baked per indicator scale, IndicatorFont)
-//   esp        -> the vgui surface face the aim-tree esp draws with (aim/helpers.cpp
+//   esp        -> the vgui surface face the aim-tree esp draws with (aim/sdk/helpers.cpp
 //                 CFonts::Reload, FONT_INDICATORS). vgui takes a GDI family name, not a file,
 //                 so this page lists families instead of font files.
 // botox's chud hud / default hud pages edit CS:GO panorama fonts.conf -- no TF2 equivalent.
@@ -28,7 +28,7 @@ constexpr int         kFontIndDefFlags = 0;
 constexpr const char* kFontEspDefName = "Verdana";
 constexpr int         kFontEspDefSize = 22;
 constexpr int         kFontEspDefFlags = 1 << FF_BOLD;
-// csgo killfeed (aim/killfeed_csgo.cpp): vgui GDI family like esp. Stratum2 Bold is embedded and
+// csgo killfeed (aim/visuals/killfeed_csgo.cpp): vgui GDI family like esp. Stratum2 Bold is embedded and
 // registered process-private, so it is not in the family list -- reset brings it back.
 // Size = css px at 1080p (CS:GO's 18px), scaled with screen height.
 constexpr const char* kFontKfDefName = "Stratum2 Bold";
@@ -94,7 +94,7 @@ struct FontSettle
 struct VguiFace { int weight; int flags; };
 inline VguiFace FontFlagsToVgui(int mask)
 {
-    constexpr int kAntialias = 0x010, kDropShadow = 0x080, kOutline = 0x200;   // FONTFLAG_* (aim/defs.h)
+    constexpr int kAntialias = 0x010, kDropShadow = 0x080, kOutline = 0x200;   // FONTFLAG_* (aim/sdk/defs.h)
     VguiFace f;
     f.weight = (mask & (1 << FF_BOLD)) ? 700 : 400;
     f.flags  = ((mask & (1 << FF_NOANTIALIAS)) ? 0 : kAntialias) | ((mask & (1 << FF_DROPSHADOW)) ? kDropShadow : 0) |

@@ -1,7 +1,7 @@
 #pragma once
 // botox chams layer list (botox hacks/chams/chams.h + menu.cpp chams_dropdown): up to 8 ordered
 // material slots, each with its own colour. Pure, no engine types: shared by the menu (dih TU),
-// the chams draw (aim TU, aim/chams.cpp) and tests/chams_layers_test.cpp.
+// the chams draw (aim TU, aim/visuals/chams.cpp) and tests/chams_layers_test.cpp.
 //
 // Config form is one string per list (config.cpp STR entry), "mat:RRGGBBAA,mat:RRGGBBAA,..." --
 // one entry instead of 8 slots + 8 colours each.

@@ -1,22 +1,24 @@
-// Every engine hook the aim half owns. One TU: each MAKE_HOOK registers itself with
-// U::Hooks at static-init time, and the whitelist in aim.cpp decides which of them are
-// actually installed -- compiling one is not installing one.
+// Every engine hook the aim code owns. Each MAKE_HOOK registers itself with U::Hooks at
+// static-init time and Aim_Init installs all of them; a hook whose sig missed is logged and
+// skipped (CHooks::Initialize), the rest still go in. Adding one here = it gets installed, so
+// its target must not be one dih hooks itself (MinHook allows one hook per target).
 
-#include "sdk.h"
-#include "ticks.h"
-#include "engineprediction.h"
-#include "aimbot.h"
-#include "aim_melee.h"
-#include "crithack.h"
-#include "nospread.h"
-#include "nospread_hitscan.h"
-#include "movesim.h"
-#include "esp.h"
+#include "aim.h"
+#include "sdk/sdk.h"
+#include "sim/ticks.h"
+#include "sim/engineprediction.h"
+#include "aimbot/aimbot.h"
+#include "aimbot/aim_melee.h"
+#include "aimbot/crithack.h"
+#include "aimbot/nospread.h"
+#include "aimbot/nospread_hitscan.h"
+#include "sim/movesim.h"
+#include "visuals/esp.h"
 #include "../lua/lua.h"   // n_lua::pose_entity_bones (entity:animate)
 #include "../visuals/esp_preview.h"
-#include "backtrack.h"
-#include "scope_fov.h"
-#include "hud_aim.h"   // botox hud group data, collected in IEngineVGui_Paint
+#include "aimbot/backtrack.h"
+#include "visuals/scope_fov.h"
+#include "visuals/hud_aim.h"   // botox hud group data, collected in IEngineVGui_Paint
 #include "../lua/lua.h"   // lua create_move / pre_prediction
 
 // Remove interp targets: remote players + the viewmodel. Amalgam hits every non-local entity;
@@ -323,9 +325,9 @@ MAKE_HOOK(CBaseEntity_SetAbsVelocity, S::CBaseEntity_SetAbsVelocity(), void,
 
 		FloatRange_t flVelocityRange;
 		{
-			std::deque<float> vDeltas = { flNewPos1 - flOldPos1, flNewPos2 - flOldPos1, flNewPos1 - flOldPos2, flNewPos2 - flOldPos2 };
-			std::sort(vDeltas.begin(), vDeltas.end(), std::less<float>());
-			flVelocityRange = { vDeltas.front() / flDeltaTime, vDeltas.back() / flDeltaTime };
+			const float aDeltas[4] = { flNewPos1 - flOldPos1, flNewPos2 - flOldPos1, flNewPos1 - flOldPos2, flNewPos2 - flOldPos2 };
+			const auto [pMin, pMax] = std::minmax_element(aDeltas, aDeltas + 4);   // was a deque + sort, per axis per player
+			flVelocityRange = { *pMin / flDeltaTime, *pMax / flDeltaTime };
 		}
 
 		for (auto& tRecord : *pRecords)
@@ -458,6 +460,8 @@ MAKE_HOOK(CBasePlayer_ItemPostFrame, S::CBasePlayer_ItemPostFrame(), void,
 			return CALL_ORIGINAL(rcx);
 
 		float flReloadTime = pViewmodel->SequenceDuration();
+		if (flReloadTime <= 0.f)   // missed sig / bad sequence: no cycle to step
+			return CALL_ORIGINAL(rcx);
 		float flReloadSpeed = 1.f / pViewmodel->m_flPlaybackRate();
 
 		float flLastCycle = (I::GlobalVars->curtime - pWeapon->m_flReloadPriorNextFire() - TICK_INTERVAL) / (flReloadTime * flReloadSpeed);
@@ -776,22 +780,22 @@ MAKE_HOOK(CHLClient_CreateMove, U::Memory.GetVirtual(I::Client, 21), void,
 	G::LastUserCmd = pCmd;
 }
 
-// ================ CHLClient_DispatchUserMessage.cpp ================
-// The ONLY reason this hook exists.
+// ================ CHLClient::DispatchUserMessage (slot 36) ================
+// NOT a hook: dih's h_DispatchUserMessage (visuals.cpp) owns slot 36 and calls this first.
+// Two MinHooks on one target = the second fails, which used to kill remove-screen-effects and
+// the chat translator whenever the aim code loaded.
 //
 // No spread asks the server "playerperf" every NoSpreadInterval to learn the server's clock
 // (CNoSpreadHitscan::AskForPlayerPerf). The server answers with a TextMsg -- the
 // "240.134 1 0 ..." lines -- and TF2 prints every one of them to the console. Swallowing the
-// reply here is what parses it (without this hook m_bSynced never leaves 0) and what keeps
-// every reply out of the console.
-//
-// Only TextMsg is touched. Every other user message goes straight to the original.
-MAKE_HOOK(CHLClient_DispatchUserMessage, U::Memory.GetVirtual(I::Client, 36), bool,
-	void* rcx, UserMessageType type, bf_read& msgData)
+// reply here is what parses it (m_bSynced never leaves 0 without it) and keeps it out of the
+// console. Only TextMsg is read; the buffer is rewound for whoever reads it next.
+bool Aim_OnUserMessage(int type, void* pMsgData)
 {
-	if (G::Unload || type != TextMsg)
-		return CALL_ORIGINAL(rcx, type, msgData);
+	if (G::Unload || type != TextMsg || !pMsgData || !Aim_Active())
+		return false;
 
+	auto& msgData = *reinterpret_cast<bf_read*>(pMsgData);
 	msgData.SetAssertOnOverflow(false);
 	msgData.Seek(0);
 
@@ -799,24 +803,7 @@ MAKE_HOOK(CHLClient_DispatchUserMessage, U::Memory.GetVirtual(I::Client, 36), bo
 	msgData.Seek(0);
 
 	// The first byte of a TextMsg is the destination, not text -- drop it.
-	std::string sMsg = rawMsg;
-	if (!sMsg.empty())
-	{
-		sMsg.erase(sMsg.begin());
-		if (F::NoSpreadHitscan.ParsePlayerPerf(sMsg))
-			return true;   // ours: consumed, never reaches the console
-	}
-
-	return CALL_ORIGINAL(rcx, type, msgData);
-}
-
-// ================ CHLClient_EncodeUserCmdToBuffer.cpp ================
-// Clean POV demos - usercmd path, INTENTIONALLY pass-through now.
-MAKE_HOOK(CHLClient_EncodeUserCmdToBuffer, U::Memory.GetVirtual(I::Client, 24), void,
-	void* rcx, bf_write& buf, int slot)
-{
-
-	CALL_ORIGINAL(rcx, buf, slot);
+	return rawMsg[0] && F::NoSpreadHitscan.ParsePlayerPerf(rawMsg + 1);   // true = ours, consumed
 }
 
 // ================ CHLClient_FrameStageNotify.cpp ================
@@ -886,10 +873,13 @@ MAKE_HOOK(CL_ProcessPacketEntities, S::CL_ProcessPacketEntities(), bool,
 		mCriticalStorage[i].m_nCritChecks = pWeapon->m_nCritChecks();
 		mCriticalStorage[i].m_nCritSeedRequests = pWeapon->m_nCritSeedRequests();
 
-		if (Vars::Debug::Logging.Value) I::CVar->ConsolePrintf("\n");
-		SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): mCriticalStorage[i].m_flCritTokenBucket = {}", i, uintptr_t(pWeapon), pWeapon->m_flCritTokenBucket()).c_str(), { 100, 150, 255 }, Vars::Debug::Logging.Value);
-		SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): mCriticalStorage[i].m_nCritChecks = {}", i, uintptr_t(pWeapon), pWeapon->m_nCritChecks()).c_str(), { 100, 150, 255 }, Vars::Debug::Logging.Value);
-		SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): mCriticalStorage[i].m_nCritSeedRequests = {}", i, uintptr_t(pWeapon), pWeapon->m_nCritSeedRequests()).c_str(), { 100, 150, 255 }, Vars::Debug::Logging.Value);
+		if (Vars::Debug::Logging.Value)   // std::format allocates even with logging off
+		{
+			I::CVar->ConsolePrintf("\n");
+			SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): mCriticalStorage[i].m_flCritTokenBucket = {}", i, uintptr_t(pWeapon), pWeapon->m_flCritTokenBucket()).c_str(), { 100, 150, 255 }, Vars::Debug::Logging.Value);
+			SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): mCriticalStorage[i].m_nCritChecks = {}", i, uintptr_t(pWeapon), pWeapon->m_nCritChecks()).c_str(), { 100, 150, 255 }, Vars::Debug::Logging.Value);
+			SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): mCriticalStorage[i].m_nCritSeedRequests = {}", i, uintptr_t(pWeapon), pWeapon->m_nCritSeedRequests()).c_str(), { 100, 150, 255 }, Vars::Debug::Logging.Value);
+		}
 	}
 
 	bool bReturn = CALL_ORIGINAL(entmsg);
@@ -911,10 +901,13 @@ MAKE_HOOK(CL_ProcessPacketEntities, S::CL_ProcessPacketEntities(), bool,
 		pWeapon->m_nCritChecks() = tStorage.m_nCritChecks;
 		pWeapon->m_nCritSeedRequests() = tStorage.m_nCritSeedRequests;
 
-		if (Vars::Debug::Logging.Value) I::CVar->ConsolePrintf("\n");
-		SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): pWeapon->m_flCritTokenBucket() = {}", iSlot, uintptr_t(pWeapon), pWeapon->m_flCritTokenBucket()).c_str(), { 100, 255, 150 }, Vars::Debug::Logging.Value);
-		SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): pWeapon->m_nCritChecks() = {}", iSlot, uintptr_t(pWeapon), pWeapon->m_nCritChecks()).c_str(), { 100, 255, 150 }, Vars::Debug::Logging.Value);
-		SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): pWeapon->m_nCritSeedRequests() = {}", iSlot, uintptr_t(pWeapon), pWeapon->m_nCritSeedRequests()).c_str(), { 100, 255, 150 }, Vars::Debug::Logging.Value);
+		if (Vars::Debug::Logging.Value)   // std::format allocates even with logging off
+		{
+			I::CVar->ConsolePrintf("\n");
+			SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): pWeapon->m_flCritTokenBucket() = {}", iSlot, uintptr_t(pWeapon), pWeapon->m_flCritTokenBucket()).c_str(), { 100, 255, 150 }, Vars::Debug::Logging.Value);
+			SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): pWeapon->m_nCritChecks() = {}", iSlot, uintptr_t(pWeapon), pWeapon->m_nCritChecks()).c_str(), { 100, 255, 150 }, Vars::Debug::Logging.Value);
+			SDK::Output("ProcessPacketEntities", std::format("{} ({:#x}): pWeapon->m_nCritSeedRequests() = {}", iSlot, uintptr_t(pWeapon), pWeapon->m_nCritSeedRequests()).c_str(), { 100, 255, 150 }, Vars::Debug::Logging.Value);
+		}
 	}
 
 	return bReturn;
@@ -1183,24 +1176,29 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 	{
 		H::Draw.UpdateScreenSize();
 		H::Draw.UpdateW2SMatrix();
-		H::Draw.Start(true);
+		// bDraw false = surface draw sigs missed: no surface draws, the snapshots below still run
+		const bool bDraw = H::Draw.Start(true);
 		if (auto pLocal = H::Entities.GetLocal())
 		{
-			F::NoSpreadHitscan.Draw(pLocal);
-			F::CritHack.Draw(pLocal);
-			F::Ticks.Draw(pLocal);
-			F::Esp.Draw(pLocal);   // player/world ESP, piggybacks this hook, no new install
+			if (bDraw)
+			{
+				F::NoSpreadHitscan.Draw(pLocal);
+				F::CritHack.Draw(pLocal);
+				F::Ticks.Draw(pLocal);
+				F::Esp.Draw(pLocal);   // player/world ESP, piggybacks this hook, no new install
+			}
 			HudAim_Collect(pLocal);   // snapshot for the ImGui hud overlays (hud/hud_snap.h)
 			void WmAim_Tick(CTFPlayer*); WmAim_Tick(pLocal);   // dna watermark "spotted" (wm_aim.cpp)
 			void RadarAim_Tick(CTFPlayer*); RadarAim_Tick(pLocal);   // csgo radar: overview bake + player snapshot (radar_aim.cpp)
 		}
-		if (I::EngineVGui->IsGameUIVisible())   // pause menu up: csgo hud stays under it
+		if (bDraw && I::EngineVGui->IsGameUIVisible())   // pause menu up: csgo hud stays under it
 		{
 			void KillfeedCsgo_Paint(); KillfeedCsgo_Paint();
 			void WeaponSel_Paint(); WeaponSel_Paint();
 			void TeamCounter_Paint(); TeamCounter_Paint();
 		}
-		H::Draw.End();
+		if (bDraw)
+			H::Draw.End();
 	}
 
 	// esp preview: menu (ui panels) and in game, frame-gated inside
@@ -1214,11 +1212,13 @@ MAKE_HOOK(IEngineVGui_Paint, U::Memory.GetVirtual(I::EngineVGui, 14), void,
 	// the rest of TF2's HUD
 	if (!G::Unload && iMode & PAINT_INGAMEPANELS && !SDK::CleanScreenshot() && !I::EngineVGui->IsGameUIVisible())
 	{
-		H::Draw.Start();
-		void KillfeedCsgo_Paint(); KillfeedCsgo_Paint();
-		void WeaponSel_Paint(); WeaponSel_Paint();
-		void TeamCounter_Paint(); TeamCounter_Paint();   // csgo team counter (teamcounter.cpp)
-		H::Draw.End();
+		if (H::Draw.Start())
+		{
+			void KillfeedCsgo_Paint(); KillfeedCsgo_Paint();
+			void WeaponSel_Paint(); WeaponSel_Paint();
+			void TeamCounter_Paint(); TeamCounter_Paint();   // csgo team counter (teamcounter.cpp)
+			H::Draw.End();
+		}
 	}
 }
 

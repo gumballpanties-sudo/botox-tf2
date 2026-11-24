@@ -3,7 +3,7 @@
 // Rebuild after ANY edit here (from the repo root):  bash src/hacks/screen/shaders/fx_stencil_build.sh
 //
 // Mask texture: r = visible player pixels (stencil 2), g = occluded ones (stencil 1), written by
-// visuals/player_stencil.cpp from the stencil aim/chams.cpp's glow pass leaves behind.
+// visuals/player_stencil.cpp from the stencil aim/visuals/chams.cpp's glow pass leaves behind.
 sampler2D s0 : register( s0 );
 float4 c0 : register( c0 );
 float4 c1 : register( c1 );

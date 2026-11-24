@@ -18,8 +18,8 @@
 #include <utility>
 #include <vector>
 
-int  Aim_ChokedCommands();                    // aim/wm_aim.cpp: CClientState::chokedcommands
-bool Aim_NetServer(char* out, size_t size);   // aim/wm_aim.cpp: INetChannelInfo::GetAddress
+int  Aim_ChokedCommands();                    // aim/visuals/wm_aim.cpp: CClientState::chokedcommands
+bool Aim_NetServer(char* out, size_t size);   // aim/visuals/wm_aim.cpp: INetChannelInfo::GetAddress
 
 // ==== botox misc.cpp watermark_clock / watermark_label / watermark_brand / watermark_info_parts ====
 // One frame's engine state, read once at the top of Watermark_Draw (render thread).
@@ -66,7 +66,7 @@ static std::vector<std::string> InfoParts()
     return parts;
 }
 
-// botox legendware: net_channel->get_address(), "loopback" -> "Local server" (aim/wm_aim.cpp, SDK classes)
+// botox legendware: net_channel->get_address(), "loopback" -> "Local server" (aim/visuals/wm_aim.cpp, SDK classes)
 static bool NetServer(char* out, size_t n) { return Aim_NetServer(out, n); }
 
 // botox g_trick_time window (points_on_trick stamps it, here Points_OnTrick -> g_wmTrickMs)
@@ -951,7 +951,7 @@ static void DrawBillware(ImDrawList* dl, ImGuiIO& io)
 // styles 17/18: dna / dna clarity -- spectator_list.cpp draw_watermark_dna[_clarity](). montserrat
 // 15 / pt root bold 15, corner-shaded ring box, parts brand | user | label (fps label = number +
 // " fps"). dna: 60-step accent strip over the text + "detection glow": accent bloom for glow ticks
-// after a trick, or while an enemy is spotted (TF2: visible, aim/wm_aim.cpp). dna clarity: faint
+// after a trick, or while an enemy is spotted (TF2: visible, aim/visuals/wm_aim.cpp). dna clarity: faint
 // icon glyph bled into the left edge.
 static ImU32 DnaGrey(float v, float a = 1.f) { return ImGui::ColorConvertFloat4ToU32(ImVec4(v, v, v, a)); }
 static void DnaBox(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 ring, ImU32 midRing)

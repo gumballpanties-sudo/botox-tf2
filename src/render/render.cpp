@@ -1494,7 +1494,7 @@ static std::string ValidIndicatorFont(float px, int flags)
     return "";
 }
 
-// esp font page -> the ImGui face player/building esp draws with (aim/esp.cpp via RenderEspQueue).
+// esp font page -> the ImGui face player/building esp draws with (aim/visuals/esp.cpp via RenderEspQueue).
 // Same rules as the indicator page: size 0 or the untouched default pick = botox's stock esp face
 // (verdana bd 11 mono); a face that will not build falls back to it. The page lists GDI families
 // (they also drive the vgui face of the world-entity labels), mapped to a file by Fonts_FamilyPath.
@@ -1797,7 +1797,7 @@ static void BuildFontAtlas()
     LuaPublishFontMetrics();
 }
 
-// botox draw_cached_data: replay the esp the game thread recorded (aim/esp.cpp, esp_queue.h) into
+// botox draw_cached_data: replay the esp the game thread recorded (aim/visuals/esp.cpp, esp_queue.h) into
 // the background list, first, so every other overlay sits on top of it. A frame older than
 // 250 ms is a dead one (no local player, level change, paint stopped): nothing is drawn.
 static void RecolourVertsY(ImDrawList* dl, int first, uint32_t topCol, uint32_t botCol, float y0, float y1)
@@ -1813,7 +1813,7 @@ static void RecolourVertsY(ImDrawList* dl, int first, uint32_t topCol, uint32_t 
     }
 }
 
-// replay half of RenderEspQueue, pulled out so esp preview's DrawBody (hacks/aim/esp_preview.cpp)
+// replay half of RenderEspQueue, pulled out so esp preview's DrawBody (hacks/aim/visuals/esp_preview.cpp)
 // can draw its own EspFrame through the same command interpreter. Font / text-look / avatar lookup
 // stay the render.cpp statics they always were: a preview frame is built and replayed on this same
 // render thread, same ImGui frame, so nothing here needs to change for that caller.

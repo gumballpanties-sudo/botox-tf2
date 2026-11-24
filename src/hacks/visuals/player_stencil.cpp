@@ -10,7 +10,7 @@
 //   - ps_3_0 never pairs with fixed function, so quads go through screenfx.cpp's passthrough vs
 //     (ScreenFx_BindQuad) and the capsules through vs_capsule, positions in clip space
 //   - saves what DrawPrimitiveUP nulls (stream 0 + indices: ssao.cpp AoSaved explains why)
-//   - capsules from TF2 hitboxes: those are boxes, so aim/chams.cpp turns each into a segment
+//   - capsules from TF2 hitboxes: those are boxes, so aim/visuals/chams.cpp turns each into a segment
 //     down its long axis with the mean of the two short half-extents as the radius
 #include "player_stencil.h"
 #include "../../globals/globals.h"

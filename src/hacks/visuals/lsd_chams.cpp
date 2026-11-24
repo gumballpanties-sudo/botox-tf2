@@ -1,6 +1,6 @@
 // botox hacks/visuals/lsd_chams.cpp + model_shader.h (commit 95ef94a), TF2 port.
 //
-// The "lsd" chams layer draws a flat white UnlitGeneric carrier (aim/chams.cpp). While armed, the
+// The "lsd" chams layer draws a flat white UnlitGeneric carrier (aim/visuals/chams.cpp). While armed, the
 // DrawIndexedPrimitive detour below swaps the carrier's shaders for the skinned-position vs +
 // "70s Melt" ps (shaders/fx_lsd_*.hlsl, fxc at build time: no d3dx9 at runtime).
 //

@@ -37,7 +37,7 @@ inline float g_wmHeroinX = 0.01f, g_wmHeroinY = 0.01f;
 
 inline bool  g_wmDnaGlow         = true;
 inline int   g_wmDnaGlowTicks    = 15;
-inline bool  g_wmDnaGlowSpotted  = false;    // TF2: "spotted" = an enemy our eye can see (aim/wm_aim.cpp)
+inline bool  g_wmDnaGlowSpotted  = false;    // TF2: "spotted" = an enemy our eye can see (aim/visuals/wm_aim.cpp)
 
 inline bool  g_wmKamiOutline      = false;
 inline float g_wmKamiOutlineColor[4] = { 252 / 255.f, 194 / 255.f, 1.f, 1.f };
@@ -71,6 +71,6 @@ inline bool  g_wmGifFlip    = false;
 
 // runtime, not saved. botox g_trick_time (points_on_trick): GetTickCount64 of the last detected
 // trick, written by detections.cpp on the movement thread. g_wmEnemySpotted: written by the aim
-// Paint hook (aim/wm_aim.cpp), read by the dna watermark on the render thread.
+// Paint hook (aim/visuals/wm_aim.cpp), read by the dna watermark on the render thread.
 inline std::atomic<unsigned long long> g_wmTrickMs{ 0 };
 inline std::atomic<bool>               g_wmEnemySpotted{ false };

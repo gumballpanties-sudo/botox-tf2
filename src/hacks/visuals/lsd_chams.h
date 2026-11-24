@@ -1,7 +1,7 @@
 #pragma once
 // botox hacks/visuals/lsd_chams.{h,cpp} (commit 95ef94a): the "lsd" chams material. The layer draws
-// a flat white carrier material (aim/chams.cpp); while armed, a DrawIndexedPrimitive detour swaps
-// in the shadertoy "70s Melt" vs/ps (fx_lsd_*.hlsl). Plain C API: aim/chams.cpp (aim TU) calls it.
+// a flat white carrier material (aim/visuals/chams.cpp); while armed, a DrawIndexedPrimitive detour swaps
+// in the shadertoy "70s Melt" vs/ps (fx_lsd_*.hlsl). Plain C API: aim/visuals/chams.cpp (aim TU) calls it.
 //
 // Main thread, around one chams layer draw. Queued onto the render thread through the material
 // system's call queue (screenfx.cpp ScreenFx_QueueFunctor) so the arm lands right before the

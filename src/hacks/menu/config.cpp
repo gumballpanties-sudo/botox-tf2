@@ -900,7 +900,7 @@ static const CfgEntry kEntries[] = {
     { "glowBuildingColor", CfgEntry::FLOAT4, g_glowBuildingColor, 0 },
     { "glowAlpha",         CfgEntry::FLOAT,  &g_glowAlpha, 0 },
 
-    // 10-31 chams/glow rework (aim/chams.cpp)
+    // 10-31 chams/glow rework (aim/visuals/chams.cpp)
     { "chamsLocalEnable",       CfgEntry::BOOL,   &g_chamsLocalEnable, 0 },
     { "chamsRagdolls",          CfgEntry::BOOL,   &g_chamsRagdolls, 0 },
     { "chamsSoundDuration",     CfgEntry::FLOAT,  &g_chamsSoundDuration, 0 },

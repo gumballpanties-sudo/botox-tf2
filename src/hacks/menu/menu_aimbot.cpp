@@ -1,13 +1,13 @@
 #include "menu_aimbot.h"
 
-#include "../aim/vars.h"
+#include "../aim/sdk/vars.h"
 #include "../../dependencies/imgui/imgui.h"
 #include "menu_chrome.h"   // menu_columns_begin/next/end, menu_group_begin/end -- engine-free, no SDK clash
 
 #include <functional>
 
 // ImGui::OptionPopup/Keybind/ColorRow bodies live in menu.cpp; can't include src/hacks/menu/menu.h
-// here (it pulls in dih's own SDK via globals.h, which redefines type names aim/vars.h's SDK
+// here (it pulls in dih's own SDK via globals.h, which redefines type names aim/sdk/vars.h's SDK
 // already defines differently -- same wall aim.cpp works around with local decls).
 namespace ImGui
 {

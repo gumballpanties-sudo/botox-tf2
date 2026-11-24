@@ -60,7 +60,7 @@ inline int ContactTick(float gap, float theirVz, float myVz, bool myFalls, float
     return -1;
 }
 
-// ---- simulated target path (aim/autorocketjump.cpp Aim_GoombaPath) -----------------------
+// ---- simulated target path (aim/movement/autorocketjump.cpp Aim_GoombaPath) -----------------------
 // Heroin's goomba assist (FUN_180075a10) runs the real ProcessMovement on its target instead
 // of a parabola: walls, ceilings, ledges and OUR hull stop them. p[k-1] = their feet +
 // velocity after k ticks past the server time our cmd runs at.

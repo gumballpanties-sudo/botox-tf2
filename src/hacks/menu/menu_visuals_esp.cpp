@@ -187,7 +187,7 @@ void Menu_Visuals_Esp()
                 ImGui::SliderFloat("duration##player hitboxes", &g_espHitboxesDuration, 0.1f, 10.f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
         }, ImVec2(220.f, -1));
 
-    // player glow: aim/chams.cpp Glow_Render (Amalgam halo). Off with the players esp.
+    // player glow: aim/visuals/chams.cpp Glow_Render (Amalgam halo). Off with the players esp.
     ImGui::Checkbox("player glow", &g_glowEnable);
     if (g_glowEnable)
         ImGui::OptionPopup("player glow settings", [&]() {
@@ -481,7 +481,7 @@ void Menu_Visuals_Chams()
 }
 
 // Called inside menu.cpp's "edicts" group (Page_VisualsEsp, under "players"). botox
-// menu_tab_visuals.cpp "edicts" group, verbatim order / labels / popups. TF2 mapping (aim/esp.cpp):
+// menu_tab_visuals.cpp "edicts" group, verbatim order / labels / popups. TF2 mapping (aim/visuals/esp.cpp):
 // dropped weapons = CTFDroppedWeapon, thrown projectiles = every live projectile (rockets, pipes,
 // stickies, arrows, flares, jars...), grenade path = your own projectile weapon's trajectory
 // (botox: the held grenade's). Skipped: planted bomb / bomb timer bar (no bomb in TF2).

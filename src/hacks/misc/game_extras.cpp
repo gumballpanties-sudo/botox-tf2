@@ -120,7 +120,7 @@ void EngineExec(const char* cmd)
 }
 
 // ==== bot names: IVEngineClient::GetPlayerInfo (slot 8, defs.h IVEngineClient) ==========
-// TF2 x64 player_info_t (aim/defs.h player_info_s, REPLAY_ENABLED): name[32] @0, userID @0x20,
+// TF2 x64 player_info_t (aim/sdk/defs.h player_info_s, REPLAY_ENABLED): name[32] @0, userID @0x20,
 // guid[33] @0x24, friendsID @0x48, friendsName[32] @0x4C, fakeplayer @0x6C, ishltv @0x6D.
 // botox writes the LISTEN SERVER's userinfo string table (CS:GO demos/gotv record it); here
 // the client's own GetPlayerInfo answer is patched -- scoreboard, killfeed, target id, chat

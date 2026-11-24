@@ -5,7 +5,7 @@
 #include <mutex>
 #include <vector>
 
-// csgo radar: game thread (aim/radar_aim.cpp, IEngineVGui::Paint) -> render thread (hud/radar.cpp).
+// csgo radar: game thread (aim/visuals/radar_aim.cpp, IEngineVGui::Paint) -> render thread (hud/radar.cpp).
 // Same split as hud_snap.h: BuildImGuiFrame may run on the render thread, which must not walk
 // entities or trace, so the game thread publishes POD copies here.
 
