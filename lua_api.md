@@ -216,7 +216,7 @@ Returns `screen_x, screen_y`, or `nil` when the point is behind the camera.
 
 #### `render.blur(x1, y1, x2, y2, strength, color, rounding)`
 
-Blurs what is on screen under the rect: the game, its hud, the botox overlays drawn before lua, and everything drawn before this call (this script's earlier draws, scripts loaded before it). Draw your panel on top right after it = frosted glass panel. `strength` = blur radius, default `1` = 34 px (same as botox csgo), `0` to `3`, `0` = no blur. `color` tints and fades the blur: default white = as is, `color(255, 255, 255, 128)` = half blurred, `color(170, 200, 255)` = bluish. `rounding` = corner radius, default `0`; give it your panel's. The blur reads the rect plus 3 radii around it, so its edges blend into what is next to the panel (up to 1024 px a side, bigger is scaled into that); the part off screen is skipped. Up to 48 a frame, more are skipped.
+Blurs what is on screen under the rect, gamesense style: the first `render.blur` of a frame blurs the screen once (the game, its hud, the botox overlays drawn before lua, and every lua draw before that call), and every `render.blur` rect of the frame is cut out of that one blur, under all lua draws after the first call. Draw your panel on top = frosted glass panel. `strength` default `1` = gamesense: one x + one y pass at 1/4 res; `0` to `3` (`3` = 3x the radius, 9 passes), `0` = no blur. One blur a frame, so the biggest strength of the frame is used for every rect. `color` tints and fades the blur: default white = as is, `color(255, 255, 255, 128)` = half blurred, `color(170, 200, 255)` = bluish. `rounding` = corner radius, default `0`; give it your panel's. Cost = one blur a frame however many rects.
 
 ```lua
 callbacks.register("paint", function()

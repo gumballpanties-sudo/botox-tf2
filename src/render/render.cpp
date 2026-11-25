@@ -2113,6 +2113,7 @@ static void RenderLuaQueue()
     const float sx = f.srcW > 0.f ? io.DisplaySize.x / f.srcW : 1.f, sy = f.srcH > 0.f ? io.DisplaySize.y / f.srcH : 1.f;
     const int firstVtx = dl->VtxBuffer.Size;
     ImVec2 buf[32];
+    bool blurred = false;
 
     for (const LuaDrawCmd& c : f.cmds)
     {
@@ -2194,9 +2195,27 @@ static void RenderLuaQueue()
                 dl->AddImageRounded(tex, ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), ImVec2(0.f, 0.f), ImVec2(1.f, 1.f), c.col, c.round);
             break;
         }
-        case LUAD_BLUR:   // a callback, no vertices: the display px scale below misses it, so scale its rect here
-            BlurRectSmooth(dl, ImVec2(c.x0 * sx, c.y0 * sy), ImVec2(c.x1 * sx, c.y1 * sy), c.size, c.col, c.round * std::min(sx, sy));
+        case LUAD_BLUR:   // gamesense: one blur at the first rect, every rect of the frame drawn from it here
+        {
+            if (blurred) break;
+            blurred = true;
+            float strength = 0.f;
+            for (const LuaDrawCmd& b : f.cmds)
+                if (b.type == LUAD_BLUR) strength = std::max(strength, b.size);
+            const ImTextureID tex = BlurLua_Queue(dl, strength);
+            if (!tex) break;
+            // engine px: uv = px / engine screen, the display px scale below moves the vertices. Far off-screen part
+            // dropped (corners kept a radius out): a vertex far out loses float precision on the gpu clip
+            const float w = f.srcW > 0.f ? f.srcW : io.DisplaySize.x, h = f.srcH > 0.f ? f.srcH : io.DisplaySize.y;
+            for (const LuaDrawCmd& b : f.cmds)
+            {
+                if (b.type != LUAD_BLUR) continue;
+                const ImVec2 lo(std::clamp(b.x0, -b.round, w + b.round), std::clamp(b.y0, -b.round, h + b.round));
+                const ImVec2 hi(std::clamp(b.x1, -b.round, w + b.round), std::clamp(b.y1, -b.round, h + b.round));
+                dl->AddImageRounded(tex, lo, hi, ImVec2(lo.x / w, lo.y / h), ImVec2(hi.x / w, hi.y / h), b.col, b.round);
+            }
             break;
+        }
         }
     }
 

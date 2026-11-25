@@ -820,8 +820,8 @@ namespace
 		return 0;
 	}
 
-	/* blurs what is drawn under the rect so far ( game, huds, earlier draws of this and older scripts ), render.cpp
-	   RenderLuaQueue -> BlurRectSmooth. strength 1 = 34 px radius, 0..3; color tints + fades it, alpha 0 = skipped */
+	/* gamesense: render.cpp RenderLuaQueue blurs once at the frame's first rect ( what is drawn so far ), every rect of the
+	   frame drawn from it there. strength 0..3, biggest of the frame wins; color tints + fades it, alpha 0 = skipped */
 	int l_render_blur( lua_State* L )
 	{
 		require_paint( L );
