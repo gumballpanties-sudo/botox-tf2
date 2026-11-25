@@ -428,6 +428,7 @@ void n_lua::impl_t::on_tick( )
 		std::error_code ec;
 		std::filesystem::create_directories( this->folder( ) / "settings", ec );
 		std::filesystem::create_directories( this->folder( ) / "lib", ec );
+		std::filesystem::create_directories( this->folder( ) / "images", ec );
 
 		this->refresh( );
 

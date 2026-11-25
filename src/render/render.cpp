@@ -38,6 +38,10 @@
 #include "../hacks/esp/esp_queue.h"  // botox m_draw_data: esp recorded on the game thread, replayed in RenderEspQueue
 #include "../hacks/esp/esp_declutter.h"  // label stacks shoved apart before the replay (EspQ_Declutter)
 #include <unordered_map>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
 #include "../hacks/visuals/esp_preview.h"   // EspPreview::DropTexture in h_Reset
 #include "../hacks/visuals/rear_mirror.h"   // RearMirror_Draw, RearMirror_DropTexture in h_Reset
 #include "../hacks/visuals/player_stencil.h"  // PlayerStencil_ReleaseTargets in h_Reset
@@ -2063,9 +2067,29 @@ static void RenderCrosshairList()
 // lua render.* (hacks/lua/lua_api.cpp records in the paint callback, lua_draw.h). Background list,
 // over esp + world fx, under the menu. s_rtLuaSeq = the frame this build is for (multicore), 0 = newest.
 static uint32_t s_rtLuaSeq = 0;
+// LUAD_IMAGE "path|stamp" -> its own gif_tex entry "lua:path|stamp" ( render thread ). Never GifTex_Reload / GetFile: those
+// swap the texture of an entry visuals > images may have drawn earlier this frame. A changed file = new stamp = new entry.
+// Freed 10 s after its last draw ( LuaImageSweep, every frame: a script never says it stopped drawing ).
+struct LuaImage { GifTex* gif = nullptr; uint64_t usedMs = 0; };
+static std::unordered_map<std::string, LuaImage> s_luaImages;
+
+static void LuaImageSweep()
+{
+    static uint64_t s_swept = 0;
+    const uint64_t now = GetTickCount64();
+    if (now - s_swept < 1000) return;
+    s_swept = now;
+    for (auto it = s_luaImages.begin(); it != s_luaImages.end();)
+    {
+        if (now - it->second.usedMs < 10000) { ++it; continue; }
+        if (it->second.gif) GifTex_Erase(("lua:" + it->first).c_str());
+        it = s_luaImages.erase(it);
+    }
+}
 
 static void RenderLuaQueue()
 {
+    LuaImageSweep();
     static LuaDrawFrame f;
     LuaDraw::CopyFrame(s_rtLuaSeq, f);
     if (f.cmds.empty() || GetTickCount64() - f.stampMs > 250)
@@ -2139,6 +2163,22 @@ static void RenderLuaQueue()
             for (int i = 0; i < n; ++i) buf[i] = ImVec2(f.pts[(c.p0 + i) * 2], f.pts[(c.p0 + i) * 2 + 1]);
             if (c.col) dl->AddConvexPolyFilled(buf, n, c.col);
             if (c.flags & 1) dl->AddPolyline(buf, n, c.col2, ImDrawFlags_Closed, c.thick);
+            break;
+        }
+        case LUAD_IMAGE:
+        {
+            if (c.pn <= 0 || c.p0 < 0 || c.p0 + c.pn > (int)f.text.size()) break;
+            const std::string key(f.text.data() + c.p0, c.pn);   // "path|stamp"
+            auto it = s_luaImages.find(key);
+            if (it == s_luaImages.end())
+            {
+                std::ifstream file(key.substr(0, key.rfind('|')), std::ios::binary);
+                const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                it = s_luaImages.emplace(key, LuaImage{ bytes.empty() ? nullptr : GifTex_Get(("lua:" + key).c_str(), bytes.data(), bytes.size()) }).first;
+            }
+            it->second.usedMs = GetTickCount64();
+            if (const ImTextureID tex = GifTex_Frame(it->second.gif, ImGui::GetTime()))
+                dl->AddImageRounded(tex, ImVec2(c.x0, c.y0), ImVec2(c.x1, c.y1), ImVec2(0.f, 0.f), ImVec2(1.f, 1.f), c.col, c.round);
             break;
         }
         }
