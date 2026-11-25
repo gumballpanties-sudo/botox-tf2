@@ -2508,11 +2508,11 @@ static void Page_MiscMain()
                 void GifTex_PathInput(const char*, const char*, char*, size_t);   // hud/gif_tex.cpp
 
                 int& style = g_wmStyle;
-                if (style < 0 || style > 25) style = 0;
+                if (style < 0 || style > 27) style = 0;
                 ImGui::Combo("style##watermark style", &style,
                     "default\0kamibebra\0clarity\0clarity v2\0delusional\0interwebz\0havoc\0onetap\0airflow\0ev0lve\0legendware\0"
                     "interium\0skebob\0cumidere\0illusory\0lumi\0billware\0dna\0dna clarity\0cucumber\0howeweware\0gamesense\0heroin\0"
-                    "lobotomy v2\0grimoire\0datashell\0");
+                    "lobotomy v2\0grimoire\0datashell\0requiem\0primordial\0");
 
                 ImGui::InputTextWithHint("name##watermark text", "botox", g_wmLabel, 25);
 
@@ -2579,7 +2579,7 @@ static void Page_MiscMain()
 
                 const bool showsUser = ((style == 0 || style == 2 || style == 15 || style == 21 || style == 23 || style == 24) && g_wmUser) || style == 12 ||
                                        (style == 1 && (g_wmKamiShowFlags & 1)) || style == 3 || style == 8 || style == 10 ||
-                                       style == 17 || style == 18 || style == 19 || style == 20 || (labelStyle && label == 2);
+                                       style == 17 || style == 18 || style == 19 || style == 20 || style == 27 || (labelStyle && label == 2);
                 if (showsUser)
                     ImGui::InputTextWithHint("user name##watermark clarity user", "user", g_wmUserName, sizeof(g_wmUserName));
 
@@ -2699,15 +2699,16 @@ static void Page_MiscMain()
                 if (cs == 0 || cs == 5 || cs == 8 || cs == 23 || cs == 24 || cs == 26 || cs == 29 || cs == 30 || cs == 31 || cs == 32 || lumiType == 2)
                     ImGui::ColorRow("spectating other color##spectator list text color two", g_specColorTwo, kA);
                 if (cs != 9 && cs != 12 && cs != 13 && cs != 14 && cs != 16 && cs != 18 && cs != 19 && cs != 20 && cs != 21 && cs != 24 &&
-                    cs != 26 && cs != 28 && cs != 29 && cs != 30 && cs != 31 && cs != 34 && cs != 35 && cs != 36 && (cs != 25 || lumiType == 1))
+                    cs != 26 && cs != 28 && cs != 29 && cs != 30 && cs != 31 && cs != 34 && cs != 35 && cs != 36 && cs != 37 && cs != 38 &&
+                    (cs != 25 || lumiType == 1))
                     ImGui::Combo("listed players##spectatorlist player", &g_specListType, "all spectators\0local spectators\0");
 
-                if (g_specStyle > 36 || g_specStyle < 0) g_specStyle = 0;
+                if (g_specStyle > 38 || g_specStyle < 0) g_specStyle = 0;
                 ImGui::Combo("style##spectatorlist style", &g_specStyle,
                     "default\0delusional\0interwebz\0windows xp\0clarity\0chillware\0lobotomy v2\0kamibebra\0eyes\0cumhacck\0clarity v2\0"
                     "airplane\0bhop cheat\0millionware\0aimware\0havoc\0onetap\0airflow\0ev0lve\0legendware\0interium\0chillware v2\0"
                     "skebob\0cumidere\0illusory\0lumi\0billware\0inkabanium\0dna\0cucumber\0howeweware\0gamesense\0kamidere\0heroin\0hotwheels v1\0"
-                    "grimoire\0datashell\0");
+                    "grimoire\0datashell\0requiem\0primordial\0");
                 const int style = g_specStyle;
 
                 if (style == 33) {   // heroin-new "speclist mode"
@@ -2719,7 +2720,8 @@ static void Page_MiscMain()
                     ImGui::Combo("type##spectatorlist lumi type", &g_specLumiType, "default\0new\0interwebz\0");
                 }
                 if (style == 1 || style == 2 || style == 3 || style == 15 || style == 22 || style == 23 || style == 24 || style == 26 || style == 28 ||
-                    style == 29 || style == 30 || style == 31 || style == 32 || style == 34 || style == 35 || style == 36 || (style == 25 && g_specLumiType != 1))
+                    style == 29 || style == 30 || style == 31 || style == 32 || style == 34 || style == 35 || style == 36 || style == 37 || style == 38 ||
+                    (style == 25 && g_specLumiType != 1))
                     ImGui::Checkbox("show targets##spectatorlist targets", &g_specShowTarget);
                 if (style == 22) {
                     ImGui::Checkbox("draw background##spectatorlist skebob", &g_specSkebobBg);
@@ -2727,8 +2729,13 @@ static void Page_MiscMain()
                 }
                 if ((style == 0 && g_specListType == 0) || style == 4 || style == 5 || style == 6 || style == 11 || style == 15 || style == 17 ||
                     style == 18 || style == 21 || style == 22 || style == 23 || style == 25 || style == 26 || style == 27 || style == 28 ||
-                    style == 29 || style == 30 || style == 31 || style == 32 || style == 34 || style == 35 || style == 36)
+                    style == 29 || style == 30 || style == 31 || style == 32 || style == 34 || style == 35 || style == 36 || style == 37 || style == 38)
                     ImGui::Checkbox("always show##spectatorlist always show", &g_specAlwaysShow);
+                if (style == 38) {   // primordial "Show Mode" / "Transparency" / "Disable Header"
+                    ImGui::Checkbox("observer mode##spectatorlist primordial", &g_specBhopMode);
+                    ImGui::SliderFloat("transparency##spectatorlist primordial", &g_specPrimordialTransparency, 0.f, 100.f, "%.0f");
+                    ImGui::Checkbox("disable header##spectatorlist primordial", &g_specPrimordialNoHeader);
+                }
                 if (style == 34)
                     ImGui::SliderFloat("gap##spectatorlist hotwheels", &g_specHotwheelsGap, 0.f, 20.f, "%.0f px");
                 if (style == 36)
@@ -2820,7 +2827,7 @@ static void Page_MiscMain()
                 if (style == 12)
                     ImGui::Checkbox("observer mode##spectatorlist bhopcheat mode", &g_specBhopMode);
                 if ((style < 13 && style != 8 && style != 9 && style != 11) || style == 22 || style == 31 || style == 32 || style == 34 || style == 35 ||
-                    (style == 25 && g_specLumiType != 2))
+                    style == 37 || (style == 25 && g_specLumiType != 2))
                     ImGui::Checkbox("spectator avatars", &g_specAvatar);
                 if (style == 10)
                     ImGui::Checkbox("always show##spectatorlist clarity v2", &g_specClarityAlwaysShow);
@@ -4075,6 +4082,7 @@ struct MenuStyleRow
     bool gamesense = false;  // skeet frame + gradient bar over the window (GamesenseFrame), layout untouched
     bool primordial = false; // black 180 outer line + solid accent line (PrimordialFrame), scrollbar colours
     bool clarity = false;    // scrollbar grab 31, no track
+    bool aventum = false;    // 1 px accent -> 22 gradient ring + 33 @ .5 outline outside the window (AventumFrame)
 };
 
 static const MenuStyleRow k_menuStyles[] = {
@@ -4117,7 +4125,32 @@ static const MenuStyleRow k_menuStyles[] = {
       IM_COL32(41, 41, 41, 255), IM_COL32(41, 41, 41, 255), IM_COL32(29, 29, 29, 255), IM_COL32(210, 210, 210, 255),
       IM_COL32(127, 127, 127, 255), 9.f, 2.f, 2.f, []() -> ImFont* { return g_fontPrimordialRoboto13; },
       []() -> ImFont* { return g_fontPrimordialRobotoMedium13; }, false, true },
+    // aventum.dll (Documents\!, payload GOVNO base 0x34500000) gui palette .data 0x34c3cab8..cb20, rounding 0 everywhere:
+    // window 16 (title on it), group 19 + title + accent line on it (band = child), widget base 23 (checkbox / slider
+    // vertical grad 51 -> 23, button 23 / hover 51), outline 33 (group ring is 22), combo list 19, idle label 149 =
+    // textDim (text 255 @ .5 on 19 = 137), active label = accent there (widget body, not a row colour). Ring outside the
+    // window = AventumFrame, so its inner border is off (alpha 0). One font for every string, both slots.
+    { "aventum", IM_COL32(16, 16, 16, 255), IM_COL32(19, 19, 19, 255), IM_COL32(19, 19, 19, 255), IM_COL32(23, 23, 23, 255),
+      IM_COL32(33, 33, 33, 255), IM_COL32(0, 0, 0, 0), IM_COL32(19, 19, 19, 255), IM_COL32(255, 255, 255, 255),
+      IM_COL32(149, 149, 149, 255), 0.f, 0.f, 0.f, []() -> ImFont* { return g_fontAventumVerdana14; },
+      []() -> ImFont* { return g_fontAventumVerdana14; }, false, false, false, true },
 };
+
+// aventum window render (vfunc +0x23ebb0 -> +0x23da10): 4 one-px strips on the ring just outside the window, accent
+// at the top-left + bottom-right corners fading to 22 (top l->r, left t->b, right b->t, bottom r->l), then
+// (33,33,33) @ alpha*.5 outline on the same ring
+static void AventumFrame(ImDrawList* dl, const ImVec2& pos, const ImVec2& size)
+{
+    const ImVec2 mn(pos.x - 1.f, pos.y - 1.f), mx(pos.x + size.x + 1.f, pos.y + size.y + 1.f);
+    const ImU32 a = ImGui::GetColorU32(ImGuiCol_Accent), g = IM_COL32(22, 22, 22, 255);
+    dl->PushClipRect(mn, mx, false);
+    dl->AddRectFilledMultiColor(mn, ImVec2(mx.x, mn.y + 1.f), a, g, g, a);
+    dl->AddRectFilledMultiColor(ImVec2(mx.x - 1.f, mn.y), mx, g, g, a, a);
+    dl->AddRectFilledMultiColor(mn, ImVec2(mn.x + 1.f, mx.y), a, a, g, g);
+    dl->AddRectFilledMultiColor(ImVec2(mn.x, mx.y - 1.f), mx, g, a, a, g);
+    dl->AddRect(mn, mx, IM_COL32(33, 33, 33, 127));
+    dl->PopClipRect();
+}
 
 // csgo menu.cpp primordial_frame: black 180 line 1 px outside the r9 frame, solid accent line under the band
 static void PrimordialFrame(ImDrawList* dl, const ImVec2& pos, const ImVec2& size, float bandH)
@@ -4712,6 +4745,7 @@ void RenderMenu()
     RenderFadedGradientLine(dl, ImVec2(wp.x, botY), ImVec2(wz.x, 1.f), ImColor(Accent()));
     if (k_menuStyles[g_menuStyle].gamesense) GamesenseFrame(dl, wp, wz);
     if (k_menuStyles[g_menuStyle].primordial) PrimordialFrame(dl, wp, wz, mf::kHeaderH);
+    if (k_menuStyles[g_menuStyle].aventum) AventumFrame(dl, wp, wz);
 
     // ---- title: "botox" bold white, then " | <date>" regular accent, same baseline,
     // centred as one unit in the top band.

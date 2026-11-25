@@ -1361,6 +1361,8 @@ static void StyleFonts(int style, ImFont*& title, ImFont*& artist, float& size)
     case 23: pick(g_fontLobotomyBold13, g_fontLobotomyBold13); break;     // lobotomy v2 wm face, sf pro bold 13
     case 24: pick(g_fontGrimoireBold11, g_fontGrimoireBold11); break;     // grimoire wm face, tahoma bd 11
     case 25: pick(g_fontDatashellBold12, g_fontDatashellBold12); break;   // datashell wm face, verdana bd 12
+    case 26: pick(g_fontTahoma12, g_fontTahoma12); break;                 // requiem spotify panel: vgui Tahoma 12 (bilevel)
+    case 27: pick(g_fontPrimordialTahoma13, g_fontPrimordialTahoma13); break;   // primordial wm face, tahoma 13 Monochrome
     default: break;
     }
     if (!title || !artist) {

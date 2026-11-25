@@ -37,6 +37,20 @@
 //      compensation rewinds to. Rewind() reproduces BacktrackPlayer on the same records the
 //      server keeps, at the exact tick the server will pick.
 //
+// dih-bs23 (the server re-read for it changed nothing above -- the geometry was right -- and found the
+// last two guesses, both on the yaw side):
+//   4. WHEN THE SERVER READS HIM was tick_count + both netchan latencies: 0.5-1.5 ticks late for a
+//      command sent on its tick, and blind to the tick (or two) a silent-aim stab is choked for. Now
+//      measured off the server's own command acks, plus the stab's choke (CmdClock, DueTime).
+//   5. THE ODDS WERE A GAUSSIAN round the bet, and closed loop that p did not sort swings (fires at
+//      p .7-.8 landed 97.6%, at p > .999 only 98.6%). Now, wherever there is data for the bet, the mass
+//      of a residual histogram learned per MOTION STATE from every scored bet of every player
+//      (ResidTable, StabMix), with Decide's bands (.90 / .99) on it. Where there is none it is bs22
+//      unchanged. Closed loop: TestMeasuredOdds.
+// Still not modelled, on purpose: MvM's "sapped robot is always a backstab" (knife:432-439), powerup
+// mode's grapple refusals (knife:411-425), cl_lagcompensation 0, the engine's own choke under
+// cl_cmdrate < tickrate.
+//
 // TWO CLOCKS, AND THEY ARE NOT THE SAME. m_flSimulationTime is set from curtime inside HIS command
 // run (player.cpp:4730), and there curtime is his m_nTickBase (player_command.cpp:336-342), which
 // the server keeps 0..2*sv_clockcorrection_msecs AHEAD of the absolute tick (player.cpp:3140-3172,
@@ -118,6 +132,7 @@ namespace BsMath
 		float margin = 0.f;   // degrees inside [lo, hi] at the centre estimate (< 0 = outside)
 		float facing = 0.f;   // degrees inside the facing window
 		float lo = 0.f, hi = 0.f;
+		float r = 0.f;        // his yaw - bearing at the estimate, unwrapped next to the window
 	};
 
 	// The mass of N(r, sigYaw) x N(0, sigBear) inside the three strips (dOwn = our yaw - bearing, r = his
@@ -167,6 +182,46 @@ namespace BsMath
 		return std::clamp(p * (0.39894228f / s), 0.f, 1.f);   // 1/sqrt(2 pi)
 	}
 
+	// dih-bs23: the same mass with his yaw drawn from a residual HISTOGRAM round the bet instead of a
+	// Gaussian (ResidTable, below: how bets made in his motion state have actually landed). n / N = that
+	// state's counts, dir = the way its positive residuals point. A cell's weight is
+	//     (count + k_resPrior x the Gaussian's share of the cell) / (N + k_resPrior)
+	// so an empty state IS the Gaussian (to the cell grid), and his yaw is uniform inside a cell. Given
+	// his yaw the three strips leave the bearing error one interval: a Phi difference, as in StabJoint.
+	constexpr int   k_resCells = 19;
+	constexpr float k_resEdge[k_resCells + 1] = { -180.f, -90.f, -60.f, -40.f, -25.f, -15.f, -8.f, -4.f, -2.f, -1.f,
+		1.f, 2.f, 4.f, 8.f, 15.f, 25.f, 40.f, 60.f, 90.f, 180.f };
+	constexpr float k_resPrior = 25.f;   // pseudo-samples the Gaussian is worth
+	inline float StabMix(float dOwn, float r, float sigYaw, float sigBear, const float* n, float N, float dir)
+	{
+		sigYaw = std::max(sigYaw, 0.01f);
+		sigBear = std::max(sigBear, 0.01f);
+		float p = 0.f;
+		for (int c = 0; c < k_resCells; c++)
+		{
+			const float a = k_resEdge[c], b = k_resEdge[c + 1];
+			// the outermost cells take the Gaussian's tails
+			const float prior = (c == k_resCells - 1 ? 1.f : Phi(b / sigYaw)) - (c == 0 ? 0.f : Phi(a / sigYaw));
+			const float w = (n[c] + k_resPrior * prior) / (N + k_resPrior);
+			if (w < 1e-5f)
+				continue;
+			const int m = std::clamp(int((b - a) * 0.25f + 0.999f), 2, 23);   // midpoints, at most 4 degrees apart
+			float in = 0.f;
+			for (int j = 0; j < m; j++)
+			{
+				// his yaw (relative to the bearing), unwrapped next to our own
+				const float y = dOwn + Wrap(r + dir * (a + (b - a) * (float(j) + 0.5f) / float(m)) - dOwn);
+				if (std::fabs(y - dOwn) >= k_facestabHalf)
+					continue;
+				const float l = std::max(dOwn - k_facingHalf, y - k_behindHalf), u = std::min(dOwn + k_facingHalf, y + k_behindHalf);
+				if (u > l)
+					in += Phi(u / sigBear) - Phi(l / sigBear);
+			}
+			p += w * in / float(m);
+		}
+		return std::clamp(p, 0.f, 1.f);
+	}
+
 	inline StabOdds StabProbability(float bearing, float ownerYaw, float yawCentre, float sigYaw, float sigBear)
 	{
 		StabOdds o;
@@ -186,6 +241,7 @@ namespace BsMath
 		const float mid = 0.5f * (lo + hi);
 		const float c = mid + Wrap(yawCentre - mid);
 		o.margin = std::min(hi - c, c - lo);
+		o.r = c - bearing;
 		if (hi <= lo)
 			return o;
 
@@ -307,6 +363,134 @@ namespace BsMath
 
 	inline int TimeToTicks(float t, float tick) { return int(0.5f + t / tick); }
 
+	// ---- WHEN THE SERVER RUNS OUR COMMAND: MEASURED (dih-bs23) -------------------------------------
+	// Up to bs22 it was guessed: tick_count + FLOW_INCOMING + FLOW_OUTGOING. Those two carry both ends'
+	// HOLD time on top of the wire -- the server's wait for its next snapshot, ours for the next send --
+	// and the command waits for neither. The sum lands on the snapshot that ACKS the command plus however
+	// far our tick clock leads the newest snapshot: 0.4 to 1.5 ticks past the server's read, by where the
+	// clock sits in its drift dead zone (TestCmdClock walks the netchan's own bookkeeping). So his yaw was
+	// bet up to ~23 ms further ahead than the server reads it and every bet was scored at that moment --
+	// it erred slow, not wrong: about the same front stabs, every stab ~25-105 ms later (TestStabTiming).
+	// The server says when instead. A snapshot's command_ack is the last command whose RESULT is in that
+	// snapshot (prediction.cpp:155 checks the predicted slot against exactly it), so
+	//     off = (tick of the first snapshot that acks command n) - (n's tick_count)
+	// is how long after its tick_count a command runs, on the packet clock his yaw is keyed by. Inside
+	// that frame he runs before or after us (sim list order, not knowable): the read sits half a tick
+	// before that snapshot.
+	// That is for a command SENT on its own tick. A silent-aim stab is not: psilent chokes it, it leaves
+	// with the next command's packet and runs a tick later (two when anti-cheat compatibility holds that
+	// one as well). DueTime takes those ticks from the caller; CcWatch measures what a stab really waited,
+	// for the log.
+	// ponytail: below cl_cmdrate = tickrate the engine chokes commands of its own (stock 30: about every
+	// other one, a tick late each). Not modelled -- hand the engine's send flag to the caller if it matters.
+	constexpr int k_ccCmds = 128;   // command numbers remembered (power of 2), 1.9 s
+	constexpr int k_ccWin  = 32;    // offsets averaged: 0.5 s of snapshots at 66/s
+	constexpr int k_ccMin  = 8;     // fewer than this = not measured, the latency guess stands
+	struct CmdClock
+	{
+		int   aNum[k_ccCmds]{}, aTick[k_ccCmds]{};   // command number -> its tick_count as created
+		int   iAck = 0, iPacketTick = 0;              // the previous snapshot's
+		int   aOff[k_ccWin]{}, nOff = 0, iOff = 0;
+		int   iGap = 0;                               // log only: ticks between the last two snapshots
+		float flOff = 0.f;                            // ticks from tick_count to the acking snapshot
+		bool  bValid = false;
+		int   iWatch = 0;                             // a command whose own ack is wanted (CcWatch)
+		int   iWatchOff = -1;                         // ...ticks from ITS tick_count to the snapshot that acked it
+	};
+
+	// Log only: how long did THIS command (a stab) wait for its ack? iWatchOff - flOff = the ticks it was
+	// held back before it was sent.
+	inline void CcWatch(CmdClock& c, int num)
+	{
+		c.iWatch = num;
+		c.iWatchOff = -1;
+	}
+
+	// Every command, BEFORE anything rewrites its tick_count (knife backtrack does).
+	inline void CcCommand(CmdClock& c, int num, int tickCount)
+	{
+		c.aNum[num & (k_ccCmds - 1)] = num;
+		c.aTick[num & (k_ccCmds - 1)] = tickCount;
+	}
+
+	// Every snapshot: its server tick and the command it acks. Only the LAST acked command is sampled --
+	// the ones choked in front of it waited for its packet, it did not. Returns true when it forgot what
+	// it had measured: another server or map (ticks or acks ran backwards), or a stall over a second.
+	inline bool CcPacket(CmdClock& c, int packetTick, int ack)
+	{
+		const int gap = packetTick - c.iPacketTick;
+		if (gap == 0)
+			return false;   // the same snapshot twice
+		if (c.iWatch && ack >= c.iWatch)
+		{
+			if (gap > 0 && c.aNum[c.iWatch & (k_ccCmds - 1)] == c.iWatch)
+				c.iWatchOff = packetTick - c.aTick[c.iWatch & (k_ccCmds - 1)];
+			c.iWatch = 0;
+		}
+		const bool bForget = gap < 0 || gap > 66 || ack < c.iAck;
+		if (bForget)
+		{	// another server, or a stall: nothing measured before it still holds
+			c.nOff = c.iOff = 0;
+			c.bValid = false;
+		}
+		else if (ack > c.iAck && c.aNum[ack & (k_ccCmds - 1)] == ack)
+		{
+			const int off = packetTick - c.aTick[ack & (k_ccCmds - 1)];
+			if (off >= 0 && off <= 66)
+			{
+				c.aOff[c.iOff] = off;
+				c.iOff = (c.iOff + 1) % k_ccWin;
+				c.nOff = std::min(c.nOff + 1, k_ccWin);
+				// interquartile mean: a lost snapshot acks late (one sided), jitter is a tick either way,
+				// and a ping sitting on a frame boundary splits the window in two -- the mean of the
+				// middle half is the expected frame without the strays
+				int a[k_ccWin];
+				std::copy(c.aOff, c.aOff + c.nOff, a);
+				std::sort(a, a + c.nOff);
+				const int q = c.nOff / 4;
+				int sum = 0;
+				for (int i = q; i < c.nOff - q; i++)
+					sum += a[i];
+				c.flOff = float(sum) / float(c.nOff - 2 * q);
+				c.bValid = c.nOff >= k_ccMin;
+			}
+		}
+		c.iGap = gap;
+		c.iPacketTick = packetTick;
+		c.iAck = ack;
+		return bForget;
+	}
+
+	// TICKS A STAB IS HELD BACK BEFORE IT IS SENT -- the DLL's own two rules, replayed by TestFireDelay:
+	//   ticks.cpp ManagePacket          silent aim sets G::PSilentAngles -> the stab's command is choked
+	//                                   (while CanChoke) and leaves with the next one: 1 tick
+	//   hooks.cpp AntiCheatCompatibility (anti-cheat compat on) on that NEXT command: its view differs from
+	//                                   the stab's silent angle by > PSILENT_EPSILON and is within
+	//                                   REAL_EPSILON of the view BEFORE the stab -> it copies the stab's send
+	//                                   flag (choked) onto itself: 2 ticks
+	// step = how far the view turned this command against the last, deg. The next command's is not known
+	// yet; at the same rate it is two steps from the view before the stab.
+	// ponytail: two cases it cannot see, both make it a tick LATE, never early (late errs slow): a silent
+	// angle within a degree of the view (no psilent check), and a view that stops between the two commands.
+	constexpr float k_accEps     = 1.f / 16.f;             // hooks.cpp MATH_EPSILON
+	constexpr float k_accPsilent = 1.f - k_accEps;         // hooks.cpp PSILENT_EPSILON
+	constexpr float k_accReal    = 0.1f + k_accEps;        // hooks.cpp REAL_EPSILON
+	inline int FireDelay(bool silent, bool canChoke, bool antiCheatCompat, float stepDeg)
+	{
+		if (!silent || !canChoke)
+			return 0;
+		return antiCheatCompat && 2.f * stepDeg < k_accReal ? 2 : 1;
+	}
+
+	// The packet-clock moment the server reads his live yaw for a command with this tick_count that is
+	// held back `chokeTicks` before it is sent. `latency` (FLOW_INCOMING + FLOW_OUTGOING) is the bs22
+	// guess, used until the clock has samples -- it runs 0.5-1.5 ticks late by itself, which is about
+	// one choked tick, so the choke is not added to it.
+	inline float DueTime(const CmdClock& c, int tickCount, float latency, float tick, int chokeTicks = 0)
+	{
+		return c.bValid ? (float(tickCount + chokeTicks) + c.flOff - 0.5f) * tick : float(tickCount) * tick + latency;
+	}
+
 	// ---- per-player snapshot track ------------------------------------------------------------------
 	// Fed at every FRAME_NET_UPDATE_END. Holds the records BacktrackPlayer walks (sim clock), his yaw
 	// on the absolute clock (packet time), whether he is choking, and a running audit of three yaw
@@ -359,6 +543,8 @@ namespace BsMath
 		int   iPredHead = 0, iPredTail = 0;
 		float aDue[k_predN]{}, aHor[k_predN]{};
 		float aPred[k_predN][k_est]{};
+		float aBet[k_predN]{};               // the bet itself: the estimator's prediction that was best then
+		signed char aBetBin[k_predN]{}, aBetDir[k_predN]{};   // his motion state when it was made (ResidTable)
 
 		float aMsFast[k_est]{}, aMsSlow[k_est]{};   // EMAs of squared error per estimator, deg^2
 		float flHorRef = 0.f;                // EMA of the horizon those errors were scored at
@@ -440,9 +626,158 @@ namespace BsMath
 			out[k] = y + k_estFrac[k] * r * h;
 	}
 
+	inline float MeasuredMs(const Track& tr, int k)
+	{
+		const float slow = tr.iScored ? tr.aMsSlow[k] / (1.f - std::pow(1.f - k_errSlow, float(std::min(tr.iScored, 400)))) : 0.f;
+		return std::max(tr.aMsFast[k], slow);
+	}
+
+	// the estimator the audit trusts most on this player right now (half rate until it has spoken)
+	inline int BestEst(const Track& tr)
+	{
+		int best = 1;
+		if (tr.iScored)
+			for (int k = 0; k < k_est; k++)
+				if (MeasuredMs(tr, k) < MeasuredMs(tr, best))
+					best = k;
+		return best;
+	}
+
+	// ---- WHERE THE BETS REALLY LAND (dih-bs23) -------------------------------------------------------
+	// bs22 priced his yaw as a Gaussian round the bet, sigma = the recent RMS error. Closed loop that
+	// number does not sort swings (lab, 75 ms, humans): fires at p .7-.8 landed 97.6%, fires at p > .999
+	// only 98.6%. Two reasons, both structural:
+	//   * the error is a MIXTURE -- nothing at all while he holds still, tens of degrees the moment a
+	//     flick starts -- and an RMS is neither. |z| > 3 came up 4.4% of the time, not 0.27%
+	//   * the RMS is scored a full horizon late, so it is high AFTER a flick (he has stopped) and low
+	//     BEFORE the next one
+	// What does tell them apart is visible in the last few snapshots: is he still, moving, speeding up,
+	// slowing down. So every bet is filed under that MOTION STATE, and when its moment arrives the
+	// residual (truth - bet, signed along his motion) goes into that state's histogram. The odds are
+	// then the mass of that histogram inside the server's window (StabMix) -- how bets made in this
+	// state on this server at this ping have actually landed, tails and one-sidedness included.
+	// One table for all players: a state fills from everyone at once (a flick's onset is ~3 ticks per
+	// player per flick; alone it would take minutes).
+	// MEASURED MEANS MEASURED. The table is believed only for a bet it has data for (TurnGuarded bMix):
+	//   * a readable motion state -- not a choker (his snapshots say nothing about now), not a gap
+	//   * with k_resTrust scored bets in it (a thinner one borrows every state's, pooled, once the table
+	//     as a whole has four times that)
+	//   * at the horizon those bets were scored at (ResidOnHorizon). Residuals are plain degrees: a turn
+	//     has twice the time at twice the ping, and no rescaling of a histogram says where it gets to
+	//     (the first cut scaled linearly and folded a 150-degree snap inside the window at 30 ms ping)
+	// Everything else is bs22 to the letter: the Gaussian, the turn guard, and the rule they were tuned
+	// on (Decide, measured = false). Nothing is seeded -- the first seconds of a map ARE bs22, until the
+	// players in view have filled the states. A ping that moves empties the table (ResidAdd) and it
+	// refills at the new horizon.
+	constexpr int   k_resSpeeds = 6, k_resTrends = 3, k_resBins = k_resSpeeds * k_resTrends;
+	constexpr float k_resSpeedEdge[k_resSpeeds - 1] = { 12.f, 30.f, 80.f, 200.f, 500.f };   // deg/s; 12 = 1 step of the 10-bit grid in 45 ms
+	constexpr float k_resSpan   = 0.04f;    // s of snapshots a speed is measured over
+	constexpr float k_resMemory = 3000.f;   // samples a state remembers (a rare tail needs the count)
+	constexpr float k_resTrust  = 150.f;    // samples before a state's histogram is believed
+	constexpr int   k_resOffMax = 600;      // off-horizon bets (net of on-horizon ones) that mean the ping moved
+
+	struct ResidTable
+	{
+		float n[k_resBins][k_resCells]{};
+		float N[k_resBins]{};
+		float flHor = 0.f;   // the horizon its bets were scored at, s (EMA); 0 = empty
+		int   iOff = 0;      // bets lately that were NOT at that horizon, net of those that were
+	};
+
+	// a bet this table can speak for: within a quarter + a tick of the horizon its own were scored at
+	inline bool ResidOnHorizon(const ResidTable& t, float horizon)
+	{
+		return t.flHor > 0.f && std::fabs(horizon - t.flHor) <= 0.25f * t.flHor + k_tick;
+	}
+
+	// His motion state from the newest snapshots (yaw clock): speed class of the last k_resSpan x trend
+	// against the k_resSpan before it (0 steady, 1 speeding up / reversed, 2 slowing down). dir = the way
+	// he is turning (+1 when it cannot be told). -1 = no state to read: too few records, a gap, or a man
+	// who is choking hard -- his newest snapshot is where he WAS, and "still" is the one thing it does not show.
+	// Hard = two packets without him, or a newest record that came as a batch of three ticks or more. One
+	// skipped packet is not: a 33 fps client sends like that, and so does every man standing still when
+	// AddSnapshot folds a sim-time rollover away (twice per 100 ticks) -- with plain Choking() those ticks
+	// had no state, went to bs22's looser rule and swung early (16% of all fires at 150 ms in the closed loop).
+	// A client under ~30 fps (3-tick batches) IS hard: bs22's odds for him (TestMeasuredOdds, low fps).
+	inline bool ChokingHard(const Track& tr)
+	{
+		if (!tr.iCount)
+			return false;
+		if (tr.iDupRun >= 2)
+			return true;
+		return tr.iCount >= 2 && tr.aChoked[Idx(tr, 0)] && tr.aT[Idx(tr, 0)] - tr.aT[Idx(tr, 1)] > 2.5f * k_tick;
+	}
+	inline int MotionBin(const Track& tr, int& dir)
+	{
+		dir = 1;
+		if (!tr.bLive || tr.iCount < 2 || ChokingHard(tr))
+			return -1;
+		const int i0 = Idx(tr, 0);
+		int b1 = 1;
+		while (b1 < tr.iCount - 1 && tr.aTy[i0] - tr.aTy[Idx(tr, b1)] < k_resSpan - 1e-4f)
+			++b1;
+		const int i1 = Idx(tr, b1);
+		const float dt1 = tr.aTy[i0] - tr.aTy[i1];
+		if (dt1 <= 1e-4f || dt1 > 2.f * k_resSpan)
+			return -1;   // a gap: nothing recent to read a motion from
+		const float v1 = (tr.aY[i0] - tr.aY[i1]) / dt1;
+		float v0 = v1;
+		int b2 = b1 + 1;
+		while (b2 < tr.iCount - 1 && tr.aTy[i1] - tr.aTy[Idx(tr, b2)] < k_resSpan - 1e-4f)
+			++b2;
+		if (b2 < tr.iCount)
+		{
+			const int i2 = Idx(tr, b2);
+			const float dt0 = tr.aTy[i1] - tr.aTy[i2];
+			if (dt0 > 1e-4f && dt0 <= 2.f * k_resSpan)
+				v0 = (tr.aY[i1] - tr.aY[i2]) / dt0;
+		}
+		const float a1 = std::fabs(v1), a0 = v0 * v1 > 0.f ? std::fabs(v0) : 0.f;   // a reversal = a start from rest
+		int s = 0;
+		while (s < k_resSpeeds - 1 && a1 >= k_resSpeedEdge[s])
+			++s;
+		const int trend = a1 > 1.5f * a0 + 10.f ? 1 : a1 < 0.67f * std::fabs(v0) - 5.f ? 2 : 0;
+		dir = v1 > 0.f ? 1 : v1 < 0.f ? -1 : v0 < 0.f ? -1 : 1;
+		return s * k_resTrends + trend;
+	}
+
+	inline int ResidCell(float r)
+	{
+		int c = 0;
+		while (c < k_resCells - 1 && r >= k_resEdge[c + 1])
+			++c;
+		return c;
+	}
+
+	// One scored bet: resid = (truth - bet) x dir, degrees, made `horizon` s ahead. bin < 0 (no readable
+	// state when it was made) is not filed.
+	inline void ResidAdd(ResidTable& t, int bin, float resid, float horizon)
+	{
+		if (bin < 0 || bin >= k_resBins)
+			return;
+		if (t.flHor <= 0.f)
+			t.flHor = horizon;
+		if (ResidOnHorizon(t, horizon))
+			t.iOff = std::max(t.iOff - 1, 0);
+		else if (++t.iOff <= k_resOffMax)
+			return;   // somebody's long reach (he choked, we hitched): not this table's bet
+		else
+		{	// they keep coming: the ping moved. What was learned at the old horizon is not about this one
+			t = {};
+			t.flHor = horizon;
+		}
+		t.flHor += 0.01f * (horizon - t.flHor);
+		const float keep = 1.f - 1.f / k_resMemory;
+		for (int c = 0; c < k_resCells; c++)
+			t.n[bin][c] *= keep;
+		t.n[bin][ResidCell(Wrap(resid))] += 1.f;   // an angle: a spin's +200 lands where -160 does
+		t.N[bin] = t.N[bin] * keep + 1.f;
+	}
+
 	// Once per FRAME_NET_UPDATE_END: tSim = his m_flSimulationTime, tPacket = the packet's server time.
-	// Returns false when it carried nothing new of him (duplicate simulation time).
-	inline bool AddSnapshot(Track& tr, float tSim, float tPacket, float yaw, V3 origin, V3 mins, V3 maxs)
+	// Returns false when it carried nothing new of him (duplicate simulation time). pTab (optional)
+	// collects where each scored bet landed.
+	inline bool AddSnapshot(Track& tr, float tSim, float tPacket, float yaw, V3 origin, V3 mins, V3 maxs, ResidTable* pTab = nullptr)
 	{
 		if (tr.bLive && tr.iCount)
 		{
@@ -505,6 +840,8 @@ namespace BsMath
 					tr.aMsFast[k] += k_errFast * (e * e - tr.aMsFast[k]);
 					tr.aMsSlow[k] += k_errSlow * (e * e - tr.aMsSlow[k]);
 				}
+				if (pTab)
+					ResidAdd(*pTab, tr.aBetBin[tr.iPredTail], (truth - tr.aBet[tr.iPredTail]) * float(tr.aBetDir[tr.iPredTail]), tr.aHor[tr.iPredTail]);
 				tr.flHorRef = tr.iScored ? tr.flHorRef + k_errFast * (tr.aHor[tr.iPredTail] - tr.flHorRef)
 					: tr.aHor[tr.iPredTail];
 				++tr.iScored;
@@ -519,8 +856,11 @@ namespace BsMath
 				for (int b = 0; b < tr.iCount; b++)
 					tr.aY[Idx(tr, b)] -= shift;
 				for (int p = tr.iPredTail; p != tr.iPredHead; p = (p + 1) % k_predN)
+				{
 					for (int k = 0; k < k_est; k++)
 						tr.aPred[p][k] -= shift;
+					tr.aBet[p] -= shift;
+				}
 			}
 		}
 
@@ -544,6 +884,10 @@ namespace BsMath
 		if (tr.iPredHead != tr.iPredTail && tr.aDue[iLast] >= tDue)
 			return;   // same command twice, or the clock stepped back: keep the ring in time order
 		Predict(tr, tDue, tr.aPred[tr.iPredHead]);
+		tr.aBet[tr.iPredHead] = tr.aPred[tr.iPredHead][BestEst(tr)];
+		int dir;
+		tr.aBetBin[tr.iPredHead] = (signed char)MotionBin(tr, dir);
+		tr.aBetDir[tr.iPredHead] = (signed char)dir;
 		tr.aDue[tr.iPredHead] = tDue;
 		tr.aHor[tr.iPredHead] = std::clamp(tDue - tr.aTy[Idx(tr, 0)], 0.f, k_maxHorizon);
 		tr.iPredHead = (tr.iPredHead + 1) % k_predN;
@@ -557,13 +901,8 @@ namespace BsMath
 		float seen = 0.f;                   // his yaw in the newest snapshot -- what he has actually been seen doing
 		float sigmaCore = k_priorSigma;     // sigma without the in-flight spread term (TurnGuarded prices that itself)
 		int   k = 1;
+		int   bin = -1, dir = 1;            // his motion state now (MotionBin): which residual histogram the bet draws on; -1 none
 	};
-
-	inline float MeasuredMs(const Track& tr, int k)
-	{
-		const float slow = tr.iScored ? tr.aMsSlow[k] / (1.f - std::pow(1.f - k_errSlow, float(std::min(tr.iScored, 400)))) : 0.f;
-		return std::max(tr.aMsFast[k], slow);
-	}
 
 	inline YawEstimate Estimate(const Track& tr, float tDue)
 	{
@@ -572,12 +911,9 @@ namespace BsMath
 			return e;
 		float pred[k_est];
 		Predict(tr, tDue, pred);
-		int best = 1;   // half rate until the audit has spoken
-		if (tr.iScored)
-			for (int k = 0; k < k_est; k++)
-				if (MeasuredMs(tr, k) < MeasuredMs(tr, best))
-					best = k;
+		const int best = BestEst(tr);
 		e.k = best;
+		e.bin = MotionBin(tr, e.dir);
 		e.centre = Wrap(pred[best]);
 		e.seen = Wrap(pred[0]);   // estimator 0 = hold = the newest snapshot's yaw
 		e.rate = Rate(tr);
@@ -625,12 +961,47 @@ namespace BsMath
 		StabOdds best;             // the odds on the best estimator's yaw (bs15's number)
 		float pGuard = 0.f;        // the odds at the guard point
 		float guardMargin = 0.f;   // degrees inside his yaw window at the guard point (< 0 = outside)
-		float p = 0.f;             // what the swing is decided on: the smaller
+		float p = 0.f;             // what the swing is decided on: the measured odds (bMix), else the smaller
+		bool  bMix = false;        // the odds are MEASURED (ResidTable); Decide's bands go with it
 	};
-	inline GuardedOdds TurnGuarded(float bearing, float ownYaw, const YawEstimate& e, float sigBear, float seenLead = 0.f)
+	// pTab (bs23): where it has something measured for this bet (bMix: a readable state, enough scored
+	// bets, the horizon they were scored at) the odds are that state's histogram inside the window and
+	// nothing else -- its one-sided stops are IN it, the guard would only count them twice. Everywhere
+	// else it is bs22: the Gaussian and the guard.
+	inline GuardedOdds TurnGuarded(float bearing, float ownYaw, const YawEstimate& e, float sigBear, float seenLead = 0.f,
+		const ResidTable* pTab = nullptr)
 	{
 		GuardedOdds g;
 		g.best = StabProbability(bearing, ownYaw, e.centre, e.sigma, sigBear);
+		const float* pCells = nullptr;
+		float flCells = 0.f, aPool[k_resCells];
+		if (pTab && e.bin >= 0 && e.bin < k_resBins && ResidOnHorizon(*pTab, e.horizon))
+		{
+			if (pTab->N[e.bin] >= k_resTrust)
+			{
+				pCells = pTab->n[e.bin];
+				flCells = pTab->N[e.bin];
+			}
+			else
+			{	// a thin state on a live table: every state's bets pooled stand in for it (wide, so cautious).
+				// A guess here would go to bs22's looser rule, and the swings the bands hold back leak out
+				// through whichever state happens to be rare (rare now: 2.7% of fires at 150 ms ping, which
+				// without the pool front 245 times for 212 -- critic round 2)
+				for (int c = 0; c < k_resCells; c++)
+					aPool[c] = 0.f;
+				for (int b = 0; b < k_resBins; b++)
+				{
+					flCells += pTab->N[b];
+					for (int c = 0; c < k_resCells; c++)
+						aPool[c] += pTab->n[b][c];
+				}
+				if (flCells >= 4.f * k_resTrust)
+					pCells = aPool;
+			}
+		}
+		g.bMix = pCells != nullptr;
+		if (g.bMix && g.best.hi > g.best.lo)
+			g.best.p = StabMix(Wrap(ownYaw - bearing), g.best.r, e.sigma, sigBear, pCells, flCells, float(e.dir));
 		// unwrapped, as Predict built the bet: a spin can carry the bet past 180 degrees from seen.
 		// The lead is capped at the horizon: a due time that close to his newest packet (zero-ping
 		// listen server) has no newer snapshot coming before it, and the guard must stay between
@@ -641,7 +1012,7 @@ namespace BsMath
 		const StabOdds og = StabProbability(bearing, ownYaw, Wrap(flSeen + k_turnTrust * flTurn), e.sigmaCore, sigBear);
 		g.pGuard = og.p;
 		g.guardMargin = og.margin;
-		g.p = std::min(g.best.p, g.pGuard);
+		g.p = g.bMix ? g.best.p : std::min(g.best.p, g.pGuard);
 		return g;
 	}
 
@@ -786,8 +1157,8 @@ namespace BsMath
 	// and past that rewinds to its own guess (tick - correct) -- the default box, the one we just
 	// judged and did not like. ServerTakesRewind is that test verbatim (the tests' ground truth).
 	constexpr float k_unlagWindow = 0.2f;
-	// Our side of it is an estimate: its tick is tDue (our tick + round trip) give or take jitter,
-	// and its latency is not quite ours. 3 ticks of the 13 the window has.
+	// Our side of it is an estimate: its tick is tDue (half a tick before the snapshot that acks us,
+	// bs23) give or take jitter, and its latency is not quite ours. 3 ticks of the 13 the window has.
 	constexpr float k_btSafety = 0.045f;
 	constexpr int   k_btMax    = 12;
 
@@ -810,10 +1181,24 @@ namespace BsMath
 	}
 
 	// ---- when to swing ----------------------------------------------------------------------------
-	constexpr float k_pSure    = 0.90f;   // bt search stops here; thin hold never asks more than this
-	constexpr float k_pTake    = 0.70f;   // take it unless the next tick is clearly better (a failed swing alerts him)
-	constexpr float k_pGain    = 0.03f;   // "clearly better"
-	constexpr int   k_patience = 4;       // ticks a better tick may be waited for (60 ms)
+	// dih-bs23. On MEASURED odds (TurnGuarded bMix) p means what it says, and the rule is three bands:
+	//   p >= k_pSure            swing
+	//   k_pTake <= p < k_pSure  a chancy stab: k_patience ticks to become a sure one, then it is taken
+	//                           (at once when the reach is about to go)
+	//   p < k_pTake             no swing
+	// Swept in a closed-loop lab over floor .80-.90 x sure .97-.99 x wait 4-12 on two mixed servers,
+	// scored 4 x fronts + chances lost: these 313, bs22's rule on bs22's odds 578. What the shipped pair
+	// does is TestMeasuredOdds' printout; the numbers are in its comment, not here.
+	// On odds that are NOT measured (a cold state, a choker, a ping that just moved) it is bs22's rule on
+	// bs22's thresholds, which is what that Gaussian + guard were tuned on: take it from k_pTakeGuess
+	// unless the next tick is clearly better (bs21). Its bands would be wrong there -- the Gaussian reads
+	// .99 on swings that land 98%, and .75 on swings that land 97%.
+	constexpr float k_pSure      = 0.99f;
+	constexpr float k_pTake      = 0.90f;
+	constexpr float k_pSureGuess = 0.90f;   // bs22's k_pSure / k_pTake
+	constexpr float k_pTakeGuess = 0.70f;
+	constexpr float k_pGain      = 0.03f;   // "clearly better": bs22's rule, and an older tick over a newer (knife backtrack)
+	constexpr int   k_patience   = 4;       // ticks a stab may wait for better odds (60 ms)
 
 	// THIN REACH (bs17). The pad above prices HIS position only; ours on the server is a client
 	// prediction, and with both of us running one tick of relative motion is ~9u. bs16's whiff
@@ -825,21 +1210,83 @@ namespace BsMath
 	inline float ThinPad(float pad, float relSpeed2D) { return pad + k_relLead * relSpeed2D * k_tick; }
 
 	enum EDecision { DEC_FIRE, DEC_ODDS, DEC_HOLD };
-	// bs21: "p >= k_pSure -> swing on spot" gone. Live front (debug.log 11-23): p .922, next .973,
-	// full reach, we orbit into his back at 401 deg/s -- one tick more = 1/3 the front odds. Clearly
-	// better next tick now waited for at ANY p (still <= k_patience ticks). Orbit closed loop
-	// (TestRisingOddsWait): fronts 37 -> 29 of 1187 swings, +3 ms. Lower k_pGain buys ~nothing more.
 	// thin = this tick's slack is under ThinPad, solidNext = the next tick's is not
-	inline EDecision Decide(float p, float pNext, bool reachNext, int held, bool thin = false, bool solidNext = false)
+	inline EDecision Decide(float p, float pNext, bool reachNext, int held, bool thin = false, bool solidNext = false, bool measured = true)
 	{
-		if (p < k_pTake)
+		const float take = measured ? k_pTake : k_pTakeGuess, sure = measured ? k_pSure : k_pSureGuess;
+		if (p < take)
 			return DEC_ODDS;
 		if (held >= k_patience)
 			return DEC_FIRE;   // waited on long enough
-		if (thin && solidNext && pNext >= std::min(p, k_pSure))
+		if (thin && solidNext && pNext >= std::min(p, sure))
 			return DEC_HOLD;   // a solid swing one tick on, no worse odds: do not risk the whiff
-		if (!reachNext || pNext < p + k_pGain)
-			return DEC_FIRE;   // the window is closing, or flat
-		return DEC_HOLD;
+		if (!reachNext)
+			return DEC_FIRE;   // the window is closing
+		if (measured)
+			return p >= k_pSure ? DEC_FIRE : DEC_HOLD;   // sure, or chancy: let it become sure
+		return pNext < p + k_pGain ? DEC_FIRE : DEC_HOLD;   // bs21: a clearly better next tick is waited for
 	}
+
+	// ---- A HOLD, COUNTED (JudgeKnife) -------------------------------------------------------------
+	// How many ticks a stab on one man has been waited on, for Decide's k_patience. Counted once per
+	// command however many targets' swings (or rewind ticks) land on him. A hold survives k_holdGap ticks
+	// of something else in between -- a candidate that only grazes him (why=reach) alternating with a
+	// held one reset it every other tick before, and a chancy stab waited for ever (critic round 2).
+	constexpr int k_holdGap = 2;
+	struct Hold { int tick = -1000, count = 0; };
+	// ticks held BEFORE this command (a stale hold starts over): the default rewind tick may already have
+	// counted this command, and an older one judged after it must not see its patience a tick short
+	inline int HeldBefore(Hold& h, int now)
+	{
+		if (now - h.tick > k_holdGap || now < h.tick)
+			h.count = 0;
+		return h.tick == now && h.count > 0 ? h.count - 1 : h.count;
+	}
+	inline void HoldCount(Hold& h, int now)
+	{
+		if (h.tick != now)
+		{
+			++h.count;
+			h.tick = now;
+		}
+	}
+
+	// ---- KNIFE BACKTRACK, WHICH TICK (RunBackstab) ------------------------------------------------
+	// Every rewind tick from the default (back 0) to the oldest the server takes is judged; the best fire
+	// is the shot. Rules (bs19 / bs23):
+	//   * an older tick has to beat the shot so far by k_pGain (newer = further from the window's edge)
+	//   * while the default tick HOLDS for a man, an older tick's fire on him has to reach what that hold
+	//     waits for -- k_pSure on measured odds, the next tick's odds on guessed (bs22) -- or the wait wins
+	//   * the search stops at a sure shot: k_pSure measured, k_pSureGuess guessed (bs22's .90)
+	// An older box does not move a tick on (NextTickStep): the next command can ask for the same tick, so
+	// "the reach is about to go" cannot be read off it.
+	constexpr int k_btPlayers = 65;
+	struct BtSearch
+	{
+		float aBar[k_btPlayers]{};
+		bool  bFired = false, bShotMeasured = false;
+		float flShot = 0.f;
+		int   iBack = 0;
+		// the default tick holds for player idx
+		void Hold(int idx, bool measured, float pNext)
+		{
+			if (idx >= 0 && idx < k_btPlayers)
+				aBar[idx] = std::max(aBar[idx], measured ? k_pSure : pNext);
+		}
+		// a fire judged `back` ticks back; true = it is the shot now
+		bool Offer(int back, int idx, float p, bool measured)
+		{
+			if (back && idx >= 0 && idx < k_btPlayers && p < aBar[idx])
+				return false;   // waiting on the default tick is better
+			if (bFired && p <= flShot + k_pGain)
+				return false;
+			bFired = true;
+			flShot = p;
+			bShotMeasured = measured;
+			iBack = back;
+			return true;
+		}
+		bool Done() const { return bFired && flShot >= (bShotMeasured ? k_pSure : k_pSureGuess); }
+	};
+	inline V3 NextTickStep(int back, V3 velocity) { return back ? V3{} : velocity * k_tick; }
 }

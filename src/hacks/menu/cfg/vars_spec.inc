@@ -54,5 +54,7 @@
     { "specHeroinType",        CfgEntry::INT,    &g_specHeroinType, 0 },
     { "specHotwheelsGap",      CfgEntry::FLOAT,  &g_specHotwheelsGap, 0 },
     { "specDatashellGap",      CfgEntry::FLOAT,  &g_specDatashellGap, 0 },
+    { "specPrimordialTransparency", CfgEntry::FLOAT, &g_specPrimordialTransparency, 0 },
+    { "specPrimordialNoHeader", CfgEntry::BOOL,  &g_specPrimordialNoHeader, 0 },
     { "specCv2X",              CfgEntry::FLOAT,  &g_specCv2X, 0 },
     { "specCv2Y",              CfgEntry::FLOAT,  &g_specCv2Y, 0 },

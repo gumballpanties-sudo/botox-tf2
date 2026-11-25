@@ -432,6 +432,9 @@ namespace Vars
 			// where he was, his yaw still live). A feature switch, not a tuning knob. Only with
 			// Aimbot::Backtrack::Enabled on too (global off = no rewind anywhere).
 			CVar(BackstabBacktrack, "Backstab backtrack", true);
+			// Most ticks it may go back. A cap only: the server's 0.2 s window (BsMath::RewindBackTicks)
+			// and the global backtrack time still cut it shorter. 12 = BsMath::k_btMax.
+			CVar(BackstabBacktrackTicks, "Backstab backtrack ticks", 12, SLIDER_CLAMP, 1, 12, 1, "%d ticks");
 			// dih-bs13: BackstabAutoShoot DELETED. Off meant the feature never pressed anything,
 			// and in Legit mode (which has no view assist at all) that is the whole feature -- the
 			// cfg was found on that value too. Auto backstab IS the auto swing. Its key goes with

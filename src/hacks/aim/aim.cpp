@@ -504,6 +504,8 @@ void Aim_RenderMenuTab()
 				if (Aimbot::Melee::BackstabAimType.Value == Aimbot::Melee::BackstabAimTypeEnum::Silent)
 					VarSlider(Aimbot::Melee::BackstabFOV);
 				VarToggle(Aimbot::Melee::BackstabBacktrack);
+				if (Aimbot::Melee::BackstabBacktrack.Value)
+					VarSlider(Aimbot::Melee::BackstabBacktrackTicks);
 				VarMulti(Aimbot::Melee::BackstabIgnore);
 				if (Aimbot::Melee::BackstabIgnore.Value & Aimbot::Melee::BackstabIgnoreEnum::Invisible)
 					VarSlider(Aimbot::General::IgnoreInvisible);

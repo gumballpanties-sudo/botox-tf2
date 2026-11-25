@@ -21,7 +21,7 @@ enum EBsGate
 	BSG_FACING,       // our view is not within 60 degrees of him
 	BSG_ODDS,         // the chance of a backstab is under BsMath::k_pTake
 	BSG_TURN,         // good odds on his predicted turn, not at the guard point (BsMath::TurnGuarded)
-	BSG_HOLD,         // good odds, but the next tick is clearly better
+	BSG_HOLD,         // a chancy stab (under BsMath::k_pSure) given its ticks to become a sure one
 	BSG_THIN,         // connects by less than our relative motion, solid next tick (BsMath::ThinPad)
 	BSG_COUNT
 };
@@ -74,6 +74,11 @@ private:
 		float m_flRel = 0.f;         // 2D speed between us and him, u/s (ThinPad)
 		int   m_iK = 1;             // yaw estimator: 0 hold, 1 half rate, 2 full rate
 		int   m_iHeld = 0;
+		// bs23: his motion state (BsMath::MotionBin, -1 none), how many scored bets its histogram holds
+		// (log only), and whether the odds are MEASURED -- that picks Decide's rule
+		int   m_iState = -1;
+		float m_flStateN = 0.f;
+		bool  m_bMix = false;
 		// front-stab forensics (bs17b, log only): sm = margin at his last SEEN yaw (sm < margin = the
 		// bet turns him deeper in), rb = seen yaw - bearing (0 = dead behind), brate = how fast the
 		// bearing swings as we pass (deg/s), the term sigBear does not price
@@ -115,8 +120,7 @@ private:
 	int  m_aRazorTick[65] = {};
 	bool m_aRazorBlocked[65] = {};
 	// consecutive ticks a good-odds stab has been held for a better one (BsMath::k_patience)
-	struct BsHold { int m_iTick = -1000; int m_iCount = 0; };
-	BsHold m_aHold[65] = {};
+	BsMath::Hold m_aHold[65] = {};
 
 	// Live (real-time) target snapshot -- the non-knife melee path's single record.
 	TickRecord m_tLiveRecord = {};
@@ -148,6 +152,9 @@ private:
 		float m_flSeenYaw = 0.f;    // bs21: his last seen yaw at the fire
 	};
 	int m_iBtFires = 0;            // swings that only existed on an older tick
+	int m_iJudgeBack = 0;          // RunBackstab -> JudgeKnife: ticks back the boxes being judged were rewound
+	bool m_bWatchLog = false;      // a stab went out: log what its command really waited (BS: sent)
+	int m_iWatchDelay = 0;         // ...next to the ticks BsFireDelay said it would
 	// sum of (1 - p) over judged swings: the fronts the odds PROMISED, next to the fronts that came
 	double m_flExpFront = 0.0;
 	BackstabFire m_tLastFire = {};

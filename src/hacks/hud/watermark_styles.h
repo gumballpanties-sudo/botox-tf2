@@ -20,6 +20,8 @@
 //                                    23 lobotomy v2 sf pro bold 13
 //                                    24 grimoire    tahoma bd 11 mono
 //                                    25 datashell   verdana bd 12 mono
+//                                    26 requiem     vgui Tahoma 12 w500 outline (vgui_font.h)
+//                                    27 primordial  tahoma 13 Monochrome
 // Accent = the menu accent (ImGuiCol_Accent), as in botox. Sets g_wmBox.
 void Watermark_Draw();
 

@@ -6,6 +6,7 @@
 #include "avatar_pure.h"   // n_avatar::FriendIdToSteam64
 #include "gif_tex.h"
 #include "wm_pure.h"
+#include "vgui_font.h"     // requiem: vgui Win32Font text
 #include "../screen/blur_rect.h"
 #include "../../dependencies/data/airflow_data.h"   // airflow watermark logo icon
 #include "../../dependencies/imgui/imgui_internal.h"   // ImDrawListSharedData (evolve shadow corners), IM_PI
@@ -1518,6 +1519,51 @@ static void DrawDatashell(ImDrawList* dl, ImGuiIO& io)
     if (showTick) slot(at, 6.f, std::to_string((int)cmdrate->GetFloat()), "T");
 }
 
+// requiem.dll draws its hud through vgui ISurface: text = vgui_font.h (engine Win32Font 1:1), one rect per texel run
+static void VguiDraw(ImDrawList* dl, const n_vgui::text_t& t, int x, int y, ImU32 color)
+{
+    n_vgui::draw(t, x, y, color, [dl](int x0, int y0, int x1, int y1, uint32_t c) {
+        dl->AddRectFilled(ImVec2((float)x0, (float)y0), ImVec2((float)x1, (float)y1), c);
+    });
+}
+
+// style 26: requiem -- requiem.dll PaintTraverse hook (RVA 0x560e0, 0x1005633a..0x100563eb): ONE vgui string, font =
+// cfg m_fonts.m_watermark default Tahoma 12 weight 500 FONTFLAG_OUTLINE, (200) grey, x = (int)(screen - 7 - wide), y 7.
+// no box / parts / fade / in-game gate. brand replaces the donor's "requiem alpha build".
+static n_vgui::font_t s_requiemWm("Tahoma", 12, 500, n_vgui::k_outline);
+static void DrawRequiem(ImDrawList* dl, ImGuiIO& io)
+{
+    const n_vgui::text_t& t = n_vgui::text(s_requiemWm, Brand(), ImGui::GetFrameCount());
+    if (!t.tall) return;
+    const int x = (int)((float)((int)io.DisplaySize.x - 7) - (float)t.wide), y = 7;
+    SetBox((float)x, (float)y, (float)(x + t.wide), (float)(y + t.tall));
+    VguiDraw(dl, t, x, y, IM_COL32(200, 200, 200, 255));
+}
+
+// primordial.bin wm chrome (also the media frame): fill_r0 (45,45,45,170), fill_r0 1 px accent bar down the left edge
+static void PrimordialBox(ImDrawList* dl, ImVec2 min, ImVec2 max)
+{
+    dl->AddRectFilled(min, max, IM_COL32(45, 45, 45, 170));
+    dl->AddRectFilled(min, ImVec2(min.x + 1.f, max.y), ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_Accent)));
+}
+
+// style 27: primordial -- primordial.bin 0x40195070: "primordial - " + user = brand + " - " + user name, '\n' stripped.
+// Tahoma 13 FreeType Monochrome, text_size truncated to int (w, h = 13): box (0, 0) (w + 8, h + 4), accent bar, text (220)
+// at (4, 2) with font flag 0x80 drop shadow (black, same alpha) at (5, 3). fixed top-left, no fps / ping / time / fade.
+static void DrawPrimordial(ImDrawList* dl, ImGuiIO&)
+{
+    ImFont* font = Or(g_fontPrimordialTahoma13);
+    std::string text = Brand() + " - " + User();
+    text.erase(std::remove(text.begin(), text.end(), '\n'), text.end());
+    const ImVec2 size = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.f, text.c_str());
+    const float w = (float)(int)size.x, h = (float)(int)size.y;
+    SetBox(0.f, 0.f, w + 8.f, h + 4.f);
+
+    PrimordialBox(dl, ImVec2(0.f, 0.f), ImVec2(w + 8.f, h + 4.f));
+    dl->AddText(font, font->FontSize, ImVec2(5.f, 3.f), IM_COL32(0, 0, 0, 255), text.c_str());
+    dl->AddText(font, font->FontSize, ImVec2(4.f, 2.f), IM_COL32(220, 220, 220, 255), text.c_str());
+}
+
 // botox misc.cpp draw_watermark(): clarity v2 (3) and cucumber (19) run before the m_watermark
 // check (they gate / fade on it themselves), every other style needs it on.
 void Watermark_Draw()
@@ -1562,6 +1608,8 @@ void Watermark_Draw()
     case 23: return DrawLobotomyV2(dl, io);
     case 24: return DrawGrimoire(dl, io);
     case 25: return DrawDatashell(dl, io);
+    case 26: return DrawRequiem(dl, io);
+    case 27: return DrawPrimordial(dl, io);
     default: return DrawDefault(dl, io);
     }
 }
@@ -1607,6 +1655,10 @@ MediaLook Watermark_MediaLook(int style)
     // grimv5 display_spotify: no box, outlined text, track white, artist 150
     case 24: return { true, white, IM_COL32(150, 150, 150, 255), 0 };   // grimoire: wm chrome box, donor spotify white / 150
     case 25: return { true, white, white, 1 };   // datashell: wm chrome box, donor display_spotify white + black 1 px shadow
+    // requiem spotify panel (FUN_100560e0): no box anywhere, title white, artists 180, Tahoma 12 drop shadow
+    case 26: return { false, white, IM_COL32(180, 180, 180, 255), 1 };
+    // primordial has no music panel: wm chrome box, wm text (220) title, accent artist, font flag 0x80 drop shadow
+    case 27: return { true, IM_COL32(220, 220, 220, 255), accent, 1 };
     default: return { true, white, accent, 0 };   // style 0: menu accent
     }
 }
@@ -1692,6 +1744,7 @@ void Watermark_MediaFrame(ImDrawList* dl, ImVec2 min, ImVec2 max, int style)
         break;
     case 24: GrimoireBox(dl, min.x, min.y, max.x - min.x, max.y - min.y); break;
     case 25: DatashellBox(dl, min, max); break;
+    case 27: PrimordialBox(dl, min, max); break;
     default: break;
     }
 }
