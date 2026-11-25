@@ -51,21 +51,20 @@ namespace
 	inline BsMath::V3 ToBs(const Vec3& v) { return { v.x, v.y, v.z }; }
 	inline Vec3 FromBs(const BsMath::V3& v) { return { v.x, v.y, v.z }; }
 
-	// Ticks a stab pressed on this command is held back before it is SENT (bs_math.h FireDelay: silent
-	// aim is choked a tick, anti-cheat compatibility may hold the next command too). Legit sends at once.
-	// `BS: sent` logs these ticks next to what the stab really waited (fd= / foff=).
-	int BsFireDelay(const CUserCmd* pCmd)
+	// Ticks a stab pressed on this command is held back before it is SENT. bs24: none -- the knife's silent
+	// angle goes out with its own command (RunBackstab writes it without psilent), so bs_math.h FireDelay
+	// is asked with psilent false whatever the aim type; TestFireDelay replays the DLL's send rules,
+	// anti-cheat compat included, and gets 0 too. `BS: sent` checks it in game (fd= next to foff=).
+	int BsFireDelay(const CUserCmd*)
 	{
-		const float flStep = G::LastUserCmd ? Math::CalcFov(pCmd->viewangles, G::LastUserCmd->viewangles) : 999.f;
-		return BsMath::FireDelay(Vars::Aimbot::Melee::BackstabAimType.Value != Vars::Aimbot::Melee::BackstabAimTypeEnum::Legit,
-			F::Ticks.CanChoke(), Vars::Misc::Game::AntiCheatCompatibility.Value, flStep);
+		return BsMath::FireDelay(false, F::Ticks.CanChoke(), Vars::Misc::Game::AntiCheatCompatibility.Value);
 	}
 
 	// The packet-clock moment a stab pressed on this command runs, which is when IsBehindAndFacingTarget
 	// reads his LIVE pl.v_angle: measured off the server's own command acks (bs_math.h CmdClock) plus the
 	// ticks the stab is choked for. Our tick plus the round trip -- bs22's whole estimate -- only until
 	// the clock has samples. The yaw bets use it too: they are scored at the moment a stab would be read.
-	// Call with the command's own view and before anything rewrites tick_count (knife backtrack does).
+	// Call before anything rewrites tick_count (knife backtrack does).
 	float BsDueTime(const CUserCmd* pCmd)
 	{
 		return BsMath::DueTime(g_tCmdClock, pCmd->tick_count, AimLatency(), TICK_INTERVAL, BsFireDelay(pCmd));
@@ -695,15 +694,16 @@ bool CAimbotMelee::JudgeKnife(int iBox, CTFPlayer* pLocal, CTFWeaponBase* pWeapo
 		const bool bThin = flSlack >= 0.f && flSlack < flThin;
 		const bool bSolidNext = flSlackNext >= flThin;
 
-		// measured odds get the bands, anything else bs22's rule (bs_math.h Decide)
-		const BsMath::EDecision eDec = BsMath::Decide(g.p, gN.p, bReachNext, iHeld, bThin, bSolidNext, g.bMix);
+		// measured odds get the bands, anything else bs22's rule (bs_math.h Decide); the wait is the user's
+		const int iWait = std::clamp(Vars::Aimbot::Melee::BackstabWait.Value, 0, BsMath::k_patience);
+		const BsMath::EDecision eDec = BsMath::Decide(g.p, gN.p, bReachNext, iHeld, bThin, bSolidNext, g.bMix, iWait);
 		// why=turn (guessed odds only -- measured ones have no guard): bs15 would have swung on the bet
 		// alone this tick and the guard stopped it, by refusing outright or by making a swing a hold
 		const bool bGuardStopped = !g.bMix && eDec != BsMath::DEC_FIRE
-			&& BsMath::Decide(o.p, gN.best.p, bReachNext, iHeld, bThin, bSolidNext, false) == BsMath::DEC_FIRE;
+			&& BsMath::Decide(o.p, gN.best.p, bReachNext, iHeld, bThin, bSolidNext, false, iWait) == BsMath::DEC_FIRE;
 		// why=thin: the hold is the reach's, not the odds' (without it this tick would fire)
 		const bool bThinHeld = eDec == BsMath::DEC_HOLD
-			&& BsMath::Decide(g.p, gN.p, bReachNext, iHeld, false, false, g.bMix) == BsMath::DEC_FIRE;
+			&& BsMath::Decide(g.p, gN.p, bReachNext, iHeld, false, false, g.bMix, iWait) == BsMath::DEC_FIRE;
 		const int iGate = !bReach ? BSG_REACH
 			: o.facing <= 0.f ? BSG_FACING
 			: bGuardStopped ? BSG_TURN
@@ -1039,14 +1039,14 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 	// .821 (single-edge odds hid the bearing under facestab, and sorted offset 30 first for it), plus
 	// two real-ping turns (yd 10, 13) -> bs22 exact joint odds (bs_math.h StabJoint).
 	// bs22: never read in game. bs23 (11-25), off a re-read of the server + a closed-loop lab:
-	// (1) the due time is MEASURED off command acks, plus the tick(s) a silent stab is choked for
-	// (bs_math.h CmdClock / BsFireDelay; the latency sum ran 0.5-1.5 ticks late and knew no choke),
-	// (2) the odds are how bets in his motion state have really landed, wherever there is data for the
-	// bet (ResidTable / StabMix, mix=1), bs22's Gaussian + guard where there is not (mix=0),
-	// (3) Decide: on measured odds >= .99 swings, .90-.99 waits up to 4 ticks; bs22's rule on the rest.
-	// Read next: `BS: sent fd= foff=` (must agree, else BsFireDelay is wrong), toff=, st=/sn=/mix= on
-	// STAB, and whether mix=1 fires at p >= .99 still front.
-	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs23 (measured cmd clock + choke, motion-state odds, .90/.99 bands). UNVERIFIED IN GAME."); }
+	// (1) the due time is MEASURED off command acks (bs_math.h CmdClock; the latency sum ran 0.5-1.5
+	// ticks late), (2) the odds are how bets in his motion state have really landed, wherever there is
+	// data for the bet (ResidTable / StabMix, mix=1), bs22's Gaussian + guard where there is not (mix=0),
+	// (3) Decide: on measured odds >= .99 swings, .90-.99 may wait; bs22's rule on the rest.
+	// bs24 (11-25, user: "no delay"): the knife's silent stab is no longer held back (psilent), and the
+	// wait is the Backstab wait slider, default 0 -- swing the first tick the odds pass .90.
+	// Read next: `BS: sent fd=0 foff=` (foff ~0 = it really went out at once), w= on STAB, toff=, mix=.
+	if (!s_bStamped) { s_bStamped = true; DebugLog("BACKSTAB BUILD = dih-bs24 (bs23 + knife stab not held back, Backstab wait slider). UNVERIFIED IN GAME."); }
 	m_bBackstabLegit = Vars::Aimbot::Melee::BackstabAimType.Value == Vars::Aimbot::Melee::BackstabAimTypeEnum::Legit;
 	const int iAimType = GetAimType(pWeapon);
 	// Wall clock for everything that has to line up with player_hurt: inside engine prediction
@@ -1285,7 +1285,7 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 		m_flWhiffTime = -1.f;
 		DebugLog("BS: STAB idx=%d p=%.3f pb=%.3f pg=%.3f gm=%.1f sc=%.1f next=%.3f margin=%.1f fac=%.1f sig=%.1f bear=%.2f k=%d rate=%.0f "
 			"hor=%.3f lerp=%.3f ext=%.3f slack=%.1f pad=%.2f thinpad=%.2f rnext=%d held=%d d=%.1f spd=%.0f my=%.0f rel=%.0f legit=%d n=%d "
-			"sm=%.1f rb=%.1f brate=%.0f lat=%.0f bt=%d/%d bt0=%s/%.3f st=%d sn=%.0f mix=%d toff=%.1f cc=%d gap=%d fd=%d",
+			"sm=%.1f rb=%.1f brate=%.0f lat=%.0f bt=%d/%d bt0=%s/%.3f st=%d sn=%.0f mix=%d toff=%.1f cc=%d gap=%d fd=%d w=%d",
 			tBest.m_iIndex, tBest.m_flP, tBest.m_flPBest, tBest.m_flPGuard, tBest.m_flGuardMargin, tBest.m_flSigCore,
 			tBest.m_flPNext, tBest.m_flMargin, tBest.m_flFacing, tBest.m_flSigma,
 			tBest.m_flSigBear, tBest.m_iK, tBest.m_flRate, tBest.m_flHorizon, flLerp, tBest.m_flExtrap,
@@ -1294,11 +1294,23 @@ void CAimbotMelee::RunBackstab(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserC
 			int(m_bBackstabLegit), nTargets,
 			tBest.m_flSeenMargin, tBest.m_flRelYaw, tBest.m_flBearRate, AimLatency() * 1000.f, iBack, nBack,
 			iBack ? BsGateName(tLive.m_iGate) : "fire", tLive.m_flP,
-			tBest.m_iState, tBest.m_flStateN, int(tBest.m_bMix), flDueOff, int(g_tCmdClock.bValid), g_tCmdClock.iGap, iFireDelay);
+			tBest.m_iState, tBest.m_flStateN, int(tBest.m_bMix), flDueOff, int(g_tCmdClock.bValid), g_tCmdClock.iGap, iFireDelay,
+			std::clamp(Vars::Aimbot::Melee::BackstabWait.Value, 0, BsMath::k_patience));
 
 		G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
-		Vec3 vAim = tBest.m_vAim;
-		Aim(pCmd, vAim, iAimType);   // Silent writes it; Legit returns without touching the view
+		// bs24: Silent writes the angle on THIS command and it is sent with it -- not psilent. The hold-back
+		// cost a tick (two with anti-cheat compat) and, in the closed loop, more front stabs, not fewer
+		// (user's call 11-25, knowing the cost: for that one tick spectators / demos see the view on his
+		// back; the next command has the real view again). Legit touches nothing.
+		if (!m_bBackstabLegit)
+		{
+			Vec3 vAim = tBest.m_vAim;
+			Math::ClampAngles(vAim);
+			SDK::FixMovement(pCmd, vAim);
+			pCmd->viewangles = vAim;
+			G::SilentAngles = true;
+		}
+		(void)iAimType;
 		return;
 	}
 

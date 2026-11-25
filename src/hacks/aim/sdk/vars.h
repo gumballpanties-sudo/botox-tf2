@@ -435,6 +435,10 @@ namespace Vars
 			// Most ticks it may go back. A cap only: the server's 0.2 s window (BsMath::RewindBackTicks)
 			// and the global backtrack time still cut it shorter. 12 = BsMath::k_btMax.
 			CVar(BackstabBacktrackTicks, "Backstab backtrack ticks", 12, SLIDER_CLAMP, 1, 12, 1, "%d ticks");
+			// dih-bs24: ticks a chancy stab (90-99% odds) may wait to become a sure one (BsMath::Decide).
+			// 0 = swing the first tick the odds pass 90% -- the user's default (11-25), fastest; 4 = fewest
+			// front stabs. The trade, in the closed loop, is in bs_math.h "when to swing".
+			CVar(BackstabWait, "Backstab wait", 0, SLIDER_CLAMP, 0, 4, 1, "%d ticks");
 			// dih-bs13: BackstabAutoShoot DELETED. Off meant the feature never pressed anything,
 			// and in Legit mode (which has no view assist at all) that is the whole feature -- the
 			// cfg was found on that value too. Auto backstab IS the auto swing. Its key goes with

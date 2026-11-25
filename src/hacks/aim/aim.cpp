@@ -500,6 +500,7 @@ void Aim_RenderMenuTab()
 			ImGui::OptionPopup("auto backstab settings", [&]()
 			{
 				VarCombo(Aimbot::Melee::BackstabAimType);
+				VarSlider(Aimbot::Melee::BackstabWait);
 				// Silent only: Legit never moves the view, so a cone there could only refuse.
 				if (Aimbot::Melee::BackstabAimType.Value == Aimbot::Melee::BackstabAimTypeEnum::Silent)
 					VarSlider(Aimbot::Melee::BackstabFOV);

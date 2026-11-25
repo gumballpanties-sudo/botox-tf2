@@ -468,18 +468,29 @@ namespace BsMath
 	//                                   the stab's silent angle by > PSILENT_EPSILON and is within
 	//                                   REAL_EPSILON of the view BEFORE the stab -> it copies the stab's send
 	//                                   flag (choked) onto itself: 2 ticks
-	// step = how far the view turned this command against the last, deg. The next command's is not known
-	// yet; at the same rate it is two steps from the view before the stab.
-	// ponytail: two cases it cannot see, both make it a tick LATE, never early (late errs slow): a silent
-	// angle within a degree of the view (no psilent check), and a view that stops between the two commands.
+	// Whether that second hold happens is decided by the NEXT command's view, which does not exist yet: a
+	// view that stops or turns back lands within REAL_EPSILON of the one before the stab whatever this
+	// command's step was (critic round 3: reading the step instead was a tick EARLY on 25-40% of stabs
+	// at ordinary sensitivity). So with compat on it is always 2 -- a tick LATE when the view keeps moving
+	// or the silent angle sits within a degree of it; never early on a steady or jittery hand (late on ~1
+	// stab in 4, TestFireDelay). Two rare paths it cannot see, pinned in TestFireDelay (critic round 4):
+	// a flick of 10+ degrees whose landing is within 0.56 of the silent angle (snap check: 2 ticks LATE),
+	// and a still view that jumps onto the silent angle the command after (3 ticks, one EARLY). Late errs
+	// slow: about the same front stabs, later (a 1.5-tick-late due time costs 25-90 ms a stab,
+	// TestStabTiming); a tick early doubles them at 30 ms. The knife no longer psilents (bs24): for it all
+	// of this is 0.
+	// ponytail: a Lua create_move script runs between the two (hooks.cpp:772) and can write send_packet;
+	// not modelled -- `BS: sent fd= foff=` shows it if one does.
 	constexpr float k_accEps     = 1.f / 16.f;             // hooks.cpp MATH_EPSILON
 	constexpr float k_accPsilent = 1.f - k_accEps;         // hooks.cpp PSILENT_EPSILON
 	constexpr float k_accReal    = 0.1f + k_accEps;        // hooks.cpp REAL_EPSILON
-	inline int FireDelay(bool silent, bool canChoke, bool antiCheatCompat, float stepDeg)
+	// psilent = the stab sets G::PSilentAngles. The knife does not any more (bs24, aim_melee.cpp RunBackstab):
+	// its silent angle goes out with its own command, 0 ticks -- TestFireDelay replays that too.
+	inline int FireDelay(bool psilent, bool canChoke, bool antiCheatCompat)
 	{
-		if (!silent || !canChoke)
+		if (!psilent || !canChoke)
 			return 0;
-		return antiCheatCompat && 2.f * stepDeg < k_accReal ? 2 : 1;
+		return antiCheatCompat ? 2 : 1;
 	}
 
 	// The packet-clock moment the server reads his live yaw for a command with this tick_count that is
@@ -1198,7 +1209,15 @@ namespace BsMath
 	constexpr float k_pSureGuess = 0.90f;   // bs22's k_pSure / k_pTake
 	constexpr float k_pTakeGuess = 0.70f;
 	constexpr float k_pGain      = 0.03f;   // "clearly better": bs22's rule, and an older tick over a newer (knife backtrack)
-	constexpr int   k_patience   = 4;       // ticks a stab may wait for better odds (60 ms)
+	constexpr int   k_patience   = 4;       // most ticks any hold may last (60 ms); the user's wait is 0..this
+	// bs24, THE WAIT IS THE USER'S (Backstab wait slider, default 0). Closed loop, front stabs and ms
+	// from the first clear chance, the knife's stab not held back (bs24), 30 / 75 / 150 ms ping:
+	//   wait 0   3.71% -43 ms | 6.04% -19 ms | 10.2% +100 ms     (the default: 35-40 ms sooner than bs22 at 30 / 75, level at 150)
+	//   wait 1   1.32% -30    | 3.75%  +5    |  7.45% +173
+	//   wait 2   0.54% -21    | 2.18% +26    |  5.51% +242
+	//   wait 4   0.22% -15    | 1.25% +66    |  3.97% +390
+	//   bs22     1.87%  -8    | 3.60% +22    | 11.75% +104      (held back a tick, its own rule)
+	// TestShippedDefault holds the first row and the wait-2 row.
 
 	// THIN REACH (bs17). The pad above prices HIS position only; ours on the server is a client
 	// prediction, and with both of us running one tick of relative motion is ~9u. bs16's whiff
@@ -1210,8 +1229,11 @@ namespace BsMath
 	inline float ThinPad(float pad, float relSpeed2D) { return pad + k_relLead * relSpeed2D * k_tick; }
 
 	enum EDecision { DEC_FIRE, DEC_ODDS, DEC_HOLD };
-	// thin = this tick's slack is under ThinPad, solidNext = the next tick's is not
-	inline EDecision Decide(float p, float pNext, bool reachNext, int held, bool thin = false, bool solidNext = false, bool measured = true)
+	// thin = this tick's slack is under ThinPad, solidNext = the next tick's is not. wait = ticks a stab may
+	// be held for better odds (the user's, 0..k_patience). The thin-reach hold is NOT the wait: a whiff
+	// costs the whole 0.8 s swing, so it holds its one tick at any wait (k_patience still ends it).
+	inline EDecision Decide(float p, float pNext, bool reachNext, int held, bool thin = false, bool solidNext = false, bool measured = true,
+		int wait = k_patience)
 	{
 		const float take = measured ? k_pTake : k_pTakeGuess, sure = measured ? k_pSure : k_pSureGuess;
 		if (p < take)
@@ -1220,8 +1242,8 @@ namespace BsMath
 			return DEC_FIRE;   // waited on long enough
 		if (thin && solidNext && pNext >= std::min(p, sure))
 			return DEC_HOLD;   // a solid swing one tick on, no worse odds: do not risk the whiff
-		if (!reachNext)
-			return DEC_FIRE;   // the window is closing
+		if (held >= wait || !reachNext)
+			return DEC_FIRE;   // the wait is over, or the window is closing
 		if (measured)
 			return p >= k_pSure ? DEC_FIRE : DEC_HOLD;   // sure, or chancy: let it become sure
 		return pNext < p + k_pGain ? DEC_FIRE : DEC_HOLD;   // bs21: a clearly better next tick is waited for
@@ -1230,15 +1252,16 @@ namespace BsMath
 	// ---- A HOLD, COUNTED (JudgeKnife) -------------------------------------------------------------
 	// How many ticks a stab on one man has been waited on, for Decide's k_patience. Counted once per
 	// command however many targets' swings (or rewind ticks) land on him. A hold survives k_holdGap ticks
-	// of something else in between -- a candidate that only grazes him (why=reach) alternating with a
-	// held one reset it every other tick before, and a chancy stab waited for ever (critic round 2).
+	// of something else in between (HOLD, REACH, REACH, HOLD is one hold) -- a candidate that only grazes
+	// him (why=reach) alternating with a held one reset it every other tick before, and a chancy stab
+	// waited for ever (critic round 2; the off-by-one that kept it at one tick, round 3).
 	constexpr int k_holdGap = 2;
 	struct Hold { int tick = -1000, count = 0; };
 	// ticks held BEFORE this command (a stale hold starts over): the default rewind tick may already have
 	// counted this command, and an older one judged after it must not see its patience a tick short
 	inline int HeldBefore(Hold& h, int now)
 	{
-		if (now - h.tick > k_holdGap || now < h.tick)
+		if (now - h.tick > k_holdGap + 1 || now < h.tick)
 			h.count = 0;
 		return h.tick == now && h.count > 0 ? h.count - 1 : h.count;
 	}

@@ -18,6 +18,7 @@ enum LuaDrawType : uint8_t
     LUAD_CIRCLE_FILLED,   // centre x0,y0 radius x1 col segments(pn)
     LUAD_POLY,            // convex fill col, outline col2 thick when flags 1, point pool
     LUAD_IMAGE,           // min x0,y0 max x1,y1, col tint, round, text pool = "path|stamp" (lua_api.cpp render.load_image)
+    LUAD_BLUR,            // min x0,y0 max x1,y1, col tint, round, size = strength (blur_rect.cpp BlurRectSmooth)
 };
 
 struct LuaDrawCmd

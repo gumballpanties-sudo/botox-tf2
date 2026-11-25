@@ -820,6 +820,29 @@ namespace
 		return 0;
 	}
 
+	/* blurs what is drawn under the rect so far ( game, huds, earlier draws of this and older scripts ), render.cpp
+	   RenderLuaQueue -> BlurRectSmooth. strength 1 = 34 px radius, 0..3; color tints + fades it, alpha 0 = skipped */
+	int l_render_blur( lua_State* L )
+	{
+		require_paint( L );
+
+		const float x1 = check_float( L, 1 ), y1 = check_float( L, 2 ), x2 = check_float( L, 3 ), y2 = check_float( L, 4 );
+		const float strength     = std::clamp( opt_float( L, 5, 1.f ), 0.f, 3.f );
+		const unsigned int color = opt_color( L, 6 );
+		if ( !( strength > 0.f ) || !( color & IM_COL32_A_MASK ) )   // nan too
+			return 0;
+
+		LuaDrawCmd& c = LuaDraw::Push( LUAD_BLUR );
+		c.x0          = std::min( x1, x2 );
+		c.y0          = std::min( y1, y2 );
+		c.x1          = std::max( x1, x2 );
+		c.y1          = std::max( y1, y2 );
+		c.col         = color;
+		c.round       = std::max( 0.f, opt_float( L, 7, 0.f ) );   // 0 first: nan -> 0
+		c.size        = strength;
+		return 0;
+	}
+
 	int l_image_size( lua_State* L )
 	{
 		const image_ref_t* image = check_image( L );
@@ -3058,6 +3081,7 @@ void n_lua_api::open( lua_State* L )
 		                                { "world_to_screen", l_render_world_to_screen },
 		                                { "load_image", l_render_load_image },
 		                                { "image", l_render_image },
+		                                { "blur", l_render_blur },
 		                                { nullptr, nullptr } };
 	add_table( L, "render", render );
 
