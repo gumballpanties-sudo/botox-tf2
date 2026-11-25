@@ -6,6 +6,7 @@
 #include "../sim/engineprediction.h"
 #include "../sim/ticks.h"
 #include "autoairblast.h"
+#include "huntsman_zone.h"
 
 //#define SPLASH_DEBUG1 // normal splash visualization
 //#define SPLASH_DEBUG2 // obstructed splash visualization
@@ -349,6 +350,36 @@ std::unordered_map<int, Vec3> CAimbotProjectile::GetDirectPoints(Target_t& tTarg
 				vOff.x = std::clamp(vOff.x, vMins.x + Vars::Aimbot::Projectile::HuntsmanClamp.Value, vMaxs.x - Vars::Aimbot::Projectile::HuntsmanClamp.Value);
 				vOff.y = std::clamp(vOff.y, vMins.y + Vars::Aimbot::Projectile::HuntsmanClamp.Value, vMaxs.y - Vars::Aimbot::Projectile::HuntsmanClamp.Value);
 				vOff.z = std::clamp(vOff.z, vMins.z + Vars::Aimbot::Projectile::HuntsmanClamp.Value, vMaxs.z - Vars::Aimbot::Projectile::HuntsmanClamp.Value);
+
+				// server hitbox pick model (huntsman_zone.h): aim height = middle of the longest z run the
+				// server gives the head, for this charge + side. From behind the lerp point above lands on
+				// the spine (low charge: head only at bbox top; high charge: only at head center).
+				// No run -> keep the lerp point. Frame = abs origin, where SetupBones put the bones.
+				auto pHDR = tTarget.m_pEntity->GetModel() ? I::ModelInfoClient->GetStudiomodel(tTarget.m_pEntity->GetModel()) : nullptr;
+				auto pSet = pHDR ? pHDR->pHitboxSet(tTarget.m_pEntity->As<CBaseAnimating>()->m_nHitboxSet()) : nullptr;
+				if (pSet && !pProjectile)
+				{
+					static hszone::Box aZone[64]; int n = 0;
+					for (int h = 0; h < pSet->numhitboxes && n < 64; h++)
+					{
+						auto pBox = pSet->pHitbox(h);
+						if (!pBox || pBox->bone < 0 || pBox->bone >= MAXSTUDIOBONES)
+							continue;
+						memcpy(aZone[n].m, aBones[pBox->bone], sizeof(matrix3x4));
+						aZone[n].mins = { pBox->bbmin.x, pBox->bbmin.y, pBox->bbmin.z };
+						aZone[n].maxs = { pBox->bbmax.x, pBox->bbmax.y, pBox->bbmax.z };
+						aZone[n++].head = pBox->group == 1;   // HITGROUP_HEAD
+					}
+					const Vec3 vAbs = tTarget.m_pEntity->GetAbsOrigin();
+					const hszone::V lo = { vAbs.x + vMins.x, vAbs.y + vMins.y, vAbs.z + vMins.z }, hi = { vAbs.x + vMaxs.x, vAbs.y + vMaxs.y, vAbs.z + vMaxs.z };
+					const hszone::V vEye = { m_tInfo.m_vLocalEye.x, m_tInfo.m_vLocalEye.y, m_tInfo.m_vLocalEye.z };
+					const float flHeadZ = vCenter.z + (vBBoxMins.z + vBBoxMaxs.z) / 2;
+					float flZ; int iRun = 0;
+					if (hszone::BestZ(aZone, n, lo, hi, vEye, vAbs.x + vOff.x, vAbs.y + vOff.y, flHeadZ - 12.f, vAbs.z + vMaxs.z, 1.f,
+						m_tInfo.m_flVelocity, m_tInfo.m_flGravity * 800.f, TICK_INTERVAL, flZ, &iRun))
+						vOff.z = flZ - vAbs.z;
+					m_iZoneIdx = tTarget.m_pEntity->entindex(), m_iZoneRun = iRun, m_flZoneZ = vOff.z;   // AIMSHOT run= z=
+				}
 				mPoints[iPriority] = vOff;
 			}
 			else
@@ -1554,7 +1585,8 @@ bool CAimbotProjectile::RunMain(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUser
 	if (vTargets.empty())
 		return false;
 
-	if (Vars::Aimbot::Projectile::Modifiers.Value & Vars::Aimbot::Projectile::ModifiersEnum::ChargeWeapon && iRealAimType
+	// release pass = user let go of the hold key: never re-hold attack or the shot never leaves
+	if (Vars::Aimbot::Projectile::Modifiers.Value & Vars::Aimbot::Projectile::ModifiersEnum::ChargeWeapon && iRealAimType && !F::Aimbot.m_bReleasePass
 		&& (nWeaponID == TF_WEAPON_COMPOUND_BOW || nWeaponID == TF_WEAPON_PIPEBOMBLAUNCHER))
 	{
 		pCmd->buttons |= IN_ATTACK;
@@ -1692,7 +1724,8 @@ void CAimbotProjectile::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd*
 
 	if (pWeapon->GetWeaponID() == TF_WEAPON_PIPEBOMBLAUNCHER && G::OriginalCmd.buttons & IN_ATTACK && Vars::Aimbot::Projectile::AutoRelease.Value && flAmount > Vars::Aimbot::Projectile::AutoRelease.Value / 100)
 		pCmd->buttons &= ~IN_ATTACK;
-	else if (G::CanPrimaryAttack && Vars::Aimbot::Projectile::Modifiers.Value & Vars::Aimbot::Projectile::ModifiersEnum::CancelCharge)
+	// release pass: user lifted the key = "shoot now". Cancel here would eat every arrow with no hittable target.
+	else if (G::CanPrimaryAttack && Vars::Aimbot::Projectile::Modifiers.Value & Vars::Aimbot::Projectile::ModifiersEnum::CancelCharge && !F::Aimbot.m_bReleasePass)
 	{
 		if (m_bLastTickHeld && (G::LastUserCmd->buttons & IN_ATTACK && !(pCmd->buttons & IN_ATTACK) && !bSuccess || flAmount > 0.95f))
 			CancelShot(pLocal, pWeapon, pCmd, m_iLastTickCancel);

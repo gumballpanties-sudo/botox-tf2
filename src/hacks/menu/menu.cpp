@@ -581,10 +581,55 @@ static void Page_VisualsWorld()
             ImGui::SliderFloat("fov##world", &g_wdWorldFov, -30.f, 60.f, "%.1f");
 
         ImGui::Checkbox("precipitation", &g_weatherEnable);
-        if (g_weatherEnable && g_weatherMode != k_weatherClipart)
-            ImGui::OptionPopup("precipitation settings", [&]() {   // ours: TF2's r_rain* knobs
-                if (g_weatherMode != 2)
+        if (g_weatherEnable)
+            ImGui::OptionPopup("precipitation settings", [&]() {   // ours: every precipitation row sits in the cog
+                // botox "rain\0ash\0rain storm\0snow\0": TF2's C_Precipitation only spawns ash where a
+                // trace hits the func_precipitation brush (c_effects.cpp:886 UTIL_TraceModel), which the
+                // entity this DLL injects has none of, and has no storm type (precipitation_shared.h).
+                // combo index 0/1/2 = g_weatherMode 1/2/3 (0 is "off"); clipart = botox type 4.
+                int type = (g_weatherMode == 2) ? 1 : (g_weatherMode == k_weatherClipart) ? 2 : 0;
+                if (ImGui::Combo("type##precipitation", &type, "rain\0" "snow\0" "clipart\0"))
+                    g_weatherMode = type + 1;
+                if (g_weatherMode == k_weatherClipart)
                 {
+                    // botox menu_tab_visuals.cpp clipart rows, verbatim labels / ranges / order
+                    constexpr ImGuiColorEditFlags alphaFlags = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
+                        ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs |
+                        ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar |
+                        ImGuiColorEditFlags_NoBorder;   // botox color_picker_alpha_flags
+                    ImGui::Combo("shape##clipart", &g_clipShape, n_particle_shape::k_names);
+                    ImGui::Combo("color mode##clipart", &g_clipColorMode, "single\0multicolor\0rainbow\0");
+                    if (!g_clipColorMode)
+                        ImGui::ColorEdit4("color##clipart", g_clipColor, alphaFlags);
+                    else
+                    {
+                        // hue comes from the mode, picker alpha still applies
+                        int alpha = (int)(g_clipColor[3] * 255.f + 0.5f);
+                        if (ImGui::SliderInt("alpha##clipart", &alpha, 0, 255, "%d", ImGuiSliderFlags_AlwaysClamp))
+                            g_clipColor[3] = (float)alpha / 255.f;
+                        ImGui::SliderFloat("saturation##clipart", &g_clipSaturation, 0.f, 1.f, "%.2f");
+                    }
+                    if (g_clipColorMode == 2)
+                        ImGui::SliderFloat("rainbow speed##clipart", &g_clipRainbowSpeed, 0.01f, 2.f, "%.2f");
+                    ImGui::Combo("glow##clipart", &g_clipGlow, "off\0glyph color\0custom\0");
+                    if (g_clipGlow == 2)
+                        ImGui::ColorEdit4("glow color##clipart", g_clipGlowColor, alphaFlags);
+                    ImGui::SliderInt("density##clipart", &g_clipDensity, 10, 3000);
+                    ImGui::SliderFloat("fall speed##clipart", &g_clipSpeed, 10.f, 600.f, "%.0f u/s");
+                    ImGui::SliderFloat("size##clipart", &g_clipSize, 0.5f, 16.f, "%.1f");
+                    ImGui::SliderFloat("spin##clipart", &g_clipSpin, 0.f, 3.f, "%.2f rev/s");
+                    // spin = tumble speed here: glyphs are flat planes turning in 3d, they settle flat on what they land on
+                    ImGui::Checkbox("3d rotation##clipart", &g_clip3d);
+                    ImGui::SliderFloat("sway##clipart", &g_clipSway, 0.f, 48.f, "%.0f u");
+                    ImGui::SliderFloat("wind##clipart", &g_clipWind, 0.f, 400.f, "%.0f u/s");
+                    if (g_clipWind > 0.f)
+                        ImGui::SliderFloat("wind direction##clipart", &g_clipWindYaw, 0.f, 360.f, "%.0f deg");
+                    ImGui::SliderFloat("area##clipart", &g_clipRadius, 200.f, 4000.f, "%.0f u");
+                    ImGui::SliderFloat("ground time##clipart", &g_clipGroundTime, 0.f, 20.f, "%.1f s");
+                }
+                else if (g_weatherMode != 2)
+                {
+                    // ours: TF2's r_rain* knobs.
                     // Floors are NOT taste: speed 0 divides by zero in ComputeEmissionArea,
                     // length 0 collapses the tracer quad, radius 0 is an empty emission box.
                     SliderF("alpha##rain", &g_rainAlpha, 0.05f, 1.f, "%.2f");
@@ -606,53 +651,6 @@ static void Page_VisualsWorld()
                     SliderF("density##snow", &g_snowDensity, 0.05f, 1.f, "%.2f");
                 }
             }, ImVec2(220.f, -1));
-        if (g_weatherEnable)
-        {
-            // botox "rain\0ash\0rain storm\0snow\0": TF2's C_Precipitation only spawns ash where a
-            // trace hits the func_precipitation brush (c_effects.cpp:886 UTIL_TraceModel), which the
-            // entity this DLL injects has none of, and has no storm type (precipitation_shared.h).
-            // combo index 0/1/2 = g_weatherMode 1/2/3 (0 is "off"); clipart = botox type 4.
-            int type = (g_weatherMode == 2) ? 1 : (g_weatherMode == k_weatherClipart) ? 2 : 0;
-            if (ImGui::Combo("type##precipitation", &type, "rain\0" "snow\0" "clipart\0"))
-                g_weatherMode = type + 1;
-        }
-        if (g_weatherEnable && g_weatherMode == k_weatherClipart)
-        {
-            // botox menu_tab_visuals.cpp clipart rows, verbatim labels / ranges / order
-            constexpr ImGuiColorEditFlags alphaFlags = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
-                ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs |
-                ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar |
-                ImGuiColorEditFlags_NoBorder;   // botox color_picker_alpha_flags
-            ImGui::Combo("shape##clipart", &g_clipShape, n_particle_shape::k_names);
-            ImGui::Combo("color mode##clipart", &g_clipColorMode, "single\0multicolor\0rainbow\0");
-            if (!g_clipColorMode)
-                ImGui::ColorEdit4("color##clipart", g_clipColor, alphaFlags);
-            else
-            {
-                // hue comes from the mode, picker alpha still applies
-                int alpha = (int)(g_clipColor[3] * 255.f + 0.5f);
-                if (ImGui::SliderInt("alpha##clipart", &alpha, 0, 255, "%d", ImGuiSliderFlags_AlwaysClamp))
-                    g_clipColor[3] = (float)alpha / 255.f;
-                ImGui::SliderFloat("saturation##clipart", &g_clipSaturation, 0.f, 1.f, "%.2f");
-            }
-            if (g_clipColorMode == 2)
-                ImGui::SliderFloat("rainbow speed##clipart", &g_clipRainbowSpeed, 0.01f, 2.f, "%.2f");
-            ImGui::Combo("glow##clipart", &g_clipGlow, "off\0glyph color\0custom\0");
-            if (g_clipGlow == 2)
-                ImGui::ColorEdit4("glow color##clipart", g_clipGlowColor, alphaFlags);
-            ImGui::SliderInt("density##clipart", &g_clipDensity, 10, 3000);
-            ImGui::SliderFloat("fall speed##clipart", &g_clipSpeed, 10.f, 600.f, "%.0f u/s");
-            ImGui::SliderFloat("size##clipart", &g_clipSize, 0.5f, 16.f, "%.1f");
-            ImGui::SliderFloat("spin##clipart", &g_clipSpin, 0.f, 3.f, "%.2f rev/s");
-            // spin = tumble speed here: glyphs are flat planes turning in 3d, they settle flat on what they land on
-            ImGui::Checkbox("3d rotation##clipart", &g_clip3d);
-            ImGui::SliderFloat("sway##clipart", &g_clipSway, 0.f, 48.f, "%.0f u");
-            ImGui::SliderFloat("wind##clipart", &g_clipWind, 0.f, 400.f, "%.0f u/s");
-            if (g_clipWind > 0.f)
-                ImGui::SliderFloat("wind direction##clipart", &g_clipWindYaw, 0.f, 360.f, "%.0f deg");
-            ImGui::SliderFloat("area##clipart", &g_clipRadius, 200.f, 4000.f, "%.0f u");
-            ImGui::SliderFloat("ground time##clipart", &g_clipGroundTime, 0.f, 20.f, "%.1f s");
-        }
 
         SkyboxCombo();
 
@@ -1715,6 +1713,10 @@ static void Page_MovementMain()
                 SliderF("delta strafe##esurfdelta", &g_edgeSurfDeltaStrafe, 0.f, 15.f, "%.2f");
                 // mid-ride only: movement keys pointing off the ride = edge surf lets go, auto strafe steers there (release = edge surf back)
                 ImGui::Checkbox("auto strafe##esurfas", &g_edgeSurfAutoStrafe);
+                // not botox: the same ride on the side lip of a walkable ramp (stair clips, ramp brushes). no friction, gravity speeds it up
+                ImGui::Checkbox("ramp slide##esurframp", &g_edgeSurfRamp);
+                // not botox: on a ledge with the key down it creeps you to the edge and steps off into the ride, no jump
+                ImGui::Checkbox("walk off entry##esurfwalk", &g_edgeSurfWalkOff);
                 ImGui::Checkbox("visualize##esurfviz", &g_edgeSurfViz);
                 ImGui::ColorEdit4("visualize color##esurfvizcolor", g_edgeSurfVizColor,
                     ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_NoOptions |
@@ -2884,8 +2886,15 @@ static void Page_MiscMain()
                 ImGui::Checkbox("readout##points", &g_ptsReadout);
                 ImGui::SliderFloat("appear speed##points", &g_ptsAppearSpeed, 0.5f, 20.f, "%.2fx");
                 ImGui::SliderFloat("bob speed##points", &g_ptsBobSpeed, 0.1f, 10.f, "%.2fx");
-                ImGui::SliderFloat("x offset##points", &g_ptsOffsetX, -300.f, 300.f, "%.0f px");
-                ImGui::SliderFloat("y offset##points", &g_ptsOffsetY, -50.f, 50.f, "%.0f px");
+                ImGui::Checkbox("standalone##points", &g_ptsStandalone);
+                if (g_ptsStandalone)
+                {
+                    if (g_ptsPosition < 0 || g_ptsPosition > 7) g_ptsPosition = 0;
+                    ImGui::Combo("position##points", &g_ptsPosition,
+                                 "top right\0top left\0top center\0bottom center\0bottom left\0bottom right\0center left\0center right\0");
+                }
+                ImGui::SliderFloat("x offset##points", &g_ptsOffsetX, g_ptsStandalone ? -1000.f : -300.f, g_ptsStandalone ? 1000.f : 300.f, "%.0f px");
+                ImGui::SliderFloat("y offset##points", &g_ptsOffsetY, g_ptsStandalone ? -600.f : -50.f, g_ptsStandalone ? 600.f : 50.f, "%.0f px");
             }, ImVec2(220.f, -1.f));
 
         ImGui::Checkbox("low fps warning", &g_fpsWarning);

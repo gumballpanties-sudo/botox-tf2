@@ -792,6 +792,8 @@ extern float g_edgeSurfRange;        // lead range: ledges scanned under the fal
 extern float g_edgeSurfReach;        // reach: a beside approach owned inside this gap (def 6, 0.1-32)
 extern float g_edgeSurfDeltaStrafe;  // 0 = straight press into the face, else air strafe turning this many deg a tick (0-15)
 extern bool  g_edgeSurfAutoStrafe;   // mid-ride: movement keys > 15 deg off the ride = edge surf lets go, AutoStrafe steers toward them while held
+extern bool  g_edgeSurfWalkOff;      // walk off entry: on a ledge with the key down, creep to its edge and step off into the ride (no jump)
+extern bool  g_edgeSurfRamp;         // ramp slide: ride a walkable ramp's side lip too (no friction, gravity speeds it up). sv_wallbug 0 only
 extern bool  g_edgeSurfViz;          // draw scanned ledges, the pick, the arrival, the act
 extern float g_edgeSurfVizColor[4];
 extern bool  g_edgeBugEdgeSurf;      // edgebug "edgesurf on eb": the eb key arms edge surf's takeover at an eb's pin end

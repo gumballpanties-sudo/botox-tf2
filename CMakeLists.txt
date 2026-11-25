@@ -519,6 +519,21 @@ add_executable(buildplace_test tests/buildplace_test.cpp)
 # Build + run: cmake --build build --config Release --target aimfov_test && build\Release\aimfov_test.exe
 add_executable(aimfov_test tests/aimfov_test.cpp)
 
+# Gate test for the huntsman / sticky release grace (src/hacks/aim/aimbot/charge_release.h): hold
+# aim key on mouse1 reads up on the cmd the shot fires; that cmd must still get aim.
+# Build + run: cmake --build build --config Release --target chargerelease_test && build\Release\chargerelease_test.exe
+add_executable(chargerelease_test tests/chargerelease_test.cpp)
+
+# Gate test for the huntsman headshot zone (src/hacks/aim/aimbot/huntsman_zone.h): server ArrowTouch
+# hitbox pick port; old bbox-top point = body shot from behind, zone point = head.
+# Build + run: cmake --build build --config Release --target huntsman_zone_test && build\Release\huntsman_zone_test.exe
+add_executable(huntsman_zone_test tests/huntsman_zone_test.cpp)
+
+# Gate test for the Ambassador head crit range (src/hacks/aim/aimbot/ambassador.h): server never
+# crits an Ambassador headshot past 1200u 2D, so hitscan aim must not prefer head there.
+# Build + run: cmake --build build --config Release --target ambassador_test && build\Release\ambassador_test.exe
+add_executable(ambassador_test tests/ambassador_test.cpp)
+
 # Gate test for the aim signature scan (src/hacks/aim/sdk/sigscan.h): the memchr-anchored scan must
 # return the same first match as the byte-by-byte loop it replaced, on every input.
 # Build + run: cmake --build build --config Release --target sigscan_test && build\Release\sigscan_test.exe
@@ -658,7 +673,14 @@ add_executable(recorder_test tests/recorder_test.cpp)
 add_executable(detections_test tests/detections_test.cpp)
 # Gate test for the edge surf core (src/hacks/movement/edgesurf_core.h): the TF2 engine knobs (wb0 pin tolerance, no air duck crop).
 # Build + run: cmake --build build --config Release --target esurf_test && build\Release\esurf_test.exe
-add_executable(esurf_test tests/esurf_test.cpp)# Gate test for the jumpstats core (src/hacks/movement/jumpstats_core.h): botox jump_stats types/gates.
+add_executable(esurf_test tests/esurf_test.cpp)
+# Gate test for ramp slide (src/hacks/movement/edgesurf_ramp.h): the edge surf core on a sheared world, model engine.
+# Build + run: cmake --build build --config Release --target esurf_ramp_test && build\Release\esurf_ramp_test.exe
+add_executable(esurf_ramp_test tests/esurf_ramp_test.cpp)
+# Gate test for walk off entry (src/hacks/movement/edgesurf_walkoff.h): step off a ledge into an edge surf ride, model engine.
+# Build + run: cmake --build build --config Release --target esurf_walkoff_test && build\Release\esurf_walkoff_test.exe
+add_executable(esurf_walkoff_test tests/esurf_walkoff_test.cpp)
+# Gate test for the jumpstats core (src/hacks/movement/jumpstats_core.h): botox jump_stats types/gates.
 # Build + run: cmake --build build --config Release --target jumpstats_test && build\Release\jumpstats_test.exe
 add_executable(jumpstats_test tests/jumpstats_test.cpp)
 # Gate test for ESP's ESP pure math (src/hacks/esp/esp_math.h): oof-arrow edge placement

@@ -2180,7 +2180,11 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on)
     if (!cmd)
         return;
 
-    if ((s_prePredFlags & FL_ONGROUND) && JumpTrickKey()) {
+    /* jump tricks own the ground: tb / edge surf stay out. NOT botox, one way in: walk off entry ( its option + the edge surf key ).
+       a step it proved beats the jump the trick adds ( edge jump on the edge surf key ); when it takes nothing the old skip runs,
+       further down ( no auto align, no tb, no head bounce ) */
+    const bool jump_ground = (s_prePredFlags & FL_ONGROUND) && JumpTrickKey();
+    if (jump_ground && !(g_edgeSurfWalkOff && ESurf_Armed())) {
         ESurf_Skip(cmd, "jump");
         s_tb.hit = s_tb.hs_hit = s_tb.owns_cmd = false;
         s_budget_live = false;
@@ -2194,7 +2198,8 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on)
     s_tb.input_side    = pre_side;
     s_tb.input_yaw     = cmd->viewangles.y;
 
-    AutoAlignImpl(pLocal, cmd, tb_on);
+    if (!jump_ground)
+        AutoAlignImpl(pLocal, cmd, tb_on);
     /* NOT botox: cumidere's ride half (TBC_Align) while the START is pinned. One held WASD key
        steers along the wall up to 450 and a 450 press tilted off the normal gains speed, every
        move re-proven pinned. Kept only when it pinned; texture_bug's 'R' then keeps it (it tests
@@ -2229,6 +2234,8 @@ static void OnCreateMove(void* pLocal, UserCmd_t* cmd, const bool tb_on)
         /* its pin is a head pin: wall climb / pixel surf / edgebug read it off these like tb's own */
         s_tb.hit = s_tb.hs_hit = es_pin;
         s_tb.owns_cmd = true;
+    } else if (jump_ground) {
+        s_tb.hit = s_tb.hs_hit = s_tb.owns_cmd = false;   // walk off entry took nothing: the jump tricks' skip
     } else {
         TextureBugImpl(pLocal, cmd, tb_on);
         HeadBounceImpl(pLocal, cmd, tb_on);

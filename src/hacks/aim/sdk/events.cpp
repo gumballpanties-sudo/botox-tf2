@@ -3,6 +3,7 @@
 #include "core.h"
 #include "../aimbot/crithack.h"
 #include "../aimbot/aim_melee.h"
+#include "../aimbot/aimbot.h"   // shot ledger
 #include "../visuals/esp.h"   // damage numbers + on-hit hitboxes (botox n_players on_player_hurt / hitboxes_on_hurt)
 
 bool CEventListener::Initialize()
@@ -74,6 +75,7 @@ void CEventListener::FireGameEvent(IGameEvent* pEvent)
 			break;
 
 		F::Esp.OnPlayerHurt(pVictim, iDamage);
+		F::Aimbot.LedgerHurt(iVictim, iDamage, pEvent->GetInt("custom"));   // AIMSHOT HIT line
 		break;
 	}
 	}

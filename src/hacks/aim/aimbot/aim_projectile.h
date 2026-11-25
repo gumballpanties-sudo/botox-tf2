@@ -86,6 +86,9 @@ public:
 	float GetSplashRadius(CBaseEntity* pProjectile, CTFWeaponBase* pWeapon = nullptr, CTFPlayer* pPlayer = nullptr, float flScale = 1.f, CTFWeaponBase* pAirblast = nullptr);
 
 	int m_iLastTickCancel = 0;
+	float TimeTo() const { return m_flTimeTo; }   // last solution's flight time incl. latency (shot ledger)
+	// last huntsman head zone (GetDirectPoints): run = 1u steps giving head (0 = none, lerp kept), z = rel aim height
+	int m_iZoneIdx = 0, m_iZoneRun = -1; float m_flZoneZ = 0.f;
 };
 
 ADD_FEATURE(CAimbotProjectile, AimbotProjectile);

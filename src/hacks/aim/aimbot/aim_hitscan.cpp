@@ -6,6 +6,7 @@
 #include "weapon_tuning.h"
 #include "backtrack.h"
 #include "aim_fovreject.h"   // aimfov::ResolveFov
+#include "ambassador.h"      // AmbassadorHeadCritRange
 #include <span>
 
 std::vector<Target_t> CAimbotHitscan::GetTargets(CTFPlayer* pLocal, CTFWeaponBase* pWeapon)
@@ -172,7 +173,10 @@ int CAimbotHitscan::GetHitboxPriority(int nHitbox, CTFPlayer* pLocal, CTFWeaponB
 		}
 		case TF_WEAPON_REVOLVER:
 		{
-			if (SDK::AttribHookValue(0, "set_weapon_mode", pWeapon) == 1 && (pWeapon->AmbassadorCanHeadshot() || Vars::Aimbot::Hitscan::Modifiers.Value & Vars::Aimbot::Hitscan::ModifiersEnum::WaitForHeadshot))
+			// ambassador.h: past 1200u 2D a head hit never crits -> no head preference there
+			const Vec3 vDelta = pTarget->GetAbsOrigin() - pLocal->GetAbsOrigin();
+			if (SDK::AttribHookValue(0, "set_weapon_mode", pWeapon) == 1 && AmbassadorHeadCritRange(vDelta.x, vDelta.y)
+				&& (pWeapon->AmbassadorCanHeadshot() || Vars::Aimbot::Hitscan::Modifiers.Value & Vars::Aimbot::Hitscan::ModifiersEnum::WaitForHeadshot))
 				bHeadshot = true;
 		}
 		}

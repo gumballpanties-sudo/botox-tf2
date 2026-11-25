@@ -1194,6 +1194,8 @@ static bool s_esurfSyncWant = false;  // armed: botox sync_arm owner k_sync_es (
 static bool s_esurfPinPrev  = false;  // cmd START: the last cmd sent a proven pin (detections, eb veto)
 static bool s_esurfLatchPrev = false; // cmd START: the last cmd an owned approach went out (detections)
 static int  s_esurfSteerCmd = -1;     // edge surf's auto strafe flew this cmd (mid-ride steer): ESurf_Online lets it go
+static bool s_esurfRampStart = false; // cmd START rides a ramp lip (ramp slide): a pin with the slope's vz, never the pin vz
+static int  s_esurfWalkHold = 0;      // walk off entry: move keys down on its pin cmd. Until they change the mid-ride steer ignores them
 
 // auto strafe flies this cmd: own bind, or edge surf's mid-ride steer (valid once AutoStrafe ran this cmd)
 static bool AutoStrafeLive(const UserCmd_t* c)
@@ -1212,7 +1214,10 @@ static void AutoStrafe(void* pLocal, UserCmd_t* pCmd)
     const bool bEsKeys  = !bOwnBind && On(g_edgeSurf && g_edgeSurfAutoStrafe, g_edgeSurfKey, g_edgeSurfMode)
                        && (pCmd->buttons & (IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT));
     const bool bEsSteer = bEsKeys && s_esurfSteerCmd == pCmd->command_number - 1;   // steer already running
-    const bool bEsRide  = bEsKeys && s_esurfPinCmd >= 0 && s_esurfPinCmd == pCmd->command_number - 1;
+    // walk off entry: the keys that walked you off are still down (often straight at the edge = 90 deg off the ride). They are
+    // no steer until you change them
+    if ((s_rawButtons & (IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT)) != s_esurfWalkHold) s_esurfWalkHold = 0;
+    const bool bEsRide  = bEsKeys && !s_esurfWalkHold && s_esurfPinCmd >= 0 && s_esurfPinCmd == pCmd->command_number - 1;
     if (!bOwnBind && !bEsSteer && !bEsRide) return;
     if (g_offVelocity <= 0 || g_offFlags <= 0) return;
 
@@ -2994,6 +2999,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
     // probe features: need working prediction + frame-restore sigs (Aletherium RunPost order:
     // PixelSurf ducks first, AutoAlign steers with the crouch active, then TB -> HS -> WC -> AS)
     s_esurfActive = false;   // per cmd: only edge surf owning this cmd (tbx::OnCreateMove) lights it
+    s_esurfRampStart = false;
     if (s_predicted && probesOK)
     {
         if (!bMoveBlocked)   // these MOVE you. The finder below only measures
@@ -3198,7 +3204,7 @@ static void Movement_RunImpl(UserCmd_t* pCmd)
         d.tick        = s_prePredTick;
         // an edge surf pin sets tb's hit (its pin is a head pin): edgesurfed, never texturebugged too
         d.tb = s_textureBugHit && !s_esurfActive; d.as = s_airStuckHit; d.ps = s.psHit && !s_esurfActive; d.wc = s_wcLanded;
-        d.esPhys = d.walk && !d.onGround && fabsf(s_prePredVel.z - TargetPredictZVel()) < as::k_pinTol && s_esurfPinPrev;
+        d.esPhys = d.walk && !d.onGround && (fabsf(s_prePredVel.z - TargetPredictZVel()) < as::k_pinTol || s_esurfRampStart) && s_esurfPinPrev;
         d.esHeld = s_esurfLatchPrev;
         // veto = an edge surf PIN (this cmd: tb's hit on an owned cmd, or the last cmd's), never a mere owned tick: the eb end
         // edge surf takes over ( U lift / H / E ) still prints edgebugged first, as botox ( m_texture_bug_now = m_hit )

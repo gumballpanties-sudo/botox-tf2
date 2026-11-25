@@ -1,4 +1,5 @@
 #include "aimbot.h"
+#include "charge_release.h"
 
 #include "aim_hitscan.h"
 #include "backtrack.h"
@@ -10,6 +11,7 @@
 
 void AutoPogo_Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd);
 bool Binds_Blocked();   // render.cpp: chat / console / menu text box -- a press there is typing
+void DebugLog(const char* fmt, ...);   // dllmain.cpp
 
 // activation bind -- the same three modes dih's own movement features
 // use (MovementKeyOK). Mode 0 = always on, 1 = while the key is held, 2 = the key toggles it.
@@ -136,7 +138,14 @@ void CAimbot::RunMain(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 	// above are their own toggles and keep running -- the key is "aim now", not "features off".
 	// auto backstab is a feature row of its own -- it still runs with the master enable off,
 	// the aim key not held, and melee aim off. m_bBackstabOnly marks that pass.
-	const bool bAimOK = Vars::Aimbot::General::Enabled.Value && KeyOK();
+	// hold key on mouse1: huntsman / sticky release cmd = key up cmd. charge_release.h
+	const int nWeaponID = pWeapon->GetWeaponID();
+	const bool bCharging = (nWeaponID == TF_WEAPON_COMPOUND_BOW || nWeaponID == TF_WEAPON_PIPEBOMBLAUNCHER)
+		&& pWeapon->As<CTFPipebombLauncher>()->m_flChargeBeginTime() > 0.f;
+	const bool bKey = KeyOK();
+	m_bReleasePass = ChargeReleasePass(m_bChargeKey, bCharging, bKey, G::Attacking);   // G::Attacking from user cmd (hooks.cpp:636)
+
+	const bool bAimOK = Vars::Aimbot::General::Enabled.Value && (bKey || m_bReleasePass);
 	if (!bAimOK && !BackstabOn())
 		return;
 	m_bBackstabOnly = !bAimOK;
@@ -144,7 +153,7 @@ void CAimbot::RunMain(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 	RunAimbot(pLocal, pWeapon, pCmd);
 	RunAimbot(pLocal, pWeapon, pCmd, true);
 
-	m_bBackstabOnly = false;
+	m_bBackstabOnly = m_bReleasePass = false;
 }
 
 void CAimbot::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
@@ -161,6 +170,92 @@ void CAimbot::Run(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
 	G::Attacking = SDK::IsAttacking(pLocal, pWeapon, pCmd, true);
 	F::Backtrack.RunBacktrack(pLocal, pWeapon, pCmd);   // botox run_backtrack: fire cmds the aim did not commit
 	F::Backtrack.RunMeleeSmack(pLocal, pWeapon, pCmd);  // melee lag comp happens at smack, not at the press
+	LedgerExpire();
+	LedgerFire(pLocal, pWeapon, pCmd);   // after backtrack: bt= is the final tick_count
+}
+
+// ---- shot ledger. realtime on both ends: CreateMove curtime is tickbase, events run on frame time.
+// AIMSHOT: FIRE/HIT/MISS + running hits/total per type. MISS lines carry dist / target speed /
+// on-ground at fire time: misses clustering on fast or airborne targets = prediction, far = drop/time.
+void CAimbot::LedgerLine(const char* szWhat, const Shot_t& tShot, int iDamage, int iCustom)
+{
+	DebugLog("AIMSHOT: %s wpn=%d idx=%d dmg=%d custom=%d t=%.2f dist=%.0f spd=%.0f gnd=%d hs=%d bt=%d chg=%.2f run=%d z=%.1f  %s %d/%d",
+		szWhat, tShot.m_iWeapon, tShot.m_iIndex, iDamage, iCustom, I::GlobalVars->realtime - tShot.m_flFired, tShot.m_flDist, tShot.m_flSpeed,
+		tShot.m_bGround, tShot.m_bHs, tShot.m_iBt, tShot.m_flCharge, tShot.m_iRun, tShot.m_flZ,
+		tShot.m_bProj ? "proj" : "hitscan", m_aHits[tShot.m_bProj], m_aTotal[tShot.m_bProj]);
+}
+
+void CAimbot::LedgerFire(CTFPlayer* pLocal, CTFWeaponBase* pWeapon, CUserCmd* pCmd)
+{
+	if (!pWeapon || G::Attacking != 1 || !G::AimTarget.m_iEntIndex || !G::AimTarget.m_iDuration
+		|| G::AimTarget.m_iTickCount != I::GlobalVars->tickcount)
+		return;   // only shots the aim solved this cmd
+	const bool bProj = G::PrimaryWeaponType == EWeaponType::PROJECTILE;
+	if (!bProj && G::PrimaryWeaponType != EWeaponType::HITSCAN)
+		return;   // melee: auto backstab has its own ledger
+	auto pEntity = I::ClientEntityList->GetClientEntity(G::AimTarget.m_iEntIndex);
+	if (!pEntity || !pEntity->As<CBaseEntity>()->IsPlayer())
+		return;   // buildings send no player_hurt
+	auto pTarget = pEntity->As<CTFPlayer>();
+
+	const int iIndex = G::AimTarget.m_iEntIndex, iWeapon = pWeapon->GetWeaponID();
+	auto pNet = I::EngineClient->GetNetChannelInfo();
+	const float flPing = pNet ? pNet->GetLatency(FLOW_INCOMING) + pNet->GetLatency(FLOW_OUTGOING) : 0.f;
+	const float flFlight = bProj ? std::min(F::AimbotProjectile.TimeTo(), 5.f) : 0.f;
+	const float flDue = I::GlobalVars->realtime + flFlight + flPing + 0.5f;   // ponytail: flat 0.5 s slack, widen if HITs log as late MISS
+
+	Shot_t* pFree = nullptr;
+	for (auto& tShot : m_aShots)
+	{
+		if (!bProj && tShot.m_flDue && tShot.m_iIndex == iIndex && tShot.m_iWeapon == iWeapon)
+		{
+			tShot.m_flDue = flDue;   // hitscan stream (minigun, smg) on one target = one shot
+			return;
+		}
+		if (!tShot.m_flDue && !pFree)
+			pFree = &tShot;
+	}
+	if (!pFree)
+		return;   // 8 in flight: drop, the ledger is a sample
+	Shot_t tShot;
+	tShot.m_iIndex = iIndex, tShot.m_iWeapon = iWeapon, tShot.m_flDue = flDue, tShot.m_flFired = I::GlobalVars->realtime;
+	tShot.m_flDist = pLocal->GetShootPos().DistTo(pTarget->m_vecOrigin());
+	tShot.m_flSpeed = pTarget->m_vecVelocity().Length2D(), tShot.m_bGround = pTarget->IsOnGround(), tShot.m_bProj = bProj;
+	tShot.m_bHs = G::CanHeadshot;
+	tShot.m_iBt = G::OriginalCmd.tick_count - pCmd->tick_count;
+	if (iWeapon == TF_WEAPON_COMPOUND_BOW)
+	{
+		const float flBegin = pWeapon->As<CTFPipebombLauncher>()->m_flChargeBeginTime();
+		tShot.m_flCharge = flBegin > 0.f ? I::GlobalVars->curtime - flBegin : 0.f;
+		if (F::AimbotProjectile.m_iZoneIdx == iIndex)
+			tShot.m_iRun = F::AimbotProjectile.m_iZoneRun, tShot.m_flZ = F::AimbotProjectile.m_flZoneZ;
+	}
+	*pFree = tShot;
+	m_aTotal[bProj]++;
+}
+
+void CAimbot::LedgerExpire()
+{
+	for (auto& tShot : m_aShots)
+	{
+		if (!tShot.m_flDue || I::GlobalVars->realtime < tShot.m_flDue)
+			continue;
+		LedgerLine("MISS", tShot, 0, -1);
+		tShot = {};
+	}
+}
+
+void CAimbot::LedgerHurt(int iVictim, int iDamage, int iCustom)
+{
+	Shot_t* pOldest = nullptr;
+	for (auto& tShot : m_aShots)
+		if (tShot.m_flDue && tShot.m_iIndex == iVictim && (!pOldest || tShot.m_flFired < pOldest->m_flFired))
+			pOldest = &tShot;
+	if (!pOldest)
+		return;   // not an aim shot (manual, afterburn after resolve, ...)
+	m_aHits[pOldest->m_bProj]++;
+	LedgerLine("HIT ", *pOldest, iDamage, iCustom);
+	*pOldest = {};
 }
 
 void CAimbot::Store(CBaseEntity* pEntity, size_t iSize)

@@ -20,8 +20,19 @@
 //     Same clip lifts a ride 0.00047 a tick: the hold's closing window is 0.0013 face ulp wide: w.pin_res.
 //   - mv->m_flMaxSpeed = min(m_flMaxspeed, TF_MAX_SPEED 520) (ProcessMovement + CheckParameters), no stamina, sv_airaccelerate 10.
 //   - player movement passes tf_gamerules.cpp / gamerules.cpp ShouldCollide's groups (ESurf_MovesGroup). No ladders.
+//
+//  NOT botox: WALK OFF ENTRY (edgesurf_walkoff.h, "walk off entry" option, default off). On the ledge with the key down:
+//  ESurf_WalkOff creeps you to the edge and steps off so the first air tick is already a ride (its pin proven before the
+//  step is sent). Your raw jump key hands the cmd back; an auto jump on an owned cmd is stripped (s_sent.nojump).
+//
+//  NOT botox: RAMP SLIDE (edgesurf_ramp.h, "ramp slide" option). The same pin on the side lip of a walkable ramp: no ground =
+//  no friction, gravity runs it like a surf ramp. The csgo core flies it unchanged on a sheared world (n_esr::view) with its
+//  own memory (s_slide). Order per cmd: an owned ramp chain, else the flat core, else a fresh ramp read. A ramp pin's START
+//  has the slope's vz, not the pin vz: s_esurfRampStart says so to the eb gate / detections.
 // ============================================================================
 #include "edgesurf_core.h"
+#include "edgesurf_ramp.h"
+#include "edgesurf_walkoff.h"
 
 namespace esurf
 {
@@ -131,6 +142,9 @@ struct World
     float crop = 1.f, pin_tol = as::k_pinTol, duck_dz = 20.f, scale = 1.f;
     // wb0 ride window = 0.0013 face ulp a tick ( top hit at fraction 0.0026 ), halves when z ulp eats the 0.00047 lift
     float pin_res = 2.5e-4f;
+    // ramp slide: CategorizePosition's ground probe is off over this vz ( tf_gamemovement.cpp:2358 )
+    float probe_vz = 250.f;
+    bool  hit_ent = false;   // ramp slide: the last trace met an entity ( a brush entity reads h.world too ), not the static world
     bool  relift_ok = true;
     bool  debug = false;
     int   sims = 0;
@@ -245,6 +259,7 @@ struct World
         void* const he  = tr.m_pEnt;
         const bool ent  = he && he != GetClientEntity(0);
         const int solid = ent ? SolidType(he) : 0;
+        hit_ent         = ent;
         h.world         = tr.hitbox == 0 && (!ent || solid == k_solidBsp);
         h.vp            = (!ent && tr.hitbox != 0) || solid == k_solidVphysics;
         if (debug && tr.fraction < 1.f && !h.world)
@@ -268,45 +283,55 @@ struct World
 };
 
 static n_es::mem_t s_mem{};
+static n_esr::slide_t s_slide{};   // ramp slide: this fall's ramp + the same core's memory on its sheared world
+static n_esw::state_t s_walk{};    // walk off entry: this stand's tries + the first air cmd's pin press
 static unsigned long long s_vizMs = 0ull;
 static bool s_vizPinned = false;
 static Vec3 s_vizOrigin{};
 static float s_vizHalf = 24.f;
 
 // later features may rewrite the cmd: one closing ulp over the top = standing on the ledge
-static struct { int cmd = -1, buttons = 0; float yaw = 0.f, fwd = 0.f, side = 0.f; } s_sent;
+// nojump = a walk off ground cmd: a jump added after us would throw the step away
+static struct { int cmd = -1, buttons = 0; float yaw = 0.f, fwd = 0.f, side = 0.f; bool nojump = false; } s_sent;
 
 // ---- visualize snapshot (movement thread -> render thread) ----
 static std::mutex s_vizLock;
 static ESurfDrawData s_vizOut;
 
 // edge_surf_render's geometry, built here: a stretch of the edge under the hull centred on `s`, ticks 8u down from its ends
-static void EdgeAt(const n_es::edge_t& e, const float s, const float half, ESurfDrawData::Edge& out)
+// rp = a ramp's read: its core's top is the sheared one, the lip is drawn at its real height end to end
+static void EdgeAt(const n_es::edge_t& e, const float s, const float half, ESurfDrawData::Edge& out, const n_esr::ramp_t* rp = nullptr)
 {
-    const auto at = [&](const float t, const float z) { return Vec3(e.n.x * e.d - e.n.y * t, e.n.y * e.d + e.n.x * t, z); };
-    out.a = at(s - half, e.top);
-    out.b = at(s + half, e.top);
+    const auto at = [&](const float t) {
+        const float x = e.n.x * e.d - e.n.y * t, y = e.n.y * e.d + e.n.x * t;
+        return Vec3(x, y, rp ? (float)rp->ztop(x, y) : e.top);
+    };
+    out.a = at(s - half);
+    out.b = at(s + half);
 }
 
-static void VizPublish()
+static void VizPublish(const n_es::mem_t& m, const n_esr::ramp_t* rp)
 {
     ESurfDrawData d;
     d.ms     = s_vizMs;
     d.pinned = s_vizPinned;
-    d.act    = s_mem.act;
-    d.own    = s_mem.act != 'N' && s_mem.act != 'Y';
+    d.act    = m.act;
+    d.own    = m.act != 'N' && m.act != 'Y';
     const n_es::v3 o3 = To3(s_vizOrigin);
-    for (int i = 0; i < s_mem.n_cand && d.nCand < ESurfDrawData::k_max; ++i)
-        if (!s_mem.pick_ok || !n_es::same(s_mem.cand[i], s_mem.pick))
-            EdgeAt(s_mem.cand[i], n_es::along(s_mem.cand[i], o3), s_vizHalf, d.cand[d.nCand++]);
-    d.pickOk = s_mem.pick_ok;
+    // on the sheared world only the ramp's own face has a real height to draw at
+    const auto shown = [&](const n_es::edge_t& e) { return !rp || (e.n.x * rp->fn.x + e.n.y * rp->fn.y > 0.9999f && fabsf(e.d - rp->fd) < 0.05f); };
+    for (int i = 0; i < m.n_cand && d.nCand < ESurfDrawData::k_max; ++i)
+        if (shown(m.cand[i]) && (!m.pick_ok || !n_es::same(m.cand[i], m.pick)))
+            EdgeAt(m.cand[i], n_es::along(m.cand[i], o3), s_vizHalf, d.cand[d.nCand++], rp);
+    d.pickOk = m.pick_ok && shown(m.pick);
     if (d.pickOk) {
-        const n_es::edge_t& f = s_mem.pick;
-        const float s = s_mem.arrive_ok ? n_es::along(f, s_mem.arrive) : n_es::along(f, o3);
-        EdgeAt(f, s, s_vizHalf, d.pick);
-        d.arriveOk = s_mem.arrive_ok;
-        d.arrive   = Vec3(f.n.x * f.d - f.n.y * s, f.n.y * f.d + f.n.x * s, f.top);
-        d.label    = Vec3(d.arrive.x, d.arrive.y, f.top + 6.f);
+        const n_es::edge_t& f = m.pick;
+        const float s = m.arrive_ok ? n_es::along(f, m.arrive) : n_es::along(f, o3);
+        EdgeAt(f, s, s_vizHalf, d.pick, rp);
+        d.arriveOk = m.arrive_ok;
+        const float ax = f.n.x * f.d - f.n.y * s, ay = f.n.y * f.d + f.n.x * s, az = rp ? (float)rp->ztop(ax, ay) : f.top;
+        d.arrive   = Vec3(ax, ay, az);
+        d.label    = Vec3(ax, ay, az + 6.f);
     }
     std::lock_guard<std::mutex> l(s_vizLock);
     s_vizOut = d;
@@ -326,6 +351,8 @@ static void ESurf_FinalStamp(UserCmd_t* cmd)
     constexpr int k_keys = IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT | IN_DUCK;
     if (!cmd || s_sent.cmd != cmd->command_number)
         return;
+    if (s_sent.nojump)
+        cmd->buttons &= ~IN_JUMP;
     const auto wish = [](const float fwd, const float side, const float yaw) {
         const float a = DEG2RADF(yaw);
         return std::pair<float, float>{ fwd * cosf(a) + side * sinf(a), fwd * sinf(a) - side * cosf(a) };
@@ -350,10 +377,56 @@ static void ESurf_FinalStamp(UserCmd_t* cmd)
 // ( else the sync arm stays up and a fall's misses / seen ledges carry into the next one )
 static void ESurf_Idle()
 {
-    s_esurfActive = s_esurfSyncWant = false;
+    s_esurfActive = s_esurfSyncWant = s_esurfRampStart = false;
     s_esurfLatchCmd   = -1;
     esurf::s_sent.cmd = -1;
     n_es::new_fall(esurf::s_mem);
+    n_esr::drop(esurf::s_slide);
+    n_esw::reset(esurf::s_walk);
+    s_esurfWalkHold = 0;
+}
+
+/* walk off entry ( edgesurf_walkoff.h, NOT botox ), one ground cmd: true = it owns the cmd ( brake / creep / hold / the step ).
+   the first air cmd after the step is ESurf_Online's ( n_esw::air ) */
+static bool ESurf_WalkOff(void* pLocal, UserCmd_t* cmd)
+{
+    using namespace esurf;
+    tbx::Restore(PredCommandsPredicted() - 1);
+    if (EntMoveType(pLocal) != MOVETYPE_WALK)
+        return false;
+    World w(pLocal);
+    w.frame = PredCommandsPredicted() - 1;
+    w.base  = *cmd;
+    w.dt    = TickInterval();
+    w.pin   = TargetPredictZVel();
+    /* the air tick after the step STARTs with friction 1: CategorizePosition resets it on the way off the ground ( vz 0, not rising ) */
+    w.k_acc     = CvarFloat("sv_airaccelerate", 10.f) * w.dt;
+    w.max_speed = MaxSpeed(pLocal);
+    w.debug     = g_debugLogEnable;
+    w.SetupHull();
+    w.relift_ok = AirDuckLeft(pLocal, 1);
+    if (w.dt <= 0.f || w.k_acc <= 0.f)
+        return false;
+    n_es::in_t in;
+    in.range = std::clamp(g_edgeSurfRange, 8.f, 512.f);
+    in.reach = std::clamp(g_edgeSurfReach, 0.f, 32.f);
+    /* your keys as a world direction, raw: before auto strafe and the other movers touched the cmd */
+    const float kf = (float)((s_rawButtons & IN_FORWARD) != 0) - (float)((s_rawButtons & IN_BACK) != 0);
+    const float ks = (float)((s_rawButtons & IN_MOVERIGHT) != 0) - (float)((s_rawButtons & IN_MOVELEFT) != 0);
+    const float ya = DEG2RADF(cmd->viewangles.y), kl = sqrtf(kf * kf + ks * ks);
+    const float wx = kl > 0.f ? (kf * cosf(ya) + ks * sinf(ya)) / kl : 0.f, wy = kl > 0.f ? (kf * sinf(ya) - ks * cosf(ya)) / kl : 0.f;
+    const n_es::out_t r = n_esw::ground(w, s_walk, cmd->command_number, in, wx, wy, (s_rawButtons & IN_DUCK) != 0);
+    w.reset();
+    if (!r.own)
+        return false;
+    const UserCmd_t c = w.cmd_of(r.mv);
+    cmd->forwardmove  = c.forwardmove;
+    cmd->sidemove     = c.sidemove;
+    cmd->buttons      = c.buttons;
+    s_esurfActive     = true;
+    s_esurfLatchCmd   = cmd->command_number;
+    s_sent            = { cmd->command_number, cmd->buttons, cmd->viewangles.y, cmd->forwardmove, cmd->sidemove, true };
+    return true;
 }
 
 /* edge_surf_online: true = edge surf owns this cmd ( tb + head bounce skip it ), pinned = a proven pin, held = nothing after tb may
@@ -363,6 +436,7 @@ static bool ESurf_Online(void* pLocal, UserCmd_t* cmd, bool& pinned, bool& held)
     using namespace esurf;
     pinned = held = false;
     s_esurfActive    = false;
+    s_esurfRampStart = false;
     const bool key   = ESurf_Armed();
     const bool armed = cmd && pLocal && EntAlive(pLocal) && (key || ESurf_EbArmed());
     /* START must be the server's END, like texture bug */
@@ -372,15 +446,29 @@ static bool ESurf_Online(void* pLocal, UserCmd_t* cmd, bool& pinned, bool& held)
         s_esurfLatchCmd = -1;
         s_sent.cmd      = -1;
         s_mem.own       = false;
+        s_slide.m.own   = false;
+        s_esurfWalkHold = 0;
         return false;
     };
+    /* ramp slide: the last cmd sent a ramp pin. its START carries the slope's vz, the sheared one is the pin's */
+    const float pin      = TargetPredictZVel();
+    const bool ramp_sent = armed && s_slide.rp.ok && s_slide.m.sent_pin && s_slide.m.cmd == cmd->command_number - 1;
+    const bool ramp_now  = ramp_sent && !(s_prePredFlags & FL_ONGROUND) && fabsf(s_slide.rp.flat_vz(To3(s_prePredVel)) - pin) < as::k_pinTol;
+    s_esurfRampStart     = ramp_now;
     /* check line: last cmd sent a proven pin, this START is no pin = engine's run of that cmd left the sim. want 0 online */
     if (armed && g_debugLogEnable && s_esurfPinPrev &&
-        ((s_prePredFlags & FL_ONGROUND) || fabsf(s_prePredVel.z - TargetPredictZVel()) >= as::k_pinTol))
-        DebugLog("ESURF: pred miss cmd=%d vz=%.2f z=%.3f ground=%d", cmd->command_number, s_prePredVel.z, s_prePredOrigin.z,
-                 (s_prePredFlags & FL_ONGROUND) ? 1 : 0);
+        (ramp_sent ? !ramp_now : ((s_prePredFlags & FL_ONGROUND) || fabsf(s_prePredVel.z - pin) >= as::k_pinTol)))
+        DebugLog("ESURF: pred miss cmd=%d vz=%.2f z=%.3f ground=%d ramp=%d", cmd->command_number, s_prePredVel.z, s_prePredOrigin.z,
+                 (s_prePredFlags & FL_ONGROUND) ? 1 : 0, ramp_sent ? 1 : 0);
     if (!armed || (s_prePredFlags & FL_ONGROUND)) {
         n_es::new_fall(s_mem);
+        n_esr::drop(s_slide);
+        s_esurfWalkHold = 0;
+        /* walk off entry: on the ledge, your key down, no jump of your own ( an auto jump is stripped: the step is proven, it is not ) */
+        if (armed && key && g_edgeSurfWalkOff && !(s_rawButtons & IN_JUMP) && !s_airStuckHit && ESurf_WalkOff(pLocal, cmd)) {
+            held = true;
+            return true;
+        }
         return off(!armed ? "key" : "ground");
     }
     /* "auto strafe" mid-ride: your keys point off the ride, AutoStrafe flew this cmd ( pre-pred ). let go, keep the fall's memory */
@@ -401,8 +489,7 @@ static bool ESurf_Online(void* pLocal, UserCmd_t* cmd, bool& pinned, bool& held)
         cmd->buttons &= ~IN_DUCK;
     }
     const bool debug   = g_debugLogEnable;
-    const float pin    = TargetPredictZVel();
-    const bool pin_now = fabsf(s_prePredVel.z - pin) < as::k_pinTol;
+    const bool pin_now = ramp_now || fabsf(s_prePredVel.z - pin) < as::k_pinTol;
     /* eb key alone: a fresh pin START ( an edgebug just ended, its plan spent ) or our chain, nothing else */
     static int s_pin_cmd = -1;
     const bool fresh     = pin_now && s_pin_cmd != cmd->command_number - 1;
@@ -441,22 +528,73 @@ static bool ESurf_Online(void* pLocal, UserCmd_t* cmd, bool& pinned, bool& held)
     w.relift_ok = AirDuckLeft(pLocal, 1);
     if (w.dt <= 0.f || w.k_acc <= 0.f)
         return off("dt");
+    /* a ramp's act Q stood you up: the same duck hold as the flat one above, on the ramp's sheared z */
+    if (s_slide.rp.ok && s_slide.m.up_cmd == cmd->command_number - 1 && ESurf_Latched(cmd)) {
+        const n_es::hull_t hq = w.hull(false);
+        if (s_slide.rp.flat_z(To3(s_prePredOrigin), hq.mins, hq.maxs) > s_slide.m.up_top) {
+            s_slide.m.up_cmd = cmd->command_number;
+            cmd->buttons    &= ~IN_DUCK;   // cmd_of strips the duck off w.base itself
+        }
+    }
     n_es::in_t in;
     in.range    = std::clamp(g_edgeSurfRange, 8.f, 512.f);
     in.reach    = std::clamp(g_edgeSurfReach, 0.f, 32.f);
     in.turn     = std::clamp(g_edgeSurfDeltaStrafe, 0.f, 15.f);
     in.takeover = !key;
-    const n_es::out_t r = n_es::tick(w, s_mem, cmd->command_number, in);
-    w.reset();
+    /* ramp slide: an owned ramp chain flies first ( its START is no flat pin ), else the flat core, then a fresh ramp read. your key
+       only: an eb end is a flat pin */
+    const int cn          = cmd->command_number;
+    const bool ramp_on    = key && g_edgeSurfRamp;
+    const bool ramp_chain = ramp_on && n_esr::chained(s_slide, cn);
+    n_es::out_t r;
+    bool ramp = false;
+    /* walk off entry's first air cmd: the pin press its step proved, before anything else plans */
+    const bool walk = key && g_edgeSurfWalkOff && (r = n_esw::air(w, s_walk, cn)).own;
+    if (walk) {
+        w.reset();
+        s_esurfWalkHold = s_rawButtons & (IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);   // AutoStrafe: no steer off these
+    }
+    if (!r.own && ramp_chain) {
+        r    = n_esr::tick(w, s_slide, cn, in);
+        ramp = r.own;
+        w.reset();
+    }
+    if (!r.own) {
+        r = n_es::tick(w, s_mem, cn, in);
+        w.reset();
+    }
+    if (!r.own && ramp_on && !ramp_chain) {
+        r    = n_esr::tick(w, s_slide, cn, in);
+        ramp = r.own;
+        w.reset();
+    }
+    if (!ramp_on)
+        n_esr::drop(s_slide);
+    /* check line: each ramp read once ( again after 2 s ). slope n.z 0.7..0.999, face square to it. top' = the core's sheared top */
+    if (debug && s_slide.rp.ok && s_slide.m.cmd == cn) {
+        static n_esr::ramp_t s_logged{};
+        static unsigned long long s_log_ms = 0ull;
+        if (const unsigned long long t = GetTickCount64(); !(s_logged.ok && n_esr::same(s_logged, s_slide.rp)) || t >= s_log_ms) {
+            s_logged = s_slide.rp;
+            s_log_ms = t + 2000ull;
+            DebugLog("ESURF: ramp read slope n=%.4f %.4f %.4f ds=%.3f face n=%.4f %.4f d=%.3f top'=%.4f own=%d act=%c xy=%.1f vz=%.1f",
+                     s_slide.rp.ax, s_slide.rp.ay, s_slide.rp.c, s_slide.rp.ds, s_slide.rp.fn.x, s_slide.rp.fn.y, s_slide.rp.fd, s_slide.rp.top,
+                     ramp ? 1 : 0, s_slide.m.act, s_prePredVel.Length2D(), s_prePredVel.z);
+        }
+    }
+    const n_es::mem_t& mm = ramp ? s_slide.m : s_mem;
+    /* drawn: the ramp's read when it owns, or when it alone picked something */
+    const bool rviz = ramp || (!r.own && s_slide.rp.ok && s_slide.m.cmd == cn && s_slide.m.pick_ok && !s_mem.pick_ok);
     s_vizMs     = GetTickCount64();
     s_vizPinned = r.pin;
     s_vizOrigin = s_prePredOrigin;
     s_vizHalf   = 24.f * w.scale;
     if (g_edgeSurfViz)
-        VizPublish();
+        VizPublish(rviz ? s_slide.m : s_mem, rviz ? &s_slide.rp : nullptr);
     if (!r.own) {
         s_esurfLatchCmd = -1;
         s_sent.cmd      = -1;
+        s_esurfWalkHold = 0;
         return false;
     }
     const UserCmd_t c = w.cmd_of(r.mv);
@@ -468,7 +606,7 @@ static bool ESurf_Online(void* pLocal, UserCmd_t* cmd, bool& pinned, bool& held)
     s_esurfActive     = true;
     if (r.pin)
         s_esurfPinCmd = cmd->command_number;
-    s_esurfLatchCmd = s_mem.own ? cmd->command_number : -1;
+    s_esurfLatchCmd = (walk || mm.own) ? cmd->command_number : -1;
     s_sent          = { cmd->command_number, cmd->buttons, cmd->viewangles.y, cmd->forwardmove, cmd->sidemove };
     return true;
 }
