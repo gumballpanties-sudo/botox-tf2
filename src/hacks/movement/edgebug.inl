@@ -1282,7 +1282,28 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
     // edgesurf on eb: a held plan with no lift keeps searching for one
     const bool replan = s_ebDetected && farFromBug
                      && ((steer && fabsf(s_ebSteerSince) >= 1.f) || s_ebFollowBlocked || (esurf && !s_ebLastLift));
-    if (!s_ebDetected || replan) do
+    // pick score: heading closest to where the mouse turns
+    auto aimAt = [&](int ticks) { return origView.y + std::clamp(delta.y * (ticks + 1) * 0.5f, -90.f, 90.f); };
+    /* eb -> esurf ( edgesurf.inl ): with the edge surf key down a bug that ducks has to head 4 deg closer than one that never
+       does to win: only a standing end has the air duck lift that makes the same ledge an edge surf ( TF2: an air release on
+       the way spends one of the 2 air ducks ) */
+    const float duckCost = ESurf_Armed() ? 4.f : 0.f;
+    const auto ducks = [](const EbCmd_t* c, int ticks, bool endDuck) {
+        return endDuck || std::any_of(c, c + ticks + 1, [](const EbCmd_t& t) { return (t.buttons & IN_DUCK) != 0; });
+    };
+    // the held plan's score: what a replan find has to beat
+    const float curErr = !replan ? 0.f
+        : EbAimErr(s_ebCmds[std::min(s_ebCurrentTick, s_ebLockTicks)].origin, s_ebFollowEnd, aimAt(s_ebLockTicks - s_ebCurrentTick))
+          + (esurf && !s_ebLastLift ? 360.f : 0.f)
+          + (ducks(s_ebCmds, s_ebLockTicks, false) ? duckCost : 0.f);
+    // the best find there is (standing, err 0) would still be kept: no find can swap, the search is wasted.
+    // Skip it; its start zeroes the steer, so the next replan comes on the same cadence
+    if (replan && MV_EbKeepPlan(s_ebFollowBlocked, curErr, false, 0.f))
+    {
+        DebugLog("EB: replan skip at %d/%d cur=%.1f steer=%.2f", s_ebCurrentTick, s_ebLockTicks, curErr, delta.y);
+        s_ebSteerSince = 0.f;
+    }
+    else if (!s_ebDetected || replan) do
     {
         static int nVz = 0, nGap = 0, nAir = 0, nRun = 0, nHit = 0;
         if (static unsigned long long next = 0ull; GetTickCount64() >= next)
@@ -1296,6 +1317,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
 
         RestoreEntityToPredicted();
         bSimmed = true;
+        const int traces0 = s_tracesThisCmd;   // our traces this search (log tr=), engine's own not counted
         const Vec3 liveOrigin = EntV3(pLocal, g_offOrigin);
         const Vec3 liveVel = EntV3(pLocal, g_offVelocity);
         const EbHull_t hull = EbMakeHull(pLocal, grav);
@@ -1640,6 +1662,17 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
 
         int bestContact = -1;
         const int replayVariant = autostrafe ? 4 : 2;
+        // a variant that folds a ZERO move is the still pair (0 stand / 1 duck): same cmds, same sims, same
+        // finds. The replay pair with no keys (or userMoveDead), the ebanat turns 8-11 with no keys (unless
+        // userMoveDead hands them 450). AirMove never reads upmove, the only field the fold can still change.
+        // Returns the still twin, -1 = a move of its own
+        const bool userKeysDead = userFwd == 0.f && userSide == 0.f;
+        auto stillTwin = [&](int v)
+        {
+            if ((userMoveDead || userKeysDead) && (v == replayVariant || v == replayVariant + 1)) return v & 1;
+            if (userKeysDead && !userMoveDead && v >= 8 && v <= 11) return v & 1;
+            return -1;
+        };
         // BREADTH FIRST: every variant once, THEN the duck sweeps
         int sweepCenter[8]; for (int& x : sweepCenter) x = -1;
         bool sweepApprox[8]{}, baseRan[8]{};
@@ -1647,14 +1680,16 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         int baseContact[8]; for (int& x : baseContact) x = -1;   // the refine pass brackets on these
         int baseEnd[8]; for (int& x : baseEnd) x = -1;           // runEnd of the base run, -1 = clock cut it
         int baseRuns = 0, sweepRuns = 0, releaseRuns = 0, bendRuns = 0, ebRuns = 0;
-        const int firstVariant = (s_ebLastVariant > 0 && s_ebLastVariant < searchCount) ? s_ebLastVariant : 0;
+        // last plan's variant first; a still twin now = its still variant (else it is skipped and still flies late)
+        const int lastV = stillTwin(s_ebLastVariant) >= 0 ? (s_ebLastVariant & 1) : s_ebLastVariant;
+        const int firstVariant = (lastV > 0 && lastV < searchCount) ? lastV : 0;
         auto variantAt = [&](int idx) { return idx == 0 ? firstVariant : (idx == firstVariant ? 0 : idx); };
         auto outOfBudget = [&] { return totalPredictions > 0 && (totalPredictions >= maxPredictions || budget.CannotFit(worstRunUs)); };
         // pass 0: every variant once
         for (int idx = 0; idx < searchCount && !enough(); idx++)
         {
             const int v = variantAt(idx);
-            if (userMoveDead && (v == replayVariant || v == replayVariant + 1)) continue;
+            if (stillTwin(v) >= 0) continue;
             if ((!toEdge || !s_ebEdgeTargetValid) && (v == 6 || v == 7)) continue;
             if (stance == 2 && (v & 1) && v < 8) continue;   // standing only: ducked twins land ducked
             if (outOfBudget()) break;
@@ -1815,6 +1850,8 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
             for (int v = 8; v < 16 && !enough() && !deepOut(); v++)
             {
                 if (stance == 2 && (v == 9 || v == 11 || v == 13 || v == 14)) continue;
+                // still twin whose base run flew to its end (clock cut = not the same run)
+                if (const int tw = stillTwin(v); tw >= 0 && baseEnd[tw] >= 0) continue;
                 famNow = 4;
                 runVariant(v, -1);
                 ebRuns++;
@@ -1844,15 +1881,7 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                 }
         s_ebLastContactTick = bestContact >= 0 ? bestContact : reachTick;
 
-        // pick: heading closest to where the mouse turns; a jump-eating plan only if nothing else
-        auto aimAt = [&](int ticks) { return origView.y + std::clamp(delta.y * (ticks + 1) * 0.5f, -90.f, 90.f); };
-        /* eb -> esurf ( edgesurf.inl ): with the edge surf key down a bug that ducks has to head 4 deg closer than one that never
-           does to win: only a standing end has the air duck lift that makes the same ledge an edge surf ( TF2: an air release on
-           the way spends one of the 2 air ducks ) */
-        const float duckCost = ESurf_Armed() ? 4.f : 0.f;
-        const auto ducks = [](const EbCmd_t* c, int ticks, bool endDuck) {
-            return endDuck || std::any_of(c, c + ticks + 1, [](const EbCmd_t& t) { return (t.buttons & IN_DUCK) != 0; });
-        };
+        // pick (aimAt / ducks / duckCost above the search); a jump-eating plan only if nothing else
         if (esurf && s_ebPlanCount == 0 && s_ebFallbackOk)
         {
             s_ebPlans[0]  = s_ebFallback;
@@ -1867,10 +1896,6 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         int sel = MV_EbPickPlan(rank, s_ebPlanCount);
         if (replan && sel >= 0)
         {
-            const float curErr = EbAimErr(s_ebCmds[std::min(s_ebCurrentTick, s_ebLockTicks)].origin, s_ebFollowEnd,
-                                          aimAt(s_ebLockTicks - s_ebCurrentTick))
-                               + (esurf && !s_ebLastLift ? 360.f : 0.f)
-                               + (ducks(s_ebCmds, s_ebLockTicks, false) ? duckCost : 0.f);
             // edgesurf on eb: a replan that only looked for a lift keeps the held plan unless the find has one
             // TF2: never over a standing find while flying a jump-eating plan ( MV_EbKeepPlan's rule )
             const bool keep = MV_EbKeepPlan(s_ebFollowBlocked, curErr, rank[sel].blocked, rank[sel].err)
@@ -1912,10 +1937,11 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
         // bre = bend runs resumed / ticks skipped, deep = 1 full / 0 half share for bend + ebanat,
         // bc = bend order start (-1 = pass skipped), brk / bis = brake ladder / bisect runs, bk = picked plan's brake tick,
         // slow = finds refused for bleeding 2D speed (MV_EbSpeedOk), rf / wd = lip refine / full window runs,
-        // fam = picked plan's pass (EbPlan_t::fam, -1 = none picked)
+        // fam = picked plan's pass (EbPlan_t::fam, -1 = none picked), tr = our hull / line traces (reach,
+        // lip lanes, tail probes, edge / ramp / surface checks)
         DebugLog("EB: mode=%d win=%d run=%d reach=%d edge=%d vars=%d base=%d sw=%d rel=%d brk=%d bis=%d bnd=%d ebv=%d rf=%d wd=%d sims=%d/%d cut=%d "
                  "us=%lld/%lld con=%d vz=%.2f found=%d var=%d bk=%d at=%d pth=%d/%d jc=%d blk=%d stc=%d surf=%d duck=%d fb=%d "
-                 "pre=%d/%d/%d snap=%lld bre=%d/%d deep=%d bc=%d slow=%d fam=%d",
+                 "pre=%d/%d/%d snap=%lld bre=%d/%d deep=%d bc=%d slow=%d fam=%d tr=%d",
                  mode, maxTicks, runTicks, reachTick, s_ebEdgeTargetValid ? 1 : 0, searchCount, baseRuns, sweepRuns,
                  releaseRuns, brakeRuns, bisectRuns, bendRuns, ebRuns, refineRuns, wideRuns, totalPredictions, maxPredictions, tailCut, budget.UsedUs(), budget.capUs,
                  bestContact, s_ebVelBackup.z, s_ebDetected ? 1 : 0, s_ebLastVariant,
@@ -1923,7 +1949,8 @@ static void EdgeBugPost(void* pLocal, UserCmd_t* pCmd)
                  s_ebPlanCount, wantPaths, nJumpChecks, nBlocked, nStance, nRejSurf,
                  sel >= 0 ? (s_ebPlans[sel].ducked ? 1 : 0) : -1, s_ebFollowBlocked ? 1 : 0,
                  famSaves, famResumes, famSkipped, Pred_SnapUs() - snapUs0,
-                 bendResumes, bendSkipped, deepFull ? 1 : 0, bendStart, nSlow, sel >= 0 ? s_ebPlans[sel].fam : -1);
+                 bendResumes, bendSkipped, deepFull ? 1 : 0, bendStart, nSlow, sel >= 0 ? s_ebPlans[sel].fam : -1,
+                 s_tracesThisCmd - traces0);
         if (esurf)
             DebugLog("EB: esurf plans=%d lifts=%d pick=%d", s_ebPlanCount,
                      (int)std::count_if(s_ebPlans, s_ebPlans + s_ebPlanCount, [](const EbPlan_t& p) { return p.lift; }),
