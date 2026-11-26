@@ -46,6 +46,15 @@ void* Glow_PreviewTarget();
 // a matrix3x4 array of nBones entries off the drawn model; pHdr is its studiohdr_t*.
 void Glow_RenderPreview(void* pEnt, void* pGun /*held weapon ent, may be null*/, const float (*worldToProjection)[4], const void* pBones, int nBones, const void* pHdr);
 
+// ---- model glow (aim/visuals/chams.cpp, botox model_glow.cpp): viewmodel glow / stencil + dropped weapon glow ----
+// screenfx.cpp: open after the post slot (DrawViewModels next, viewrender.cpp:2160), shut at ViewDrawFade
+void ModelGlow_SetViewmodelWindow(bool open);
+bool ModelGlow_ViewmodelOpen();            // window open + a viewmodel glow / stencil part wanted (cheap gate)
+int  ModelGlow_ViewmodelRef(int vmKind);   // visuals.cpp ViewmodelDrawKind -> stencil ref the live part stamps, 0 = none
+void ModelGlow_Stamp(int ref);             // h_DrawModelExecute around the live gun draw: ref, then 0 = stencil off
+void ModelGlow_ViewmodelPass();            // screenfx.cpp ViewDrawFade, after the gun passes: queue the glow / outline
+void ModelGlow_RenderDropped();            // screenfx.cpp post slot, right before Glow_Render: stamp + queue (read + clear)
+
 // IVModelRender::ForcedMaterialOverride (slot 1), installed by thread.cpp. The engine's own
 // overrides (invuln, burning, ...) are dropped while Glow_Rendering so the glow material stays.
 using ForcedMaterialOverride_t = void(__fastcall*)(void*, void*, int);

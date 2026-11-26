@@ -1485,6 +1485,20 @@ static bool Lua_DrawModel(void* rcx, const void* pState, const void* pInfo, cons
     return true;
 }
 
+// viewmodel glow / stencil (aim/visuals/chams.cpp model glow): stencil ref of a live gun part drawn inside
+// DrawViewModels, 0 = none. Not a shadow / ssao depth draw (model_types.h 0x40000000 / 0x08000000), not the
+// mirror, not a glow silhouette. ModelRenderInfo_t flags +0x40, pModel +0x20, entity_index +0x44
+static int ViewmodelGlowRef(const void* pInfo)
+{
+    if (g_eject || !pInfo || !ModelGlow_ViewmodelOpen() || RearMirror_Drawing() || Glow_Rendering()) return 0;
+    const uint8_t* info = static_cast<const uint8_t*>(pInfo);
+    if (*reinterpret_cast<const int*>(info + 0x40) & (0x40000000 | 0x08000000)) return 0;
+    const void* pMdl = *reinterpret_cast<const void* const*>(info + 0x20);
+    if (reinterpret_cast<uintptr_t>(pMdl) < 0x10000) pMdl = nullptr;
+    LazyModelName nm; nm.mdl = pMdl;
+    return ModelGlow_ViewmodelRef(ViewmodelDrawKind(pMdl, nm, *reinterpret_cast<const int*>(info + 0x44)));
+}
+
 void __fastcall h_DrawModelExecute(void* rcx, const void* pState, const void* pInfo, const void* pBones)
 {
     MiscHookGuard _g;
@@ -1493,7 +1507,11 @@ void __fastcall h_DrawModelExecute(void* rcx, const void* pState, const void* pI
         MultiHud_PropDiagEnt(*reinterpret_cast<const int*>(static_cast<const uint8_t*>(pInfo) + 0x44),
                              *reinterpret_cast<const void* const*>(static_cast<const uint8_t*>(pInfo) + 0x20));
     if (Lua_DrawModel(rcx, pState, pInfo, pBones)) return;
+    // the live gun stamps its ref around every pass it draws (chams layers included), stencil off after
+    const int vmRef = ViewmodelGlowRef(pInfo);
+    if (vmRef) ModelGlow_Stamp(vmRef);
     h_DrawModelExecute_impl(rcx, pState, pInfo, pBones);
+    if (vmRef) ModelGlow_Stamp(0);
 }
 
 // ==== Particle create hooks (block new unusual effects while no-hats on) ==========

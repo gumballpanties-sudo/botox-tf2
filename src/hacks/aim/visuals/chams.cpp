@@ -1565,3 +1565,279 @@ void Glow_RenderPreview(void* pEnt, void* pGun, const float (*worldToProjection)
 
 	VCallAt<void>(rc, 1 /*Release*/);
 }
+
+// ---- model glow (botox hacks/visuals/screen/model_glow.cpp): viewmodel glow / stencil + dropped weapon
+// glow. The models stamp their own stencil refs, player_stencil.cpp's passes build glow + outline off them
+// and zero them again right after the read. Refs live in the low 7 bits only, stamped and read through the
+// 0x7f masks: bit 0x80 is the web surface's (websurface.cpp:1458 marks it in the post slot before both
+// stamps, 2690 restores the pre-grade frame where it is set, after colour correction). 0x50..0x57: above
+// the player / engine glow refs (1, 2), below vgui popups' low bits (254 & 0x7f down). Writer order, per
+// frame: vgui stale -> web mark -> dropped stamp + read + clear -> Glow_Render players (1 / 2, halo == 0,
+// player mask) -> engine glow (cart, intel: 1 / 2, halo == 0) -> DrawViewModels stamp -> ViewDrawFade read +
+// clear -> tonemap occlusion (sdk2013 viewpostprocess.cpp:468, bit 0, sets it before it tests it) -> web restore.
+namespace
+{
+	constexpr int kRefWeapon = 0x51, kRefArms = 0x52, kRefDroppedSeen = 0x54, kRefDroppedHidden = 0x55;
+	constexpr unsigned kRefBits = 0x7F;                                      // stamp write mask + fill test mask
+	constexpr PlayerStencilClear kClear{ kModelBandTest, kModelBandRef, kRefBits };   // 0x50..0x57 in the low bits -> 0, 0x80 kept
+	constexpr unsigned kCmpEqual = 3, kRed = 1, kGreen = 2;   // d3d9 D3DCMP_EQUAL / D3DCOLORWRITEENABLE_*
+
+	bool s_vmWindow = false;       // DrawViewModels running: screenfx.cpp opens it after the post slot, ViewDrawFade shuts it
+	int  s_vmStampedFrame = -1;    // frame a live viewmodel part stamped, -1 once its pass is queued
+	bool s_droppedDead = false;    // the dropped stamp faulted: off for good, like Glow_Render's s_glowReady
+
+	// stamp only when a pass will read and clear it: shaders built, the last model pass reached Draw, queue alive
+	bool PipelineLive() { return PlayerStencil_Ready() && PlayerStencil_ModelLive(); }
+
+	// once a frame while the feature is wanted: build the shaders / re-probe after a skipped pass. true = stamp
+	bool PipelineFrame()
+	{
+		if (!PlayerStencil_Ready()) { PlayerStencil_Warm(); return false; }
+		if (!PlayerStencil_ModelLive()) { PlayerStencil_Probe(); return false; }
+		return true;
+	}
+
+	// ShaderStencilState_t's defaults, disabled (botox stamp( 0 ) = shader_stencil_state_t{ }): nothing of ours
+	// (ref, masks, REPLACE) leaks to the next stencil user
+	void StencilDefault(void* rc) { GlowStencil(rc, false, kStencilAlways, 0, 0xFFFFFFFFu, 0xFFFFFFFFu, kOpKeep, kOpKeep, kOpKeep); }
+
+	bool VmGlowParts()    { return g_vmGlow && (g_vmGlowWeapon || g_vmGlowArms); }
+	bool VmStencilParts() { return g_vmStencil && (g_vmStencilWeapon || g_vmStencilArms); }
+
+	// part off = keeps its coverage (the other part's glow stops at it) but draws nothing
+	void PartColor(float out[4], bool on, const float* c) { for (int k = 0; k < 4; k++) out[k] = on ? c[k] : 0.f; }
+
+	// botox model_glow on_screen, through the view being drawn (WorldToScreenMatrix, StencilBoxes' matrix; not
+	// SDK::IsOnScreen: H::Draw's matrix is refreshed at paint = last frame, 6 points, behind points dropped).
+	// Box = a cube around the origin that holds the collision box in any rotation (no transform slot needed).
+	// In front and inside [-1,1] = draw; across the eye plane (a gun at your feet) is kept; all behind is not
+	bool OnScreen(CBaseEntity* pEnt)
+	{
+		const VMatrix& m = I::EngineClient->WorldToScreenMatrix();
+		const Vec3 o = pEnt->GetAbsOrigin(), mn = pEnt->m_vecMins(), mx = pEnt->m_vecMaxs();
+		const float r = sqrtf(std::max(mn.x * mn.x, mx.x * mx.x) + std::max(mn.y * mn.y, mx.y * mx.y) + std::max(mn.z * mn.z, mx.z * mx.z));
+		float lo[2] = { 1e9f, 1e9f }, hi[2] = { -1e9f, -1e9f };
+		bool front = false, behind = false;
+		for (int i = 0; i < 8; i++)
+		{
+			const float p[3] = { o.x + ((i & 1) ? r : -r), o.y + ((i & 2) ? r : -r), o.z + ((i & 4) ? r : -r) };
+			const float w = m[3][0] * p[0] + m[3][1] * p[1] + m[3][2] * p[2] + m[3][3];
+			if (w < 0.1f) { behind = true; continue; }
+			front = true;
+			for (int a = 0; a < 2; a++)
+			{
+				const float ndc = (m[a][0] * p[0] + m[a][1] * p[1] + m[a][2] * p[2] + m[a][3]) / w;
+				lo[a] = std::min(lo[a], ndc);
+				hi[a] = std::max(hi[a], ndc);
+			}
+		}
+		return front && (behind || (hi[0] >= -1.f && lo[0] <= 1.f && hi[1] >= -1.f && lo[1] <= 1.f));
+	}
+
+	// botox player_stencil apply_look: gradient start / reach / blend, accent wave, edge pulse, outline wave.
+	// Every field it owns is written, so a static settings object never carries last frame's wave over
+	void ApplyLook(PlayerStencilSettings& st, bool gradient, float gradientInner, bool normalBlend, float glowThickness,
+	               bool wave, const float* waveColor, float waveSpeed, float waveSize, float waveStrength, float waveAngle,
+	               bool pulse, float pulseSpeed, float pulseMin,
+	               float outlineThickness, bool oWave, const float* oWaveColor, float oSpeed, float oSize, float oStrength, float oAngle)
+	{
+		if (!gradient)   // outer = inner: the pure falloff
+		{
+			Rgba(st.glowVisibleOuter, st.glowVisible);
+			Rgba(st.glowInvisibleOuter, st.glowInvisible);
+			Rgba(st.glowThirdOuter, st.glowThird);
+		}
+		const float start = 1.f - std::clamp(gradientInner, 0.f, 100.f) / 100.f;
+		st.gradient[0] = start;
+		st.gradient[1] = 1.f / std::max(1.f - start, 1e-3f);
+		const bool additive = !normalBlend;
+		st.gradient[2] = std::min(additive ? 15.f /*k_engine_glow_radius*/ : std::clamp(glowThickness, 2.f, 30.f), 31.f);
+		st.gradient[3] = additive ? 1.f : 0.f;
+		st.thickness = std::clamp(outlineThickness, 0.5f, 8.f);
+
+		const float now = I::GlobalVars ? I::GlobalVars->realtime : 0.f;
+		auto Wave = [&](float out[4], float color[4], float* angle, bool on, const float* c, float speed, float size, float strength, float deg) {
+			out[0] = out[1] = out[2] = out[3] = 0.f;
+			if (!on) return;
+			const float phase = fmodf(now * speed, 1.f);
+			out[0] = 1.f;
+			out[1] = phase < 0.f ? phase + 1.f : phase;
+			out[2] = 1.f / std::clamp(size, 0.05f, 4.f);
+			out[3] = std::clamp(strength, 0.f, 1.f);
+			Rgba(color, c);
+			angle[0] = cosf(deg * 0.017453293f);
+			angle[1] = sinf(deg * 0.017453293f);
+		};
+		Wave(st.wave, st.waveColor, &st.waveAngle[0], wave, waveColor, waveSpeed, waveSize, waveStrength, waveAngle);
+		Wave(st.outlineWave, st.outlineWaveColor, &st.waveAngle[2], oWave, oWaveColor, oSpeed, oSize, oStrength, oAngle);
+
+		if (pulse)
+		{
+			const float floor = std::clamp(pulseMin, 0.f, 100.f) / 100.f;
+			const float k = floor + (1.f - floor) * (0.5f + 0.5f * sinf(6.2831853f * fmodf(now * pulseSpeed, 1.f)));
+			for (float* c : { st.glowVisible, st.glowInvisible, st.glowThird, st.glowVisibleOuter, st.glowInvisibleOuter, st.glowThirdOuter })
+				c[3] *= k;
+			if (!additive)
+				st.gradient[2] = std::max(2.f, st.gradient[2] * (0.6f + 0.4f * k));
+		}
+	}
+
+	// the mask program + the per-player fields these sources never use
+	void ModelSettings(PlayerStencilSettings& st, bool glow, bool outline, std::initializer_list<PlayerStencilFill> fills)
+	{
+		st.glow = glow; st.outline = outline; st.inner = st.innerBones = false;
+		st.nCapsules = 0;
+		st.waveAnchor[0] = st.waveAnchor[1] = st.waveAnchor[2] = st.waveAnchor[3] = 0.f;   // screen sweep, no player boxes
+		st.nFills = 0;
+		for (const PlayerStencilFill& f : fills)
+			if (st.nFills < PlayerStencilSettings::kMaxFills) st.fills[st.nFills++] = f;
+		st.clear = kClear;
+		st.model = true;
+	}
+
+	// RenderGlowEffects' stencil pass (sdk2013 glow_outline_effect.cpp:165-245): glow_color forced, blend 0,
+	// depth tested, no depth write. Whole silhouette hidden (z fail stamps too), then the depth passing px seen
+	// everything the dropped stamp changes, back: depth override, stencil (defaults, off), colour, blend, material
+	void DroppedRestore(void* rc, const float* aColor, float flBlend, IMaterial* pOrigMat, int iOrigType)
+	{
+		VCallAt<void>(rc, kRcOverrideDepthEnable, false, false);
+		StencilDefault(rc);
+		I::RenderView->SetColorModulation(aColor);
+		I::RenderView->SetBlend(flBlend);
+		ForceMaterial(pOrigMat, iOrigType);
+	}
+
+	__declspec(noinline) bool DroppedStamp_SEH(void* rc)
+	{
+		float aColor[3] = { 1.f, 1.f, 1.f };
+		volatile float flBlend = 1.f;
+		IMaterial* pOrigMat = nullptr; int iOrigType = 0;
+		volatile bool bSaved = false;
+		__try
+		{
+			I::RenderView->GetColorModulation(aColor);
+			flBlend = I::RenderView->GetBlend();
+			VCallAt<void>(g_modelRender, kMdlGetMaterialOverride, &pOrigMat, &iOrigType);
+			bSaved = true;
+			const float aWhite[3] = { 1.f, 1.f, 1.f };
+
+			ForceMaterial(s_glowMatColor);
+			I::RenderView->SetBlend(0.f);
+			I::RenderView->SetColorModulation(aWhite);
+			VCallAt<void>(rc, kRcOverrideDepthEnable, true, false);
+			GlowStencil(rc, true, kStencilAlways, kRefDroppedHidden, 0x0, kRefBits, kOpKeep, kOpReplace, kOpReplace);
+			GlowDrawAll(false);
+			GlowStencil(rc, true, kStencilAlways, kRefDroppedSeen, 0x0, kRefBits, kOpKeep, kOpKeep, kOpReplace);
+			GlowDrawAll(false);
+			DroppedRestore(rc, aColor, flBlend, pOrigMat, iOrigType);
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			s_glowRendering = false;
+			// nothing forced may stay behind: freeze cam skips RenderGlowEffects (clientmode_tf.cpp:1625), nothing else resets it
+			__try { DroppedRestore(rc, aColor, flBlend, bSaved ? pOrigMat : nullptr, bSaved ? iOrigType : 0); }
+			__except (EXCEPTION_EXECUTE_HANDLER) {}
+			return false;
+		}
+	}
+}
+
+void ModelGlow_SetViewmodelWindow(bool open) { s_vmWindow = open; }
+
+// no live pipeline = no pass would read (or clear) the refs: stamp nothing
+bool ModelGlow_ViewmodelOpen() { return s_vmWindow && (VmGlowParts() || VmStencilParts()) && PipelineLive(); }
+
+int ModelGlow_ViewmodelRef(int vmKind)
+{
+	if (!ModelGlow_ViewmodelOpen() || !I::GlobalVars) return 0;
+	const int ref = vmKind == 2 ? kRefWeapon : vmKind == 1 ? kRefArms : 0;
+	if (ref) s_vmStampedFrame = I::GlobalVars->framecount;
+	return ref;
+}
+
+void ModelGlow_Stamp(int ref)
+{
+	if (!g_matSystem) return;
+	void* rc = VCallAt<void*>(g_matSystem, kMatSysGetRenderContext);
+	if (!rc) return;
+	if (ref) GlowStencil(rc, true, kStencilAlways, ref, 0x0, kRefBits, kOpKeep, kOpKeep, kOpReplace);
+	else     StencilDefault(rc);
+	VCallAt<void>(rc, 1 /*Release*/);
+}
+
+void ModelGlow_ViewmodelPass()
+{
+	const bool bGlow = VmGlowParts(), bOutline = VmStencilParts();
+	if (!bGlow && !bOutline) return;
+	// not stamped: warm / probe only. stamped: the pass runs whatever the gate says now (the render thread may
+	// have reported an older skip since the stamp) -- it is the read + clear, and reports Draw again itself
+	if (!I::GlobalVars || s_vmStampedFrame != I::GlobalVars->framecount) { PipelineFrame(); return; }
+
+	static PlayerStencilSettings st;   // ~19 KB: not on the stack
+	ModelSettings(st, bGlow, bOutline, { { kCmpEqual, kRefWeapon, kRed, false, kRefBits }, { kCmpEqual, kRefArms, kGreen, false, kRefBits } });
+	PartColor(st.glowVisible, g_vmGlowWeapon, g_vmGlowWeaponColor);
+	PartColor(st.glowInvisible, g_vmGlowArms, g_vmGlowArmsColor);
+	PartColor(st.glowVisibleOuter, g_vmGlowWeapon, g_vmGlowWeaponOuterColor);
+	PartColor(st.glowInvisibleOuter, g_vmGlowArms, g_vmGlowArmsOuterColor);
+	PartColor(st.glowThird, false, g_vmGlowArmsColor);
+	PartColor(st.glowThirdOuter, false, g_vmGlowArmsColor);
+	PartColor(st.visible, g_vmStencilWeapon, g_vmStencilWeaponColor);
+	PartColor(st.invisible, g_vmStencilArms, g_vmStencilArmsColor);
+	PartColor(st.third, false, g_vmStencilArmsColor);
+	ApplyLook(st, g_vmGlowGradient, g_vmGlowGradientInner, g_vmGlowNormalBlend, g_vmGlowThickness,
+	          g_vmGlowWave, g_vmGlowWaveColor, g_vmGlowWaveSpeed, g_vmGlowWaveSize, g_vmGlowWaveStrength, g_vmGlowWaveAngle,
+	          g_vmGlowPulse, g_vmGlowPulseSpeed, g_vmGlowPulseMin,
+	          g_vmStencilThickness, g_vmStencilWave, g_vmStencilWaveColor, g_vmStencilWaveSpeed, g_vmStencilWaveSize,
+	          g_vmStencilWaveStrength, g_vmStencilWaveAngle);
+	PlayerStencil_Submit(st);
+	s_vmStampedFrame = -1;   // consumed: a second ViewDrawFade this frame (PerformScreenOverlay) finds the stencil cleared
+}
+
+void ModelGlow_RenderDropped()
+{
+	if (!Aim_Active() || !g_esxDropped || !g_esxDroppedGlow || PlayerStencil_Failed() || s_droppedDead) return;
+	if (!PipelineFrame()) return;   // no pass would read / clear the stamps (yet / since a skipped one)
+	if (!g_matSystem || !g_modelRender || !I::RenderView || !I::ClientEntityList || !I::EngineClient || !H::Entities.GetLocal()) return;
+	if (!s_glowMatColor)   // Glow_LevelInit failed or never ran: the shared dev/glow_color, like Glow_PreviewInit (main thread)
+	{
+		s_glowMatColor = VCallAt<IMaterial*>(g_matSystem, kMatSysFindMaterial, "dev/glow_color", "Other textures", false, (const char*)nullptr);
+		if (s_glowMatColor && !s_glowMatColor->IsErrorMaterial()) s_glowMatColor->IncrementReferenceCount();
+		else { s_glowMatColor = nullptr; return; }
+	}
+
+	// esp.cpp DrawWorld's dropped weapon set, on screen only (OnScreen, this view's matrix): no gun in view = no pass
+	static std::vector<GlowItem> s_dropped;
+	s_dropped.clear();
+	const int nHighest = I::ClientEntityList->GetHighestEntityIndex();
+	for (int i = 1; i <= nHighest; i++)
+	{
+		auto pClient = I::ClientEntityList->GetClientEntity(i);
+		auto pEnt = pClient ? pClient->As<CBaseEntity>() : nullptr;
+		if (pEnt && !pEnt->IsDormant() && pEnt->GetClassID() == ETFClassID::CTFDroppedWeapon && pEnt->ShouldDraw() && OnScreen(pEnt))
+			s_dropped.push_back(GlowItem{ pEnt });
+	}
+	if (s_dropped.empty()) return;
+
+	void* rc = VCallAt<void*>(g_matSystem, kMatSysGetRenderContext);
+	if (!rc) return;
+	s_dropped.swap(s_glowItems);   // GlowDrawAll draws s_glowItems (Glow_Render rebuilds it right after)
+	const bool ok = DroppedStamp_SEH(rc);
+	s_dropped.swap(s_glowItems);
+	VCallAt<void>(rc, 1 /*Release*/);
+	if (!ok)
+	{
+		s_droppedDead = true;
+		DebugLog("model glow: exception in the dropped weapon stamp, state restored, dropped weapon glow off");
+		return;
+	}
+
+	static PlayerStencilSettings st;
+	ModelSettings(st, true, false, { { kCmpEqual, kRefDroppedSeen, kRed, false, kRefBits }, { kCmpEqual, kRefDroppedHidden, kGreen, false, kRefBits } });
+	Rgba(st.glowVisible, g_esxDroppedGlowVisColor);
+	Rgba(st.glowInvisible, g_esxDroppedGlowInvisColor);
+	PartColor(st.glowThird, false, g_esxDroppedGlowVisColor);
+	const float aNone[4] = {};
+	ApplyLook(st, false, 60.f, false, 15.f, false, aNone, 0.f, 1.f, 0.f, 0.f, false, 1.f, 35.f, 1.5f, false, aNone, 0.f, 1.f, 0.f, 0.f);
+	PlayerStencil_Submit(st);
+}

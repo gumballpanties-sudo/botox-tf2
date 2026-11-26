@@ -504,6 +504,11 @@ void Menu_Visuals_WorldEsp()
                 ImGui::SameLine();
                 ImGui::ColorRow("##dropped weapons name color", g_esxDroppedNameColor, kPickerAlpha);
             }
+            ImGui::Checkbox("glow##dropped weapons", &g_esxDroppedGlow);
+            if (g_esxDroppedGlow) {
+                ImGui::ColorRow("glow visible##dropped weapons glow vis color", g_esxDroppedGlowVisColor, kPickerAlpha);
+                ImGui::ColorRow("glow invisible##dropped weapons glow invis color", g_esxDroppedGlowInvisColor, kPickerAlpha);
+            }
         }, ImVec2(220.f, -1));
 
     ImGui::Checkbox("thrown projectiles", &g_esxThrown);

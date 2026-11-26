@@ -765,6 +765,79 @@ static void Page_VisualsWorld()
                 }
             }, ImVec2(220.f, -1.f));
 
+        // botox viewmodel glow / stencil (aim/visuals/chams.cpp model glow). TF2 parts: weapon + arms
+        // (botox gloves + sleeves = the arms here). part off = no glow there, its coverage still blocks
+        constexpr ImGuiColorEditFlags kVmA = ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf |
+            ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_NoInputs |
+            ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop | ImGuiColorEditFlags_PickerHueBar |
+            ImGuiColorEditFlags_NoBorder;
+        constexpr ImGuiColorEditFlags kVmNoA = ImGuiColorEditFlags_NoOptions | ImGuiColorEditFlags_InputRGB |
+            ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop |
+            ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_NoBorder | ImGuiColorEditFlags_NoAlpha;
+        ImGui::Checkbox("viewmodel glow", &g_vmGlow);
+        if (g_vmGlow)
+            ImGui::OptionPopup("viewmodel glow settings", [&]() {
+                // part toggle + colour, gradient adds its outer colour
+                auto part = [&](const char* label, const char* colorId, const char* outerId, bool* on, float* color, float* outer) {
+                    ImGui::Checkbox(label, on);
+                    if (!*on) return;
+                    ImGui::SameLine();
+                    ImGui::ColorRow(colorId, color, kVmA);
+                    if (g_vmGlowGradient) ImGui::ColorRow(outerId, outer, kVmA);
+                };
+                part("weapon##viewmodel glow", "##viewmodel glow weapon color", "weapon outer##viewmodel glow weapon outer color",
+                     &g_vmGlowWeapon, g_vmGlowWeaponColor, g_vmGlowWeaponOuterColor);
+                part("arms##viewmodel glow", "##viewmodel glow arms color", "arms outer##viewmodel glow arms outer color",
+                     &g_vmGlowArms, g_vmGlowArmsColor, g_vmGlowArmsOuterColor);
+
+                ImGui::Checkbox("accent wave##viewmodel glow", &g_vmGlowWave);
+                if (g_vmGlowWave) {
+                    ImGui::ColorRow("wave color##viewmodel glow wave", g_vmGlowWaveColor, kVmNoA);
+                    ImGui::SliderFloat("wave speed##viewmodel glow wave", &g_vmGlowWaveSpeed, 0.05f, 4.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::SliderFloat("wave size##viewmodel glow wave", &g_vmGlowWaveSize, 0.05f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::SliderFloat("wave strength##viewmodel glow wave", &g_vmGlowWaveStrength, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::SliderFloat("wave angle##viewmodel glow wave", &g_vmGlowWaveAngle, -180.f, 180.f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+                }
+
+                ImGui::Checkbox("edge pulse##viewmodel glow", &g_vmGlowPulse);
+                if (g_vmGlowPulse) {
+                    ImGui::SliderFloat("pulse speed##viewmodel glow pulse", &g_vmGlowPulseSpeed, 0.1f, 4.f, "%.1fx", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::SliderFloat("pulse min##viewmodel glow pulse", &g_vmGlowPulseMin, 0.f, 95.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
+                }
+
+                ImGui::Checkbox("normal blending##viewmodel glow", &g_vmGlowNormalBlend);
+                if (g_vmGlowNormalBlend)
+                    ImGui::SliderFloat("thickness##viewmodel glow", &g_vmGlowThickness, 2.f, 30.f, "%.0f px", ImGuiSliderFlags_AlwaysClamp);
+
+                ImGui::Checkbox("gradient##viewmodel glow", &g_vmGlowGradient);
+                if (g_vmGlowGradient)
+                    ImGui::SliderFloat("inner size##viewmodel glow gradient", &g_vmGlowGradientInner, 0.f, 100.f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
+            }, ImVec2(220.f, -1.f));
+
+        ImGui::Checkbox("viewmodel stencil", &g_vmStencil);
+        if (g_vmStencil)
+            ImGui::OptionPopup("viewmodel stencil settings", [&]() {
+                auto part = [&](const char* label, const char* colorId, bool* on, float* color) {
+                    ImGui::Checkbox(label, on);
+                    if (!*on) return;
+                    ImGui::SameLine();
+                    ImGui::ColorRow(colorId, color, kVmA);
+                };
+                part("weapon##viewmodel stencil", "##viewmodel stencil weapon color", &g_vmStencilWeapon, g_vmStencilWeaponColor);
+                part("arms##viewmodel stencil", "##viewmodel stencil arms color", &g_vmStencilArms, g_vmStencilArmsColor);
+
+                ImGui::SliderFloat("thickness##viewmodel stencil", &g_vmStencilThickness, 0.5f, 8.f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
+
+                ImGui::Checkbox("accent wave##viewmodel stencil", &g_vmStencilWave);
+                if (g_vmStencilWave) {
+                    ImGui::ColorRow("wave color##viewmodel stencil wave", g_vmStencilWaveColor, kVmNoA);
+                    ImGui::SliderFloat("wave speed##viewmodel stencil wave", &g_vmStencilWaveSpeed, 0.05f, 4.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::SliderFloat("wave size##viewmodel stencil wave", &g_vmStencilWaveSize, 0.05f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::SliderFloat("wave strength##viewmodel stencil wave", &g_vmStencilWaveStrength, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+                    ImGui::SliderFloat("wave angle##viewmodel stencil wave", &g_vmStencilWaveAngle, -180.f, 180.f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+                }
+            }, ImVec2(220.f, -1.f));
+
         ImGui::BeginDisabled(g_vmRemoveBob);
         ImGui::Checkbox("bob changer", &g_vmCsBob);   // CS:GO bob, ported (vm_csgo.h)
         if (g_vmCsBob)

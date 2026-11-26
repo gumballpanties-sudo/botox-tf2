@@ -1660,9 +1660,10 @@ void ScreenFx_ViewmodelFrame(IDirect3DDevice9* dev)
 // IVRenderView::ViewDrawFade -- slot 24, counted off public/ivrenderview.h from
 // DrawBrushModel at 0 (the interface has no virtual destructor). SetBlend 4 and GetBlend 5
 // out of that same count are the ones visuals.cpp already calls every frame, so the count
-// is not a guess. viewrender.cpp:2185 calls it once per RenderView, unconditionally,
-// straight after DrawViewModels and DrawUnderwaterOverlay and before the engine's post
-// processing -- the one window where the gun is painted and the hud is not.
+// is not a guess. viewrender.cpp:2176 calls it every RenderView, unconditionally, straight
+// after DrawViewModels and DrawUnderwaterOverlay and before the engine's post processing --
+// the one window where the gun is painted and the hud is not. PerformScreenOverlay
+// (viewrender.cpp:1245 / 1294) calls it a SECOND time when a screen overlay is up.
 inline constexpr int k_slotViewDrawFade = 24;
 
 using ViewDrawFade_t = void(__fastcall*)(void*, unsigned char*, void*);
@@ -1698,6 +1699,14 @@ static void __fastcall h_ViewDrawFade(void* thisptr, unsigned char* color, void*
 
     // DrawViewModels is over: the next frame's world draws must not feed the gun's bones
     FbBones::SetViewmodelPass(false);
+    ModelGlow_SetViewmodelWindow(false);
+
+    // viewmodel glow / stencil (aim/visuals/chams.cpp): DrawViewModels is done, its stencil refs are still in
+    // the scene's depth-stencil (nothing between 2160 and here writes stencil; the engine post with its
+    // tonemap stencil is after). Before the engine's fade so a fade to black covers the glow too; the
+    // overlay's second call finds the frame consumed
+    if (!g_eject && !RearMirror_Drawing())
+        ModelGlow_ViewmodelPass();
 
     o_ViewDrawFade(thisptr, color, material);
 
@@ -2030,6 +2039,10 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
     // Player glow + stencil (aim/visuals/chams.cpp) over every pass above (botox: glow after the passes).
     // The passes restore the depth-stencil, so the marks still z test vs the scene. Glow_Render stays
     // ahead of the original: the engine glow (cart, intel) leaves stencil 1/2 and the halo needs 0.
+    // dropped weapon glow (aim/visuals/chams.cpp): stamp, read and zero its low-bit refs BEFORE the player
+    // marks -- its clear would otherwise wipe player 1 / 2 under a gun, and the engine glow halo below tests == 0
+    if (!g_eject) ModelGlow_RenderDropped();
+
     if (!g_eject) Glow_Render();
 
     const bool ret = o_DoPostSSE(thisptr, setup);
@@ -2041,6 +2054,7 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
     // DrawViewModels is the very next line (viewrender.cpp:2160): from here to ViewDrawFade every
     // model draw is the gun, and nothing before it is
     FbBones::SetViewmodelPass(true);
+    ModelGlow_SetViewmodelWindow(true);
 
     return ret;
 }
