@@ -51,6 +51,22 @@ namespace wc
     constexpr float k_dup_vel        = 1e-2f;
     constexpr float k_climb_rise     = 2.f;   /* relaxed land: above the last ground by this (csgo: jump floor + 2) */
 
+    // STARVED SWEEP = BEAM. 11-26 log: an uncut sweep flies ~98 sims, but on dense disps one sim costs 50-150 us and the
+    // clock cuts at 37-86, so all 22 variants die at depth 2-4 while 27 of 33 fresh wins landed at depth >= 3. When the
+    // clock left cannot fly the full set k_beam_layers deep, the fwd 30 half goes (7 of 33 fresh wins, 450 had 27) and
+    // the 450 half reaches the horizon on the same clock.
+    // ponytail: family yield is 33 wins and the yaw-major tie order favours 450; re-read WC LAND fwd= vs beam= if climbs drop
+    // gb = the tick the player's own move grounds (k_depth + 1 = never): the sweep only flies layers d < gb, so the full
+    // set needs min(k_beam_layers, gb - 1) of them
+    constexpr int k_beam_layers = 4;
+    inline bool Beam(const float left_us, const float us_per_sim, const int sims_left, const int n_full, const int gb)
+    {
+        if (us_per_sim <= 0.f) return false;
+        const int   layers = (std::min)(k_beam_layers, gb - 1);
+        const float afford = (std::min)(left_us / us_per_sim, (float)sims_left);
+        return layers > 0 && afford < (float)(n_full * layers);
+    }
+
     // GATE 3. Grounded flush on the scanned face (<= 2u) is a catch. Further out (a crest / quadrant catch reads several u
     // off one facet's plane on a bumpy disp) it still is when the ground under the hull is a disp, higher than the last
     // ground (a landing on the floor you jumped from is never higher) and NOT walkable under the hull's center (a crest /
@@ -61,13 +77,9 @@ namespace wc
         return support <= k_engage_support && ground_disp && !center_floor && land_z > ground_z + k_climb_rise;
     }
 
-    // disp-face scan past brush faces. MV_DetectWallLines walks 16 directions from its start and returns the first
-    // face plus that direction's angle UNWRAPPED (start .. start+2pi). The next call starts one direction later; the walk
-    // stops once a full turn from the first start is covered, so it costs at most the 16 directions one scan has
+    // disp-face scan: MV_DetectWallLines(want_disp) walks 16 directions from its start, steps past brush faces, and
+    // returns the first disp face's angle UNWRAPPED (start .. start+2pi); the next scan starts there, wrapped
     constexpr float k_two_pi    = 6.28318530718f;
-    constexpr float k_scan_step = k_two_pi / 16.f;
-    inline float NextScan(const float found_angle) { return found_angle + k_scan_step; }
-    inline bool  ScanLeft(const float start, const float a) { return a < start + k_two_pi - 1e-3f; }
     inline float WrapScan(const float a) { return std::fmod(a, k_two_pi); }
 
     inline bool Slowed(const float old_xy, const float new_xy)

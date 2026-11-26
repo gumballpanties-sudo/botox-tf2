@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 // THE GUN'S ANIMATION, AS A VELOCITY -- the half a depth reprojection can never see.
@@ -117,6 +118,10 @@ namespace FbBones
             // two sets and an index: the draws write one while the screen pass reads the other
             Set published[2] = {};
             std::atomic<int> ready{ -1 };
+
+            // open = DrawViewModels is running (see SetViewmodelPass). Starts open so a missing
+            // hook leaves the old behaviour, never a gun with no bones.
+            std::atomic<bool> window{ true };
         };
 
         inline State& S() { static State s; return s; }
@@ -326,6 +331,19 @@ namespace FbBones
         }
     } // namespace detail
 
+    // THE GUN IS ONLY EVER DRAWN IN ONE PLACE: DrawViewModels (viewrender.cpp:2160), between the
+    // post slot (2157) and ViewDrawFade (2176). The name test alone also takes anything else at
+    // entity -1 with a weapon path -- a ragdoll's weapon wearables, a client side prop, a model
+    // panel -- and those come and go with where you stand on the map. Taken, they eat the
+    // weapon's ten slots, thrash the six part slots, and pair the gun with someone else's
+    // skeleton: the viewmodel smears wrong. Proof it happened: weapon bones kept publishing at
+    // age 0 while the player was dead (debug.log, "streak reset (death)" then "bones 1 (weapon 1)").
+    // Main thread both ends, same as the draws.
+    inline void SetViewmodelPass(bool open)
+    {
+        detail::S().window.store(open, std::memory_order_relaxed);
+    }
+
     // Called from the DrawModelExecute detour, once per first-person part per frame. `weapon`
     // is the caller's own classification of the draw (TF2: the c_ weapon attachment, drawn at
     // entity_index -1, against the v_models / _arms stack).
@@ -335,6 +353,7 @@ namespace FbBones
         if (!pState || !pInfo || !pBones) return;
 
         detail::State& s = detail::S();
+        if (!s.window.load(std::memory_order_relaxed)) return;   // not DrawViewModels: not the gun
 
         int         boneCount = 0;
         const void* model     = nullptr;

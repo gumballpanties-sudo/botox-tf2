@@ -47,7 +47,8 @@ static struct WcSteer {
 } s_wcSteer;
 
 /* per-second counters, debug log */
-static int s_wcN[23]{}; /* ticks scan disp near sweep win hop strip wall rej d1 d2 d3 d4 plan zmiss dup cut | steer: job pick tick drift done */
+static int s_wcN[24]{}; /* ticks scan disp near sweep win hop strip wall rej d1 d2 d3 d4 plan zmiss dup cut | steer: job pick tick drift done | beam */
+static long long s_wcScanQpc = 0ll;   /* scan_disp wall clock, QPC ticks (log scanus=) */
 static int s_wcDep[wc::k_depth]{};   /* wins per depth */
 static Vec3 s_wcBrushN{};  /* last brush face the disp gate skipped (log bn=) */
 static int s_wcSims = 0; static long long s_wcUs = 0ll, s_wcUsWorst = 0ll;
@@ -72,15 +73,20 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
 
     if (const unsigned long long now = GetTickCount64(); g_debugLogEnable && now >= s_wcLogNext) {
         s_wcLogNext = now + 1000ull;
-        if (s_wcN[0])
-            DebugLog("WC: ticks=%d scan=%d wall=%d disp=%d near=%d sweep=%d win=%d hop=%d strip=%d rej=%d dep=%d/%d/%d/%d/%d/%d plan=%d zmiss=%d dup=%d cut=%d steer=%d/%d/%d/%d/%d sims=%d us=%lld worst=%lld bn=%.2f,%.2f,%.2f",
+        if (s_wcN[0]) {
+            LARGE_INTEGER f{}; QueryPerformanceFrequency(&f);
+            // beam = sweeps that dropped the fwd 30 half (wallclimb_pure.h Beam), scanus = scan_disp time (in us= only
+            // on a steer slice tick, where the job starts the clock before the scan)
+            DebugLog("WC: ticks=%d scan=%d wall=%d disp=%d near=%d sweep=%d win=%d hop=%d strip=%d rej=%d dep=%d/%d/%d/%d/%d/%d plan=%d zmiss=%d dup=%d cut=%d steer=%d/%d/%d/%d/%d sims=%d us=%lld worst=%lld beam=%d scanus=%lld bn=%.2f,%.2f,%.2f",
                      s_wcN[0], s_wcN[1], s_wcN[8], s_wcN[2], s_wcN[3], s_wcN[4], s_wcN[5], s_wcN[6], s_wcN[7], s_wcN[9],
                      s_wcDep[0], s_wcDep[1], s_wcDep[2], s_wcDep[3], s_wcDep[4], s_wcDep[5], s_wcN[14], s_wcN[15], s_wcN[16], s_wcN[17],
                      s_wcN[18], s_wcN[22], s_wcN[19], s_wcN[20], s_wcN[21], s_wcSims, s_wcUs, s_wcUsWorst,
+                     s_wcN[23], f.QuadPart > 0 ? s_wcScanQpc * 1000000ll / f.QuadPart : 0ll,
                      s_wcBrushN.x, s_wcBrushN.y, s_wcBrushN.z);
+        }
         for (int& c : s_wcN) c = 0;
         for (int& c : s_wcDep) c = 0;
-        s_wcSims = 0; s_wcUs = s_wcUsWorst = 0ll;
+        s_wcSims = 0; s_wcUs = s_wcUsWorst = 0ll; s_wcScanQpc = 0ll;
     }
 
     // the entity holds this cmd's END here; START is the pre-pred capture. Ground z tracked key or not: a hold key pressed
@@ -180,19 +186,20 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     float found_angle = 0.f;
     // GATE 1: displacement or nothing. The scan hands back the FIRST face in angle order, so a brush face there (the
     // trim under a disp cliff, the far side of a corner) used to end the tick with a disp face sitting in the next
-    // direction: 11-04 log read disp=0 on every second. Step past brush faces, one full turn at most
-    // (wallclimb_pure.h NextScan). s_wcWallTick is not stamped on a brush, so the unlatch stays out of it too
+    // direction: 11-04 log read disp=0 on every second. Step past brush faces, one full turn at most.
+    // s_wcWallTick is not stamped on a brush, so the unlatch stays out of it too.
+    // ONE CALL now (want_disp): the detector steps past a brush direction itself. The old walk re-called it from the
+    // next direction = the same directions in the same order, plus one 40u broadphase box trace per brush face stepped
+    // past. 11-26 log: 6100 of 7962 wall ticks were brush only. bn= is now the FIRST brush passed (was the last)
     const auto scan_disp = [&]() {
         ++s_wcN[1];
-        bool any_wall = false, have_disp = false;
-        for (float a = s_wcScanStart; ScanLeft(s_wcScanStart, a); a = NextScan(found_angle)) {
-            if (!MV_DetectWallLines(pLocal, start_pos, mins, maxs, a, primary, found_angle, k_scan_nz, k_scan_reach))
-                break;
-            any_wall = true;
-            if (primary.dispFlags & DISPSURF_SURFACE) { have_disp = true; break; }
-            s_wcBrushN = primary.plane.normal;
-        }
-        if (any_wall) ++s_wcN[8];
+        const long long t0 = AsClock::Now();
+        TbWallHit_t first{};   // first face of any kind the turn met (diag: wall=, bn=)
+        const bool have_disp = MV_DetectWallLines(pLocal, start_pos, mins, maxs, s_wcScanStart, primary, found_angle,
+                                                  k_scan_nz, k_scan_reach, nullptr, nullptr, nullptr, &first, true);
+        s_wcScanQpc += AsClock::Now() - t0;
+        if (have_disp || first.valid) ++s_wcN[8];
+        if (first.valid && !(first.trace.dispFlags & DISPSURF_SURFACE)) s_wcBrushN = first.trace.plane.normal;
         if (!have_disp) {
             s_wcScanStart = 0.f;   // next scan fresh, do not pin on a brush
             return false;
@@ -492,6 +499,14 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     // grounds -- a crest catch is often ONE ground tick, the hop must be pressable on it. A fresh press stays (scout
     // double jump, parachute)
     const bool  duck_now = (base.buttons & IN_DUCK) != 0;
+    // starved clock = the 450 half only (wallclimb_pure.h Beam), priced off this tick's own sims (plan + baseline,
+    // same spot, same disp). The plan replay / baseline always ran a sim before here, so sims > 0 when !found.
+    // ponytail: baseline sims skip the judge trace + snapshot, so the price reads a little low and beam fires late
+    // (errs toward the full set); a steer slice tick prices in its roll sims + the scan
+    const bool beam = !found && clocked && sims > 0 && !cut   // cut = nothing flies anyway, keep beam= honest
+        && Beam((float)(budget.span * 1000000ll / budget.freq - budget.UsedUs()), (float)budget.UsedUs() / (float)sims,
+                SimsLeft(), g_wcDuck ? k_max_vars : k_forwards * k_yaws, gb);
+    if (beam) ++s_wcN[23];
     static UserCmd_t s_var[k_max_vars];
     static Vec3      s_wish[k_max_vars];
     static bool      s_live[k_max_vars];
@@ -500,7 +515,7 @@ static void WallClimb(void* pLocal, UserCmd_t* pCmd)
     for (int stance = 0; stance < 2 && !found; ++stance) {
         if (stance == 1 && !g_wcDuck) break;
         const float* fwd_list = stance == 0 ? k_forward : k_duck_forward;
-        const int    fwd_n    = stance == 0 ? k_forwards : k_duck_forwards;
+        const int    fwd_n    = stance == 0 ? (beam ? 1 : k_forwards) : k_duck_forwards;   // k_forward[0] = 450
         for (const int y : yaw_order)
             for (int f = 0; f < fwd_n; ++f) {
                 const float offset = k_yaw[y];

@@ -14,6 +14,7 @@
 #include "../misc/killeffects.h"      // PrecipClipart_ViewTick -- clipart precipitation traces off this view setup
 #include "screenfx_passes.h" // ScreenFxPasses_DepthView -- emphasize/show depth, same draw point
 #include "bloom.h"           // Bloom_Frame -- tail of the gun pass (botox: after motion blur, before hud)
+#include "fbbones.h"         // FbBones::SetViewmodelPass -- gun bones only from DrawViewModels
 
 // ==== the depth source ==============================================================
 // Ported from coldtires (hacks/visuals/screen/depth_source.{h,cpp}). Two routes, both
@@ -1695,6 +1696,9 @@ static void __fastcall h_ViewDrawFade(void* thisptr, unsigned char* color, void*
     MiscHookGuard _g;
     CrashSpan _s("view/fade");   // gun frame blend + dof viewmodel pass + bloom, after the engine's fade
 
+    // DrawViewModels is over: the next frame's world draws must not feed the gun's bones
+    FbBones::SetViewmodelPass(false);
+
     o_ViewDrawFade(thisptr, color, material);
 
     // Flip world (either DLL) mirrors before DrawViewModels, so the gun's colour and its 0..0.1 depth slice
@@ -2033,6 +2037,10 @@ static bool __fastcall h_DoPostScreenSpaceEffects(void* thisptr, const void* set
     // Flip world: the world is finished and DrawViewModels is next (viewrender.cpp:2160), so the gun
     // draws unmirrored over it. After the passes above so they still read a z buffer that matches the colour.
     if (!g_eject) FlipWorld_Render(setup);
+
+    // DrawViewModels is the very next line (viewrender.cpp:2160): from here to ViewDrawFade every
+    // model draw is the gun, and nothing before it is
+    FbBones::SetViewmodelPass(true);
 
     return ret;
 }

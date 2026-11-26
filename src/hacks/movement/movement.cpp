@@ -672,7 +672,8 @@ static bool MV_DetectWallLines(void* pLocal, const Vec3& start_pos, const Vec3& 
                                float max_normal_z = 0.35f, float extra_reach = 2.f,
                                const Vec3* pVel = nullptr, const Vec3* pRequireNormal = nullptr,
                                const float* pRequirePlaneD = nullptr,
-                               TbWallHit_t* pOutFallback = nullptr)
+                               TbWallHit_t* pOutFallback = nullptr,
+                               bool want_disp = false)
 {
     const float max_radius = MV_PI * 2.f;
     const float step = max_radius / 16.f;
@@ -838,7 +839,10 @@ static bool MV_DetectWallLines(void* pLocal, const Vec3& start_pos, const Vec3& 
             consider(pre, !have_any, !have_match);
 
         const bool want_match = pRequireNormal != nullptr;
-        if (want_match ? have_match : have_any)
+        // want_disp (wall climb): a direction whose nearest face is a brush is stepped past, same answer as calling
+        // again from the next direction, minus the broadphase trace every re-call paid
+        if ((want_match ? have_match : have_any)
+            && (!want_disp || ((want_match ? best_match : best_any).dispFlags & DISPSURF_SURFACE)))
         {
             out_trace = want_match ? best_match : best_any;
             out_angle = a;
@@ -2340,6 +2344,21 @@ static bool AutoAlignStick(void* pLocal, UserCmd_t* pCmd)
 // gamemovement.cpp TryPlayerMove) = xy 0, and FinishGravity's half step makes vz read as a pin. a hull corner
 // wedged in a prop / slanted face. our cmd stalls within 2 ticks where the one we got does not = hand it back
 static int s_aaGuardRev = 0;   // reverts, per second on the AA: ticks line
+// AA cost on the AA: ticks line (us= / sims=): every AutoAlign + AutoAlignStickAfterTb call since the
+// last line printed. Debug log only (the line is what resets them)
+static long long s_aaCostQpc = 0;
+static int       s_aaCostSims = 0;
+struct AaCost
+{
+    LARGE_INTEGER t0{}; int s0 = g_simsThisCmd;
+    AaCost() { if (g_debugLogEnable) QueryPerformanceCounter(&t0); }
+    ~AaCost()
+    {
+        if (!g_debugLogEnable || !t0.QuadPart) return;   // log switched on mid-call: no start stamp
+        LARGE_INTEGER t{}; QueryPerformanceCounter(&t);
+        s_aaCostQpc += t.QuadPart - t0.QuadPart; s_aaCostSims += g_simsThisCmd - s0;
+    }
+};
 // this tick's face can wedge the AABB (not square = corner contact; props are refused before any press). only
 // then is an xy 0 pin a stuck: on a square face a head-on surf zeroes xy too (wall + lip clip, crease d <= 0)
 static bool s_aaWedge = false;
@@ -2490,7 +2509,7 @@ static void AutoAlignImpl(void* pLocal, UserCmd_t* pCmd)
         // hull out of its .phy at whatever angle the mapper dropped it, so the into-wall press
         // meets it at a hull CORNER instead of flush, the corner digs past the face and the hull
         // wedges. This function is the one that KEEPS PRESSING while that happens (0-100 u/s
-        // straight down the normal, and a 10 u/s fallback press when no sim finds a park), so it
+        // straight down the normal, and the 10 u/s no-park nudge, your along-wall keys on top since 11-26), so it
         // is the one that turns the wedge into a stick. MV_IsHullFlatWall was the guard for it and
         // it cannot be: it reads the returned PLANE, and a crate dropped square to the world
         // answers a perfectly axis-aligned normal while its hull still contacts on a corner.
@@ -2530,14 +2549,6 @@ static void AutoAlignImpl(void* pLocal, UserCmd_t* pCmd)
         s_aaWallDetected = false;
         return;
     }
-
-    Vec3 vNormalPlane = Vec3(trace.plane.normal.x * -0.005f, trace.plane.normal.y * -0.005f, 0.f);
-    Vec3 vWallAngle = VectorAngles(vNormalPlane);
-    ClampAnglesMv(vWallAngle);
-
-    float flRotation = DEG2RADF(vWallAngle.y - pCmd->viewangles.y);
-    float flCosRot = cosf(flRotation);
-    float flSinRot = sinf(flRotation);
 
     const float flSurfZ = CvarFloat("sv_gravity", 800.f) * TickInterval() * 0.5f;
 
@@ -2699,21 +2710,29 @@ static void AutoAlignImpl(void* pLocal, UserCmd_t* pCmd)
     // hand the entity back un-simulated; pCmd keeps the winning move
     RestoreOriginal();
 
+    // NO PIN PROVEN = YOUR ALONG-WALL KEYS + THE NUDGE (user: "make aa not prevent you from strafing
+    // on the wall"). botox wrote a flat 10 u/s press into the face here, over everything you held:
+    // 11-26 log, 2366 of 2719 wall ticks (det=0) went out as that bare press, so every strafe beside
+    // a wall died. Now your along-wall input rides on top of it. The across part stays botox's flat
+    // 10: PixelSurf runs after us and its hunt / hold fly THIS fwd / side for 8 ticks, a parallel
+    // approach 0.5u off the face only reaches a lip if something closes the gap, and on sv_wallbug 0
+    // a harder approach press kills the catch (airstuck_pure.h Wb0RidePress, 11-22 log: flat 10
+    // caught first try, 45..138 caught 0 of 5). Your push INTO the face is the one input dropped:
+    // the face clips it anyway. AirAccelerate decides the rest (as::NudgeAlong): at ride speed an
+    // along wish under the 30 cap adds nothing AND swings the nudge's wishdir with it, so then your
+    // input was a no-op and the nudge goes alone; braking, reversing, slow strafes add speed and stay.
+    // The catch / ride search loops left their last probe in pCmd: rebuilt from your keys here
     if (!bDetect)
     {
-        pCmd->forwardmove = flCosRot * 10.f;
-        pCmd->sidemove = -flSinRot * 10.f;
+        const float flAlong = as::NudgeAlong(vWishWorld.Dot(vTangentDir), s_prePredVel.Dot(vTangentDir),
+                                             s_prePredVel.Dot(vInto), CvarFloat("sv_air_max_wishspeed", 30.f));
+        const Vec3 vMove = vInto * 10.f + vTangentDir * flAlong;
+        MV_WriteWishWorld(pCmd, vMove, vMove.Length2D());
     }
-    // sv_wallbug 0 keeps botox's 10 u/s press too (= botox-css AA, same 1/32 clip nudge). The 11-08
-    // creep fallback (half the gap a tick) was deleted 11-09: 08:02 log, every creep catch was shallow
-    // (pd >= 0.0293, 0-1 tick rides) while PS hold's hard-press catches rode 10-15. Ride length = catch
-    // depth (css RULE), and a ~0 closing speed approach is the shallow one
 
-    // AutoAlign shipped with NO diag at all, so 6056 lines of debug.log had 3551 TB:
-    // and zero AA:, and "it aligns worse than TB" had nothing to read. 120th like TB's ramp
-    // hands-off: per second, not per session. det=0 is the case to watch -- that is the sim
-    // failing to find a park and the fallback OVERWRITING the player's move with a 10 u/s push
-    // (max wish is 450), which is what a mushy approach feels like
+    // det=0 ticks carry the player's move (see above). us / sims = every AutoAlign call since the
+    // last line printed (stick, guard, scan, both searches; stick-owned and no-wall ticks pile in),
+    // wall clock, not per second
     if (g_debugLogEnable)
     {
         static int s_aaTicks = 0, s_aaDet = 0, s_aaSec = -1;
@@ -2726,19 +2745,23 @@ static void AutoAlignImpl(void* pLocal, UserCmd_t* pCmd)
             // prop= is the new one: ticks whose nearest face was a prop and was refused. A ride
             // that used to end in a wedge now reads as prop counting up with det holding
             // guard= cmds AutoAlignGuard handed back (ours stalled, yours did not)
+            LARGE_INTEGER f{}; QueryPerformanceFrequency(&f);
             DebugLog("AA: ticks=%d det=%d prop=%d guard=%d ang=%.2f nx=%.2f ny=%.2f nz=%.3f frac=%.3f "
-                     "tan=%.1f xy=%.0f vz=%.1f look=%.1f fwd=%.1f side=%.1f",
+                     "tan=%.1f xy=%.0f vz=%.1f look=%.1f fwd=%.1f side=%.1f us=%lld sims=%d",
                      s_aaTicks, s_aaDet, s_aaPropRej, s_aaGuardRev, flFoundAngle, trace.plane.normal.x,
                      trace.plane.normal.y,
                      trace.plane.normal.z, trace.fraction, flTangentInput, v.Length2D(), v.z,
-                     v.Length2D() * TickInterval(), pCmd->forwardmove, pCmd->sidemove);
+                     v.Length2D() * TickInterval(), pCmd->forwardmove, pCmd->sidemove,
+                     f.QuadPart > 0 ? s_aaCostQpc * 1000000ll / f.QuadPart : 0ll, s_aaCostSims);
             s_aaTicks = 0; s_aaDet = 0; s_aaPropRej = 0; s_aaGuardRev = 0;
+            s_aaCostQpc = 0; s_aaCostSims = 0;
         }
     }
 }
 
 static void AutoAlign(void* pLocal, UserCmd_t* pCmd)
 {
+    const AaCost cost;
     const UserCmd_t got = *pCmd;
     s_aaWedge = false;
     AutoAlignImpl(pLocal, pCmd);
@@ -2755,6 +2778,7 @@ static void AutoAlignStickAfterTb(void* pLocal, UserCmd_t* pCmd)
 {
     if (!g_autoAlign || s_psAssistPressIn || !TbBindOn())
         return;
+    const AaCost cost;
     if (pCmd->forwardmove != s_wcPreTbFwd || pCmd->sidemove != s_wcPreTbSide || pCmd->buttons != s_wcPreTbButtons)
         { AutoAlignStickDrop("tb"); return; }
     // TB's align already flew the presses on this pinned START and none holds the next tick: a TB

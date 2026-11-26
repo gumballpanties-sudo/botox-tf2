@@ -114,6 +114,18 @@ inline float Wb0RidePress(float force, float xy, float dt)
     return force > 0.f ? std::min(force * xy * dt, 450.f) : 0.f;
 }
 
+// auto align no-pin cmd, wall frame (along = tangent, into = into the face): botox's 10 u/s nudge + your
+// along-wall input. Returns the along part to send: yours, or 0 when AirAccelerate gives the combined wish no
+// speed at all (addspeed = min(|wish|, cap) - v.wishdir <= 0) -- then your input was a no-op and it only
+// swung the nudge's wishdir off the face, so the nudge goes alone
+inline float NudgeAlong(float along_in, float v_along, float v_into, float cap)
+{
+    constexpr float k_nudge = 10.f;
+    const float l = std::sqrt(k_nudge * k_nudge + along_in * along_in);
+    const float add = std::min(l, cap) - (v_into * k_nudge + v_along * along_in) / l;
+    return add > 0.f ? along_in : 0.f;
+}
+
 // press search tie (same hold): want > 0 = the press nearest the ride press wins, else the harder one
 inline bool RidePressBetter(float m, float best, float want)
 {
