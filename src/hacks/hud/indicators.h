@@ -59,6 +59,7 @@ inline int   g_viStyle        = 0;
 inline int   g_viSmoothOrigin = 0;
 inline float g_viSmoothAngle  = 0.f;     // deg -90..90, + = tilt toward bottom (left/right) or right (top/bottom)
 inline bool  g_viSmoothRandomAngle = false;   // pre speed rolls own angle in +-|angle| each show
+inline bool  g_viSmoothDriveBy = false;   // pre speed leaves out the far side
 inline bool  g_viShadow       = true;
 inline float g_viShadowBlur   = 0.f;
 inline float g_viShadowColor[4] = { 0.f, 0.f, 0.f, 1.f };
@@ -107,6 +108,7 @@ inline int   g_kiStyle        = 0;
 inline int   g_kiSmoothOrigin = 0;
 inline float g_kiSmoothAngle  = 0.f;
 inline bool  g_kiSmoothRandomAngle = false;   // each tag rolls own angle in +-|angle| on spawn
+inline bool  g_kiSmoothDriveBy = false;   // tag leaves out the far side
 inline float g_kiStaticFade   = 0.f;
 inline float g_kiColor[4]        = { 1.f, 1.f, 1.f, 1.f };
 inline float g_kiColorSuccess[4] = { 0.f, 1.f, 0.f, 1.f };

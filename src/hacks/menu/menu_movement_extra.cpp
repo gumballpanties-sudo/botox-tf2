@@ -23,6 +23,7 @@ void Menu_Movement_Indicators()
                 ImGui::Combo("comes from##velocity indicator", &g_viSmoothOrigin, kSmoothOriginNames);
                 // kamibebra auto = fades in place, no direction
                 if (g_viSmoothOrigin != SMOOTH_ORIGIN_CENTER && (g_viStyle == IND_STYLE_SMOOTH || g_viSmoothOrigin != SMOOTH_ORIGIN_AUTO)) {
+                    ImGui::Checkbox("drive by##velocity indicator", &g_viSmoothDriveBy);
                     // random = pre speed rolls its own angle in +-max each show
                     ImGui::Checkbox("random angle##velocity indicator", &g_viSmoothRandomAngle);
                     if (g_viSmoothRandomAngle)
@@ -144,6 +145,7 @@ void Menu_Movement_Indicators()
             if (g_kiStyle == IND_STYLE_SMOOTH || g_kiStyle == IND_STYLE_KAMIBEBRA) {
                 ImGui::Combo("comes from##keybind indicators", &g_kiSmoothOrigin, kSmoothOriginNames);
                 if (g_kiSmoothOrigin != SMOOTH_ORIGIN_CENTER) {
+                    ImGui::Checkbox("drive by##keybind indicators", &g_kiSmoothDriveBy);
                     // random = each tag rolls its own angle in +-max on turn on
                     ImGui::Checkbox("random angle##keybind indicators", &g_kiSmoothRandomAngle);
                     if (g_kiSmoothRandomAngle)

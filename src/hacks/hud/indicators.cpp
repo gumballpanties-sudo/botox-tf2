@@ -1082,6 +1082,26 @@ static slide_dir_t key_slide_dir(const int fallback, const float rolled)
     return slide_dir(g_kiSmoothOrigin, fallback, g_kiSmoothRandomAngle ? rolled : g_kiSmoothAngle);
 }
 
+// drive by: leave out the far side, spawn point mirrored through the slot ( same line, keeps going )
+static ImVec2 drive_by_exit(const ImVec2& back, const float tx, const float ty)
+{
+    return ImVec2(2.f * tx - back.x, 2.f * ty - back.y);
+}
+
+static slide_dir_t drive_by_dir(slide_dir_t d)
+{
+    d.m_ux = -d.m_ux;
+    d.m_uy = -d.m_uy;
+    return d;
+}
+
+// exit unit for a removing tag
+static slide_dir_t key_exit_dir(const int fallback, const float rolled)
+{
+    const slide_dir_t d = key_slide_dir(fallback, rolled);
+    return g_kiSmoothDriveBy ? drive_by_dir(d) : d;
+}
+
 // pre speed sits right of center: left = same run mirrored around its slot tx, never across the number
 static float slide_run_x(const slide_dir_t& d, const float right_x, const float tx)
 {
@@ -1162,7 +1182,9 @@ static void keybinds_smooth(const std::vector<key_pending_t>& pending, ImFont* f
         const slide_dir_t dir = key_slide_dir(fallback, t.m_angle);
         const float primary   = !dir.m_axis_y ? (t.m_spawn_x != 0.f ? t.m_spawn_x : slide_spawn_x(dir, smooth_spawn_x(live_count()), t.m_size.x))
                                               : (t.m_spawn_y != 0.f ? t.m_spawn_y : t.m_y + (dir.m_side == SMOOTH_ORIGIN_TOP ? -drop : drop));
-        const ImVec2 to       = slide_from(dir, t.m_target_x, t.m_target_y, primary);
+        ImVec2 to             = slide_from(dir, t.m_target_x, t.m_target_y, primary);
+        if (g_kiSmoothDriveBy)
+            to = drive_by_exit(to, t.m_target_x, t.m_target_y);
         t.m_target_x          = to.x;
         t.m_target_y          = to.y;
     };
@@ -1289,7 +1311,7 @@ static void keybinds_smooth(const std::vector<key_pending_t>& pending, ImFont* f
     for (auto it = s_smooth_tags.begin(); it != s_smooth_tags.end();) {
         smooth_tag_t& t = *it;
 
-        smooth_tag_step(t, visible > 1, now, dt, key_slide_dir(fallback, t.m_angle), center);
+        smooth_tag_step(t, visible > 1, now, dt, key_exit_dir(fallback, t.m_angle), center);
         t.m_detect = rido_lerp(t.m_detect, t.m_target_detect, k_detect_smooth, dt);
 
         if (t.m_opacity > 0.01f) {
@@ -1512,7 +1534,9 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, ImFont
         const slide_dir_t dir = key_slide_dir(SMOOTH_ORIGIN_RIGHT, t.m_angle);
         const float primary   = !dir.m_axis_y ? (t.m_spawn_x != 0.f ? t.m_spawn_x : slide_spawn_x(dir, smooth_spawn_x(live_count()), t.m_size.x))
                                               : t.m_target_y + drop;
-        const ImVec2 to       = slide_from(dir, t.m_target_x, t.m_target_y, primary);
+        ImVec2 to             = slide_from(dir, t.m_target_x, t.m_target_y, primary);
+        if (g_kiSmoothDriveBy)
+            to = drive_by_exit(to, t.m_target_x, t.m_target_y);
         t.m_target_x          = to.x;
         t.m_target_y          = to.y;
     };
@@ -1606,7 +1630,7 @@ static void keybinds_kamibebra(const std::vector<key_pending_t>& pending, ImFont
 
         float position_smooth = center ? k_smooth_center : k_position;
         if (t.m_removing && visible > 1 && !center) {
-            const slide_dir_t dir = key_slide_dir(SMOOTH_ORIGIN_RIGHT, t.m_angle);
+            const slide_dir_t dir = key_exit_dir(SMOOTH_ORIGIN_RIGHT, t.m_angle);
             const float to_go     = (t.m_target_x - t.m_x) * dir.m_ux + (t.m_target_y - t.m_y) * dir.m_uy;
             const float total     = std::max(std::round(s), std::fabs(to_go) + 220.f * s);
             const float remaining = std::clamp(to_go / total, 0.f, 1.f);
@@ -2096,6 +2120,7 @@ struct speed_pair_opts_t {
     int   m_smooth_origin = SMOOTH_ORIGIN_AUTO;
     float m_smooth_angle  = 0.f;
     bool  m_smooth_random = false;   // pre rolls its own angle each show
+    bool  m_drive_by      = false;   // pre leaves out the far side
 };
 
 static void speed_pair(speed_pair_state_t& st, const int style, const char* anim_key, const std::string& main_text, const std::string& pre_value,
@@ -2213,7 +2238,8 @@ static void speed_pair(speed_pair_state_t& st, const int style, const char* anim
                 }
                 k.m_pre_off = k.m_pre_slide;
             }
-            const ImVec2 off_to = k.m_pre_removing ? (center ? mid_off : k.m_pre_slide) : ImVec2(0.f, 0.f);
+            const ImVec2 back   = opts.m_drive_by ? ImVec2(-k.m_pre_slide.x, -k.m_pre_slide.y) : k.m_pre_slide;
+            const ImVec2 off_to = k.m_pre_removing ? (center ? mid_off : back) : ImVec2(0.f, 0.f);
             const float off_rate = center ? k_smooth_center : 9.5f;
             k.m_pre_off.x        = rido_lerp(k.m_pre_off.x, off_to.x, off_rate, dt);
             k.m_pre_off.y        = rido_lerp(k.m_pre_off.y, off_to.y, off_rate, dt);
@@ -2308,6 +2334,8 @@ static void speed_pair(speed_pair_state_t& st, const int style, const char* anim
                 const float primary = !dir.m_axis_y ? (p.m_spawn_x != 0.f ? p.m_spawn_x : slide_run_x(dir, smooth_spawn_x(2), p.m_x))
                                                     : (p.m_spawn_y != 0.f ? p.m_spawn_y : p.m_y + drop);
                 to                  = slide_from(dir, p.m_x, pre_y, primary);
+                if (opts.m_drive_by)
+                    to = drive_by_exit(to, p.m_x, pre_y);
             }
             p.m_target_x   = to.x;
             p.m_target_y   = to.y;
@@ -2323,7 +2351,7 @@ static void speed_pair(speed_pair_state_t& st, const int style, const char* anim
 
         smooth_tag_step(m, false, now, dt, {}, center);
         if (s.m_has_pre)
-            smooth_tag_step(p, p.m_opacity > 0.01f, now, dt, dir, center);
+            smooth_tag_step(p, p.m_opacity > 0.01f, now, dt, opts.m_drive_by ? drive_by_dir(dir) : dir, center);
 
         const float main_x = std::round(m.m_x + 0.2f);
         push(false, ImVec2(main_x, std::round(m.m_y)), main_text, color, shadow_alpha);
@@ -2540,7 +2568,7 @@ static void velocity(const MvInd_t& s, const bool on_ground)
     speed_pair(s_velocity_pair, g_viStyle, "velocity_pre_speed", main_text, pre_text, text_color, shadow_alpha, y,
                kamibebra ? g_viPreSpeed && !on_ground : should_draw_take_off,
                shadow_opts_of(g_viShadow, g_viShadowBlur, g_viShadowColor, g_viOutline, g_viOutlineColor, g_viOutlinePx, g_viShadowX, g_viShadowY),
-               g_viScale, { g_viPreLayout, g_viPreScale, g_viPreAlign, took_off, false, g_viSmoothOrigin, g_viSmoothAngle, g_viSmoothRandomAngle });
+               g_viScale, { g_viPreLayout, g_viPreScale, g_viPreAlign, took_off, false, g_viSmoothOrigin, g_viSmoothAngle, g_viSmoothRandomAngle, g_viSmoothDriveBy });
 
     if (d.m_tick_prev_velocity + 5 < s.tick) {
         d.m_last_velocity      = velocity;
